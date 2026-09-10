@@ -28,6 +28,15 @@ export interface BrandIndexOptions {
   readonly liquidGlass?: boolean
   /** Let the client face take over the hero workspace picker. Defaults to true. */
   readonly workspacePicker?: boolean
+  /**
+   * Directory an unprojected session runs in.
+   *
+   * The harness resolves its own default when a `session.create` names no cwd,
+   * but the CLIENT needs a concrete value: the hero shows the directory as the
+   * chip label, and the composer stays disabled while that label is empty. Only
+   * the host process knows the harness's working directory, so it is forwarded.
+   */
+  readonly defaultCwd?: string
 }
 
 /**
@@ -89,7 +98,10 @@ export function applyBrandToIndex(html: string, options: BrandIndexOptions = {})
   // Forward the runtime choices the browser face needs. The client half gets no
   // plugin config from the harness, so the host half hands it over here.
   if (!out.includes('__PROTEUS_CODE_OPTS__')) {
-    const opts = { workspacePicker: options.workspacePicker !== false }
+    const opts = {
+      workspacePicker: options.workspacePicker !== false,
+      ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
+    }
     head.push(`<script>globalThis.__PROTEUS_CODE_OPTS__=${JSON.stringify(opts)}</script>`)
   }
   if (withGlass) {

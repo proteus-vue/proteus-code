@@ -64,6 +64,8 @@ interface ThemeSeam {
  */
 interface ProteusClientOptions {
   readonly workspacePicker?: boolean
+  /** Forwarded from the host: the directory an unprojected session runs in. */
+  readonly defaultCwd?: string
 }
 
 function clientOptions(): ProteusClientOptions {
@@ -71,15 +73,22 @@ function clientOptions(): ProteusClientOptions {
   return typeof raw === 'object' && raw !== null ? (raw as ProteusClientOptions) : {}
 }
 
-/** Unwrap a remote result envelope, or throw the transport error. */
+/**
+ * Unwrap a remote result envelope, or throw the transport error.
+ *
+ * Accepts both the enveloped form (`{ ok, value | error }`) and a bare value,
+ * because the transport is not the only possible caller here.
+ */
 function unwrap<T>(result: unknown): T {
   const envelope = result as { ok?: boolean; value?: T; error?: unknown } | undefined
   if (envelope && envelope.ok === false) {
-    const message = (envelope.error as { message?: string } | undefined)?.message
+    const error = envelope.error as { message?: string } | string | undefined
+    const message = typeof error === 'string' ? error : error?.message
     throw new Error(message ?? 'the harness rejected the request')
   }
   return (envelope && envelope.ok === true ? envelope.value : result) as T
 }
+
 
 /** Normalize whatever the workspace service returns into rows. */
 export function toWorkspaceRows(snapshot: unknown): WorkspaceRow[] {
@@ -103,11 +112,6 @@ function pickerServices(scope: Record<string, unknown>): PickerServices {
     list(): Promise<unknown>
     create(input: { path: string }): Promise<unknown>
   }
-  const sessions = scope.sessions as {
-    create(opts?: Record<string, never>): Promise<unknown>
-    open(sessionId: string): void
-  }
-  const layout = scope.layout as { selectPanel(id: string | null): void }
   const picker = (scope['remote.directoryPicker'] ?? scope.remote) as {
     pick(): Promise<unknown>
   }
@@ -116,13 +120,29 @@ function pickerServices(scope: Record<string, unknown>): PickerServices {
     list: async () => toWorkspaceRows(await workspaces.list()),
     pickDirectory: async () => unwrap<{ path: string }>(await picker.pick()).path,
     createWorkspace: async (path) => toWorkspaceRows([unwrap(await workspaces.create({ path }))])[0]!,
-    // No cwd and no workspace: the host resolves its documented default
-    // directory, which is exactly "run here, ungrouped".
-    createUngroupedSession: async () =>
-      unwrap<{ sessionId: string }>(await sessions.create({})).sessionId,
-    openSession: (sessionId) => {
-      sessions.open(sessionId)
-      layout.selectPanel(null)
+    /**
+     * Adopt the harness's own working directory as the current project.
+     *
+     * A workspace-less session is not a usable state in this UI: the composer is
+     * disabled until the hero's workspace chip has a label, and that label comes
+     * from either a workspace or an attached directory. The harness's own
+     * "new session" control reflects this — with no workspace it only clears the
+     * selection and returns to the picker.
+     *
+     * So "work without picking a project" is served the way the product supports:
+     * register the working directory as a project and open it. The user picks one
+     * item and is composing; nothing is set up by hand. `create` is idempotent, so
+     * repeated use reuses the same entry rather than duplicating it.
+     */
+    adoptDefaultProject: async () => {
+      const cwd = clientOptions().defaultCwd
+      if (!cwd) {
+        throw new Error(
+          'no default directory was provided by the host, so there is nowhere to work',
+        )
+      }
+      const workspace = toWorkspaceRows([unwrap(await workspaces.create({ path: cwd }))])[0]!
+      return workspace.workspaceId
     },
   }
 }
@@ -259,7 +279,7 @@ export function apply(ctx: ClientRootContext): void {
   // The ZCode-style picker, including "work without a project". This owns a
   // `single` slot, so it is opted out of via injected options rather than forced.
   if (clientOptions().workspacePicker !== false) {
-    ctx.inject(['sessions', 'workspaces', 'layout', 'remote.directoryPicker'], (scope) => {
+    ctx.inject(['workspaces', 'remote.directoryPicker'], (scope) => {
       const services = pickerServices(scope)
       ctx.slots.inject('conversation.hero.workspace', () => {
         ctx.slots.register(

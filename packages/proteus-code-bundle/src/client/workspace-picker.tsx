@@ -45,9 +45,13 @@ export interface PickerServices {
   list(): Promise<readonly WorkspaceRow[]>
   pickDirectory(): Promise<string>
   createWorkspace(path: string): Promise<WorkspaceRow>
-  /** Create an ungrouped session and return its id. */
-  createUngroupedSession(): Promise<string>
-  openSession(sessionId: string): void
+  /**
+   * Register (or reuse) the harness working directory as a project and return
+   * its id. This is how "no project to pick" is served: the UI needs a workspace
+   * for the composer to be usable, so the directory is adopted automatically and
+   * the caller then selects it through the normal path.
+   */
+  adoptDefaultProject(): Promise<string>
 }
 
 /** Props the conversation plugin passes into the slot. */
@@ -118,7 +122,20 @@ const S = {
     fontSize: '14px',
     fontFamily: 'inherit',
   } as const,
-  row: (selected: boolean) =>
+  /**
+   * A menu row's background by interaction state.
+   *
+   * Three distinct states, matching what the host's own menus show:
+   *   - `active`   — the current cursor position (mouse hover OR arrow-key
+   *                  focus). This is the "landing point" the eye needs.
+   *   - `selected` — the workspace the session currently belongs to.
+   *   - `idle`     — everything else.
+   *
+   * Inline styles cannot express `:hover`, so hover is tracked in React state
+   * and shares one cursor with the keyboard. `active` wins over `selected`: while
+   * the pointer is moving, the highlight must follow it.
+   */
+  row: (state: 'idle' | 'selected' | 'active') =>
     ({
       display: 'flex',
       alignItems: 'center',
@@ -127,16 +144,28 @@ const S = {
       padding: '9px 12px',
       borderRadius: '10px',
       border: 'none',
-      background: selected ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent',
+      background:
+        state === 'active'
+          ? 'var(--dsw-alias-interactive-bg-hover)'
+          : state === 'selected'
+            ? 'var(--dsw-alias-interactive-bg-active)'
+            : 'transparent',
       color: 'var(--dsw-alias-label-primary)',
       cursor: 'pointer',
       textAlign: 'left',
       font: 'inherit',
+      outline: 'none',
+      transition: 'background-color 120ms ease',
     }) as const,
   divider: {
     height: '1px',
     margin: '6px 8px',
     background: 'var(--dsw-alias-border-l2)',
+  } as const,
+  list: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '1px',
   } as const,
   empty: {
     padding: '10px 12px',
@@ -184,6 +213,36 @@ function ChatIcon() {
 }
 
 /**
+ * Advance a menu cursor for one key press.
+ *
+ * Extracted as a pure function so the navigation rules (wrap-around, Home/End)
+ * are testable without a DOM event pipeline. Returns the next index, or
+ * `undefined` when the key is not a navigation key.
+ *
+ * An empty menu always yields `-1` (no cursor). Down from nothing lands on the
+ * first item and Up lands on the last, matching how native menus behave.
+ */
+export function nextCursor(
+  current: number,
+  key: string,
+  length: number,
+): number | undefined {
+  if (length <= 0) return key === 'Home' || key === 'End' || key.startsWith('Arrow') ? -1 : undefined
+  switch (key) {
+    case 'ArrowDown':
+      return current < 0 ? 0 : (current + 1) % length
+    case 'ArrowUp':
+      return current < 0 ? length - 1 : (current - 1 + length) % length
+    case 'Home':
+      return 0
+    case 'End':
+      return length - 1
+    default:
+      return undefined
+  }
+}
+
+/**
  * Build the picker component bound to its services.
  *
  * The component keeps its own list state instead of the framework's store
@@ -200,7 +259,10 @@ export function createWorkspacePicker(services: PickerServices) {
     const [query, setQuery] = useState('')
     const [error, setError] = useState<string | undefined>(undefined)
     const [pos, setPos] = useState<{ left: number; top: number } | undefined>(undefined)
+    /** Cursor position shared by hover and arrow keys; -1 means "nothing yet". */
+    const [cursor, setCursor] = useState(-1)
     const menuRef = useRef<HTMLElement | null>(null)
+    const searchRef = useRef<HTMLInputElement | null>(null)
 
     const refresh = useCallback(() => {
       services
@@ -210,15 +272,20 @@ export function createWorkspacePicker(services: PickerServices) {
     }, [services])
 
     // Anchor the menu to the chip on open, flipping above when it would overflow.
+    // With no anchor element the menu must still open — falling back to a
+    // centred-ish position beats silently rendering nothing.
     useEffect(() => {
       if (!open) return
       setQuery('')
       setError(undefined)
       refresh()
       const el = anchorRef?.current
-      if (!el) return
-      const r = el.getBoundingClientRect()
       const estimated = Math.min(window.innerHeight * 0.6, 420)
+      if (!el) {
+        setPos({ left: Math.round(window.innerWidth / 2 - 160), top: 120 })
+        return
+      }
+      const r = el.getBoundingClientRect()
       const below = r.bottom + 8
       const top = below + estimated > window.innerHeight ? Math.max(8, r.top - estimated - 8) : below
       setPos({ left: Math.max(8, r.left), top })
@@ -248,100 +315,173 @@ export function createWorkspacePicker(services: PickerServices) {
 
     const visible = useMemo(() => filterWorkspaces(rows, query), [rows, query])
 
+    /**
+     * Run an action, reporting failure where the user can see it.
+     *
+     * The menu closes only on SUCCESS. Closing first would hide the error: the
+     * failure is rendered inside the menu, so dismissing it on failure turns a
+     * diagnosable problem into a silent no-op.
+     */
     const run = useCallback(
-      (action: () => Promise<void>) => {
+      async (action: () => Promise<void>) => {
         setError(undefined)
-        action().catch((reason: unknown) => {
+        try {
+          await action()
+          onClose()
+        } catch (reason) {
           setError(reason instanceof Error ? reason.message : t.failed)
-        })
+        }
       },
-      [t.failed],
+      [onClose, t.failed],
     )
 
     const chooseFolder = () =>
       run(async () => {
         const path = await services.pickDirectory()
         const workspace = await services.createWorkspace(path)
-        onClose()
         onPick(workspace.workspaceId)
       })
 
+    /**
+     * "Work without a project": adopt the harness working directory, then select
+     * it through the same `onPick` every other row uses. The host owns the
+     * navigation (it opens a session in the workspace), so this stays on the
+     * proven path rather than reimplementing session creation.
+     */
     const chooseNoProject = () =>
       run(async () => {
-        const sessionId = await services.createUngroupedSession()
-        onClose()
-        services.openSession(sessionId)
+        const workspaceId = await services.adoptDefaultProject()
+        onPick(workspaceId)
       })
 
+    /**
+     * One flat, ordered list of everything selectable.
+     *
+     * Keyboard traversal and hover share this order, so `cursor` is a single
+     * index into it rather than per-section state. The divider is presentational
+     * and deliberately not an item.
+     */
+    const items = useMemo(
+      () => [
+        ...visible.map((row) => ({ kind: 'workspace' as const, id: row.workspaceId, title: row.title })),
+        { kind: 'folder' as const, id: '__folder__', title: t.openFolder },
+        { kind: 'no-project' as const, id: '__no-project__', title: t.noProject },
+      ],
+      [visible, t.openFolder, t.noProject],
+    )
+
+    const activate = useCallback(
+      (index: number) => {
+        const item = items[index]
+        if (!item) return
+        // Selection is immediate; the two actions report their own outcome and
+        // close on success only, so a failure stays visible.
+        if (item.kind === 'workspace') {
+          onClose()
+          onPick(item.id)
+        } else if (item.kind === 'folder') {
+          void chooseFolder()
+        } else {
+          void chooseNoProject()
+        }
+      },
+      // chooseFolder/chooseNoProject close over `services` and `t`, stable per open.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [items, onClose, onPick],
+    )
+
+    // Reset the cursor whenever the result set changes shape.
+    useEffect(() => {
+      setCursor(items.length > 0 ? 0 : -1)
+    }, [items.length])
+
+    // Arrow keys, Home/End, Enter — the keyboard half of the landing-point feedback.
+    const onKeyDown = (event: { key: string; preventDefault: () => void }) => {
+      const next = nextCursor(cursor, event.key, items.length)
+      if (next !== undefined) {
+        event.preventDefault()
+        setCursor(next)
+        return
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        activate(cursor)
+      }
+    }
+
+    // Focus the search field on open, so typing filters without a click.
+    useEffect(() => {
+      if (open && pos) searchRef.current?.focus()
+    }, [open, pos])
+
+    /** One rendered row, with its interaction state resolved. */
+    const renderRow = (index: number, item: (typeof items)[number], leading: unknown, trailing?: unknown) =>
+      jsx(
+        'button',
+        {
+          key: item.id,
+          type: 'button',
+          role: 'menuitem',
+          'aria-current': item.kind === 'workspace' && item.id === selectedId ? 'true' : undefined,
+          style: S.row(index === cursor ? 'active' : item.kind === 'workspace' && item.id === selectedId ? 'selected' : 'idle'),
+          // Hover moves the same cursor the keyboard uses. `onMouseEnter` alone
+          // is enough (it fires per row entry); adding `onMouseMove` would
+          // re-fire continuously while the pointer rests on a row.
+          onMouseEnter: () => setCursor(index),
+          onClick: () => activate(index),
+          children: [
+            jsx('span', { key: 'i', style: { display: 'flex', flex: 'none' }, children: leading }),
+            jsx('span', { key: 't', style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: item.title }),
+            trailing ?? null,
+          ],
+        },
+        item.id,
+      )
+
     if (!open || !pos) return null
+
+    const workspaceCount = visible.length
 
     return jsx('div', {
       ref: menuRef,
       style: { ...S.menu, left: `${pos.left}px`, top: `${pos.top}px` },
       role: 'menu',
       'data-proteus-code': 'workspace-picker',
+      onKeyDown,
       children: [
         jsx('input', {
           key: 'search',
+          ref: searchRef,
           style: S.search,
           placeholder: t.search,
           value: query,
           'aria-label': t.search,
+          onKeyDown,
           onChange: (e: { target: { value: string } }) => setQuery(e.target.value),
         }),
-        visible.length === 0
+        workspaceCount === 0
           ? jsx('div', { key: 'empty', style: S.empty, children: t.empty })
-          : visible.map((row) =>
-              jsx(
-                'button',
-                {
-                  key: row.workspaceId,
-                  type: 'button',
-                  role: 'menuitem',
-                  style: S.row(row.workspaceId === selectedId),
-                  onClick: () => {
-                    onClose()
-                    onPick(row.workspaceId)
-                  },
-                  children: [
-                    jsx('span', { key: 'i', style: { display: 'flex' }, children: FolderIcon() }),
-                    jsx('span', { key: 't', children: row.title }),
-                    row.workspaceId === selectedId
-                      ? jsx('span', { key: 'c', style: S.check, children: '✓' })
-                      : null,
-                  ],
-                },
-                row.workspaceId,
+          : jsx('div', {
+              key: 'list',
+              style: S.list,
+              role: 'group',
+              children: visible.map((row, i) =>
+                renderRow(
+                  i,
+                  { kind: 'workspace', id: row.workspaceId, title: row.title },
+                  FolderIcon(),
+                  row.workspaceId === selectedId
+                    ? jsx('span', { key: 'c', style: S.check, children: '✓' })
+                    : null,
+                ),
               ),
-            ),
+            }),
         jsx('div', { key: 'd', style: S.divider }),
-        jsx(
-          'button',
-          {
-            key: 'folder',
-            type: 'button',
-            role: 'menuitem',
-            style: S.row(false),
-            onClick: chooseFolder,
-            children: [
-              jsx('span', { key: 'i', style: { display: 'flex' }, children: FolderIcon() }),
-              jsx('span', { key: 't', children: t.openFolder }),
-            ],
-          },
-        ),
-        jsx(
-          'button',
-          {
-            key: 'noproject',
-            type: 'button',
-            role: 'menuitem',
-            style: S.row(false),
-            onClick: chooseNoProject,
-            children: [
-              jsx('span', { key: 'i', style: { display: 'flex' }, children: ChatIcon() }),
-              jsx('span', { key: 't', children: t.noProject }),
-            ],
-          },
+        renderRow(workspaceCount, { kind: 'folder', id: '__folder__', title: t.openFolder }, FolderIcon()),
+        renderRow(
+          workspaceCount + 1,
+          { kind: 'no-project', id: '__no-project__', title: t.noProject },
+          ChatIcon(),
         ),
         error ? jsx('div', { key: 'err', style: S.error, children: error }) : null,
       ],

@@ -102,6 +102,9 @@ export function apply(ctx: Context, config: Config): void {
     installBrandAssets(ctx as unknown as { inject: never }, {
       liquidGlass: config.enableLiquidGlass !== false,
       workspacePicker: config.workspacePicker !== false,
+      // The harness home's working directory is the natural "no project" root;
+      // this process is the only one that knows it.
+      defaultCwd: process.cwd(),
     })
   }
 

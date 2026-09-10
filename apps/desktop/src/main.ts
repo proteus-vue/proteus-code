@@ -201,6 +201,9 @@ async function runSmoke(window: BrowserWindow, outputPath: string): Promise<void
       const script = readFileSync(process.env.PROTEUS_CODE_QUERY, 'utf8')
       const result = await window.webContents.executeJavaScript(script)
       console.log(`[proteus-code] query: ${JSON.stringify(result, null, 2)}`)
+      // Let the renderer paint any state the query changed, so the screenshot
+      // below reflects the post-query UI rather than the pre-query one.
+      await new Promise((resolve) => setTimeout(resolve, Number(process.env.PROTEUS_CODE_QUERY_SETTLE_MS ?? '1500')))
     }
 
     const image = await window.webContents.capturePage()
