@@ -22,6 +22,17 @@ proteus-code 在这一层之上做了一件事：**把 Proteus 的 CLI 能力、
 
 ---
 
+## 文档导航
+
+| 文档 | 内容 |
+|---|---|
+| [PROJECT_MEMORY.md](PROJECT_MEMORY.md) | **交接文档**：决策依据、踩过的坑、被证伪的方案、此后必须遵守的事实 |
+| [AGENTS.md](AGENTS.md) | 在本仓库工作的约定（效率标准 + 项目固有约束） |
+| [docs/architecture.md](docs/architecture.md) | 架构与扩展点、UI 定制面、上游契约清单 |
+| [docs/getting-started.md](docs/getting-started.md) | 上手、配置、排错 |
+
+---
+
 ## 界面：全面换成 proteus-code 自己的
 
 界面能力来自 DSH 的 Web Client，proteus-code 通过**官方扩展点**整体改造它，不 fork、不改上游文件：
