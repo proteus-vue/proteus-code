@@ -1,0 +1,19 @@
+{
+  "name": "@proteus-code/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "proteus-code desktop application: an Electron shell hosting the proteus-code DeepSeek Harness profile.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "node scripts/build-desktop.mjs",
+    "dev": "node scripts/build-desktop.mjs && electron dist/main.js",
+    "start": "electron dist/main.js",
+    "web": "node dist/cli.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "electron": "^44.0.0"
+  }
+}

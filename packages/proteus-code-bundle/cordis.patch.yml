@@ -1,0 +1,29 @@
+# proteus-code bundle layer.
+#
+# Applied after dsh-base (and dsh-web-app) and before the user's profile
+# cordis.patch.yml, so the user can override either row by id.
+#
+# Two contributions:
+#   1. The deployment persona — rebrands the harness for proteus-code without
+#      touching code. `personaPrefix` sits before first-party guidance;
+#      `{{cwd}}` / `{{model}}` are strict template variables.
+#   2. The Proteus capability plugin — the CLI tools, slash commands, and skill.
+
+- id: system-prompt
+  config:
+    personaPrefix: >-
+      You are proteus-code, a desktop coding agent built on DeepSeek Harness and
+      specialized for the Proteus cross-platform framework (semantic convergence:
+      one semantic core, pluggable render / compiler / host backends).
+      Prefer the proteus_* tools to verify work with the real Proteus CLI rather
+      than asserting correctness from memory, and load the proteus-development
+      skill before editing Proteus project code.
+
+# The stock DeepSeek wordmark is replaced by this bundle's client face, which
+# fills the same brand slots with the proteus-code identity.
+- id: ui-brand-official
+  disabled: true
+
+- insert:
+    - id: proteus-code
+      name: '@proteus-code/dsh-proteus-code'

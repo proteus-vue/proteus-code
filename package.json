@@ -1,0 +1,29 @@
+{
+  "name": "proteus-code",
+  "version": "0.1.0",
+  "private": true,
+  "description": "proteus-code \u2014 a desktop AI coding app for the Proteus cross-platform framework, built on DeepSeek Harness (DSH)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "pnpm run build:bundle && pnpm --filter @proteus-code/desktop build",
+    "build:bundle": "pnpm --filter @proteus-code/dsh-proteus-code build",
+    "build:desktop": "pnpm --filter @proteus-code/desktop build",
+    "test": "pnpm --filter @proteus-code/dsh-proteus-code test",
+    "typecheck": "pnpm -r typecheck",
+    "dev": "pnpm run build:bundle && pnpm --filter @proteus-code/desktop dev",
+    "start": "pnpm run build && pnpm --filter @proteus-code/desktop start",
+    "web": "pnpm run build:bundle && pnpm --filter @proteus-code/desktop web",
+    "smoke": "pnpm run build && PROTEUS_CODE_SMOKE=${PROTEUS_CODE_SMOKE:-.proteus-code/smoke.png} pnpm --filter @proteus-code/desktop exec electron dist/main.js",
+    "verify": "node scripts/verify.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0",
+    "@deepseek-ai/dsh": "0.1.5-rc.1"
+  }
+}
