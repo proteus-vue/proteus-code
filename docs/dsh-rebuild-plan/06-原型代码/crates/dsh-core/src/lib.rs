@@ -29,6 +29,13 @@ pub const MAX_TOOL_CALLS_PER_STEP: usize = 32;
 /// 一轮内允许的最大步数。超出即报错结束该轮，不无限循环。
 pub const DEFAULT_MAX_STEPS: usize = 8;
 
+/// 上下文消息上限。
+///
+/// 达到上限时内核**报错并要求压缩**，而不是静默丢消息 ——
+/// 静默丢会让模型的视角与日志不一致，破坏"模型可见即已落盘"的铁律。
+/// 压缩本身是 L4 orchestration 的职责（`Compact` Op），当前**未实现**。
+pub const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 4096;
+
 // ══════════════════════════════════════════════════════════════════════
 // 会话消息：模型可见的内容
 // ══════════════════════════════════════════════════════════════════════
@@ -65,11 +72,16 @@ pub struct ToolSchema {
 }
 
 /// 一次模型请求。
-#[derive(Debug, Clone)]
-pub struct ModelRequest {
-    pub system: String,
-    pub messages: Vec<Message>,
-    pub tools: Vec<ToolSchema>,
+///
+/// `messages` 是**借用**的切片而非拥有所有权的 `Vec`：
+/// 若每步都 `clone()` 整份历史，一轮 N 步就是 O(N²) 拷贝 —— 长会话下这是
+/// 主要热点。真实 provider 本来就会先把请求序列化出去再流式读回，
+/// 不需要持有历史，所以借用不构成限制。
+#[derive(Debug)]
+pub struct ModelRequest<'a> {
+    pub system: &'a str,
+    pub messages: &'a [Message],
+    pub tools: &'a [ToolSchema],
 }
 
 /// 模型响应的增量。顺序即语义：文本增量 → 工具调用 → 用量。
@@ -94,7 +106,10 @@ pub type ModelStream = Box<dyn Iterator<Item = ModelDelta> + Send>;
 pub trait ModelProvider: Send + Sync {
     fn name(&self) -> &str;
     /// 产生一次模型响应的增量序列。**必须确定性**：同请求同序列（T2 可回放的前提）。
-    fn stream(&self, request: &ModelRequest) -> ModelStream;
+    ///
+    /// 返回的流不借用 `request`：实现应在内部把需要的内容序列化/复制出去
+    /// （真实 provider 一次 HTTP 请求即如此），从而让调用方可以立即释放借用。
+    fn stream(&self, request: &ModelRequest<'_>) -> ModelStream;
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -121,17 +136,50 @@ pub enum CallKind {
 ///
 /// 存在的意义：让「沙箱是硬边界」成为内核的**结构保证** ——
 /// 工具无法自行选择沙箱模式，也没有不经沙箱执行命令的入口。
+/// 单次工具调用允许回灌到内存的输出上限（字节）。
+///
+/// 为什么必须有：Rust 保证内存**安全**，但不保证内存**有界** ——
+/// 一条 `yes` 或 `find /` 能把进程撑爆。上限是内核的义务，不是工具的自觉。
+pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 256 * 1024;
+
 pub struct ToolCtx<'a> {
     pub sandbox: &'a dyn SandboxBackend,
     pub mode: SandboxMode,
-    pub cwd: PathBuf,
+    pub cwd: &'a std::path::Path,
+    /// 单次调用的输出上限；超出即截断并置 `truncated`。
+    pub max_output_bytes: usize,
 }
 
 impl ToolCtx<'_> {
-    /// 经沙箱执行一条命令。**工具执行命令的唯一入口。**
+    /// 经沙箱执行一条命令并**施加输出上限**。工具执行命令的唯一入口。
+    ///
+    /// 截断是必须的：沙箱实现（真实执行器）按流读取时就得停止累积，
+    /// 否则内存已经在被吃掉，再截断也没意义。
     pub fn exec(&self, command: &str) -> SandboxOutcome {
-        self.sandbox.execute(self.mode, command)
+        let outcome = self.sandbox.execute(self.mode, command);
+        match outcome {
+            SandboxOutcome::Ran { stdout, truncated } => {
+                let (text, cut) = truncate_utf8(&stdout, self.max_output_bytes);
+                SandboxOutcome::Ran { stdout: text.to_string(), truncated: truncated || cut }
+            }
+            denied => denied,
+        }
     }
+}
+
+/// 按字节上限截断，且**不切开 UTF-8 码点**。
+///
+/// 直接 `&s[..n]` 在非字符边界会 panic —— 这是 Rust 里截断字符串的经典坑。
+/// 必须回退到最近的字符边界。
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> (&str, bool) {
+    if s.len() <= max_bytes {
+        return (s, false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&s[..end], true)
 }
 
 pub trait Tool: Send + Sync {
@@ -190,7 +238,9 @@ pub trait SandboxBackend: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxOutcome {
-    Ran { stdout: String },
+    /// 执行完成。`truncated` 表示输出已按上限截断（**必须如实上报**，
+    /// 否则上层会把"被截断的结果"当成完整结果）。
+    Ran { stdout: String, truncated: bool },
     /// 因沙箱策略被拒（结构化事实，不是字符串报错）。
     Denied { reason: String },
 }
@@ -309,6 +359,11 @@ pub enum KernelError {
     Persistence(PersistenceError),
     /// 尚未实现的 Op（明确报错，不静默忽略）。
     Unimplemented(String),
+    /// 上下文超上限：要求压缩，而不是静默丢消息。
+    ///
+    /// 为什么不静默丢弃最老的：模型的视角必须与日志一致（"模型可见即已落盘"）。
+    /// 悄悄丢消息会让回放出的历史与实际请求不符 —— 那比报错危险得多。
+    ContextBudgetExceeded { messages: usize, limit: usize },
 }
 
 impl std::fmt::Display for KernelError {
@@ -317,6 +372,10 @@ impl std::fmt::Display for KernelError {
             Self::NoPendingApproval(id) => write!(f, "无待审批调用：{id}"),
             Self::Persistence(e) => write!(f, "{e}"),
             Self::Unimplemented(what) => write!(f, "该 Op 尚未实现：{what}"),
+            Self::ContextBudgetExceeded { messages, limit } => write!(
+                f,
+                "上下文超上限（{messages} > {limit} 条），需压缩后再继续；压缩属 L4 职责，当前未实现"
+            ),
         }
     }
 }
@@ -350,6 +409,15 @@ pub struct Kernel {
     persistence: Box<dyn SessionPersistence>,
     cwd: PathBuf,
     max_steps: usize,
+    /// 单次工具调用的输出上限（内核级，工具不可放宽）
+    max_output_bytes: usize,
+    /// 上下文消息上限；超出即报错要求压缩，而非静默无限增长
+    max_context_messages: usize,
+    /// 系统提示词：构造时算一次。**必须字节稳定**（提示词缓存命中的前提），
+    /// 且避免每步重新拼接。
+    system_prompt: String,
+    /// 工具 schema：构造时算一次，同样避免每步分配。
+    tool_schemas: Vec<ToolSchema>,
 
     session_id: String,
     state: KernelState,
@@ -376,6 +444,12 @@ impl Kernel {
         persistence: Box<dyn SessionPersistence>,
         cwd: impl Into<PathBuf>,
     ) -> Self {
+        let tools = tools;
+        let tool_schemas = tools.schemas();
+        let mut system_prompt =
+            String::from("你是 NEO 的编码 agent。优先用工具核验事实，不要凭记忆断言。\n\n可用工具：\n");
+        system_prompt.push_str(&tools.render_prompt());
+
         Self {
             cfg,
             tools,
@@ -384,6 +458,10 @@ impl Kernel {
             persistence,
             cwd: cwd.into(),
             max_steps: DEFAULT_MAX_STEPS,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+            max_context_messages: DEFAULT_MAX_CONTEXT_MESSAGES,
+            system_prompt,
+            tool_schemas,
             session_id: session_id.into(),
             state: KernelState::Idle,
             messages: Vec::new(),
@@ -398,6 +476,23 @@ impl Kernel {
     }
 
     pub fn with_max_steps(mut self, n: usize) -> Self { self.max_steps = n; self }
+    pub fn with_output_cap(mut self, bytes: usize) -> Self { self.max_output_bytes = bytes; self }
+    pub fn with_context_cap(mut self, messages: usize) -> Self {
+        self.max_context_messages = messages;
+        self
+    }
+    /// 仅供测试：直接灌入历史消息，用于测量分配行为。
+    ///
+    /// 生产路径不得使用 —— 绕过了"模型可见即已落盘"的铁律。
+    #[doc(hidden)]
+    pub fn seed_history_for_test(&mut self, n: usize) {
+        for i in 0..n {
+            self.messages.push(Message::User(format!("seed-{i}")));
+        }
+    }
+
+    /// 系统提示词（供测试断言字节稳定）。
+    pub fn system_prompt(&self) -> &str { &self.system_prompt }
     pub fn state(&self) -> &KernelState { &self.state }
     pub fn messages(&self) -> &[Message] { &self.messages }
     pub fn session_id(&self) -> &str { &self.session_id }
@@ -426,6 +521,9 @@ impl Kernel {
 
         match op {
             Op::UserTurn { text, refs } => {
+                // 先检查预算再推入用户消息：否则会留下一条"无法被处理"的消息，
+                // 让历史与日志都多出一条实际没发出去的输入。
+                self.check_context_budget()?;
                 self.turn_counter += 1;
                 self.steps_this_turn = 0;
                 self.usage_in = 0;
@@ -501,6 +599,7 @@ impl Kernel {
                 self.emit_and_log(&msg)?;
                 break;
             }
+            self.check_context_budget()?;
             self.steps_this_turn += 1;
             self.step_counter += 1;
 
@@ -532,41 +631,54 @@ impl Kernel {
     }
 
     /// 一次模型请求：组装 → 流式消费 → 返回（文本, 工具调用）。
+    ///
+    /// **零拷贝**：历史用 `mem::take` 临时移出，而不是 `clone` ——
+    /// 每步克隆整份历史会让一轮退化到 O(N²)，长会话下是主要热点。
+    /// 移出后 `self` 可自由可变借用（落盘/入队），跑完再放回。
     fn model_step(&mut self) -> Result<(String, Vec<ToolInvocation>), KernelError> {
-        let request = ModelRequest {
-            system: self.assemble_system(),
-            messages: self.messages.clone(),
-            tools: self.tools.schemas(),
-        };
-        // 请求参数也落日志（可审计：模型当时看到了多少条消息、多少个工具）
-        self.log(
-            "event",
-            &serde_json::json!({
-                "kind": "model_request",
-                "messages": request.messages.len(),
-                "tools": request.tools.len(),
-            }),
-        )?;
+        let messages = std::mem::take(&mut self.messages);
 
-        let mut text = String::new();
-        let mut calls = Vec::new();
-        for delta in self.model.stream(&request) {
-            match delta {
-                ModelDelta::Text(chunk) => {
-                    text.push_str(&chunk);
-                    self.emit_and_log(&EventMsg::AgentMessageDelta { delta: chunk })?;
-                }
-                ModelDelta::ToolCall(call) => {
-                    let ev = EventMsg::ToolCallBegin { id: call.id.clone(), name: call.name.clone() };
-                    self.emit_and_log(&ev)?;
-                    calls.push(call);
-                }
-                ModelDelta::Usage { input_tokens, output_tokens } => {
-                    self.usage_in += input_tokens;
-                    self.usage_out += output_tokens;
+        let (text, calls, result) = {
+            let request = ModelRequest {
+                system: &self.system_prompt,
+                messages: &messages,
+                tools: &self.tool_schemas,
+            };
+
+            let mut text = String::new();
+            let mut calls = Vec::new();
+            let mut result: Result<(), KernelError> = Ok(());
+
+            for delta in self.model.stream(&request) {
+                match delta {
+                    ModelDelta::Text(chunk) => {
+                        text.push_str(&chunk);
+                        let ev = EventMsg::AgentMessageDelta { delta: chunk };
+                        if let Err(e) = self.emit_and_log(&ev) {
+                            result = Err(e);
+                            break;
+                        }
+                    }
+                    ModelDelta::ToolCall(call) => {
+                        let ev =
+                            EventMsg::ToolCallBegin { id: call.id.clone(), name: call.name.clone() };
+                        if let Err(e) = self.emit_and_log(&ev) {
+                            result = Err(e);
+                            break;
+                        }
+                        calls.push(call);
+                    }
+                    ModelDelta::Usage { input_tokens, output_tokens } => {
+                        self.usage_in += input_tokens;
+                        self.usage_out += output_tokens;
+                    }
                 }
             }
-        }
+            (text, calls, result)
+        };
+
+        self.messages = messages; // 放回
+        result?;
         self.emit_and_log(&EventMsg::AgentMessageDone { text: text.clone() })?;
         Ok((text, calls))
     }
@@ -611,6 +723,18 @@ impl Kernel {
         self.drive_steps()
     }
 
+    /// 上下文预算检查。超限即报错，绝不静默丢弃。
+    fn check_context_budget(&self) -> Result<(), KernelError> {
+        let n = self.messages.len();
+        if n >= self.max_context_messages {
+            return Err(KernelError::ContextBudgetExceeded {
+                messages: n,
+                limit: self.max_context_messages,
+            });
+        }
+        Ok(())
+    }
+
     /// 工具分类：优先问工具自己；工具不认识该名字则保守判为 Write
     /// （宁可多问一次，不可漏放一次写操作）。
     fn classify(&self, call: &ToolInvocation) -> CallKind {
@@ -627,7 +751,8 @@ impl Kernel {
                 let ctx = ToolCtx {
                     sandbox: self.sandbox.as_ref(),
                     mode: self.resolution().sandbox,
-                    cwd: self.cwd.clone(),
+                    cwd: &self.cwd,
+                    max_output_bytes: self.max_output_bytes,
                 };
                 tool.execute(&call.arguments, &ctx)
             }
@@ -646,15 +771,6 @@ impl Kernel {
             output,
         });
         Ok(())
-    }
-
-    /// 组装系统提示词。**必须字节稳定**（提示词缓存命中的前提）：
-    /// 不插入时间、随机数或任何随运行变化的内容。
-    fn assemble_system(&self) -> String {
-        let mut s =
-            String::from("你是 NEO 的编码 agent。优先用工具核验事实，不要凭记忆断言。\n\n可用工具：\n");
-        s.push_str(&self.tools.render_prompt());
-        s
     }
 
     fn emit_and_log(&mut self, ev: &EventMsg) -> Result<(), KernelError> {

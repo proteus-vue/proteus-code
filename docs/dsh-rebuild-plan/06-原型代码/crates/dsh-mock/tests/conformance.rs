@@ -163,7 +163,9 @@ fn sandbox_contract_catches_leaky_backend() {
 /// 契约：同一输入必得同一输出（否则 Op→Event 回放不确定）。
 fn assert_model_contract(m: &dyn ModelProvider) {
     use dsh_core::ModelRequest;
-    let req = ModelRequest { system: "sys".into(), messages: Vec::new(), tools: Vec::new() };
+    let messages: Vec<dsh_core::Message> = Vec::new();
+    let tools: Vec<dsh_core::ToolSchema> = Vec::new();
+    let req = ModelRequest { system: "sys", messages: &messages, tools: &tools };
     let a: Vec<_> = m.stream(&req).collect();
     let b: Vec<_> = m.stream(&req).collect();
     assert_eq!(a, b, "模型后端不确定：同请求得到不同增量序列，破坏 T2 可回放性");
@@ -190,7 +192,12 @@ fn assert_tool_contract(tool: &dyn Tool) {
         "call_kind 必须返回合法类别");
     // 畸形参数：不得 panic（工具需自担参数校验）
     let sandbox = Arc::new(NoopSandbox);
-    let ctx = ToolCtx { sandbox: sandbox.as_ref(), mode: dsh_protocol::SandboxMode::DangerFullAccess, cwd: "/tmp".into() };
+    let ctx = ToolCtx {
+        sandbox: sandbox.as_ref(),
+        mode: dsh_protocol::SandboxMode::DangerFullAccess,
+        cwd: std::path::Path::new("/tmp"),
+        max_output_bytes: 4096,
+    };
     let _ = tool.execute(&json!({"unexpected": [1, 2, 3]}), &ctx);
     let _ = tool.execute(&json!(null), &ctx);
 }

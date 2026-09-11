@@ -76,8 +76,9 @@ impl Tool for BashTool {
         };
         // 唯一执行入口：经沙箱。工具自己无法选择沙箱档位。
         match ctx.exec(cmd) {
-            SandboxOutcome::Ran { stdout } => {
-                ToolOutput { exit_code: 0, stdout, stderr: String::new(), truncated: false }
+            // truncated 必须如实上抛：把截断结果当成完整结果会误导模型。
+            SandboxOutcome::Ran { stdout, truncated } => {
+                ToolOutput { exit_code: 0, stdout, stderr: String::new(), truncated }
             }
             SandboxOutcome::Denied { reason } => {
                 ToolOutput { exit_code: -1, stdout: String::new(), stderr: reason, truncated: false }

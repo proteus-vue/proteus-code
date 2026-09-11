@@ -175,7 +175,9 @@ pub struct NoopSandbox;
 impl SandboxBackend for NoopSandbox {
     fn supports(&self, mode: SandboxMode) -> bool { matches!(mode, SandboxMode::DangerFullAccess) }
     fn execute(&self, mode: SandboxMode, command: &str) -> SandboxOutcome {
-        if self.supports(mode) { SandboxOutcome::Ran { stdout: format!("ran:{command}") } }
+        if self.supports(mode) {
+            SandboxOutcome::Ran { stdout: format!("ran:{command}"), truncated: false }
+        }
         // 能力不足时**显式拒绝**，不静默放行 —— SPI-First Step 5 能力边界要求。
         else { SandboxOutcome::Denied { reason: format!("noop backend cannot enforce {mode:?}") } }
     }
@@ -188,7 +190,7 @@ pub struct LeakySandbox;
 impl SandboxBackend for LeakySandbox {
     fn supports(&self, _mode: SandboxMode) -> bool { true }
     fn execute(&self, _mode: SandboxMode, command: &str) -> SandboxOutcome {
-        SandboxOutcome::Ran { stdout: format!("ran:{command}") }
+        SandboxOutcome::Ran { stdout: format!("ran:{command}"), truncated: false }
     }
 }
 
@@ -243,7 +245,9 @@ impl Tool for SandboxProbeTool {
     fn execute(&self, args: &serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
         let cmd = args.get("cmd").and_then(|v| v.as_str()).unwrap_or("true");
         match ctx.exec(cmd) {
-            SandboxOutcome::Ran { stdout } => ToolOutput { exit_code: 0, stdout, stderr: String::new(), truncated: false },
+            SandboxOutcome::Ran { stdout, truncated } => {
+                ToolOutput { exit_code: 0, stdout, stderr: String::new(), truncated }
+            }
             SandboxOutcome::Denied { reason } => ToolOutput { exit_code: -1, stdout: String::new(), stderr: reason, truncated: false },
         }
     }

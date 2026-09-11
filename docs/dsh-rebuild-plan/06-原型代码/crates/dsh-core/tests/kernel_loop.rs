@@ -26,7 +26,7 @@ impl SandboxBackend for TestSandbox {
         if mode == SandboxMode::ReadOnly && command.contains("rm ") {
             return SandboxOutcome::Denied { reason: "read-only 禁止删除".into() };
         }
-        SandboxOutcome::Ran { stdout: format!("ran:{command}") }
+        SandboxOutcome::Ran { stdout: format!("ran:{command}"), truncated: false }
     }
 }
 
@@ -47,7 +47,9 @@ impl Tool for RecordingTool {
         let cmd = args.get("cmd").and_then(Value::as_str).unwrap_or("");
         self.seen.lock().unwrap().push(cmd.to_string());
         match ctx.exec(cmd) {
-            SandboxOutcome::Ran { stdout } => ToolOutput { exit_code: 0, stdout, stderr: String::new(), truncated: false },
+            SandboxOutcome::Ran { stdout, truncated } => {
+                ToolOutput { exit_code: 0, stdout, stderr: String::new(), truncated }
+            }
             SandboxOutcome::Denied { reason } => ToolOutput { exit_code: -1, stdout: String::new(), stderr: reason, truncated: false },
         }
     }
