@@ -155,6 +155,190 @@ impl Clipboard for NoopClipboard {
     }
 }
 
+
+// ══════════════════════════════════════════════════════════════════════
+// 提醒（提示音 / 桌面通知）—— 第 7 个 SPI
+// ══════════════════════════════════════════════════════════════════════
+//
+// # 为什么做成 SPI
+//
+// 与剪贴板同理：直接 `Command::new("osascript")` 会把 macOS 写死在调用点，
+// 于是 Linux/Windows 静默失效，且测试无法注入假实现。
+// 更重要的是**提醒是最不该失败却很爱失败的能力**：
+// 它常在无 GUI、无音频设备、SSH、容器里被调用 —— 那时必须"安静地降级"
+// 而不是崩或卡住。把它做成契据，降级行为就有明确位置可写、可测。
+//
+// # 语义边界：提醒失败不该影响主流程
+//
+// `Notify::notify` 返回 `Result`，但调用方应当**只用它来告知用户**，
+// 绝不能因为提醒失败而中断任务。这一点在文档里写明，免得后人把
+// `?` 加到调用链上。
+
+/// 提醒的场景（决定声音/紧急程度；后端可据此选择不同表现）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attention {
+    /// 一轮任务完成
+    TurnComplete,
+    /// 出错
+    Error,
+    /// 需要用户审批（最该打扰用户的场景）
+    ApprovalNeeded,
+}
+
+impl Attention {
+    /// 给桌面通知用的标题。
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::TurnComplete => "Neo · 完成",
+            Self::Error => "Neo · 出错",
+            Self::ApprovalNeeded => "Neo · 需要审批",
+        }
+    }
+}
+
+/// 提醒契据：让用户**注意到**某件事发生了。
+pub trait Notify: Send + Sync {
+    /// 后端名（日志与错误信息用）。
+    fn name(&self) -> &'static str;
+
+    /// 后端在此平台是否可用。
+    fn available(&self) -> bool;
+
+    /// 发一次提醒。`detail` 是给用户看的一句话说明。
+    ///
+    /// 返回 `Err` 表示没发出去；调用方**不得**因此中断主流程。
+    fn notify(&self, kind: Attention, detail: &str) -> Result<(), String>;
+}
+
+/// 系统提醒后端：macOS 用 `osascript` 弹通知 + `afplay` 响铃；
+/// Linux 用 `notify-send`；Windows 暂不支持（返回明确原因）。
+pub struct SystemNotify {
+    /// 是否同时发声。通知（视觉）与声音（听觉）分开控制 ——
+    /// 用户在专注时可能只想要声音、或只要视觉。
+    pub sound: bool,
+}
+
+impl SystemNotify {
+    pub fn new(sound: bool) -> Self { Self { sound } }
+
+    /// macOS 的系统提示音文件（`/System/Library/Sounds/`）。
+    fn macos_sound(kind: Attention) -> &'static str {
+        match kind {
+            // 不同场景用不同音色：出错用低沉、完成用清脆、审批用温和
+            Attention::TurnComplete => "Glass.aiff",
+            Attention::Error => "Basso.aiff",
+            Attention::ApprovalNeeded => "Ping.aiff",
+        }
+    }
+}
+
+impl Default for SystemNotify {
+    fn default() -> Self { Self::new(true) }
+}
+
+impl Notify for SystemNotify {
+    fn name(&self) -> &'static str { "system" }
+
+    fn available(&self) -> bool {
+        if cfg!(target_os = "macos") {
+            command_exists("osascript")
+        } else if cfg!(target_os = "linux") {
+            command_exists("notify-send")
+        } else {
+            false
+        }
+    }
+
+    fn notify(&self, kind: Attention, detail: &str) -> Result<(), String> {
+        if !self.available() {
+            return Err(format!(
+                "本平台 ({}) 无可用提醒后端（macOS 需 osascript，Linux 需 notify-send）",
+                std::env::consts::OS
+            ));
+        }
+        if cfg!(target_os = "macos") {
+            // 通知文案里的引号必须转义，否则 AppleScript 语法错
+            let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            let script = format!(
+                r#"display notification "{detail}" with title "{title}""#,
+                detail = esc(detail),
+                title = esc(kind.title()),
+            );
+            let st = Command::new("osascript")
+                .args(["-e", &script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| format!("无法启动 osascript：{e}"))?;
+            if !st.status.success() {
+                return Err(format!(
+                    "osascript 失败：{}",
+                    String::from_utf8_lossy(&st.stderr).trim()
+                ));
+            }
+            if self.sound {
+                // 声音失败**不算整体失败**：没声音但弹出通知，仍是有用的提醒。
+                let _ = Command::new("afplay")
+                    .arg(format!("/System/Library/Sounds/{}", Self::macos_sound(kind)))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
+            Ok(())
+        } else {
+            let st = Command::new("notify-send")
+                .args([kind.title(), detail])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| format!("无法启动 notify-send：{e}"))?;
+            if !st.status.success() {
+                return Err(format!(
+                    "notify-send 失败：{}",
+                    String::from_utf8_lossy(&st.stderr).trim()
+                ));
+            }
+            if self.sound && command_exists("paplay") {
+                let _ = Command::new("paplay")
+                    .arg("/usr/share/sounds/freedesktop/stereo/complete.oga")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 无提醒后端：CI / headless / 用户显式关闭。
+///
+/// 它**不是"失败"**而是"按配置不提醒" —— 因此 `available()` 返回 false，
+/// 但 `notify` 返回 Ok（没有出错，只是没做）。这是与 `NoopClipboard`
+/// 有意的区别：剪贴板不可用意味着用户的操作没生效（必须报错），
+/// 而提醒不可用只意味着"少了个便利"（不该报错打扰用户）。
+pub struct NoopNotify {
+    pub reason: String,
+}
+
+impl NoopNotify {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self { reason: reason.into() }
+    }
+}
+
+impl Notify for NoopNotify {
+    fn name(&self) -> &'static str { "noop" }
+    fn available(&self) -> bool { false }
+    fn notify(&self, _kind: Attention, _detail: &str) -> Result<(), String> {
+        let _ = &self.reason;
+        Ok(()) // 按配置不提醒，不是错误
+    }
+}
+
 // ── 其余平台能力（尚未实现，保留契据）──────────────────────────────
 
 pub fn harden_process() { /* pre-main 反调试 / 反转储 / 环境变量清理 */ }
@@ -192,6 +376,79 @@ mod tests {
         let c = SystemClipboard::new();
         let _ = c.available();
         assert_eq!(c.name(), "system");
+    }
+
+    // ── 提醒 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn attention_titles_are_distinct_and_nonempty() {
+        // 三种场景的标题必须能区分 —— 用户一眼要知道是"完成"还是"要审批"
+        let ts: Vec<&str> = [
+            Attention::TurnComplete,
+            Attention::Error,
+            Attention::ApprovalNeeded,
+        ]
+        .iter()
+        .map(|a| a.title())
+        .collect();
+        for t in &ts {
+            assert!(!t.is_empty());
+        }
+        let mut uniq = ts.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), ts.len(), "标题必须互不相同：{ts:?}");
+    }
+
+    #[test]
+    fn noop_notify_is_silent_but_not_an_error() {
+        // 与 NoopClipboard 的关键区别：提醒不可用**不是错误** ——
+        // 剪贴板失败意味着用户操作没生效（必须报错），
+        // 提醒不可用只是少了个便利（不该报错打扰）。
+        let n = NoopNotify::new("CI 环境");
+        assert!(!n.available());
+        assert!(n.notify(Attention::TurnComplete, "x").is_ok(), "不该报错");
+        assert_eq!(n.name(), "noop");
+    }
+
+    #[test]
+    fn system_notify_reports_unavailable_platforms_instead_of_pretending() {
+        let n = SystemNotify::new(true);
+        if n.available() {
+            // 可用平台上不该返回"不可用"的错误
+            let r = n.notify(Attention::TurnComplete, "neo 提醒自检");
+            assert!(r.is_ok(), "自称可用却失败：{:?}", r.err());
+        } else {
+            let err = n.notify(Attention::TurnComplete, "x").unwrap_err();
+            assert!(!err.trim().is_empty(), "不可用时必须给出原因");
+        }
+    }
+
+    #[test]
+    fn notification_text_with_quotes_does_not_break_the_backend() {
+        // AppleScript 里未转义的引号会导致语法错 —— 这是最容易踩的坑。
+        // 该用例断言"含引号的文案要么成功、要么报出真实错误（而非语法错）"。
+        let n = SystemNotify::new(false); // 关声音，避免测试时响
+        if n.available() {
+            let r = n.notify(Attention::Error, r#"包含 "引号" 与 \ 反斜杠"#);
+            if let Err(e) = &r {
+                assert!(
+                    !e.contains("syntax error"),
+                    "文案里的引号/反斜杠必须被转义，实际：{e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn macos_sound_choices_differ_by_scenario() {
+        // 同一个音色配所有场景会让人分不清发生了什么
+        let a = SystemNotify::macos_sound(Attention::TurnComplete);
+        let b = SystemNotify::macos_sound(Attention::Error);
+        let c = SystemNotify::macos_sound(Attention::ApprovalNeeded);
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
     }
 
     #[test]

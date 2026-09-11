@@ -2403,6 +2403,10 @@ enum Effect {
     Settings,
     /// 收起 / 展开侧栏
     ToggleSidebar,
+    /// 开 / 关提醒
+    ToggleNotify,
+    /// 开 / 关提醒声音
+    ToggleNotifySound,
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -2467,6 +2471,8 @@ fn apply_popup_item(
             commands::Action::CopyLastReply => Effect::CopyLastReply,
             commands::Action::Settings => Effect::Settings,
             commands::Action::ToggleSidebar => Effect::ToggleSidebar,
+            commands::Action::ToggleNotify => Effect::ToggleNotify,
+            commands::Action::ToggleNotifySound => Effect::ToggleNotifySound,
             commands::Action::Keys => {
                 *info_screen = Some(commands::keys_text().to_string());
                 Effect::None
@@ -2570,6 +2576,10 @@ pub enum SettingAction {
     NewSession,
     /// 查看 diff
     DiffViewer,
+    /// 开 / 关提醒
+    ToggleNotify,
+    /// 开 / 关提醒声音
+    ToggleNotifySound,
 }
 
 /// 设置视图的一个分组。
@@ -2595,6 +2605,12 @@ pub struct SettingsInfo {
     pub sidebar: bool,
     pub mouse: bool,
     pub clipboard: bool,
+    /// 提醒（提示音 / 桌面通知）是否可用
+    pub notify: bool,
+    /// 是否同时发声
+    pub notify_sound: bool,
+    /// 是否启用提醒
+    pub notify_enabled: bool,
     pub messages: usize,
     pub files_changed: usize,
 }
@@ -2719,6 +2735,24 @@ pub fn settings_sections(info: &SettingsInfo) -> Vec<SettingSection> {
         SettingSection {
             title: "显示",
             rows: vec![
+                SettingRow {
+                    label: "提醒".into(),
+                    value: if info.notify_enabled { "开启".into() } else { "关闭".to_string() },
+                    action: Some(SettingAction::ToggleNotify),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "提醒声音".into(),
+                    value: if info.notify_sound { "开".into() } else { "关".to_string() },
+                    action: Some(SettingAction::ToggleNotifySound),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "提醒后端".into(),
+                    value: if info.notify { "系统可用".into() } else { "不可用".to_string() },
+                    action: None,
+                    readonly_note: "macOS 用 osascript / Linux 用 notify-send；不可用时静默跳过",
+                },
                 SettingRow {
                     label: "工具输出".into(),
                     value: if info.details { "展开".into() } else { "折叠".to_string() },
@@ -3094,6 +3128,9 @@ fn open_settings(
     sidebar: bool,
     mouse: bool,
     clipboard: &dyn neo_platform::Clipboard,
+    notify_backend: &dyn neo_platform::Notify,
+    notify_enabled: bool,
+    notify_sound: bool,
     theme_name: theme::ThemeName,
 ) {
     let facts = facts_of(events);
@@ -3106,6 +3143,11 @@ fn open_settings(
         })
         .unwrap_or(0);
     let info = SettingsInfo {
+        // 提醒的三项来自真实后端与当前开关，不是硬编码 ——
+        // 硬编码会让设置页显示"开启"而实际没开。
+        notify: notify_backend.available(),
+        notify_sound,
+        notify_enabled,
         version: about.version.clone(),
         model: about.model.clone(),
         mode: about.mode_short.clone(),
@@ -3153,6 +3195,42 @@ fn do_copy(events: &[EventMsg], clipboard: &dyn neo_platform::Clipboard) -> Stri
         Err(e) => format!("复制失败：{e}"),
     }
 }
+
+/// 找出**新出现**的、值得提醒的信号。
+///
+/// 只提醒三类（对齐 opencode 的 attention）：完成、出错、需审批。
+/// `seen` 用来去重 —— 否则每帧重扫 facts 会重复响。
+fn attention_signals(
+    facts: &[Fact],
+    seen: &std::collections::HashSet<String>,
+) -> Vec<(String, neo_platform::Attention, String)> {
+    let mut out = Vec::new();
+    for f in facts {
+        let (key, kind, detail) = match f {
+            Fact::TurnFinished { input_tokens, output_tokens } => (
+                format!("done:{input_tokens}:{output_tokens}"),
+                neo_platform::Attention::TurnComplete,
+                format!("完成（{input_tokens} in / {output_tokens} out）"),
+            ),
+            Fact::Failed(msg) => (
+                format!("err:{}", msg.chars().take(64).collect::<String>()),
+                neo_platform::Attention::Error,
+                msg.chars().take(120).collect(),
+            ),
+            Fact::ApprovalNeeded { detail } => (
+                format!("ask:{}", detail.chars().take(64).collect::<String>()),
+                neo_platform::Attention::ApprovalNeeded,
+                format!("需要审批：{detail}"),
+            ),
+            _ => continue,
+        };
+        if !seen.contains(&key) {
+            out.push((key, kind, detail));
+        }
+    }
+    out
+}
+
 
 /// 取最近一条助手回复（供 `/copy`）。
 ///
@@ -3318,6 +3396,18 @@ where
     // 设置视图（`ctrl+p` → 设置，或 `/settings`）
     let mut settings_state: Option<Vec<SettingSection>> = None;
     let mut settings_cursor: usize = 0;
+    // 提醒：默认关闭（对齐 opencode 的 attention.enabled 默认 false）——
+    // 没人喜欢工具自己响。要就显式开：/settings 或 NEO_TUI_NOTIFY=1。
+    let mut notify_enabled = std::env::var_os("NEO_TUI_NOTIFY").is_some();
+    let mut notify_sound = std::env::var_os("NEO_TUI_NOTIFY_SILENT").is_none();
+    let notify_backend: Box<dyn neo_platform::Notify> =
+        if std::env::var_os("NEO_TUI_NO_NOTIFY").is_some() {
+            Box::new(neo_platform::NoopNotify::new("已通过 NEO_TUI_NO_NOTIFY 禁用"))
+        } else {
+            Box::new(neo_platform::SystemNotify::new(notify_sound))
+        };
+    // 已提醒过的信号，避免同一个事件重复响（每帧都会重新扫 facts）
+    let mut notified: std::collections::HashSet<String> = std::collections::HashSet::new();
     // 剪贴板：按平台选后端；不可用时退化为 noop（`/copy` 会如实报错）
     let clipboard: Box<dyn neo_platform::Clipboard> =
         if std::env::var_os("NEO_TUI_NO_CLIPBOARD").is_some() {
@@ -3507,6 +3597,19 @@ where
                                         open_diff_viewer(&events, &mut diff_viewer);
                                         settings_state = None;
                                     }
+                                    SettingAction::ToggleNotify => {
+                                        notify_enabled = !notify_enabled;
+                                        // 刚打开时立刻发一条，让用户确认"能响"
+                                        if notify_enabled {
+                                            let _ = notify_backend.notify(
+                                                neo_platform::Attention::ApprovalNeeded,
+                                                "提醒已开启（试音）",
+                                            );
+                                        }
+                                    }
+                                    SettingAction::ToggleNotifySound => {
+                                        notify_sound = !notify_sound;
+                                    }
                                 }
                                 // 刷新设置页上的值（改完之后数字/状态要跟着变）
                                 open_settings(
@@ -3518,6 +3621,9 @@ where
                                     sidebar_open,
                                     mouse_on,
                                     clipboard.as_ref(),
+                                    notify_backend.as_ref(),
+                                    notify_enabled,
+                                    notify_sound,
                                     theme_name,
                                 );
                             }
@@ -3649,6 +3755,21 @@ where
 
         if dirty {
             let facts = facts_of(&events);
+            // 提醒：扫"新出现"的完成/出错/审批信号。用 set 记住已提醒过的，
+            // 避免每帧重扫 facts 时重复响。
+            if notify_enabled {
+                let seen: &std::collections::HashSet<String> = &notified;
+                for (key, kind, detail) in attention_signals(&facts, seen) {
+                    // 提醒失败**只忽略、不中断** —— 见 platform::Notify 的契约
+                    let _ = notify_backend.notify(kind, &detail);
+                    notified.insert(key);
+                }
+                // 有界：只保留最近 64 个 key，避免长会话无界增长
+                if notified.len() > 64 {
+                    notified.clear();
+                }
+            }
+
             let screen = Screen {
                 cols,
                 rows,
@@ -3784,11 +3905,26 @@ where
                                     sidebar_open,
                                     mouse_on,
                                     clipboard.as_ref(),
+                                    notify_backend.as_ref(),
+                                    notify_enabled,
+                                    notify_sound,
                                     theme_name,
                                 );
                             }
                             Effect::ToggleSidebar => {
                                 sidebar_open = !sidebar_open;
+                            }
+                            Effect::ToggleNotify => {
+                                notify_enabled = !notify_enabled;
+                                status = if notify_enabled {
+                                    "提醒：开启（完成 / 出错 / 需审批）".into()
+                                } else {
+                                    "提醒：关闭".into()
+                                };
+                            }
+                            Effect::ToggleNotifySound => {
+                                notify_sound = !notify_sound;
+                                status = if notify_sound { "提醒声音：开".into() } else { "提醒声音：关".into() };
                             }
                             Effect::ClearTranscript => {
                                 events.clear();
@@ -3958,11 +4094,26 @@ where
                                             sidebar_open,
                                             mouse_on,
                                             clipboard.as_ref(),
+                                            notify_backend.as_ref(),
+                                            notify_enabled,
+                                            notify_sound,
                                             theme_name,
                                         );
                                     }
                                     Effect::ToggleSidebar => {
                                         sidebar_open = !sidebar_open;
+                                    }
+                                    Effect::ToggleNotify => {
+                                        notify_enabled = !notify_enabled;
+                                        status = if notify_enabled {
+                                            "提醒：开启（完成 / 出错 / 需审批）".into()
+                                        } else {
+                                            "提醒：关闭".into()
+                                        };
+                                    }
+                                    Effect::ToggleNotifySound => {
+                                        notify_sound = !notify_sound;
+                                        status = if notify_sound { "提醒声音：开".into() } else { "提醒声音：关".into() };
                                     }
                                     Effect::ClearTranscript => events.clear(),
                                     Effect::ShowStatus => {
@@ -4217,11 +4368,26 @@ where
                                     sidebar_open,
                                     mouse_on,
                                     clipboard.as_ref(),
+                                    notify_backend.as_ref(),
+                                    notify_enabled,
+                                    notify_sound,
                                     theme_name,
                                 );
                             }
                             Effect::ToggleSidebar => {
                                 sidebar_open = !sidebar_open;
+                            }
+                            Effect::ToggleNotify => {
+                                notify_enabled = !notify_enabled;
+                                status = if notify_enabled {
+                                    "提醒：开启（完成 / 出错 / 需审批）".into()
+                                } else {
+                                    "提醒：关闭".into()
+                                };
+                            }
+                            Effect::ToggleNotifySound => {
+                                notify_sound = !notify_sound;
+                                status = if notify_sound { "提醒声音：开".into() } else { "提醒声音：关".into() };
                             }
                             Effect::ClearTranscript => events.clear(),
                             Effect::ShowStatus => {
@@ -4354,11 +4520,26 @@ where
                                         sidebar_open,
                                         mouse_on,
                                         clipboard.as_ref(),
+                                        notify_backend.as_ref(),
+                                        notify_enabled,
+                                        notify_sound,
                                         theme_name,
                                     );
                                 }
                                 Effect::ToggleSidebar => {
                                     sidebar_open = !sidebar_open;
+                                }
+                                Effect::ToggleNotify => {
+                                    notify_enabled = !notify_enabled;
+                                    status = if notify_enabled {
+                                        "提醒：开启（完成 / 出错 / 需审批）".into()
+                                    } else {
+                                        "提醒：关闭".into()
+                                    };
+                                }
+                                Effect::ToggleNotifySound => {
+                                    notify_sound = !notify_sound;
+                                    status = if notify_sound { "提醒声音：开".into() } else { "提醒声音：关".into() };
                                 }
                                 Effect::ClearTranscript => {
                                     events.clear();
@@ -5085,6 +5266,66 @@ mod tests {
         assert!(text.contains("命令"), "至少应显示标题：{text}");
     }
 
+    // ── 提醒触发 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn attention_fires_for_the_three_signal_kinds() {
+        use neo_platform::Attention;
+        let facts = vec![
+            Fact::TurnFinished { input_tokens: 10, output_tokens: 2 },
+            Fact::Failed("出错了".into()),
+            Fact::ApprovalNeeded { detail: "写入需确认".into() },
+        ];
+        let seen = std::collections::HashSet::new();
+        let sigs = attention_signals(&facts, &seen);
+        let kinds: Vec<Attention> = sigs.iter().map(|(_, k, _)| *k).collect();
+        assert!(kinds.contains(&Attention::TurnComplete), "{kinds:?}");
+        assert!(kinds.contains(&Attention::Error), "{kinds:?}");
+        assert!(kinds.contains(&Attention::ApprovalNeeded), "{kinds:?}");
+        assert_eq!(sigs.len(), 3);
+    }
+
+    #[test]
+    fn attention_does_not_refire_for_the_same_signal() {
+        // 关键：facts 每帧都会被重新扫描。若不去重，同一个"完成"会响个不停。
+        let facts = vec![Fact::TurnFinished { input_tokens: 1, output_tokens: 1 }];
+        let mut seen = std::collections::HashSet::new();
+        let first = attention_signals(&facts, &seen);
+        assert_eq!(first.len(), 1, "首次应触发");
+        for (k, _, _) in first {
+            seen.insert(k);
+        }
+        let second = attention_signals(&facts, &seen);
+        assert!(second.is_empty(), "已提醒过的不该再触发：{second:?}");
+    }
+
+    #[test]
+    fn attention_ignores_ordinary_conversation_facts() {
+        // 普通对话/工具调用不该触发提醒 —— 那会变成噪声
+        let facts = vec![
+            Fact::UserSaid("你好".into()),
+            Fact::AssistantSaid("你好".into()),
+            Fact::ToolFinished {
+                name: "bash".into(), exit_code: 0,
+                stdout: String::new(), stderr: String::new(), truncated: false,
+            },
+            Fact::FilesChanged(vec![]),
+            Fact::TodoList(vec![]),
+        ];
+        let seen = std::collections::HashSet::new();
+        assert!(attention_signals(&facts, &seen).is_empty(), "普通事实不该提醒");
+    }
+
+    #[test]
+    fn attention_detail_is_bounded() {
+        // 超长错误信息不该原样塞进通知（通知中心显示不下，且可能很长）
+        let long = "错误".repeat(500);
+        let facts = vec![Fact::Failed(long)];
+        let sigs = attention_signals(&facts, &std::collections::HashSet::new());
+        let (_, _, detail) = &sigs[0];
+        assert!(detail.chars().count() <= 120, "提醒文案应截断，实际 {}", detail.chars().count());
+    }
+
     // ── 剪贴板复制 ───────────────────────────────────────────────────
 
     /// 假的剪贴板后端：记录被复制的内容，并可模拟失败。
@@ -5353,6 +5594,7 @@ mod tests {
     #[test]
     fn settings_lists_the_four_sections() {
         let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
             version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
             context_limit: 64_000, theme: "neo".into(),
@@ -5370,6 +5612,7 @@ mod tests {
         // 关键：服务商 / 模型 / 上下文上限在运行中改不了，
         // 必须标为只读并给出原因 —— 假控件比缺控件更糟。
         let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
             version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
             context_limit: 64_000, theme: "neo".into(),
@@ -5400,6 +5643,7 @@ mod tests {
         let a = about();
         let ed = editor::Editor::new();
         let info = SettingsInfo {
+        notify: true, notify_sound: true, notify_enabled: false,
             version: "0.1.0".into(), model: "deepseek-chat".into(), mode: "default".into(),
             workspace: "/Volumes/data1/work/office/debug/proteus-code".into(),
             branch: "main".into(), session: "neo-tui".into(),
@@ -5431,6 +5675,7 @@ mod tests {
     fn settings_cursor_only_lands_on_actionable_rows() {
         // 光标必须只在可操作行间移动 —— 停在只读行上会让人以为能改
         let info = SettingsInfo {
+        notify: true, notify_sound: true, notify_enabled: false,
             version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),

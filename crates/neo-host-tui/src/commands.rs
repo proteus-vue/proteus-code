@@ -108,6 +108,10 @@ pub enum Action {
     Settings,
     /// 收起 / 展开侧栏
     ToggleSidebar,
+    /// 开 / 关提醒
+    ToggleNotify,
+    /// 开 / 关提醒声音
+    ToggleNotifySound,
 }
 
 /// **必须由命令触发**的动作。新增变体时要加进这里 ——
@@ -128,6 +132,8 @@ const COMMAND_ACTIONS: &[Action] = &[
     Action::CopyLastReply,
     Action::Settings,
     Action::ToggleSidebar,
+    Action::ToggleNotify,
+    Action::ToggleNotifySound,
 ];
 
 /// **只在界面内部产生**的动作（不经过命令表）。
@@ -190,6 +196,14 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "sidebar", aliases: &["panel"], desc: "收起 / 展开右侧面板",
         action: Action::ToggleSidebar, category: Category::Display, keybinding: "ctrl+b",
+    },
+    Command {
+        name: "notify", aliases: &["attention"], desc: "开 / 关提醒（完成 / 出错 / 需审批）",
+        action: Action::ToggleNotify, category: Category::Display, keybinding: "",
+    },
+    Command {
+        name: "notify-sound", aliases: &["sound"], desc: "开 / 关提醒声音",
+        action: Action::ToggleNotifySound, category: Category::Display, keybinding: "",
     },
     Command {
         name: "keys", aliases: &["keybindings"], desc: "键盘快捷键",
@@ -292,6 +306,8 @@ Neo —— 编程 Agent 内核
     /theme     选择配色主题（6 套）
     /next      直接切到下一个主题
     /sidebar   收起 / 展开右侧面板
+    /notify    开 / 关提醒（默认关）
+    /notify-sound 开 / 关提醒声音
     /copy      复制最近一条回复
     /details   展开 / 折叠工具输出
     /thinking  显示 / 隐藏推理

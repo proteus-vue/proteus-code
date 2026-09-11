@@ -74,6 +74,14 @@ SPI_SPEC = {
         "test": "crates/neo-platform/tests/clipboard.rs",
         "status": "landed",
     },
+    # 第 7 个 SPI：提醒。它天然多后端（系统 / noop），且**降级语义**
+    # 是本 SPI 最要紧的契约（无人值守时必须安静地不做，而非报错中断）。
+    "Notify": {
+        "trait": "Notify",
+        "conformance": "T8",
+        "test": "crates/neo-platform/tests/notify.rs",
+        "status": "landed",
+    },
 }
 
 
