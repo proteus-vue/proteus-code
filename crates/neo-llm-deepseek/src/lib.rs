@@ -24,10 +24,19 @@ use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
 /// DeepSeek 官方 endpoint（OpenAI 兼容形态）。
-pub const DEFAULT_ENDPOINT: &str = "api.deepseek.com";
-pub const DEFAULT_PATH: &str = "/chat/completions";
+pub const DEFAULT_ENDPOINT: &str = "api.deepseek.com";pub const DEFAULT_PATH: &str = "/chat/completions";
 pub const DEFAULT_MODEL: &str = "deepseek-chat";
 pub const DEFAULT_LABEL: &str = "deepseek";
+
+/// 把（可能有问题的）响应文本截成一段**可安全打印**的预览：
+/// 控制字符替换成 `.`（直接打印二进制会把终端弄乱），长度上限 200 字符。
+/// 换行保留 —— 多行 JSON 的可读性依赖它。
+fn preview_text(s: &str) -> String {
+    s.chars()
+        .take(200)
+        .map(|c| if c.is_control() && c != '\n' && c != '\r' { '.' } else { c })
+        .collect()
+}
 
 pub struct DeepSeekProvider {
     pub api_key: String,
@@ -183,15 +192,28 @@ impl DeepSeekProvider {
 
     /// 发一次请求，返回（状态码, 响应体）。**不做状态码判断** ——
     /// 让调用方（含集成测试）能看到真实状态。
-    pub fn post_raw(&self, body: &str) -> Result<(u16, String), String> {
-        let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {key}\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+    /// 组装一次请求的原始文本。
+    ///
+    /// 独立成方法是为了**可单测**：有些头不发就会出问题，但它们的效果
+    /// 只在真机才显现（例如压缩）。抽出来才能在单测里断言"这个头确实在"。
+    fn build_request(&self, body: &str) -> String {
+        // `Accept-Encoding: identity` 是**显式要求不压缩**。
+        //
+        // 不发它时，有些网关仍会 gzip 响应体 —— 而响应是按文本解析的，
+        // 收到 gzip 字节就变成"响应不是合法 UTF-8"（用户真机报过这个错）。
+        // 在请求侧声明 identity 比在客户端解压简单，也少一个失败点。
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {key}\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
             path = self.path,
             host = self.endpoint,
             key = self.api_key,
             len = body.as_bytes().len(),
             body = body,
-        );
+        )
+    }
+
+    pub fn post_raw(&self, body: &str) -> Result<(u16, String), String> {
+        let request = self.build_request(body);
 
         // HTTPS：交给 openssl s_client（-quiet 抑制握手噪声）
         let mut child = Command::new("openssl")
@@ -211,12 +233,34 @@ impl DeepSeekProvider {
         // 关闭 stdin 让 s_client 发完即读
         drop(child.stdin.take());
 
-        let mut raw = String::new();
+        // 按**字节**读，再自行解码。
+        //
+        // 之前用 `read_to_string`：响应里只要有一个非 UTF-8 字节就整体失败，
+        // 报出"stream did not contain valid UTF-8" —— 用户既看不到状态码、
+        // 也看不到服务商到底回了什么，完全无从下手。真实场景里非 UTF-8 很常见：
+        // 网关把错误页返回成二进制，或响应里夹了非 UTF-8 字段。
+        let mut bytes: Vec<u8> = Vec::new();
         {
             let mut out = child.stdout.take().ok_or("openssl stdout 不可用")?;
-            out.read_to_string(&mut raw).map_err(|e| format!("读取响应失败：{e}"))?;
+            out.read_to_end(&mut bytes)
+                .map_err(|e| format!("读取响应失败：{e}"))?;
         }
         let _ = child.wait();
+        let raw = match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                let lossy = String::from_utf8_lossy(e.as_bytes()).into_owned();
+                // 连 HTTP 状态行都认不出：多半是压缩体/二进制错误页。
+                // 如实说明并给一段可打印预览 —— 比一句 "invalid UTF-8" 有用得多。
+                if !lossy.starts_with("HTTP/") {
+                    return Err(format!(
+                        "响应不是合法 UTF-8（多半是压缩体或二进制错误页）；预览：{}",
+                        preview_text(&lossy)
+                    ));
+                }
+                lossy
+            }
+        };
 
         // 拆 HTTP 头 / 体
         let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
@@ -611,6 +655,27 @@ mod tests {
     #[test]
     fn rejects_a_response_without_choices() {
         assert!(parse_completion(r#"{"id":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn preview_text_is_printable_and_bounded() {
+        let got = preview_text("HTTP/1.1 200 OK\u{0007}\u{0001}body");
+        assert!(!got.contains('\u{0007}'), "控制字符必须替换：{got:?}");
+        assert!(got.contains("HTTP/1.1 200 OK"));
+        assert!(preview_text("a\nb").contains('\n'), "换行要保留");
+        assert!(preview_text(&"x".repeat(5000)).chars().count() <= 200, "预览要有上限");
+    }
+
+    #[test]
+    fn request_declares_identity_encoding() {
+        // 显式拒绝压缩：否则网关可能回 gzip，被当成"非法 UTF-8"。
+        let p = DeepSeekProvider {
+            api_key: "k".into(), endpoint: "e.invalid".into(), path: "/p".into(),
+            model: "m".into(), temperature: 0.0, label: DEFAULT_LABEL.into(),
+        };
+        let req = p.build_request("{}");
+        assert!(req.contains("Accept-Encoding: identity"), "缺 identity 声明：{req}");
+        assert!(req.starts_with("POST /p HTTP/1.1"), "请求行应含 path：{req}");
     }
 
     #[test]

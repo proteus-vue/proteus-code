@@ -1546,7 +1546,12 @@ impl Screen<'_> {
         // ── 底部：工作区分支（对标 opencode sidebar 的 footer）──
         if let Some(a) = self.about {
             if self.rows > 2 {
-                let label = if a.branch.is_empty() { a.model.clone() } else { a.branch.clone() };
+                // 无分支时退回显示模型名 —— 同样用实时值（见上面 2308 的注释）
+                let label = if a.branch.is_empty() {
+                    a.current_model.clone()
+                } else {
+                    a.branch.clone()
+                };
                 let t = width::truncate_to_width(&label, inner).to_string();
                 g.put(self.rows - 2, x0 + 2, &t, Tone::Border);
             }
@@ -2305,8 +2310,14 @@ impl Screen<'_> {
         let stat_row = top + 1 + shown;
         g.put(stat_row, left, "│", border);
         let inner = match self.about {
-            Some(a) if !a.mode_short.is_empty() => format!("{} ⏵ {}", a.mode_short, a.model),
-            Some(a) => a.model.clone(),
+            // 用 `current_model`（实时）而不是 `model`（启动快照）——
+            // 否则切换模型后输入框下方一直显示启动时那个名字。
+            // 这是**第三次**踩同一个坑（会话 id、设置页模型行、这里），
+            // 已把它当纪律：显示"会变的状态"一律用实时值。
+            Some(a) if !a.mode_short.is_empty() => {
+                format!("{} ⏵ {}", a.mode_short, a.current_model)
+            }
+            Some(a) => a.current_model.clone(),
             None => String::new(),
         };
         g.put(
