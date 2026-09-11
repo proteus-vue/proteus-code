@@ -216,6 +216,31 @@ fn read_key(stdin: &mut impl Read) -> Key {
 // 渲染（ANSI）
 // ══════════════════════════════════════════════════════════════════════
 
+/// 首屏「关于」信息。
+///
+/// **全部由调用方注入**：宿主不读环境变量、不问模型、不查沙箱，
+/// 否则就又变成了"宿主含业务逻辑"。它只负责把这些字符串排版出来。
+#[derive(Debug, Clone, Default)]
+pub struct About {
+    pub version: String,
+    pub model: String,
+    pub mode: String,
+    pub workspace: String,
+    pub session: String,
+}
+
+/// 词标（ANSI Shadow）。每行等宽，测试会断言这一点 —— 不等宽会看出错位。
+const WORDMARK: [&str; 6] = [
+    "███╗   ██╗ ███████╗ ██████╗ ",
+    "████╗  ██║ ██╔════╝██╔═══██╗",
+    "██╔██╗ ██║ █████╗  ██║   ██║",
+    "██║╚██╗██║ ██╔══╝  ██║   ██║",
+    "██║ ╚████║ ███████╗╚██████╔╝",
+    "╚═╝  ╚═══╝ ╚══════╝ ╚═════╝ ",
+];
+
+/// 词标所需的最小终端宽度（词标宽 + 左侧缩进 + 余量）。
+const WORDMARK_MIN_COLS: usize = 32;
 /// 一屏内容，渲染成 ANSI 文本。
 pub struct Screen<'a> {
     pub cols: usize,
@@ -228,6 +253,8 @@ pub struct Screen<'a> {
     pub status: &'a str,
     /// 光标可视（运行中不显示输入光标）
     pub show_cursor: bool,
+    /// 首屏关于信息；仅在**尚无任何事实**时展示（有对话后让位给正文）
+    pub about: Option<&'a About>,
 }
 
 const ESC: &str = "\u{1b}";
@@ -247,7 +274,16 @@ impl Screen<'_> {
         let input_rows = 3; // 输入行 + 状态栏 + 分隔
         let transcript_rows = self.rows.saturating_sub(input_rows);
 
-        let lines = self.wrap_facts(self.cols);
+        // 空对话时展示首屏；一旦有事实（含审批请求）就让位给正文。
+        // 这比"启动时打印一次 banner 再清屏"更稳：不会在滚屏时留下残影。
+        let lines = if self.facts.is_empty() {
+            match self.about {
+                Some(a) => self.welcome_lines(a),
+                None => Vec::new(),
+            }
+        } else {
+            self.wrap_facts(self.cols)
+        };
         // 只显示最后 transcript_rows 行（自动滚到底）
         let start = lines.len().saturating_sub(transcript_rows);
         for line in &lines[start..] {
@@ -270,6 +306,92 @@ impl Screen<'_> {
         // 状态栏
         out.push_str(&format!("{DIM}{}{RESET}", width::truncate_to_width(self.status, self.cols)));
         out
+    }
+
+    /// 首屏内容：词标 + 会话信息 + 快捷键。
+    ///
+    /// **必须自己保证放得下**：`render` 只显示末尾 `transcript_rows` 行（自动滚到底），
+    /// 若首屏比可视区高，被裁掉的恰好是**顶部**——用户会看到"没有 logo 的半截首屏"。
+    /// 因此这里按「奢 → 简」四档试排，选第一个放得下的档位。
+    fn welcome_lines(&self, a: &About) -> Vec<String> {
+        let avail = self.rows.saturating_sub(3); // 与 render 的 transcript_rows 同算式
+
+        // (词标, 副标题, 快捷键, 留白)
+        for &(mark, subtitle, hints, airy) in &[
+            (true, true, true, true),
+            (false, true, true, true),
+            (false, true, true, false),
+            (false, false, true, false),
+        ] {
+            let lines = self.welcome_variant(a, mark, subtitle, hints, airy);
+            if lines.len() <= avail {
+                return lines;
+            }
+        }
+        // 极端小的终端：只留最要紧的一行 + 键值
+        self.welcome_variant(a, false, false, false, false)
+    }
+
+    fn welcome_variant(
+        &self,
+        a: &About,
+        mark: bool,
+        subtitle: bool,
+        hints: bool,
+        airy: bool,
+    ) -> Vec<String> {
+        // 定长文案也按宽度截断（窄终端里提示语会超宽）
+        let fit = |s: &str| width::truncate_to_width(s, self.cols.saturating_sub(2)).to_string();
+        // 键值先截断再着色：着色后含 ANSI，再按宽度截会错切
+        let val_budget = self.cols.saturating_sub(16);
+        let cut = |s: &str| width::truncate_to_width(s, val_budget).to_string();
+
+        let mut lines: Vec<String> = Vec::new();
+        if airy {
+            lines.push(String::new());
+        }
+
+        if mark && self.cols >= WORDMARK_MIN_COLS {
+            for row in WORDMARK {
+                lines.push(format!("  {CYAN}{row}{RESET}"));
+            }
+        } else {
+            lines.push(format!("  {BOLD}{CYAN}NEO{RESET}"));
+        }
+
+        lines.push(String::new());
+        lines.push(format!("  {BOLD}Neo{RESET}{DIM} —— 编程 Agent 内核{RESET}"));
+        if subtitle {
+            lines.push(format!("  {DIM}{}{RESET}", fit("Rust 内核 · TUI / Web / Exec 共享同一内核")));
+        }
+
+        if airy {
+            lines.push(String::new());
+        }
+        for (label, value) in [
+            ("版本", &a.version),
+            ("模型", &a.model),
+            ("模式", &a.mode),
+            ("工作区", &a.workspace),
+            ("会话", &a.session),
+        ] {
+            // pad_to_width 按**显示列**对齐（中文标签 1 字 = 2 列，不能按字符个数 pad）
+            let padded = width::pad_to_width(label, 10);
+            lines.push(format!("  {DIM}{padded}{RESET}{}", cut(value)));
+        }
+
+        if hints {
+            lines.push(String::new());
+            lines.push(format!(
+                "  {DIM}{}{RESET}",
+                fit("输入任务后回车提交 · Ctrl+R 搜索历史 · Tab 补全 @文件引用")
+            ));
+            lines.push(format!(
+                "  {DIM}{}{RESET}",
+                fit("Ctrl+G 外部编辑器 · Ctrl+L 清屏 · Ctrl+C 退出")
+            ));
+        }
+        lines
     }
 
     /// 把 Fact 列表渲染成若干行文本（已含 ANSI）。
@@ -441,7 +563,7 @@ impl HostBackend for TuiFacts {
 ///
 /// `submit` 由调用方注入（通常是 `kernel.submit`），这样本 crate
 /// **不依赖 neo-orchestration / L3 之上的任何东西**，只依赖契据。
-pub fn run<F>(mut submit: F) -> std::io::Result<()>
+pub fn run<F>(about: About, mut submit: F) -> std::io::Result<()>
 where
     F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
 {
@@ -484,6 +606,7 @@ where
             input: &prompt,
             status: &status,
             show_cursor: true,
+            about: Some(&about),
         };
         write!(stdout, "{}", screen.render())?;
         stdout.flush()?;
@@ -629,6 +752,8 @@ where
                         input: "",
                         status: &status,
                         show_cursor: false,
+                        // 这一帧是"运行中"过渡态：facts 通常已非空，不展示首屏
+                        about: None,
                     }
                     .render()
                 )?;
@@ -690,7 +815,15 @@ mod tests {
             Fact::AssistantSaid("line2".into()),
             Fact::AssistantSaid("line3".into()),
         ];
-        let s = Screen { cols: 40, rows: 6, facts: &facts, input: "", status: "s", show_cursor: false };
+        let s = Screen {
+            cols: 40,
+            rows: 6,
+            facts: &facts,
+            input: "",
+            status: "s",
+            show_cursor: false,
+            about: None,
+        };
         let out = s.render();
         assert!(out.contains("line3"), "应显示最新内容：{out}");
     }
@@ -722,6 +855,125 @@ mod tests {
         // 无法识别的不提交（避免误批）
         assert_eq!(parse_approval_answer("maybe"), None);
         assert_eq!(parse_approval_answer(""), None);
+    }
+
+    #[test]
+    fn wordmark_rows_are_equal_width() {
+        // 手改词标最容易犯的错：某行多/少一个字符，终端里立刻看出错位。
+        let ws: Vec<usize> = WORDMARK.iter().map(|r| r.chars().count()).collect();
+        assert!(
+            ws.windows(2).all(|w| w[0] == w[1]),
+            "词标各行必须等宽，实际 {ws:?}"
+        );
+    }
+
+    fn about_fixture() -> About {
+        About {
+            version: "0.1.0".into(),
+            model: "mock".into(),
+            mode: "Default（沙箱 WorkspaceWrite / 审批 OnRequest）".into(),
+            workspace: "/tmp/ws".into(),
+            session: "neo-tui".into(),
+        }
+    }
+
+    #[test]
+    fn empty_transcript_shows_the_welcome_screen() {
+        let a = about_fixture();
+        let s = Screen {
+            cols: 100,
+            rows: 30,
+            facts: &[],
+            input: "",
+            status: "就绪",
+            show_cursor: true,
+            about: Some(&a),
+        };
+        let out = s.render();
+        // 注入的会话信息必须出现（否则首屏等于没有信息量）
+        assert!(out.contains("mock"), "首屏应显示模型：{out}");
+        assert!(out.contains("/tmp/ws"), "首屏应显示工作区：{out}");
+        assert!(out.contains("neo-tui"), "首屏应显示会话：{out}");
+        assert!(out.contains("0.1.0"), "首屏应显示版本：{out}");
+        // 大终端下应出现词标
+        assert!(out.contains('█'), "大终端应显示词标：{out}");
+    }
+
+    #[test]
+    fn welcome_yields_to_content_once_there_are_facts() {
+        // 有内容后首屏必须消失，否则每轮都刷一遍 banner 会淹没正文
+        let a = about_fixture();
+        let facts = vec![Fact::AssistantSaid("回答".into())];
+        let s = Screen {
+            cols: 100,
+            rows: 30,
+            facts: &facts,
+            input: "",
+            status: "就绪",
+            show_cursor: true,
+            about: Some(&a),
+        };
+        let out = s.render();
+        assert!(out.contains("回答"), "正文必须显示：{out}");
+        assert!(!out.contains('█'), "有正文时不该再出现词标：{out}");
+    }
+
+    #[test]
+    fn small_terminal_degrades_to_one_line_wordmark() {
+        // 小窗口里 6 行词标会把信息挤出可视区，应降级为单行
+        let a = about_fixture();
+        let s = Screen {
+            cols: 40,
+            rows: 12,
+            facts: &[],
+            input: "",
+            status: "就绪",
+            show_cursor: true,
+            about: Some(&a),
+        };
+        let out = s.render();
+        assert!(out.contains("NEO"), "小终端应退化为单行 NEO：{out}");
+        assert!(!out.contains('█'), "小终端不该显示大词标：{out}");
+        assert!(out.contains("/tmp/ws"), "降级后信息仍须可见：{out}");
+    }
+
+    #[test]
+    fn welcome_truncates_long_values_instead_of_overflowing() {
+        // 长路径不能撑破行宽（宽字符截断用 display width，不用字节数）
+        let a = About { workspace: "很长的目录名".repeat(30), ..about_fixture() };
+        let s = Screen {
+            cols: 40,
+            rows: 30,
+            facts: &[],
+            input: "",
+            status: "就绪",
+            show_cursor: true,
+            about: Some(&a),
+        };
+        for line in s.welcome_lines(&a) {
+            // 去掉 ANSI 后逐行量宽
+            let plain: String = {
+                let mut o = String::new();
+                let mut it = line.chars().peekable();
+                while let Some(c) = it.next() {
+                    if c == '\u{1b}' {
+                        while let Some(&n) = it.peek() {
+                            it.next();
+                            if n == 'm' { break; }
+                        }
+                    } else {
+                        o.push(c);
+                    }
+                }
+                o
+            };
+            assert!(
+                width::display_width(&plain) <= s.cols,
+                "行宽 {} 超过终端 {}：{plain:?}",
+                width::display_width(&plain),
+                s.cols
+            );
+        }
     }
 
     #[test]

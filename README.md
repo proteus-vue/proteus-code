@@ -20,7 +20,7 @@
 | `SandboxBackend` 真实后端（macOS Seatbelt） | ✅ **已实现**，6 项**真机**越权拦截测试 |
 | `SessionPersistence` 真实后端（JSONL append-only） | ✅ **已实现**，重开续号已验证 |
 | `neo exec` 无头宿主（端到端闭环） | ✅ **已实现**，离线 + 真实 provider 双路径跑通 |
-| `neo tui` 终端宿主（交互式，含审批应答、历史/模糊补全/CJK 宽度） | ✅ **已实现**，真终端验证（pty 驱动） |
+| `neo tui` 终端宿主（欢迎首屏 + 审批应答 + 历史/模糊补全/CJK 宽度） | ✅ **已实现**，真终端验证（pty 驱动，两种终端尺寸） |
 | `neo serve` Web 宿主（浏览器界面 + SSE 事件流 + 审批） | ✅ **已实现**，端到端验证（订阅→提交→审批→真落盘） |
 | **T6 宿主语义等价**（同一事件流多宿主比对） | ✅ **铁律生效**：headless / TUI / desktop / **web** 四宿主事实完全等价 |
 | Shell 工具真实执行（经沙箱） | ✅ **已实现**（`bash` 真跑，输出受限） |
@@ -44,7 +44,8 @@ cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
 ```
 
 ```bash
-# 交互式（TUI）：输入任务，写操作会问 y/n；Ctrl+R 历史、Tab 补全 @ 引用
+# 交互式（TUI）：首屏显示欢迎页（词标 + 版本/模型/模式/工作区/会话）
+# 输入任务后回车；写操作会问 y/n；Ctrl+R 历史、Tab 补全 @ 引用
 neo tui --provider selftest --mode default
 # 等价写法：neo --provider selftest --mode default（裸选项默认进 TUI）
 
@@ -66,7 +67,7 @@ neo exec "用一句话回答 1+1" --mode plan
 cargo run -p neo-cli -- tui --provider mock    # 不装 PATH，直接用 cargo 跑 TUI
 cargo install --path crates/neo-cli --locked   # 或装成全局命令 neo
 
-cargo test --workspace     # 109 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo test --workspace     # 114 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
 cargo check --workspace    # 17 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构守卫 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 测试

@@ -345,10 +345,21 @@ fn cmd_tui(args: &[String]) -> i32 {
     let persistence = Box::new(neo_session_local::JsonlPersistence::new(
         workspace.join(".neo/sessions/tui.jsonl"),
     ));
-    let mut kernel = build_kernel("neo-tui", &workspace, &opts, model, sandbox, persistence);
+    let session_id = "neo-tui";
+    let mut kernel = build_kernel(session_id, &workspace, &opts, model, sandbox, persistence);
+
+    // 首屏信息由 CLI 装配（宿主不读环境）—— 与 exec 启动时打印的那三行同源，
+    // 避免"命令行提示"与"TUI 首屏"两处各说一套。
+    let about = neo_host_tui::About {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        model: provider.clone(),
+        mode: describe_mode(mode),
+        workspace: workspace.display().to_string(),
+        session: session_id.to_string(),
+    };
 
     // 注入 submit：TUI 只认契据，业务在 kernel
-    let result = neo_host_tui::run(move |op| {
+    let result = neo_host_tui::run(about, move |op| {
         kernel.submit(op).map_err(|e| e.to_string())
     });
     match result {
