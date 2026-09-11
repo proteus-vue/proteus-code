@@ -92,6 +92,16 @@ pub struct ModelRequest<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelDelta {
     Text(String),
+    /// 模型的**推理过程**（DeepSeek 的 `reasoning_content`）。
+    ///
+    /// # 为什么必须在这一层就有它
+    ///
+    /// 协议层早就有 `EventMsg::ReasoningDelta` 与 `Fact::AssistantThought`，
+    /// TUI 也早就会渲染"思考过程"，但 **`ModelDelta` 里没有对应的变体** ——
+    /// provider 没有任何途径把推理报上来。于是整条链路是断的：
+    /// 用户"看不到思考过程"不是显示问题，是**第一个环节就不存在**。
+    /// 又一个"两端都写好了、中间没接"。
+    Reasoning(String),
     ToolCall(ToolInvocation),
     Usage { input_tokens: u64, output_tokens: u64 },
 }
@@ -770,33 +780,11 @@ impl Kernel {
             }
 
             Op::Approve { id, decision } => {
-                let Some(pending) = self.pending.take() else {
-                    return Err(KernelError::NoPendingApproval(id));
-                };
-                let call = pending.calls[pending.index].clone();
-                self.state = KernelState::Idle;
-
-                match decision {
-                    Decision::Allow => self.execute_one(&call)?,
-                    Decision::AllowAlways => {
-                        // 记住**类别**：之后同类调用不再问。
-                        // 若只记这一条命令，用户下次仍会被问 —— 那就等于没实现。
-                        let kind = self.classify(&call);
-                        self.granted.insert(kind);
-                        self.execute_one(&call)?;
-                    }
-                    Decision::Deny => {
-                        let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: -1, stdout: String::new(), stderr: String::new(), truncated: false };
-                        self.emit_and_log(&ev)?;
-                        self.messages.push(Message::ToolResult {
-                            id: call.id,
-                            name: call.name,
-                            output: denied_output("用户拒绝了该调用"),
-                        });
-                    }
-                }
-                // 继续同一步的剩余调用，然后进入下一步
-                self.finish_step_from(&pending.calls, pending.index + 1)?;
+                self.resolve_approval(id, decision, true)?;
+            }
+            // 同 `Approve`，但**不驱动**后续步骤（逐帧宿主用，配合 `Op::Pump`）。
+            Op::ApproveStep { id, decision } => {
+                self.resolve_approval(id, decision, false)?;
             }
 
             Op::Rewind { turns } => {
@@ -1040,6 +1028,15 @@ impl Kernel {
                             break;
                         }
                     }
+                    ModelDelta::Reasoning(chunk) => {
+                        // 推理也要落盘：它同样是**模型可见内容**（下一轮请求
+                        // 会带上 assistant 的 reasoning），不落日志回放就缺一块。
+                        let ev = EventMsg::ReasoningDelta { delta: chunk };
+                        if let Err(e) = self.emit_and_log(&ev) {
+                            result = Err(e);
+                            break;
+                        }
+                    }
                     ModelDelta::ToolCall(call) => {
                         let ev = EventMsg::ToolCallBegin {
                             id: call.id.clone(),
@@ -1114,6 +1111,63 @@ impl Kernel {
     }
 
     /// 恢复后继续同一步剩余调用；跑完则进入下一步。
+    /// 落实一次审批：执行/记类别/记拒绝，然后按 `drive` 决定是否继续跑完整轮。
+    ///
+    /// `drive = false`（逐帧宿主）时只执行**本步剩余调用**就返回 ——
+    /// 后续步骤由宿主 `Op::Pump` 逐步推进。这样审批之后也不会出现
+    /// "一次调用里跑完多次网络往返"的冻结。
+    fn resolve_approval(
+        &mut self,
+        id: ApprovalId,
+        decision: Decision,
+        drive: bool,
+    ) -> Result<(), KernelError> {
+        let Some(pending) = self.pending.take() else {
+            return Err(KernelError::NoPendingApproval(id));
+        };
+        let call = pending.calls[pending.index].clone();
+        self.state = KernelState::Idle;
+
+        match decision {
+            Decision::Allow => self.execute_one(&call)?,
+            Decision::AllowAlways => {
+                // 记住**类别**：之后同类调用不再问。只记这一条命令的话
+                // 用户下次仍会被问 —— 那就等于没实现。
+                let kind = self.classify(&call);
+                self.granted.insert(kind);
+                self.execute_one(&call)?;
+            }
+            Decision::Deny => {
+                let ev = EventMsg::ToolCallEnd {
+                    id: call.id.clone(),
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    truncated: false,
+                };
+                self.emit_and_log(&ev)?;
+                self.messages.push(Message::ToolResult {
+                    id: call.id,
+                    name: call.name,
+                    output: denied_output("用户拒绝了该调用"),
+                });
+            }
+        }
+        if drive {
+            // 继续同一步的剩余调用，然后进入下一步（一路跑到本轮结束）
+            self.finish_step_from(&pending.calls, pending.index + 1)?;
+        } else {
+            // 只把本步剩余调用执行完（有界：都是工具执行，不再有模型往返）
+            if pending.index + 1 < pending.calls.len() {
+                match self.execute_from(&pending.calls, pending.index + 1)? {
+                    ExecOutcome::Done => {}
+                    ExecOutcome::Suspended => return Ok(()),
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn finish_step_from(&mut self, calls: &[ToolInvocation], start: usize) -> Result<(), KernelError> {
         if start < calls.len() {
             match self.execute_from(calls, start)? {

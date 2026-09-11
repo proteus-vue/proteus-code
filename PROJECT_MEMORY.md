@@ -1707,6 +1707,48 @@ pty 驱动，提交后测**首次输出延迟**：改前要等整轮结束（数
 
 全门禁通过：494 测试、零 warning。
 
+## 4.49 两个问题：推理链路断了，批准后界面再次冻结
+
+用户报两件事：没有思考过程显示；选择"总是允许"后回车终端退出。
+
+### (a) 推理：不是显示问题，是**第一环就不存在**
+协议层有 `EventMsg::ReasoningDelta`、有 `Fact::AssistantThought`，
+TUI 早就实现了"思考过程"渲染与 `/thinking` 开关 —— 但
+**`ModelDelta` 里根本没有推理变体**。provider 没有任何途径把推理报上来，
+整条链路是断的。用户看到的是"永远没有思考过程"。
+
+修：`ModelDelta::Reasoning`（第一环）+ provider 解析 DeepSeek 的
+`reasoning_content`（顺序在正文之前，与模型产出顺序一致）+ 内核转成
+`ReasoningDelta` 事件并落盘（它同样是模型可见内容）。
+顺带让 `demo` 桩也带一段推理 —— 否则这条链路**离线不可验**
+（真实模型才有 reasoning_content，测试里永远覆盖不到）。
+
+实测：默认隐藏；`/thinking` 开启后出现推理文字。
+
+### (b) 批准后"退出"：批准把整轮又跑了一遍 → 再次冻结
+`Approve` 与 `UserTurn` 是同一个毛病：`finish_step_from` 里会
+`drive_steps()`，**在一次 submit 里把整轮剩下的模型往返全跑完**。
+于是批准之后界面又冻住几十秒；用户在冻结期间敲的键（回车、q…）
+堆在缓冲区里，解冻后被**逐个**处理 —— 其中任何一个被当成退出/提交
+就会"终端直接退出"。这是上一轮只修了 UserTurn、**漏了 Approve** 的后果。
+
+修：
+- 协议加 `Op::ApproveStep`（只执行本步剩余调用，**不驱动**后续），
+  与 `Approve` 语义区分；内核抽出 `resolve_approval(id, decision, drive)`。
+- TUI 审批改用 `ApproveStep`，随后自己 `pump_until_boundary()` 逐步推进。
+- 把"推进 + 每步重绘"抽成 `pump_until_boundary()`，主提交路径与审批恢复
+  **共用同一段** —— 两处各写一遍正是这次漏掉审批路径的原因。
+
+顺带：审批模态在场时，回车是"确认当前选项"，不再同时是"提交空输入" ——
+消除了一个误触退出的入口。
+
+### (c) 教训
+上一轮修"卡死"时我只改了 `UserTurn` 一条路径，没问"还有哪些路径会
+一次跑完整轮"。`Approve` 就是其中之一。**修一类问题时，先把同类路径列全**，
+否则用户会在下一条路径上再撞一次 —— 这次就是这样。
+
+全门禁通过：495 测试、零 warning。
+
 ## 5. 假通过：门禁与测试各抓到过一次自己
 
 这两次都值得记，因为它们说明"看起来有保护"有多危险：
@@ -1740,7 +1782,7 @@ pty 驱动，提交后测**首次输出延迟**：改前要等整轮结束（数
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 494 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo test --workspace      # 495 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫）
 ```
 

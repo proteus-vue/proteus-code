@@ -369,6 +369,14 @@ pub fn parse_completion(resp_body: &str) -> Result<Vec<ModelDelta>, String> {
 
     let mut deltas = Vec::new();
 
+    // 推理过程（DeepSeek 的 `reasoning_content`）。**先于正文**入列，
+    // 与模型产出顺序一致（先想后说）。缺失/为空就跳过 —— 非推理模型没有这段。
+    if let Some(r) = msg.get("reasoning_content").and_then(|c| c.as_str()) {
+        if !r.is_empty() {
+            deltas.push(ModelDelta::Reasoning(r.to_string()));
+        }
+    }
+
     if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
         if !text.is_empty() {
             deltas.push(ModelDelta::Text(text.to_string()));
@@ -658,6 +666,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_reasoning_content_into_a_reasoning_delta() {
+        // 少了这条，推理链路的**第一环**就是断的：协议与 TUI 都支持思考过程，
+        // 但 provider 从不报上来，用户永远看不到。
+        let body = r#"{"choices":[{"message":{
+            "reasoning_content":"先看依赖方向。","content":"结论：合法。"}}]}"#;
+        let deltas = parse_completion(body).unwrap();
+        assert!(
+            deltas.iter().any(|d| matches!(d, ModelDelta::Reasoning(t) if t.contains("依赖方向"))),
+            "必须把 reasoning_content 解析成 Reasoning 增量：{deltas:?}"
+        );
+        // 顺序：先推理后正文（与模型产出顺序一致）
+        let ri = deltas.iter().position(|d| matches!(d, ModelDelta::Reasoning(_))).unwrap();
+        let ti = deltas.iter().position(|d| matches!(d, ModelDelta::Text(_))).unwrap();
+        assert!(ri < ti, "推理应排在正文之前");
+        // 非推理模型（无该字段）不该产生空增量
+        let plain = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
+        assert!(!parse_completion(plain).unwrap().iter().any(|d| matches!(d, ModelDelta::Reasoning(_))));
+    }
+
+    #[test]
     fn preview_text_is_printable_and_bounded() {
         let got = preview_text("HTTP/1.1 200 OK\u{0007}\u{0001}body");
         assert!(!got.contains('\u{0007}'), "控制字符必须替换：{got:?}");
@@ -751,6 +779,12 @@ impl ScriptedProvider {
     pub fn demo() -> Self {
         Self::scripted(
             vec![vec![
+                // 带一段推理：让"思考过程"这条链路**离线可验**。
+                // 之前 demo 只发工具调用与正文，于是推理显示对不对
+                // 根本无从检查（真实模型才有 reasoning_content）。
+                ModelDelta::Reasoning(
+                    "先看依赖方向是否合法，再确认缩进与行号，最后跑门禁验证。".to_string(),
+                ),
                 Self::tool_call_delta(
                     "todo1",
                     "todowrite",

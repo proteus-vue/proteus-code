@@ -2798,18 +2798,24 @@ fn decide_approval<F>(
     events: &mut Vec<EventMsg>,
     submit: &mut F,
     decision: neo_protocol::Decision,
-) where
+) -> bool
+where
     F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
 {
     *approval = None;
-    let Some(id) = outstanding.take() else { return };
-    match submit(neo_protocol::Op::Approve { id, decision }) {
+    let Some(id) = outstanding.take() else { return false };
+    // 用 `ApproveStep`（只执行本步剩余调用）而**不是** `Approve`：
+    // 后者会在一次调用里把整轮剩下的模型往返全跑完 —— 审批之后界面又冻结，
+    // 用户在冻结期间敲的键会在解冻后被逐个处理（误触退出的来源之一）。
+    // 剩余步骤由调用方用 `Op::Pump` 逐步推进。
+    match submit(neo_protocol::Op::ApproveStep { id, decision }) {
         Ok(produced) => {
             *outstanding = latest_approval_id(&produced);
             events.extend(produced);
         }
         Err(e) => events.push(EventMsg::Error { message: e }),
     }
+    outstanding.is_none()
 }
 
 /// 审批应答：允许一次 / 总是允许这类 / 拒绝。
@@ -3256,6 +3262,81 @@ pub trait SessionControl {
 /// 转成契据调用，真正的读写在 L3（neo-providers）。这样：
 /// 1. 宿主可脱离文件系统单测（用假实现）；
 /// 2. 密钥的读写策略（0600、只读用户级）只在一个地方实现，不会在宿主里被绕过。
+/// 逐步推进本轮直到**边界**（TurnComplete 或审批请求），每步重绘一次。
+///
+/// 为什么需要它：整轮可能包含多次模型往返，一次跑完界面就冻结
+/// （用户反馈"像卡死"；更糟的是冻结期间的按键会在解冻后被逐个处理，
+/// 误触退出）。这里把"推进 + 重绘"绑在一起，让等待始终是可见的。
+#[allow(clippy::too_many_arguments)]
+fn pump_until_boundary<F>(
+    submit: &mut F,
+    events: &mut Vec<EventMsg>,
+    outstanding: &mut Option<String>,
+    about: &About,
+    empty_input: &editor::Editor,
+    view_state: &view::View,
+    display: ToolDisplay,
+    sidebar_open: bool,
+    theme_name: theme::ThemeName,
+    appearance: appearance::Appearance,
+    custom_bg: Option<&Vec<String>>,
+    stdout: &mut impl Write,
+    cols: usize,
+    rows: usize,
+) -> std::io::Result<()>
+where
+    F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
+{
+    loop {
+        match submit(neo_protocol::Op::Pump) {
+            Ok(produced) => {
+                *outstanding = latest_approval_id(&produced);
+                let done = produced
+                    .iter()
+                    .any(|e| matches!(e, EventMsg::TurnComplete { .. }));
+                events.extend(produced);
+                // 重绘：这是"不冻结"的关键
+                let screen = Screen {
+                    cols,
+                    rows,
+                    facts: &[],
+                    input: empty_input,
+                    status: "运行中…",
+                    awaiting_input: false,
+                    approval: None,
+                    show_cursor: false,
+                    about: Some(about),
+                    trust: None,
+                    theme: theme_name,
+                    popup: None,
+                    preformatted: None,
+                    sidebar: sidebar_open,
+                    view: Some(view_state),
+                    diff_viewer: None,
+                    whichkey: None,
+                    display,
+                    settings: None,
+                    settings_cursor: 0,
+                    settings_picker: None,
+                    settings_form: None,
+                    settings_confirm: None,
+                    appearance,
+                    custom_background: custom_bg,
+                };
+                write!(stdout, "{}", screen.render())?;
+                stdout.flush()?;
+                if done || outstanding.is_some() {
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                events.push(EventMsg::Error { message: e });
+                return Ok(());
+            }
+        }
+    }
+}
+
 pub trait ProviderControl {
     /// 列出服务商：(名字, 描述, 是否已配密钥)。
     fn list(&self) -> Vec<(String, String, bool)>;
@@ -5512,9 +5593,40 @@ custom_bg.is_some(),
                 }
             }
             if let Some(d) = decision {
-                decide_approval(&mut approval, &mut outstanding, &mut events, &mut submit, d);
+                let resume = decide_approval(
+                    &mut approval,
+                    &mut outstanding,
+                    &mut events,
+                    &mut submit,
+                    d,
+                );
                 if outstanding.is_some() {
+                    // 还有下一个审批：换内容继续问
                     approval = build_approval_prompt(&events);
+                } else if resume {
+                    // 没有待审批了 → 逐步推进本轮剩余步骤（每步重绘，
+                    // 不再出现"批准后界面又冻住"）
+                    pump_until_boundary(
+                        &mut submit,
+                        &mut events,
+                        &mut outstanding,
+                        &about,
+                        &empty_input,
+                        &view_state,
+                        display,
+                        sidebar_open,
+                        theme_name,
+                        current_appearance,
+                        custom_bg.as_ref(),
+                        &mut stdout,
+                        cols,
+                        rows,
+                    )?;
+                    approval = if outstanding.is_some() {
+                        build_approval_prompt(&events)
+                    } else {
+                        None
+                    };
                 }
                 status = idle_or_approval(&outstanding);
             }
@@ -6569,55 +6681,23 @@ sessions,
                     }
                     Err(e) => events.push(EventMsg::Error { message: e }),
                 }
-                // 逐步推进直到本轮结束或挂起审批
-                while outstanding.is_none() {
-                    match submit(neo_protocol::Op::Pump) {
-                        Ok(produced) => {
-                            outstanding = latest_approval_id(&produced);
-                            let done = produced
-                                .iter()
-                                .any(|e| matches!(e, EventMsg::TurnComplete { .. }));
-                            events.extend(produced);
-                            // 每步之后重绘一次：这是"不冻结"的关键
-                            let screen = Screen {
-                                cols,
-                                rows,
-                                facts: &[],
-                                input: &empty_input,
-                                status: "运行中…",
-                                awaiting_input: false,
-                                approval: None,
-                                show_cursor: false,
-                                about: Some(&about),
-                                trust: None,
-                                theme: theme_name,
-                                popup: None,
-                                preformatted: None,
-                                sidebar: sidebar_open,
-                                view: Some(&view_state),
-                                diff_viewer: None,
-                                whichkey: None,
-                                display,
-                                settings: None,
-                                settings_cursor: 0,
-                                settings_picker: None,
-                                settings_form: None,
-                                settings_confirm: None,
-                                appearance: current_appearance,
-                                custom_background: custom_bg.as_ref(),
-                            };
-                            write!(stdout, "{}", screen.render())?;
-                            stdout.flush()?;
-                            if done {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            events.push(EventMsg::Error { message: e });
-                            break;
-                        }
-                    }
-                }
+                // 逐步推进直到本轮结束或挂起审批（每步重绘，见 pump_until_boundary）
+                pump_until_boundary(
+                    &mut submit,
+                    &mut events,
+                    &mut outstanding,
+                    &about,
+                    &empty_input,
+                    &view_state,
+                    display,
+                    sidebar_open,
+                    theme_name,
+                    current_appearance,
+                    custom_bg.as_ref(),
+                    &mut stdout,
+                    cols,
+                    rows,
+                )?;
                 // 有审批请求就**弹模态框**（而不是只把输入框变黄）——
                 // 用户明确反馈"不是那种对话框形式，和 opencode/mimo 差很远"。
                 approval = if outstanding.is_some() {

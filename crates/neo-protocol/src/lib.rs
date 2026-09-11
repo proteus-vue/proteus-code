@@ -95,6 +95,13 @@ pub enum Op {
     Shell { command: String },
     Interrupt,
     Approve { id: ApprovalId, decision: Decision },
+    /// 与 `Approve` 相同，但**只执行本步剩余的调用**，不驱动后续步骤。
+    ///
+    /// 供逐帧宿主（TUI）用：`Approve` 会在一次调用里把整轮剩下的
+    /// 模型往返全部跑完 —— 那里可能又有多次网络请求，界面再次冻结
+    /// （用户曾因此在冻结期间敲键，解冻后那些键被逐个处理，误触退出）。
+    /// 逐帧宿主用这个变体，然后自己 `Pump` 逐步推进。
+    ApproveStep { id: ApprovalId, decision: Decision },
     ConfigureSession { patch: SessionPatch },
     Compact,
     Fork,
