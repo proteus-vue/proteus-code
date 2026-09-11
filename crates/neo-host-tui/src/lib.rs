@@ -570,6 +570,10 @@ pub struct Screen<'a> {
     pub whichkey: Option<&'a [whichkey::Group]>,
     /// 工具输出与推理的显示方式
     pub display: ToolDisplay,
+    /// 设置视图（`Some` = 占满屏幕）
+    pub settings: Option<&'a Vec<SettingSection>>,
+    /// 设置视图当前选中的可操作行（用于高亮）
+    pub settings_cursor: usize,
 }
 
 /// 信任对话框状态。
@@ -1019,6 +1023,15 @@ impl Screen<'_> {
             return (out, regions);
         }
 
+        // 设置视图：占满整屏
+        if let Some(sections) = self.settings {
+            self.draw_settings(&mut g, sections);
+            let mut out = format!("{ESC}[H{ESC}[2J");
+            out.push_str(&g.lines(&p).join("\r\n"));
+            out.push_str(&format!("{ESC}[?25l"));
+            return (out, regions);
+        }
+
         let chrome = chrome_rows(self.input.line_count());
         let body_rows = self.rows.saturating_sub(chrome);
         let (chrome_top, cursor) = if let Some(lines) = self.preformatted {
@@ -1446,6 +1459,84 @@ impl Screen<'_> {
             .collect()
     }
 
+    /// 设置视图：分节列出可配置项与只读项。
+    fn draw_settings(&self, g: &mut Grid, sections: &[SettingSection]) {
+        // 标题
+        let title = "设置";
+        g.put(0, 2, title, Tone::Text);
+        let hint = "↑↓ 移动  enter 执行  q / esc 返回";
+        if self.cols > 50 {
+            let w = width::display_width(hint);
+            g.put(0, self.cols.saturating_sub(w + 2), hint, Tone::Border);
+        }
+        let bar = "─".repeat(self.cols.saturating_sub(2));
+        g.put(1, 1, &bar, Tone::Border);
+
+        let label_w = 14usize;
+        let mut row = 2usize;
+        let mut flat: usize = 0; // 扁平序号（与 settings_cursor 对齐）
+        for sec in sections {
+            if row + 1 >= self.rows {
+                break;
+            }
+            row += 1; // 节前空行
+            g.put(row, 2, sec.title, Tone::Accent);
+            row += 1;
+            for r in &sec.rows {
+                if row >= self.rows {
+                    break;
+                }
+                let selected = flat == self.settings_cursor;
+                let actionable = r.action.is_some();
+                // 光标只停在可操作行上；只读行用弱色 + 说明
+                let mark = if selected { "▸ " } else { "  " };
+                if selected {
+                    g.put(row, 1, mark, Tone::Primary);
+                }
+                let lt = if actionable { Tone::Text } else { Tone::Muted };
+                let padded = width::pad_to_width(&r.label, label_w);
+                g.put(row, 3, &padded, lt);
+                // 值
+                let vt = if actionable {
+                    Tone::Info
+                } else {
+                    Tone::Muted
+                };
+                let vx = 3 + label_w + 2;
+                let note_w = if r.readonly_note.is_empty() {
+                    self.cols.saturating_sub(vx + 2)
+                } else {
+                    width::display_width(&r.value).min(self.cols.saturating_sub(vx + 2))
+                };
+                let v = width::truncate_to_width(&r.value, note_w.max(4)).to_string();
+                let vend = g.put(row, vx, &v, vt);
+                // 只读原因（右侧，弱色）
+                if !r.readonly_note.is_empty() {
+                    let nx = vend + 2;
+                    if nx < self.cols.saturating_sub(6) {
+                        let note = width::truncate_to_width(
+                            r.readonly_note,
+                            self.cols.saturating_sub(nx + 2),
+                        )
+                        .to_string();
+                        g.put(row, nx, &note, Tone::Border);
+                    }
+                }
+                row += 1;
+                flat += 1;
+            }
+        }
+        // 底部：说明光标只能停在可操作行
+        if self.rows > 2 {
+            g.put(
+                self.rows - 1,
+                2,
+                "灰字为只读项（右侧是原因）；▸ 停在可操作项上",
+                Tone::Border,
+            );
+        }
+    }
+
     /// which-key 覆盖层：右下的键位提示卡片。
     ///
     /// 放在**右下**而不是居中：用户通常还在打字，居中会盖住刚看的内容。
@@ -1689,9 +1780,23 @@ impl Screen<'_> {
         let avail = chrome_top.saturating_sub(2);
         let hint_rows = if pop.is_empty() { 1 } else { 0 };
         let foot_rows = if pop.truncated { 1 } else { 0 };
-        // 需要：2(边框) + 标题(1) + 候选 + hint + foot
+        // 需要：2(边框) + 标题(1) + 候选 + 分组标题 + hint + foot
         let for_items = avail.saturating_sub(3 + hint_rows + foot_rows);
-        let visible = pop.items.len().min(max_rows).min(for_items);
+        // **分组标题也占行** —— 不把它算进来的话，实际内容会超出框，
+        // 超出的那几行画在未清空的格子上，底下界面的文字就会透上来
+        //（实测看到 `/undo` 那行前面挂着欢迎页的 `v0.1`）。
+        // 用不动点收敛：先按无标题估，再按"标题占掉的行"收缩，直到装得下。
+        let show_group = pop.kind == popup::Kind::Palette || pop.kind == popup::Kind::Slash;
+        let mut visible = pop.items.len().min(max_rows).min(for_items);
+        if show_group {
+            loop {
+                let headers = group_headers(&pop.items, visible);
+                if visible + headers <= for_items || visible == 0 {
+                    break;
+                }
+                visible -= 1;
+            }
+        }
         if available_rows(avail) == 0 || pop.items.len() > 0 && visible == 0 {
             // 连一行候选都放不下：至少把标题画出来，让用户知道弹窗开了
             let height = 3 + hint_rows;
@@ -1719,7 +1824,8 @@ impl Screen<'_> {
             g.put(top + 2, left + box_w - 1, "╯", Tone::BorderActive);
             return;
         }
-        let height = 2 + visible + hint_rows + foot_rows; // 含上下边框这 2 行
+        let headers = if show_group { group_headers(&pop.items, visible) } else { 0 };
+        let height = 2 + visible + headers + hint_rows + foot_rows; // 含上下边框这 2 行
         if chrome_top < height + 1 {
             return;
         }
@@ -1756,20 +1862,64 @@ impl Screen<'_> {
             row += 1;
         } else {
             let start = pop.scroll_top(visible);
+            // 面板带分组时，在**第一个可见项**上方标一次组名（滚动中会随项移动，
+            // 这让"我现在在哪个组"始终可见，而不是只在顶部标一次）。
             for (i, item) in pop.items.iter().enumerate().skip(start).take(visible) {
+                if row >= bottom_limit(top, height) {
+                    break;
+                }
                 let selected = i == pop.selected;
+                // 分组标题（仅当与上一项不同、且是真分组）
+                if show_group && !item.category.is_empty() {
+                    let prev = if i > 0 { pop.items.get(i - 1).map(|x| x.category) } else { None };
+                    if prev != Some(item.category) {
+                        if row + 1 < height {
+                            g.put(top + row, left, "│", Tone::BorderActive);
+                            g.put(
+                                top + row,
+                                left + 2,
+                                item.category,
+                                Tone::Accent,
+                            );
+                            g.put(top + row, left + box_w - 1, "│", Tone::BorderActive);
+                            row += 1;
+                        }
+                    }
+                }
                 let (mark, label_tone) = if selected {
                     ("▸ ", Tone::Primary)
                 } else {
                     ("  ", Tone::Text)
                 };
-                g.put(top + row, left, "│", Tone::BorderActive);
+                // 选中标记：把左侧边框换成实心竖条 + 标记前缀高亮。
+                // 不做整行反白 —— 网格只有前景色，反白会让文字与背景同色（看不见）。
+                g.put(top + row, left, if selected { "┃" } else { "│" },
+                      if selected { Tone::Primary } else { Tone::BorderActive });
                 g.put(top + row, left + 2, mark, Tone::Primary);
-                let label = width::truncate_to_width(&item.label, inner.saturating_sub(2)).to_string();
+                // 右侧优先放键位：它比描述短，且"能与不能按"更值得一眼看到
+                let kb = item.keybinding;
+                let kb_w = width::display_width(kb);
+                let kb_x = if kb.is_empty() {
+                    None
+                } else {
+                    let x = (left + box_w - 3).saturating_sub(kb_w);
+                    if x > left + 8 {
+                        Some(x)
+                    } else {
+                        None
+                    }
+                };
+                let label_budget = match kb_x {
+                    Some(x) => x.saturating_sub(left + 4).saturating_sub(1),
+                    None => inner.saturating_sub(2),
+                };
+                let label = width::truncate_to_width(&item.label, label_budget.max(4)).to_string();
                 let used = g.put(top + row, left + 4, &label, label_tone);
-                // 右侧说明：空间够才写（不挤掉主标签）
-                if !item.detail.is_empty() {
-                    let d = width::truncate_to_width(&item.detail, 34).to_string();
+                if let Some(x) = kb_x {
+                    g.put(top + row, x, kb, Tone::Muted);
+                } else if !item.detail.is_empty() {
+                    // 没键位时退而给描述
+                    let d = width::truncate_to_width(&item.detail, 30).to_string();
                     let dw = width::display_width(&d);
                     let dx = (left + box_w - 2).saturating_sub(dw);
                     if dx > used + 2 {
@@ -2249,6 +2399,10 @@ enum Effect {
     ToggleThinking,
     /// 复制最近一条助手回复
     CopyLastReply,
+    /// 打开设置
+    Settings,
+    /// 收起 / 展开侧栏
+    ToggleSidebar,
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -2311,6 +2465,8 @@ fn apply_popup_item(
             commands::Action::ToggleDetails => Effect::ToggleDetails,
             commands::Action::ToggleThinking => Effect::ToggleThinking,
             commands::Action::CopyLastReply => Effect::CopyLastReply,
+            commands::Action::Settings => Effect::Settings,
+            commands::Action::ToggleSidebar => Effect::ToggleSidebar,
             commands::Action::Keys => {
                 *info_screen = Some(commands::keys_text().to_string());
                 Effect::None
@@ -2380,6 +2536,204 @@ fn accept_trust(ws: &std::path::Path) {
 /// 各算一次的话行号必然对不上（搜索高亮会标在无关的行上）。
 fn fact_lines(facts: &[Fact], body_cols: usize) -> Vec<Vec<Seg>> {
     fact_lines_with(facts, body_cols, ToolDisplay::default())
+}
+
+/// 设置视图的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingRow {
+    /// 左侧标签
+    pub label: String,
+    /// 当前值（人可读）
+    pub value: String,
+    /// 可点击执行的动作；`None` 表示只读（我们改不了，如实标注）
+    pub action: Option<SettingAction>,
+    /// 只读项的原因（`action` 为 None 时必须给，说明为什么不能改）
+    pub readonly_note: &'static str,
+}
+
+/// 设置项的动作（受限于内核实际能力，只有这些是能改的）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingAction {
+    /// 切换主题
+    NextTheme,
+    /// 打开主题列表
+    ThemePicker,
+    /// 切换工具输出展开
+    ToggleDetails,
+    /// 切换推理显隐
+    ToggleThinking,
+    /// 切换侧栏
+    ToggleSidebar,
+    /// 回退对话
+    Rewind,
+    /// 清空转录
+    NewSession,
+    /// 查看 diff
+    DiffViewer,
+}
+
+/// 设置视图的一个分组。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingSection {
+    pub title: &'static str,
+    pub rows: Vec<SettingRow>,
+}
+
+/// 设置视图的运行时信息（由主循环注入 —— 宿主不自己读配置）。
+#[derive(Debug, Clone)]
+pub struct SettingsInfo {
+    pub version: String,
+    pub model: String,
+    pub mode: String,
+    pub workspace: String,
+    pub branch: String,
+    pub session: String,
+    pub context_limit: u64,
+    pub theme: String,
+    pub details: bool,
+    pub thinking: bool,
+    pub sidebar: bool,
+    pub mouse: bool,
+    pub clipboard: bool,
+    pub messages: usize,
+    pub files_changed: usize,
+}
+
+/// 构造设置分组。
+///
+/// **只把能改的做成可点击**；改不了的（服务商、模型、上下文上限）
+/// 明确写"为什么不能改"，而不是给一个点了没反应的假按钮。
+/// 假控件比缺控件更糟 —— 用户会以为功能坏了。
+pub fn settings_sections(info: &SettingsInfo) -> Vec<SettingSection> {
+    vec![
+        SettingSection {
+            title: "系统",
+            rows: vec![
+                SettingRow {
+                    label: "版本".into(),
+                    value: info.version.clone(),
+                    action: None,
+                    readonly_note: "编译期常量",
+                },
+                SettingRow {
+                    label: "主题".into(),
+                    value: info.theme.clone(),
+                    action: Some(SettingAction::ThemePicker),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "侧栏".into(),
+                    value: if info.sidebar { "展开".into() } else { "收起".to_string() },
+                    action: Some(SettingAction::ToggleSidebar),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "鼠标".into(),
+                    value: if info.mouse { "启用".into() } else { "禁用".to_string() },
+                    action: None,
+                    readonly_note: "启动参数 NEO_TUI_NO_MOUSE 控制（需重启）",
+                },
+                SettingRow {
+                    label: "剪贴板".into(),
+                    value: if info.clipboard { "可用".into() } else { "不可用".to_string() },
+                    action: None,
+                    readonly_note: "按平台探测；不可用时 /copy 会如实报错",
+                },
+            ],
+        },
+        SettingSection {
+            title: "模型",
+            rows: vec![
+                SettingRow {
+                    label: "服务商".into(),
+                    value: info.model.clone(),
+                    action: None,
+                    // 诚实边界：内核持有 Box<dyn ModelProvider>，运行中不可换
+                    readonly_note: "运行中不可切换；用 --provider 启动参数指定",
+                },
+                SettingRow {
+                    label: "档位".into(),
+                    value: info.mode.clone(),
+                    action: None,
+                    readonly_note: "启动参数 --mode 指定（沙箱 × 审批是内核硬边界）",
+                },
+                SettingRow {
+                    label: "上下文上限".into(),
+                    value: if info.context_limit == 0 {
+                        "未知".into()
+                    } else {
+                        format!("{} tokens", info.context_limit)
+                    },
+                    action: None,
+                    readonly_note: "由模型目录决定，本版本未接模型元数据",
+                },
+            ],
+        },
+        SettingSection {
+            title: "会话",
+            rows: vec![
+                SettingRow {
+                    label: "会话 ID".into(),
+                    value: info.session.clone(),
+                    action: None,
+                    readonly_note: "内核单会话；多会话需要会话库（未实现）",
+                },
+                SettingRow {
+                    label: "工作区".into(),
+                    value: info.workspace.clone(),
+                    action: None,
+                    readonly_note: "启动时的当前目录",
+                },
+                SettingRow {
+                    label: "分支".into(),
+                    value: if info.branch.is_empty() { "（非 git 仓库）".into() } else { info.branch.clone() },
+                    action: None,
+                    readonly_note: "从 .git/HEAD 读取",
+                },
+                SettingRow {
+                    label: "消息数".into(),
+                    value: info.messages.to_string(),
+                    action: None,
+                    readonly_note: "只读统计",
+                },
+                SettingRow {
+                    label: "改动文件".into(),
+                    value: info.files_changed.to_string(),
+                    action: Some(SettingAction::DiffViewer),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "回退对话".into(),
+                    value: "回退一轮".into(),
+                    action: Some(SettingAction::Rewind),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "新对话".into(),
+                    value: "清空转录".into(),
+                    action: Some(SettingAction::NewSession),
+                    readonly_note: "",
+                },
+            ],
+        },
+        SettingSection {
+            title: "显示",
+            rows: vec![
+                SettingRow {
+                    label: "工具输出".into(),
+                    value: if info.details { "展开".into() } else { "折叠".to_string() },
+                    action: Some(SettingAction::ToggleDetails),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "推理过程".into(),
+                    value: if info.thinking { "显示".into() } else { "隐藏".to_string() },
+                    action: Some(SettingAction::ToggleThinking),
+                    readonly_note: "",
+                },
+            ],
+        },
+    ]
 }
 
 /// 工具输出的展示方式。
@@ -2646,6 +3000,27 @@ fn truncate_left(s: &str, max_cols: usize) -> String {
     format!("…{}", tail.into_iter().collect::<String>())
 }
 
+/// 前 `visible` 项会画出多少个分组标题（与 draw_popup 的判定一致）。
+fn group_headers(items: &[popup::Item], visible: usize) -> usize {
+    let mut n = 0;
+    let mut prev: Option<&str> = None;
+    for it in items.iter().take(visible) {
+        if it.category.is_empty() {
+            continue;
+        }
+        if prev != Some(it.category) {
+            n += 1;
+            prev = Some(it.category);
+        }
+    }
+    n
+}
+
+/// 弹窗内内容的行上限（不含边框），防止分组标题把内容挤出框外。
+fn bottom_limit(top: usize, height: usize) -> usize {
+    top + height - 1
+}
+
 /// 弹窗上方能容纳的总行数（含边框）。0 表示连边框都放不下。
 fn available_rows(avail: usize) -> usize {
     if avail < 3 {
@@ -2706,6 +3081,62 @@ where
         }
         Err(e) => *status = format!("回退失败：{e}"),
     }
+}
+
+/// 组装并打开设置视图。
+#[allow(clippy::too_many_arguments)]
+fn open_settings(
+    slot: &mut Option<Vec<SettingSection>>,
+    cursor: &mut usize,
+    about: &About,
+    events: &[EventMsg],
+    display: &ToolDisplay,
+    sidebar: bool,
+    mouse: bool,
+    clipboard: &dyn neo_platform::Clipboard,
+    theme_name: theme::ThemeName,
+) {
+    let facts = facts_of(events);
+    let files_changed = facts
+        .iter()
+        .rev()
+        .find_map(|f| match f {
+            Fact::FilesChanged(files) => Some(files.len()),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let info = SettingsInfo {
+        version: about.version.clone(),
+        model: about.model.clone(),
+        mode: about.mode_short.clone(),
+        workspace: about.workspace.clone(),
+        branch: about.branch.clone(),
+        session: about.session.clone(),
+        context_limit: about.context_limit,
+        theme: theme_name.as_str().to_string(),
+        details: display.expanded,
+        thinking: display.thinking,
+        sidebar,
+        mouse,
+        clipboard: clipboard.available(),
+        messages: events.len(),
+        files_changed,
+    };
+    *slot = Some(settings_sections(&info));
+    *cursor = 0;
+}
+
+/// 设置视图里"可操作行"的扁平序号 → (节, 行)。
+fn settings_actionable(sections: &[SettingSection]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (si, sec) in sections.iter().enumerate() {
+        for (ri, r) in sec.rows.iter().enumerate() {
+            if r.action.is_some() {
+                out.push((si, ri));
+            }
+        }
+    }
+    out
 }
 
 /// 复制最近一条回复到剪贴板，返回给状态栏的文案。
@@ -2884,6 +3315,9 @@ where
     let mut whichkey_groups: Option<Vec<whichkey::Group>> = None;
     // 工具输出 / 推理的显示方式（`/details` `/thinking` 切换）
     let mut display = ToolDisplay::default();
+    // 设置视图（`ctrl+p` → 设置，或 `/settings`）
+    let mut settings_state: Option<Vec<SettingSection>> = None;
+    let mut settings_cursor: usize = 0;
     // 剪贴板：按平台选后端；不可用时退化为 noop（`/copy` 会如实报错）
     let clipboard: Box<dyn neo_platform::Clipboard> =
         if std::env::var_os("NEO_TUI_NO_CLIPBOARD").is_some() {
@@ -2955,6 +3389,8 @@ where
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                settings: None,
+                settings_cursor: 0,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2984,6 +3420,116 @@ where
     loop {
         let (cols, rows) = terminal_size();
 
+        // ── 设置视图：独占输入 ──────────────────────────────────────
+        if let Some(sections) = settings_state.as_ref() {
+            let screen = Screen {
+                cols,
+                rows,
+                facts: &[],
+                input: &empty_input,
+                status: "",
+                awaiting_input: false,
+                show_cursor: false,
+                about: Some(&about),
+                trust: None,
+                theme: theme_name,
+                popup: None,
+                preformatted: None,
+                sidebar: false,
+                view: None,
+                diff_viewer: None,
+                whichkey: None,
+                display,
+                settings: Some(sections),
+                settings_cursor,
+            };
+            write!(stdout, "{}", screen.render())?;
+            stdout.flush()?;
+
+            let slots = settings_actionable(sections);
+            match read_key_timeout(&mut stdin, 1) {
+                None => continue, // 超时：只在尺寸变化时由顶层判断
+                Some(k) => match k {
+                    Key::Quit => break,
+                    Key::Escape | Key::Char('q') => {
+                        settings_state = None;
+                        status = "已关闭设置".to_string();
+                    }
+                    // 光标只在**可操作行**之间移动 —— 停在只读行上会让
+                    // 用户以为按 enter 能改点什么。
+                    Key::Up | Key::Char('k') => {
+                        settings_cursor = settings_cursor.saturating_sub(1);
+                    }
+                    Key::Down | Key::Char('j') => {
+                        if settings_cursor + 1 < slots.len() {
+                            settings_cursor += 1;
+                        }
+                    }
+                    Key::Home | Key::Char('g') => settings_cursor = 0,
+                    Key::End | Key::Char('G') => {
+                        settings_cursor = slots.len().saturating_sub(1)
+                    }
+                    Key::Enter => {
+                        if let Some((si, ri)) = slots.get(settings_cursor).copied() {
+                            if let Some(action) =
+                                sections.get(si).and_then(|s| s.rows.get(ri)).and_then(|r| r.action)
+                            {
+                                match action {
+                                    SettingAction::NextTheme => {
+                                        theme_name = theme_name.next();
+                                        theme::save_preference(theme_name);
+                                        status = format!("主题：{}", theme_name.as_str());
+                                    }
+                                    SettingAction::ThemePicker => {
+                                        let mut tp = popup::Popup::new(popup::Kind::Theme, "");
+                                        tp.set_items(popup::theme_items(""), false);
+                                        popup_state = Some(tp);
+                                        settings_state = None;
+                                    }
+                                    SettingAction::ToggleDetails => {
+                                        display.expanded = !display.expanded;
+                                    }
+                                    SettingAction::ToggleThinking => {
+                                        display.thinking = !display.thinking;
+                                    }
+                                    SettingAction::ToggleSidebar => {
+                                        sidebar_open = !sidebar_open;
+                                    }
+                                    SettingAction::Rewind => {
+                                        do_rewind(&mut submit, &mut events, &mut status);
+                                    }
+                                    SettingAction::NewSession => {
+                                        events.clear();
+                                        status = "新对话（已清空转录；文件改动不受影响）"
+                                            .to_string();
+                                    }
+                                    SettingAction::DiffViewer => {
+                                        open_diff_viewer(&events, &mut diff_viewer);
+                                        settings_state = None;
+                                    }
+                                }
+                                // 刷新设置页上的值（改完之后数字/状态要跟着变）
+                                open_settings(
+                                    &mut settings_state,
+                                    &mut settings_cursor,
+                                    &about,
+                                    &events,
+                                    &mut display,
+                                    sidebar_open,
+                                    mouse_on,
+                                    clipboard.as_ref(),
+                                    theme_name,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+            }
+            continue;
+        }
+
+
         // ── 全屏 diff 查看器：独占输入 ──────────────────────────────
         if let Some(v) = diff_viewer.as_mut() {
             let screen = Screen {
@@ -3004,6 +3550,8 @@ where
                 diff_viewer: Some(v),
                 whichkey: None,
                 display: ToolDisplay::default(),
+                settings: None,
+                settings_cursor: 0,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -3083,6 +3631,8 @@ where
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                settings: None,
+                settings_cursor: 0,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -3117,6 +3667,8 @@ where
                 diff_viewer: diff_viewer.as_ref(),
                 whichkey: whichkey_groups.as_deref(),
                 display,
+                settings: settings_state.as_ref(),
+                settings_cursor,
             };
             let (out, regs) = screen.render_with_regions();
             write!(stdout, "{out}")?;
@@ -3221,6 +3773,22 @@ where
                             }
                             Effect::CopyLastReply => {
                                 status = do_copy(&events, clipboard.as_ref())
+                            }
+                            Effect::Settings => {
+                                open_settings(
+                                    &mut settings_state,
+                                    &mut settings_cursor,
+                                    &about,
+                                    &events,
+                                    &mut display,
+                                    sidebar_open,
+                                    mouse_on,
+                                    clipboard.as_ref(),
+                                    theme_name,
+                                );
+                            }
+                            Effect::ToggleSidebar => {
+                                sidebar_open = !sidebar_open;
                             }
                             Effect::ClearTranscript => {
                                 events.clear();
@@ -3379,6 +3947,22 @@ where
                                     }
                                     Effect::CopyLastReply => {
                                         status = do_copy(&events, clipboard.as_ref())
+                                    }
+                                    Effect::Settings => {
+                                        open_settings(
+                                            &mut settings_state,
+                                            &mut settings_cursor,
+                                            &about,
+                                            &events,
+                                            &mut display,
+                                            sidebar_open,
+                                            mouse_on,
+                                            clipboard.as_ref(),
+                                            theme_name,
+                                        );
+                                    }
+                                    Effect::ToggleSidebar => {
+                                        sidebar_open = !sidebar_open;
                                     }
                                     Effect::ClearTranscript => events.clear(),
                                     Effect::ShowStatus => {
@@ -3623,6 +4207,22 @@ where
                             Effect::CopyLastReply => {
                                 status = do_copy(&events, clipboard.as_ref())
                             }
+                            Effect::Settings => {
+                                open_settings(
+                                    &mut settings_state,
+                                    &mut settings_cursor,
+                                    &about,
+                                    &events,
+                                    &mut display,
+                                    sidebar_open,
+                                    mouse_on,
+                                    clipboard.as_ref(),
+                                    theme_name,
+                                );
+                            }
+                            Effect::ToggleSidebar => {
+                                sidebar_open = !sidebar_open;
+                            }
                             Effect::ClearTranscript => events.clear(),
                             Effect::ShowStatus => {
                                 info_screen = Some(commands::status_text(
@@ -3713,11 +4313,7 @@ where
                     match commands::resolve(name) {
                         Some(cmd) => {
                             let eff = apply_popup_item(
-                                &popup::Item {
-                                    label: format!("/{}", cmd.name),
-                                    detail: String::new(),
-                                    action: popup::ItemAction::Run(cmd.action),
-                                },
+                                &popup::item_of(cmd),
                                 &mut input,
                                 &mut status,
                                 &mut theme_name,
@@ -3747,6 +4343,22 @@ where
                                 }
                                 Effect::CopyLastReply => {
                                     status = do_copy(&events, clipboard.as_ref())
+                                }
+                                Effect::Settings => {
+                                    open_settings(
+                                        &mut settings_state,
+                                        &mut settings_cursor,
+                                        &about,
+                                        &events,
+                                        &mut display,
+                                        sidebar_open,
+                                        mouse_on,
+                                        clipboard.as_ref(),
+                                        theme_name,
+                                    );
+                                }
+                                Effect::ToggleSidebar => {
+                                    sidebar_open = !sidebar_open;
                                 }
                                 Effect::ClearTranscript => {
                                     events.clear();
@@ -3806,6 +4418,8 @@ where
                             diff_viewer: None,
                             whichkey: None,
                             display,
+                            settings: None,
+                            settings_cursor: 0,
                         }
                         .render()
                     )?;
@@ -3850,6 +4464,8 @@ where
                         diff_viewer: None,
                         whichkey: None,
                         display,
+                        settings: None,
+                        settings_cursor: 0,
                     }
                     .render()
                 )?;
@@ -3902,6 +4518,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render()
     }
@@ -3940,6 +4558,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render()
     }
@@ -4047,6 +4667,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render();
         // 找出弹窗所在的行区间（含边框），断言这些行里没有 logo 的半块字符
@@ -4071,6 +4693,8 @@ mod tests {
             label: "/help".into(),
             detail: String::new(),
             action: popup::ItemAction::Run(commands::Action::Help),
+            category: "",
+            keybinding: "",
         };
         let mut input = editor::Editor::from_text("/help");
         let mut status = String::new();
@@ -4089,6 +4713,8 @@ mod tests {
             label: "src/main.rs".into(),
             detail: String::new(),
             action: popup::ItemAction::Insert("@src/main.rs".into()),
+            category: "",
+            keybinding: "",
         };
         let mut input = editor::Editor::from_text("@src/ma");
         let mut status = String::new();
@@ -4145,6 +4771,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4169,6 +4797,8 @@ mod tests {
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                settings: None,
+                settings_cursor: 0,
             }
             .render();
             let newlines = out.matches('\n').count();
@@ -4215,6 +4845,8 @@ mod tests {
                     diff_viewer: None,
                     whichkey: None,
                     display: ToolDisplay::default(),
+                    settings: None,
+                    settings_cursor: 0,
                 }
                 .render();
                 for (i, l) in plain(&out).iter().enumerate() {
@@ -4245,6 +4877,8 @@ mod tests {
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                settings: None,
+                settings_cursor: 0,
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -4275,6 +4909,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render()
     }
@@ -4329,6 +4965,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }.render();
         let text = plain(&out).join("\n");
         assert!(text.contains("上限未知"), "应说明上限未知：{text}");
@@ -4349,6 +4987,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }.render();
         assert!(plain(&out).join("\n").contains("90% of 1000"), "占用率应为 90%");
     }
@@ -4410,6 +5050,8 @@ mod tests {
                     diff_viewer: None,
                     whichkey: None,
                     display: ToolDisplay::default(),
+                    settings: None,
+                    settings_cursor: 0,
                 }
                 .render()
             })
@@ -4435,7 +5077,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
         }
         .render_with_regions();
         let text = plain(&out).join("\n");
@@ -4537,6 +5179,8 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: disp,
+            settings: None,
+            settings_cursor: 0,
         }
         .render()
     }
@@ -4631,6 +5275,183 @@ mod tests {
     // ── which-key ────────────────────────────────────────────────────
 
     #[test]
+    fn palette_sections_fit_inside_the_card_without_leaking() {
+        // 实测 bug：分组标题占了行但高度计算没算进去 → 内容溢出框外，
+        // 底下欢迎页的文字透上来（看到 `/undo` 行前面挂着 `v0.1`）。
+        // 这条断言覆盖"面板内容必须完全落在框内"。
+        let a = about();
+        let ed = editor::Editor::new();
+        let mut p = popup::Popup::new(popup::Kind::Palette, "");
+        p.set_items(popup::palette_items(""), false);
+        for rows in [18usize, 22, 30, 44] {
+            let out = Screen {
+                cols: 120, rows, facts: &[], input: &ed, status: "就绪",
+                awaiting_input: false, show_cursor: true,
+                about: Some(&a), trust: None,
+                theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
+                sidebar: false, view: None, diff_viewer: None, whichkey: None,
+                display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            }
+            .render();
+            let lines = plain(&out);
+            // 卡片是**居中**的，所以不能要求行首就是框线。改为量列：
+            // 先由顶部边框行确定卡片的 [x0, x1] 列区间，再断言区间内的每一行
+            // 都以框线字符起止（否则就是内容溢出框外、或背景文字透了进来）。
+            let border_row = lines.iter().find(|l| l.contains('╭')).expect("应有上边框");
+            let x0 = border_row.find('╭').unwrap();
+            let x1 = border_row.rfind('╮').unwrap();
+            let top = lines.iter().position(|l| l.contains('╭')).unwrap();
+            let bottom = lines.iter().rposition(|l| l.contains('╰')).unwrap();
+            for l in &lines[top..=bottom] {
+                let chars: Vec<char> = l.chars().collect();
+                if chars.len() <= x1 {
+                    continue;
+                }
+                let first = chars[x0];
+                let last = chars[x1];
+                assert!(
+                    matches!(first, '│' | '┃' | '╭' | '╰'),
+                    "rows={rows} 卡片左边有框外内容（会漏出背景）：{l:?}"
+                );
+                assert!(
+                    matches!(last, '│' | '┃' | '╮' | '╯'),
+                    "rows={rows} 卡片右边有框外内容：{l:?}"
+                );
+            }
+            // 「推荐」分组标题必须出现（说明分组渲染生效）
+            assert!(
+                lines[top..=bottom].iter().any(|l| l.contains("推荐")),
+                "rows={rows} 应显示分组标题"
+            );
+        }
+    }
+
+    #[test]
+    fn palette_shows_keybinding_hints() {
+        // 面板右侧显示键位，让"命令"与"键盘"对上号
+        let a = about();
+        let ed = editor::Editor::new();
+        let mut p = popup::Popup::new(popup::Kind::Palette, "");
+        p.set_items(popup::palette_items(""), false);
+        // 键位需要右侧空间；窄终端里会被让位给标签（这是刻意的取舍），
+        // 所以用宽终端断言"宽敞时给出键位提示"。
+        let out = Screen {
+            cols: 150, rows: 46, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: true,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+        }
+        .render();
+        let text = plain(&out).join("\n");
+        assert!(text.contains("ctrl+t"), "应显示主题的键位：{text}");
+    }
+
+    // ── 设置视图 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn settings_lists_the_four_sections() {
+        let info = SettingsInfo {
+            version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
+            workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
+            context_limit: 64_000, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 4, files_changed: 2,
+        };
+        let secs = settings_sections(&info);
+        assert_eq!(secs.len(), 4, "应有系统/模型/会话/显示四节");
+        let titles: Vec<&str> = secs.iter().map(|s| s.title).collect();
+        assert_eq!(titles, vec!["系统", "模型", "会话", "显示"]);
+    }
+
+    #[test]
+    fn settings_only_makes_achievable_items_clickable() {
+        // 关键：服务商 / 模型 / 上下文上限在运行中改不了，
+        // 必须标为只读并给出原因 —— 假控件比缺控件更糟。
+        let info = SettingsInfo {
+            version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
+            workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
+            context_limit: 64_000, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 4, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let find = |label: &str| {
+            secs.iter()
+                .flat_map(|s| s.rows.iter())
+                .find(|r| r.label == label)
+                .unwrap_or_else(|| panic!("应有设置项 {label}"))
+                .clone()
+        };
+        for label in ["服务商", "档位", "上下文上限"] {
+            let r = find(label);
+            assert!(r.action.is_none(), "{label} 不该可点击（内核不支持运行时切换）");
+            assert!(!r.readonly_note.is_empty(), "{label} 只读项必须给出原因");
+        }
+        for label in ["主题", "侧栏", "工具输出", "推理过程"] {
+            let r = find(label);
+            assert!(r.action.is_some(), "{label} 应当可操作");
+        }
+    }
+
+    #[test]
+    fn settings_view_renders_and_stays_within_width() {
+        let a = about();
+        let ed = editor::Editor::new();
+        let info = SettingsInfo {
+            version: "0.1.0".into(), model: "deepseek-chat".into(), mode: "default".into(),
+            workspace: "/Volumes/data1/work/office/debug/proteus-code".into(),
+            branch: "main".into(), session: "neo-tui".into(),
+            context_limit: 64_000, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 12, files_changed: 3,
+        };
+        let secs = settings_sections(&info);
+        for cols in [70usize, 100, 140, 200] {
+            let out = Screen {
+                cols, rows: 40, facts: &[], input: &ed, status: "",
+                awaiting_input: false, show_cursor: false,
+                about: Some(&a), trust: None,
+                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                sidebar: false, view: None, diff_viewer: None, whichkey: None,
+                display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            }
+            .render();
+            let text = plain(&out).join("\n");
+            assert!(text.contains("设置"), "cols={cols} 应显示设置标题：{text}");
+            for (i, l) in plain(&out).iter().enumerate() {
+                let w = width::display_width(l);
+                assert!(w <= cols, "cols={cols} 第 {i} 行宽 {w} 超宽");
+            }
+        }
+    }
+
+    #[test]
+    fn settings_cursor_only_lands_on_actionable_rows() {
+        // 光标必须只在可操作行间移动 —— 停在只读行上会让人以为能改
+        let info = SettingsInfo {
+            version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
+            workspace: "/w".into(), branch: "".into(), session: "s".into(),
+            context_limit: 0, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 0, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let slots = settings_actionable(&secs);
+        assert!(!slots.is_empty(), "应有可操作项");
+        for (si, ri) in slots.iter().copied() {
+            assert!(
+                secs[si].rows[ri].action.is_some(),
+                "settings_actionable 只应返回可操作行"
+            );
+        }
+        // 只读行不该出现在可操作清单里
+        let total_rows: usize = secs.iter().map(|s| s.rows.len()).sum();
+        assert!(slots.len() < total_rows, "确实存在只读行（否则这条断言没意义）");
+    }
+
+    #[test]
     fn whichkey_overlay_renders_a_card() {
         let a = about();
         let ed = editor::Editor::new();
@@ -4643,6 +5464,8 @@ mod tests {
             sidebar: false, view: None, diff_viewer: None,
             whichkey: Some(&groups),
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4665,6 +5488,8 @@ mod tests {
             sidebar: false, view: None, diff_viewer: None,
             whichkey: Some(&groups),
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4686,6 +5511,8 @@ mod tests {
                 sidebar: cols >= 96, view: None, diff_viewer: None,
                 whichkey: Some(&groups),
                 display: ToolDisplay::default(),
+                settings: None,
+                settings_cursor: 0,
             }
             .render();
             let lines = plain(&out);
@@ -4714,7 +5541,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(),
+            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
         }
         .render()
     }
@@ -4840,7 +5667,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup, preformatted: None,
-            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
+            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
         }
         .render_with_regions()
         .1
@@ -4905,7 +5732,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
         }
         .render_with_regions();
         let (gx, gy) = r.sidebar_grip.expect("侧栏收起时应留一个把手");
@@ -4976,7 +5803,7 @@ mod tests {
                 status: "", awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
+                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
             }
             .render()
         };
@@ -5002,7 +5829,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
         }
         .render();
         assert!(plain(&out).join("\n").contains("下方还有"), "应提示下方还有内容");
@@ -5024,7 +5851,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -5066,6 +5893,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -5099,6 +5928,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -5123,6 +5954,8 @@ mod tests {
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                settings: None,
+                settings_cursor: 0,
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -5151,6 +5984,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render();
         // 提取光标定位序列 ESC[<row>;<col>H（渲染尾部还有 ?25h 之类，需精确匹配）
@@ -5252,6 +6087,8 @@ mod tests {
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                settings: None,
+                settings_cursor: 0,
             }
             .render();
             for (i, line) in plain(&out).iter().enumerate() {
@@ -5407,6 +6244,8 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            settings: None,
+            settings_cursor: 0,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -5430,6 +6269,8 @@ mod tests {
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                settings: None,
+                settings_cursor: 0,
             }
             .render();
             plain(&out).join("\n")
@@ -5619,6 +6460,8 @@ mod tests {
                     diff_viewer: None,
                     whichkey: None,
                     display: ToolDisplay::default(),
+                    settings: None,
+                    settings_cursor: 0,
                 }
                 .render()
             };

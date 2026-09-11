@@ -72,7 +72,9 @@ cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
 #   右侧面板：Context（token 占用）/ Todo（进度）/ Modified Files（+N -N）
 #   ctrl+b 开关侧栏（<96 列自动隐藏）
 #   !cmd       直接执行 shell（走同一沙箱），输出进会话
-#   ctrl+p     命令面板    ctrl+t 切换主题（7 套，默认 NEO 紫）
+#   ctrl+p     命令面板（分四组 + 右侧键位提示 + 模糊搜索）
+#   /settings  设置界面（系统 / 模型 / 会话 / 显示）
+#   ctrl+t     切换主题（7 套，默认 NEO 紫）
 #   @file#12-40 引用文件的行范围
 #   助手回复按 Markdown 渲染（代码块语法高亮、行内代码、标题、列表）
 #   多行输入：最多显示 6 行（超出滚到末尾），带光标移动与整行编辑

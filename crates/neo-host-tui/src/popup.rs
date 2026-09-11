@@ -66,6 +66,17 @@ pub struct Item {
     /// 右侧说明（命令描述 / 文件来源），可为空
     pub detail: String,
     pub action: ItemAction,
+    /// 所属分组（`ctrl+p` 面板按此分节；文件/主题列表留空）
+    pub category: &'static str,
+    /// 右侧快捷键提示（无则空串）
+    pub keybinding: &'static str,
+}
+
+impl Item {
+    /// 造一个不带分组/键位的项（文件与主题列表用）。
+    pub fn plain(label: String, detail: String, action: ItemAction) -> Self {
+        Self { label, detail, action, category: "", keybinding: "" }
+    }
 }
 
 /// 弹窗状态。
@@ -131,26 +142,74 @@ impl Popup {
 
 // ── 候选构造 ──────────────────────────────────────────────────────────
 
+/// 把一条命令包成 Item（`/` 列表与面板共用）。
+pub fn item_of(c: &'static commands::Command) -> Item {
+    Item {
+        label: format!("/{}", c.name),
+        detail: c.desc.to_string(),
+        action: ItemAction::Run(c.action),
+        category: c.category.title(),
+        keybinding: c.keybinding,
+    }
+}
+
 /// 斜杠命令候选（按 `query` 过滤）。
 pub fn slash_items(query: &str) -> Vec<Item> {
-    commands::matches(query)
+    let mut items: Vec<(usize, usize, Item)> = commands::matches(query)
         .into_iter()
-        .map(|c| Item {
-            label: format!("/{}", c.name),
-            detail: if c.aliases.is_empty() {
-                c.desc.to_string()
-            } else {
-                format!("{}  ({})", c.desc, c.aliases.join(", "))
-            },
-            action: ItemAction::Run(c.action),
+        .map(|c| {
+            (
+                // 排序键：(分类顺序, 是否模糊命中偏移) —— 分类内保持表内顺序
+                c.category.order(),
+                0usize,
+                Item {
+                    label: format!("/{}", c.name),
+                    detail: c.desc.to_string(),
+                    action: ItemAction::Run(c.action),
+                    category: c.category.title(),
+                    keybinding: c.keybinding,
+                },
+            )
         })
-        .collect()
+        .collect();
+    items.sort_by_key(|(cat, off, _)| (*cat, *off));
+    items.into_iter().map(|(_, _, i)| i).collect()
 }
 
 /// 命令面板候选：所有斜杠命令（面板的价值是"看得到全部"，
 /// 所以不做前缀过滤之外的裁剪，只按 query 过滤）。
+/// 命令面板候选。
+///
+/// 用**模糊匹配**（子序列）而不是子串：用户记得的是大概形状
+/// （"tl" → theme/details?），精确子串会一个都不匹配。
+/// 排序：先按分类，再按模糊得分（得分高的靠前）。
 pub fn palette_items(query: &str) -> Vec<Item> {
-    slash_items(query)
+    let q = query.trim();
+    if q.is_empty() {
+        return slash_items("");
+    }
+    let mut scored: Vec<(usize, i64, Item)> = Vec::new();
+    for c in commands::registry() {
+        let label = format!("/{}", c.name);
+        // 名字与描述都参与匹配，任一命中即可
+        let score = crate::input::fuzzy_score(q, &label)
+            .map(|s| s as i64)
+            .or_else(|| crate::input::fuzzy_score(q, c.desc).map(|s| s as i64 - 500));
+        let Some(score) = score else { continue };
+        scored.push((
+            c.category.order(),
+            -score, // 负号：分数大的排前面（sort 是升序）
+            Item {
+                label,
+                detail: c.desc.to_string(),
+                action: ItemAction::Run(c.action),
+                category: c.category.title(),
+                keybinding: c.keybinding,
+            },
+        ));
+    }
+    scored.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    scored.into_iter().map(|(_, _, i)| i).collect()
 }
 
 /// 主题候选。
@@ -159,9 +218,8 @@ pub fn theme_items(query: &str) -> Vec<Item> {
     crate::theme::ThemeName::all()
         .into_iter()
         .filter(|t| q.is_empty() || t.as_str().contains(&q))
-        .map(|t| Item {
-            label: t.as_str().to_string(),
-            detail: match t {
+        .map(|t| {
+            let d = match t {
                 crate::theme::ThemeName::Neo => "NEO 默认（紫）",
                 crate::theme::ThemeName::OpenCode => "opencode 官方（暖橙 / 紫）",
                 crate::theme::ThemeName::Nord => "冷蓝灰",
@@ -169,9 +227,8 @@ pub fn theme_items(query: &str) -> Vec<Item> {
                 crate::theme::ThemeName::RosePine => "柔和玫瑰",
                 crate::theme::ThemeName::Tokyonight => "霓虹夜蓝",
                 crate::theme::ThemeName::Catppuccin => "柔和马卡龙",
-            }
-            .to_string(),
-            action: ItemAction::SetTheme(t),
+            };
+            Item::plain(t.as_str().to_string(), d.to_string(), ItemAction::SetTheme(t))
         })
         .collect()
 }
@@ -186,11 +243,7 @@ pub fn file_items(query: &str, files: &[String], limit: usize) -> (Vec<Item>, bo
     };
     let items = ranked
         .into_iter()
-        .map(|f| Item {
-            label: f.clone(),
-            detail: String::new(),
-            action: ItemAction::Insert(format!("@{f}")),
-        })
+        .map(|f| Item::plain(f.clone(), String::new(), ItemAction::Insert(format!("@{f}"))))
         .collect();
     let truncated = files.len() > limit;
     (items, truncated)
@@ -242,10 +295,12 @@ mod tests {
     fn scroll_keeps_selection_visible() {
         let mut p = Popup::new(Kind::File, "");
         let items: Vec<Item> = (0..50)
-            .map(|i| Item {
-                label: format!("f{i}.rs"),
-                detail: String::new(),
-                action: ItemAction::Insert(format!("@f{i}.rs")),
+            .map(|i| {
+                Item::plain(
+                    format!("f{i}.rs"),
+                    String::new(),
+                    ItemAction::Insert(format!("@f{i}.rs")),
+                )
             })
             .collect();
         p.set_items(items, false);

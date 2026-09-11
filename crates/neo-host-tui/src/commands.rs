@@ -14,6 +14,47 @@
 
 use crate::theme::ThemeName;
 
+/// 命令分组（`ctrl+p` 面板按此分节展示）。
+///
+/// 为什么要分组：命令多了之后平铺一列，用户要在十几个条目里逐行找。
+/// 分组把"我大概想要什么"变成一次定位 —— 对齐 opencode 面板的分节观感。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    /// 最常用（放最上面）
+    Recommended,
+    /// 对话与会话
+    Session,
+    /// 界面显示
+    Display,
+    /// 系统与信息
+    System,
+}
+
+impl Category {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Recommended => "推荐",
+            Self::Session => "会话",
+            Self::Display => "显示",
+            Self::System => "系统",
+        }
+    }
+
+    /// 展示顺序：推荐 → 会话 → 显示 → 系统。
+    pub fn order(self) -> usize {
+        match self {
+            Self::Recommended => 0,
+            Self::Session => 1,
+            Self::Display => 2,
+            Self::System => 3,
+        }
+    }
+
+    pub fn all() -> [Category; 4] {
+        [Self::Recommended, Self::Session, Self::Display, Self::System]
+    }
+}
+
 /// 一条斜杠命令。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Command {
@@ -23,6 +64,10 @@ pub struct Command {
     pub aliases: &'static [&'static str],
     pub desc: &'static str,
     pub action: Action,
+    pub category: Category,
+    /// 对应的键盘快捷键（无则空串）。面板右侧显示，让"命令"与"键位"对上号 ——
+    /// 用户看到 `/theme` 右边写着 `ctrl+t`，下回就直接按键而不用打命令。
+    pub keybinding: &'static str,
 }
 
 /// 命令要执行的动作。
@@ -59,6 +104,10 @@ pub enum Action {
     ToggleThinking,
     /// 复制最近一条助手回复到剪贴板
     CopyLastReply,
+    /// 打开设置（系统 / 模型 / 会话）
+    Settings,
+    /// 收起 / 展开侧栏
+    ToggleSidebar,
 }
 
 /// **必须由命令触发**的动作。新增变体时要加进这里 ——
@@ -77,6 +126,8 @@ const COMMAND_ACTIONS: &[Action] = &[
     Action::ToggleDetails,
     Action::ToggleThinking,
     Action::CopyLastReply,
+    Action::Settings,
+    Action::ToggleSidebar,
 ];
 
 /// **只在界面内部产生**的动作（不经过命令表）。
@@ -91,19 +142,73 @@ const INTERNAL_ONLY_ACTIONS: &[Action] = &[Action::SetTheme(crate::theme::ThemeN
 /// 若审计走 `registry()` 会**无限递归**（registry → audit → registry），
 /// 表现为测试里的 stack overflow。表格是数据，取用方式是函数。
 const COMMANDS: &[Command] = &[
-    Command { name: "help", aliases: &[], desc: "显示帮助", action: Action::Help },
-    Command { name: "keys", aliases: &["keybindings"], desc: "键盘快捷键", action: Action::Keys },
-    Command { name: "status", aliases: &["info"], desc: "运行状态与环境", action: Action::Status },
-    Command { name: "theme", aliases: &["themes"], desc: "切换配色主题", action: Action::ThemePicker },
-    Command { name: "next", aliases: &["next-theme"], desc: "切到下一个主题", action: Action::NextTheme },
-    Command { name: "new", aliases: &["clear"], desc: "开始新对话（清空当前转录）", action: Action::NewSession },
-    Command { name: "compact", aliases: &["summarize"], desc: "压缩上下文以腾出预算", action: Action::Compact },
-    Command { name: "diff", aliases: &["changes"], desc: "查看本次会话的改动", action: Action::DiffViewer },
-    Command { name: "undo", aliases: &["rewind"], desc: "回退对话一轮（不还原文件）", action: Action::Rewind },
-    Command { name: "details", aliases: &["d"], desc: "展开 / 折叠工具输出", action: Action::ToggleDetails },
-    Command { name: "thinking", aliases: &["think"], desc: "显示 / 隐藏推理过程", action: Action::ToggleThinking },
-    Command { name: "copy", aliases: &["yank"], desc: "复制最近一条回复（写入系统剪贴板）", action: Action::CopyLastReply },
-    Command { name: "exit", aliases: &["quit", "q"], desc: "退出 Neo", action: Action::Quit },
+    // ── 推荐：最常用 ──
+    Command {
+        name: "settings", aliases: &["config"], desc: "设置（系统 / 模型 / 会话）",
+        action: Action::Settings, category: Category::Recommended, keybinding: "",
+    },
+    Command {
+        name: "theme", aliases: &["themes"], desc: "切换配色主题",
+        action: Action::ThemePicker, category: Category::Recommended, keybinding: "ctrl+t",
+    },
+    Command {
+        name: "next", aliases: &["next-theme"], desc: "直接切到下一个主题",
+        action: Action::NextTheme, category: Category::Recommended, keybinding: "ctrl+t",
+    },
+    Command {
+        name: "details", aliases: &["d"], desc: "展开 / 折叠工具输出",
+        action: Action::ToggleDetails, category: Category::Recommended, keybinding: "",
+    },
+    Command {
+        name: "copy", aliases: &["yank"], desc: "复制最近一条回复",
+        action: Action::CopyLastReply, category: Category::Recommended, keybinding: "",
+    },
+
+    // ── 会话 ──
+    Command {
+        name: "new", aliases: &["clear"], desc: "开始新对话（清空转录）",
+        action: Action::NewSession, category: Category::Session, keybinding: "",
+    },
+    Command {
+        name: "undo", aliases: &["rewind"], desc: "回退对话一轮（不还原文件）",
+        action: Action::Rewind, category: Category::Session, keybinding: "",
+    },
+    Command {
+        name: "diff", aliases: &["changes"], desc: "查看本次会话的改动",
+        action: Action::DiffViewer, category: Category::Session, keybinding: "审批时按 d",
+    },
+    Command {
+        name: "compact", aliases: &["summarize"], desc: "压缩上下文（需 L4 编排，尚未实现）",
+        action: Action::Compact, category: Category::Session, keybinding: "",
+    },
+
+    // ── 显示 ──
+    Command {
+        name: "thinking", aliases: &["think"], desc: "显示 / 隐藏推理过程",
+        action: Action::ToggleThinking, category: Category::Display, keybinding: "",
+    },
+    Command {
+        name: "sidebar", aliases: &["panel"], desc: "收起 / 展开右侧面板",
+        action: Action::ToggleSidebar, category: Category::Display, keybinding: "ctrl+b",
+    },
+    Command {
+        name: "keys", aliases: &["keybindings"], desc: "键盘快捷键",
+        action: Action::Keys, category: Category::Display, keybinding: "ctrl+o",
+    },
+
+    // ── 系统 ──
+    Command {
+        name: "status", aliases: &["info"], desc: "运行状态与环境",
+        action: Action::Status, category: Category::System, keybinding: "",
+    },
+    Command {
+        name: "help", aliases: &[], desc: "显示帮助",
+        action: Action::Help, category: Category::System, keybinding: "",
+    },
+    Command {
+        name: "exit", aliases: &["quit", "q"], desc: "退出 Neo",
+        action: Action::Quit, category: Category::System, keybinding: "ctrl+c",
+    },
 ];
 
 /// 检查"动作 ↔ 命令"的可达性，返回问题列表（空 = 一致）。
@@ -174,6 +279,7 @@ Neo —— 编程 Agent 内核
 
 命令
   打 / 唤起命令列表（也可 ctrl+p 打开命令面板）。可用命令：
+    /settings  设置（系统 / 模型 / 会话）
     /help      显示帮助
     /keys      键盘快捷键
     /status    运行状态与环境
@@ -185,6 +291,10 @@ Neo —— 编程 Agent 内核
     /diff      查看改动（全屏查看器：hunk/文件跳转、双列视图）
     /theme     选择配色主题（6 套）
     /next      直接切到下一个主题
+    /sidebar   收起 / 展开右侧面板
+    /copy      复制最近一条回复
+    /details   展开 / 折叠工具输出
+    /thinking  显示 / 隐藏推理
     /new       开始新对话（清空转录）
     /compact   压缩上下文（需 L4 编排，尚未实现）
     /exit      退出（别名 quit / q）
