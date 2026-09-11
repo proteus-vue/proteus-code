@@ -733,48 +733,18 @@ impl Kernel {
 
         match op {
             Op::UserTurn { text, refs } => {
-                // 先检查预算再推入用户消息：否则会留下一条"无法被处理"的消息，
-                // 让历史与日志都多出一条实际没发出去的输入。
-                self.check_context_budget()?;
-                self.turn_counter += 1;
-                self.steps_this_turn = 0;
-                self.usage_in = 0;
-                self.usage_out = 0;
-                let turn_id = format!("turn-{}", self.turn_counter);
-
-                let started = EventMsg::TurnStarted { turn_id };
-                self.emit_and_log(&started)?;
-
-                // 引用（@ / # / / / $）解析成具体内容，随用户消息一起进历史。
-                //
-                // 解析失败**不阻断本轮** —— 一条引用的路径打错不该让整个提问发不出去，
-                // 但要如实把失败写进事件与摘要，让模型和用户都知道"这条没读到"。
-                let resolution = self.resolve_refs(&refs);
-                let user_text = match &resolution.block {
-                    Some(block) => format!("{text}\n\n{block}"),
-                    None => text.clone(),
-                };
-                // 先回显**用户原话**（不含注入块 —— 用户要看到自己打的字，
-                // 而不是几百行文件正文），再报 turn 开始：转录顺序与用户感知一致。
-                let echo = EventMsg::UserSubmitted { text: text.clone() };
-                self.emit_and_log(&echo)?;
-                // 注入块单独成事件：它模型可见（必须落盘），但用户不必在转录里读到。
-                // 紧接着 UserSubmitted 发出，回放时"把块拼到刚推入的用户消息后"。
-                //
-                // **有摘要就要发**（哪怕 block 为空）：`$nope` 找不到技能时没有块，
-                // 但"未找到，可用的是 X/Y"这条恰恰是用户唯一能得到的反馈 ——
-                // 只在有块时发事件会让失败静默（本功能的第一个 bug）。
-                if !resolution.summary.is_empty() {
-                    let ev = EventMsg::RefsResolved {
-                        summary: resolution.summary.clone(),
-                        block: resolution.block.clone().unwrap_or_default(),
-                    };
-                    self.emit_and_log(&ev)?;
-                }
-                self.messages.push(Message::User(user_text));
-
+                self.begin_turn(text, refs)?;
                 self.drive_steps()?;
             }
+            // 逐帧宿主：只做开场（回显/引用/入历史），不驱动。
+            Op::BeginTurn { text, refs } => {
+                self.begin_turn(text, refs)?;
+            }
+            // 推进一步。到边界（TurnComplete / ApprovalRequest）宿主自行判断。
+            Op::Pump => match self.step_once()? {
+                StepOutcome::More | StepOutcome::Suspended => {}
+                StepOutcome::Done => self.finish_turn_if_idle()?,
+            },
 
             Op::Shell { command } => {
                 // 与模型请求的工具调用走**同一条**执行路径（execute_one），
@@ -937,39 +907,105 @@ impl Kernel {
     // ── 主循环 ────────────────────────────────────────────────────────
 
     /// 跑完本轮：反复「模型一步 → 执行其工具调用」，直到模型不再要工具。
+    /// 开场一轮：检查预算 → 回显 → 解析引用 → 推入历史。**不驱动**。
+    ///
+    /// 与 `drive_steps` 分开是为了让逐帧宿主能"先看到自己发了什么"，
+    /// 再一步步推进 —— 整轮可能要多次网络往返，期间界面必须还能重绘。
+    fn begin_turn(&mut self, text: String, refs: Vec<ContextRef>) -> Result<(), KernelError> {
+                // 先检查预算再推入用户消息：否则会留下一条"无法被处理"的消息，
+                // 让历史与日志都多出一条实际没发出去的输入。
+                self.check_context_budget()?;
+                self.turn_counter += 1;
+                self.steps_this_turn = 0;
+                self.usage_in = 0;
+                self.usage_out = 0;
+                let turn_id = format!("turn-{}", self.turn_counter);
+
+                let started = EventMsg::TurnStarted { turn_id };
+                self.emit_and_log(&started)?;
+
+                // 引用（@ / # / / / $）解析成具体内容，随用户消息一起进历史。
+                //
+                // 解析失败**不阻断本轮** —— 一条引用的路径打错不该让整个提问发不出去，
+                // 但要如实把失败写进事件与摘要，让模型和用户都知道"这条没读到"。
+                let resolution = self.resolve_refs(&refs);
+                let user_text = match &resolution.block {
+                    Some(block) => format!("{text}\n\n{block}"),
+                    None => text.clone(),
+                };
+                // 先回显**用户原话**（不含注入块 —— 用户要看到自己打的字，
+                // 而不是几百行文件正文），再报 turn 开始：转录顺序与用户感知一致。
+                let echo = EventMsg::UserSubmitted { text: text.clone() };
+                self.emit_and_log(&echo)?;
+                // 注入块单独成事件：它模型可见（必须落盘），但用户不必在转录里读到。
+                // 紧接着 UserSubmitted 发出，回放时"把块拼到刚推入的用户消息后"。
+                //
+                // **有摘要就要发**（哪怕 block 为空）：`$nope` 找不到技能时没有块，
+                // 但"未找到，可用的是 X/Y"这条恰恰是用户唯一能得到的反馈 ——
+                // 只在有块时发事件会让失败静默（本功能的第一个 bug）。
+                if !resolution.summary.is_empty() {
+                    let ev = EventMsg::RefsResolved {
+                        summary: resolution.summary.clone(),
+                        block: resolution.block.clone().unwrap_or_default(),
+                    };
+                    self.emit_and_log(&ev)?;
+                }
+                self.messages.push(Message::User(user_text));
+        Ok(())
+    }
+
+    /// 跑完整轮（`submit(Op::UserTurn)` 用）。逐帧宿主用 `begin_turn` + `pump_step`。
     fn drive_steps(&mut self) -> Result<(), KernelError> {
         loop {
-            if self.steps_this_turn >= self.max_steps {
-                let msg = EventMsg::Error { message: format!("超出步数预算（{} 步）", self.max_steps) };
-                self.emit_and_log(&msg)?;
-                break;
-            }
-            self.check_context_budget()?;
-            self.steps_this_turn += 1;
-            self.step_counter += 1;
-
-            let (text, calls) = self.model_step()?;
-            self.messages.push(Message::Assistant { text, tool_calls: calls.clone() });
-
-            if calls.is_empty() {
-                break; // 模型不再要工具 → 本轮结束
-            }
-            if calls.len() > MAX_TOOL_CALLS_PER_STEP {
-                let msg = EventMsg::Error {
-                    message: format!("单步工具调用过多（{} > {}）", calls.len(), MAX_TOOL_CALLS_PER_STEP),
-                };
-                self.emit_and_log(&msg)?;
-                break;
-            }
-            match self.execute_from(&calls, 0)? {
-                ExecOutcome::Done => continue,   // 工具欠一次请求 → 下一步
-                ExecOutcome::Suspended => return Ok(()), // 挂审批，本轮暂停
+            match self.step_once()? {
+                StepOutcome::More => continue,
+                StepOutcome::Suspended => return Ok(()), // 挂审批，本轮暂停（不结束）
+                StepOutcome::Done => break,
             }
         }
+        self.finish_turn_if_idle()
+    }
 
-        // 只在没有挂起时结束本轮
+    /// 推进**一步**：一次模型请求 + 它要求的工具执行。
+    ///
+    /// 拆出来是为了让宿主能逐帧推进（每步之后重绘），而不是等整轮结束 ——
+    /// 整轮可能包含多次网络往返，期间界面完全冻结（真实反馈："像卡死"）。
+    fn step_once(&mut self) -> Result<StepOutcome, KernelError> {
+        if self.steps_this_turn >= self.max_steps {
+            let msg = EventMsg::Error { message: format!("超出步数预算（{} 步）", self.max_steps) };
+            self.emit_and_log(&msg)?;
+            return Ok(StepOutcome::Done);
+        }
+        self.check_context_budget()?;
+        self.steps_this_turn += 1;
+        self.step_counter += 1;
+
+        let (text, calls) = self.model_step()?;
+        self.messages.push(Message::Assistant { text, tool_calls: calls.clone() });
+
+        if calls.is_empty() {
+            return Ok(StepOutcome::Done); // 模型不再要工具 → 本轮结束
+        }
+        if calls.len() > MAX_TOOL_CALLS_PER_STEP {
+            let msg = EventMsg::Error {
+                message: format!("单步工具调用过多（{} > {}）", calls.len(), MAX_TOOL_CALLS_PER_STEP),
+            };
+            self.emit_and_log(&msg)?;
+            return Ok(StepOutcome::Done);
+        }
+        match self.execute_from(&calls, 0)? {
+            ExecOutcome::Done => Ok(StepOutcome::More), // 工具欠一次请求 → 下一步
+            ExecOutcome::Suspended => Ok(StepOutcome::Suspended),
+        }
+    }
+
+    /// 没有挂起时结束本轮（发 TurnComplete）。
+    fn finish_turn_if_idle(&mut self) -> Result<(), KernelError> {
         if matches!(self.state, KernelState::Idle) {
-            let done = EventMsg::TurnComplete { input_tokens: self.usage_in, output_tokens: self.usage_out };
+            let done = EventMsg::TurnComplete {
+                input_tokens: self.usage_in,
+                output_tokens: self.usage_out,
+            };
             self.emit_and_log(&done)?;
         }
         Ok(())
@@ -1496,6 +1532,10 @@ impl Kernel {
 }
 
 enum ExecOutcome { Done, Suspended }
+
+/// 单步推进的结果。与 `ExecOutcome` 分开：一个是"这一步的工具执行完了吗"，
+/// 一个是"整轮推进到哪了"。
+enum StepOutcome { More, Suspended, Done }
 
 fn denied_output(reason: &str) -> ToolOutput {
     ToolOutput { exit_code: -1, stdout: String::new(), stderr: reason.into(), truncated: false }

@@ -6553,23 +6553,78 @@ sessions,
                 // 引用必须在**提交前**解析：`@file` / `$skill` 的解析结果
                 // 是协议语义（RefKind），四个宿主共用同一份 `parse_refs`，
                 // 不会各自漂移出"某个宿主不认 `$`"这类分叉。
-                match submit(neo_protocol::Op::UserTurn {
+                // 开场 + **逐步推进**，而不是一次 submit 跑完整轮。
+                //
+                // 整轮可能包含多次模型往返与工具执行，一次跑完意味着界面在
+                // 全部结束前**完全冻结**（真实反馈："回车像卡死，退出后才
+                // 显示一堆内容"）。现在每推进一步就重绘一次，用户至少能看到
+                // "正在请求模型 / 正在执行工具"，而不是一块不动的屏幕。
+                match submit(neo_protocol::Op::BeginTurn {
                     refs: neo_protocol::parse_refs(&line),
                     text: line,
                 }) {
                     Ok(produced) => {
                         outstanding = latest_approval_id(&produced);
                         events.extend(produced);
-                        // 有审批请求就**弹模态框**（而不是只把输入框变黄）——
-                        // 用户明确反馈"不是那种对话框形式，和 opencode/mimo 差很远"。
-                        approval = if outstanding.is_some() {
-                            build_approval_prompt(&events)
-                        } else {
-                            None
-                        };
                     }
                     Err(e) => events.push(EventMsg::Error { message: e }),
                 }
+                // 逐步推进直到本轮结束或挂起审批
+                while outstanding.is_none() {
+                    match submit(neo_protocol::Op::Pump) {
+                        Ok(produced) => {
+                            outstanding = latest_approval_id(&produced);
+                            let done = produced
+                                .iter()
+                                .any(|e| matches!(e, EventMsg::TurnComplete { .. }));
+                            events.extend(produced);
+                            // 每步之后重绘一次：这是"不冻结"的关键
+                            let screen = Screen {
+                                cols,
+                                rows,
+                                facts: &[],
+                                input: &empty_input,
+                                status: "运行中…",
+                                awaiting_input: false,
+                                approval: None,
+                                show_cursor: false,
+                                about: Some(&about),
+                                trust: None,
+                                theme: theme_name,
+                                popup: None,
+                                preformatted: None,
+                                sidebar: sidebar_open,
+                                view: Some(&view_state),
+                                diff_viewer: None,
+                                whichkey: None,
+                                display,
+                                settings: None,
+                                settings_cursor: 0,
+                                settings_picker: None,
+                                settings_form: None,
+                                settings_confirm: None,
+                                appearance: current_appearance,
+                                custom_background: custom_bg.as_ref(),
+                            };
+                            write!(stdout, "{}", screen.render())?;
+                            stdout.flush()?;
+                            if done {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            events.push(EventMsg::Error { message: e });
+                            break;
+                        }
+                    }
+                }
+                // 有审批请求就**弹模态框**（而不是只把输入框变黄）——
+                // 用户明确反馈"不是那种对话框形式，和 opencode/mimo 差很远"。
+                approval = if outstanding.is_some() {
+                    build_approval_prompt(&events)
+                } else {
+                    None
+                };
                 status = idle_or_approval(&outstanding);
             }
             _ => {}

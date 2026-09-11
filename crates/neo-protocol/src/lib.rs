@@ -74,6 +74,19 @@ pub enum RefKind {
 #[serde(rename_all = "snake_case")]
 pub enum Op {
     UserTurn { text: String, refs: Vec<ContextRef> },
+    /// 开始一轮但**不驱动**：只做回显/引用解析/推入历史。配合 [`Op::Pump`]
+    /// 逐帧推进用。
+    ///
+    /// # 为什么需要它（而不是只用 UserTurn）
+    ///
+    /// `UserTurn` 在一次 `submit` 里跑完整轮（可能多次模型往返 + 工具执行），
+    /// 宿主只能等它全部结束才拿到事件 —— 期间界面**完全冻结**（真实反馈：
+    /// "回车后像卡死，退出后才显示一堆内容"）。逐帧推进让宿主在每步之后
+    /// 重绘一次，至少能看到"正在请求模型 / 正在执行工具"。
+    BeginTurn { text: String, refs: Vec<ContextRef> },
+    /// 推进一轮里的**一步**（一次模型请求 + 它要求的工具执行）。
+    /// 收到 `TurnComplete` 或 `ApprovalRequest` 即到边界。
+    Pump,
     /// 用户直接执行一条 shell 命令（TUI 的 `!cmd`，opencode 同款）。
     ///
     /// 与 UserTurn 的区别：**不经过模型**。命令仍走沙箱（结构性约束），
