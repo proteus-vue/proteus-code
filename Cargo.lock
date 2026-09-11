@@ -74,6 +74,7 @@ dependencies = [
  "neo-capability",
  "neo-config",
  "neo-core",
+ "neo-instructions",
  "neo-orchestration",
  "neo-protocol",
  "neo-skill-loader",
@@ -112,6 +113,14 @@ dependencies = [
  "neo-orchestration",
  "neo-protocol",
  "serde_json",
+]
+
+[[package]]
+name = "neo-instructions"
+version = "0.1.0"
+dependencies = [
+ "neo-config",
+ "neo-core",
 ]
 
 [[package]]

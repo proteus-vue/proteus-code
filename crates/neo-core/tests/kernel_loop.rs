@@ -1305,3 +1305,64 @@ fn parse_refs_and_shell_quote_reject_injection() {
     let tricky = neo_core::shell_quote("it's.txt");
     assert_eq!(tricky, "'it'\\''s.txt'", "单引号必须按 POSIX 规则转义");
 }
+
+// ─────────────── 项目指令（AGENTS.md 级联）───────────────
+
+#[test]
+fn instructions_enter_system_prompt_and_are_logged_once() {
+    let ins = neo_core::instructions::Instructions {
+        sources: vec!["/repo/AGENTS.md".into()],
+        block: "必须遵守：零 warning。".into(),
+        truncated: false,
+    };
+    let mut k = // 用 InMemoryPersistence 才能读回日志
+    {
+        let mut k = kernel_with_parts(Arc::new(TestSandbox), Default::default(),
+            Box::new(InMemoryPersistence::new()));
+        k = k.with_instructions(ins.clone());
+        k
+    };
+
+    // 提示词里必须真的带上指令（不重建提示词的话，指令只停在字段里）
+    assert!(k.system_prompt().contains("零 warning"), "指令必须进系统提示词: {}", k.system_prompt());
+
+    let ev1 = k.submit(Op::UserTurn { text: "一".into(), refs: vec![] }).unwrap();
+    let ev2 = k.submit(Op::UserTurn { text: "二".into(), refs: vec![] }).unwrap();
+    let n1 = ev1.iter().filter(|e| matches!(e, EventMsg::InstructionsLoaded { .. })).count();
+    let n2 = ev2.iter().filter(|e| matches!(e, EventMsg::InstructionsLoaded { .. })).count();
+    assert_eq!(n1, 1, "首次提交应落一条指令事件");
+    assert_eq!(n2, 0, "指令只落一次，不得每轮重复（否则日志被放大）");
+}
+
+#[test]
+fn empty_instructions_do_not_emit_noise_events() {
+    let mut k = kernel_with_parts(Arc::new(TestSandbox), Default::default(),
+        Box::new(InMemoryPersistence::new()));
+    let ev = k.submit(Op::UserTurn { text: "x".into(), refs: vec![] }).unwrap();
+    assert!(!ev.iter().any(|e| matches!(e, EventMsg::InstructionsLoaded { .. })),
+        "没有 AGENTS.md 时不该发指令事件");
+}
+
+#[test]
+fn instructions_roundtrip_restores_system_prompt() {
+    // 指令进系统提示词 = 模型可见 ⇒ 必须能从日志还原**当时那一份**
+    // （AGENTS.md 之后可能被改，回放不能重读盘）。
+    let ins = neo_core::instructions::Instructions {
+        sources: vec!["/repo/AGENTS.md".into()],
+        block: "历史约定：不要 sleep。".into(),
+        truncated: false,
+    };
+    let mut k = kernel_with_parts(Arc::new(TestSandbox), Default::default(),
+        Box::new(InMemoryPersistence::new()))
+        .with_instructions(ins);
+    k.submit(Op::UserTurn { text: "x".into(), refs: vec![] }).unwrap();
+    let logs = k.log_for_test();
+    let original_prompt = k.system_prompt().to_string();
+
+    // 回放到一个**没有注入指令**的新内核：指令应完全由日志还原
+    let mut k2 = kernel_with_parts(Arc::new(TestSandbox), Default::default(),
+        Box::new(InMemoryPersistence::new()));
+    assert!(!k2.system_prompt().contains("不要 sleep"), "前置条件：新内核本无指令");
+    k2.rebuild_from_log(&logs);
+    assert_eq!(k2.system_prompt(), original_prompt, "回放必须还原同一份系统提示词");
+}

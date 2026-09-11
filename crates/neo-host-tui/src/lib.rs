@@ -3062,6 +3062,16 @@ fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<V
                 }
                 out.push(Vec::new());
             }
+            // 指令来源（用户需要知道会话受哪些约定约束；截断必须显式告警）
+            Fact::InstructionsLoaded { sources, truncated } => {
+                let text = format!(
+                    "  ⚑ 项目指令：{} 个文件{}",
+                    sources.len(),
+                    if *truncated { "（已按 32 KiB 截断）" } else { "" }
+                );
+                out.push(vec![(0, text, Tone::Dim)]);
+                out.push(Vec::new());
+            }
             Fact::AssistantThought(text) => {
                 // 推理默认**不显示**（`/thinking` 打开）：它常常很长且是过程性
                 // 内容，默认铺开会把答复挤下去。但必须可选可见 —— 排查模型

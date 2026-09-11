@@ -137,6 +137,19 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
                     Some(format!("[refs] {}", summary.join("；")))
                 }
             }
+            // 指令来源要可见（含截断告警）：用户得知道这个会话受哪些约定约束。
+            EventMsg::InstructionsLoaded { sources, block, truncated } => {
+                if sources.is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "[instructions] {} 个文件并入系统提示词（{} 字节{}）",
+                        sources.len(),
+                        block.len(),
+                        if *truncated { "，已截断" } else { "" }
+                    ))
+                }
+            }
             EventMsg::FilesChanged { files } => {
                 let adds: usize = files.iter().map(|f| f.additions).sum();
                 let dels: usize = files.iter().map(|f| f.deletions).sum();
@@ -224,6 +237,9 @@ pub fn build_kernel(
     // 这个取舍写在 README 的诚实边界里。
     let roots = neo_skill_loader::default_roots(workspace);
     let (skills, _report) = neo_skill_loader::load_roots(&roots);
+    // 项目指令（AGENTS.md 级联）与技能同在装配点加载一次：
+    // 它进系统提示词，中途变化需重启才可见（与技能同一取舍）。
+    let instructions = neo_instructions::load(neo_instructions::neo_home().as_deref(), workspace);
     Kernel::new(session_id, cfg, tools, models, sandbox, persistence, workspace)
         .with_max_steps(opts.max_steps)
         // 压缩策略由 L4 提供（内核只认契据）—— 这样 `/compact` 不是空操作
@@ -231,6 +247,7 @@ pub fn build_kernel(
             neo_orchestration::PolicyCompactor::default(),
         ))
         .with_skills(skills)
+        .with_instructions(instructions)
 }
 
 /// 档位短名（footer / 状态栏用）。

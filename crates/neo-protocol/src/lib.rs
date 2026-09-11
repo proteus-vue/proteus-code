@@ -200,6 +200,22 @@ pub enum EventMsg {
         block: String,
     },
     SessionConfigured { session_id: String },
+    /// 项目指令（`AGENTS.md` 级联）已并入系统提示词。
+    ///
+    /// # 为什么系统提示词的组成也要落日志
+    ///
+    /// 系统提示词**每一轮都进模型请求**，属于最典型的"模型可见"内容。
+    /// 只落会话消息而不落它，审计时无法回答"模型当时到底被要求遵守什么约定" ——
+    /// 而这恰恰是解释模型行为的关键（它按 AGENTS.md 做了某件事，日志里却看不到那份文件）。
+    ///
+    /// `block` 是注入提示词的实际文本；`sources` 是它来自哪些文件。
+    /// `truncated` 如实标注是否被 32 KiB 上限截断。
+    InstructionsLoaded {
+        sources: Vec<String>,
+        block: String,
+        #[serde(default)]
+        truncated: bool,
+    },
     /// 模型已切换（运行时换模型）。
     ///
     /// 单独发事件而不是只发 SessionConfigured：模型切换是用户**会关心**的
@@ -336,6 +352,11 @@ pub enum Fact {
     TurnFinished { input_tokens: u64, output_tokens: u64 },
     /// 会话已就绪。
     SessionReady { session_id: String },
+    /// 项目指令已加载（`AGENTS.md` 级联）。
+    ///
+    /// 纳入事实的理由：用户应当知道"这个会话受哪些约定约束"，
+    /// 尤其是**截断**时 —— 否则会以为整套约定都在生效。
+    InstructionsLoaded { sources: Vec<String>, truncated: bool },
     /// 模型已切换（含新模型的上下文窗口，0 = 未知）。
     ModelSwitched { model: String, context_limit: u64 },
 }
@@ -420,6 +441,14 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
             }
             EventMsg::SessionConfigured { session_id } => {
                 out.push(Fact::SessionReady { session_id: session_id.clone() })
+            }
+            EventMsg::InstructionsLoaded { sources, truncated, .. } => {
+                if !sources.is_empty() {
+                    out.push(Fact::InstructionsLoaded {
+                        sources: sources.clone(),
+                        truncated: *truncated,
+                    })
+                }
             }
             EventMsg::ModelSwitched { model, context_limit } => {
                 out.push(Fact::ModelSwitched {

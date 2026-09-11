@@ -32,6 +32,7 @@
 | Desktop 宿主（系统 webview 壳） | 🟡 **契据就绪**：`DesktopHost` 的 `HostBackend` 实现与 T6 覆盖已完成；wry window 层未接（原型阶段不拉入平台图形栈） |
 | Goal 编排（L4） | ✅ **已实现**：Goal 状态机（Subtask/Phase/Checkpoint/StopConditions）+ 上下文压缩策略（`/compact` 端到端，摘要与移除条数可回放） |
 | **上下文引用解析**（`@file` / `$skill`） | ✅ **已实现**：`@path` 与 `@path#行范围` 经沙箱读入并注入请求；`$skill` 查注册表注入正文、找不到则列出可用项。注入块落 `RefsResolved` 日志，回放一致 |
+| **项目指令级联**（`AGENTS.md`） | ✅ **已实现**：`~/.neo/AGENTS.override.md` → `~/.neo/AGENTS.md` → 仓库根 → 子目录（越具体越靠后），合并上限 32 KiB，超限如实标注截断。并入系统提示词并落 `InstructionsLoaded` 日志，回放还原同一份提示词 |
 | Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |
 
 **一句话现状**：内核 + 真实沙箱 + **真实模型** + 落盘 + **三宿主（exec / TUI / Web）**
@@ -55,14 +56,16 @@ neo tui --provider demo        # Markdown 高亮 + 任务清单
 ```
 
 **离线验不到的**（必须真实模型）：真实推理质量、多轮工具编排、
-模型是否真的会调 `todowrite` 维护清单。压缩策略（`/compact`）与引用解析
-（`@file` / `$skill`）都已在离线桩上端到端验证：前者日志出现 `context_compacted`、
-回放能重建压缩后历史；后者注入内容落 `RefsResolved`、回放一致。
+模型是否真的会调 `todowrite` 维护清单。压缩策略（`/compact`）、引用解析
+（`@file` / `$skill`）与项目指令级联（`AGENTS.md`）都已在离线桩上端到端验证：
+依次落 `context_compacted` / `RefsResolved` / `InstructionsLoaded` 日志，回放一致。
 界面本身与 provider 无关，所以这些以外的交互都能离线确认。
 
-**已知边界**：技能目录在**启动时**加载一次（引用是热路径，扫盘是冷路径），
-所以会话中途新增技能需要重启才可见；`@` 引用暂不支持带空格的路径
-（`@"my file.txt"` 语法未实现）。
+**已知边界**：技能目录与 `AGENTS.md` 都在**启动时**加载一次（装配是冷路径，
+引用与提示词是热路径），所以会话中途新增技能或改约定需要重启才可见；
+`@` 引用暂不支持带空格的路径（`@"my file.txt"` 语法未实现）；
+`AGENTS.md` 超 32 KiB 时**诚实截断**（标注"已截断"），尚未实现规划中的
+"让模型生成握手摘要"。
 
 ### 亲测可用
 
@@ -125,8 +128,8 @@ neo exec "用一句话回答 1+1" --mode plan
 cargo run -p neo-cli -- tui --provider mock    # 不装 PATH，直接用 cargo 跑 TUI
 cargo install --path crates/neo-cli --locked   # 或装成全局命令 neo
 
-cargo test --workspace     # 451 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
-cargo check --workspace    # 19 个 crate，零 unsafe、零 warning
+cargo test --workspace     # 460 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo check --workspace    # 20 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试
 ```
@@ -151,6 +154,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 │   ├── neo-session/           会话真相源（append-only）
 │   ├── neo-session-store/     多会话库（列举 / 新建 / 删除 / 标题）
 │   ├── neo-skill-loader/      技能目录发现与加载（SKILL.md → SkillRegistry）
+│   ├── neo-instructions/      项目指令级联加载（AGENTS.md → 系统提示词）
 │   ├── neo-config/            四级配置 + 模式解析
 │   └── neo-mock/              test-support：各 SPI 的 Mock 后端 + 反例后端
 ├── docs/

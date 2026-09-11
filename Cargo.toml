@@ -20,6 +20,7 @@ members = [
   "crates/neo-session-local",
   "crates/neo-session-store",
   "crates/neo-skill-loader",
+  "crates/neo-instructions",
 ]
 
 [workspace.package]

@@ -22,6 +22,7 @@ use neo_protocol::*;
 use serde_json::Value;
 pub mod models;
 pub mod skills;
+pub mod instructions;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -589,6 +590,10 @@ pub struct Kernel {
     pending: Option<PendingApproval>,
     /// 技能注册表（`$skill` 引用的解析来源）。构造时注入，缺省为空。
     skills: crate::skills::SkillRegistry,
+    /// 项目指令（AGENTS.md 级联）。构造时注入，缺省为空。
+    instructions: crate::instructions::Instructions,
+    /// 指令是否已落日志（**只落一次**：它是系统提示词的组成，每轮重复落盘纯属放大日志）。
+    instructions_logged: bool,
     /// 本次 submit 产生的事件（宿主收取）
     outbox: Vec<EventMsg>,
 }
@@ -634,6 +639,8 @@ impl Kernel {
             usage_out: 0,
             pending: None,
             skills: crate::skills::SkillRegistry::new(),
+            instructions: crate::instructions::Instructions::default(),
+            instructions_logged: false,
             outbox: Vec::new(),
         }
     }
@@ -644,6 +651,26 @@ impl Kernel {
     pub fn with_skills(mut self, skills: crate::skills::SkillRegistry) -> Self {
         self.skills = skills;
         self
+    }
+
+    /// 注入项目指令（AGENTS.md 级联）。**重建系统提示词** ——
+    /// 指令是提示词的组成，不重建就不会真正进入请求。
+    pub fn with_instructions(mut self, ins: crate::instructions::Instructions) -> Self {
+        self.instructions = ins;
+        self.refresh_system_prompt();
+        self
+    }
+
+    /// 按当前指令重新拼系统提示词。**必须字节稳定**（提示词缓存命中的前提）：
+    /// 拼接顺序固定，不做任何基于内容的排序或格式化。
+    fn refresh_system_prompt(&mut self) {
+        let mut p = String::from("你是 NEO 的编码 agent。优先用工具核验事实，不要凭记忆断言。\n\n可用工具：\n");
+        p.push_str(&self.tools.render_prompt());
+        if !self.instructions.is_empty() {
+            p.push_str("\n\n");
+            p.push_str(&self.instructions.block);
+        }
+        self.system_prompt = p;
     }
     pub fn with_context_cap(mut self, messages: usize) -> Self {
         self.max_context_messages = messages;
@@ -686,6 +713,9 @@ impl Kernel {
     pub fn submit(&mut self, op: Op) -> Result<Vec<EventMsg>, KernelError> {
         self.outbox.clear();
         self.log("op", &op)?;
+        // 指令组成系统提示词（模型可见），必须在**第一次**请求前落盘。
+        // 只落一次：它每轮都进请求，逐轮重复落盘会把日志放大到无意义。
+        self.ensure_instructions_logged()?;
 
         match op {
             Op::UserTurn { text, refs } => {
@@ -1104,6 +1134,18 @@ impl Kernel {
                 }
                 "event" => {
                     match serde_json::from_value::<EventMsg>(rec.payload.clone()) {
+                        // 指令是系统提示词的组成，回放必须还原**当时**那一份，
+                        // 而不是重新读盘（AGENTS.md 可能已被改）。还原后重拼提示词，
+                        // 否则回放出的请求与真实请求系统提示词不一致。
+                        Ok(EventMsg::InstructionsLoaded { sources, block, truncated }) => {
+                            self.instructions = crate::instructions::Instructions {
+                                sources,
+                                block,
+                                truncated,
+                            };
+                            self.instructions_logged = true;
+                            self.refresh_system_prompt();
+                        }
                         Ok(EventMsg::UserSubmitted { text }) => {
                             rebuilt.push(Message::User(text));
                         }
@@ -1377,6 +1419,24 @@ impl Kernel {
     fn emit_and_log(&mut self, ev: &EventMsg) -> Result<(), KernelError> {
         self.outbox.push(ev.clone());
         self.log("event", ev)
+    }
+
+    /// 把项目指令（系统提示词的组成）落一次日志。
+    ///
+    /// 空指令不落 —— 发一条 `sources: []` 的事件只会让日志多一行噪音，
+    /// 而"没有指令"本就是默认状态。
+    fn ensure_instructions_logged(&mut self) -> Result<(), KernelError> {
+        if self.instructions_logged || self.instructions.is_empty() {
+            return Ok(());
+        }
+        let ev = EventMsg::InstructionsLoaded {
+            sources: self.instructions.sources.clone(),
+            block: self.instructions.block.clone(),
+            truncated: self.instructions.truncated,
+        };
+        self.emit_and_log(&ev)?;
+        self.instructions_logged = true;
+        Ok(())
     }
 
     /// 落盘。**任何模型可见内容都必须经过这里**，否则回放不成立。
