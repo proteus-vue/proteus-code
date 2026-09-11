@@ -832,6 +832,11 @@ pub struct Regions {
     /// 侧栏收起时的"把手"格子（列, 行，1 基）—— 点它展开侧栏。
     /// 没有它的话，鼠标用户一旦点收起就再也点不开了（陷阱）。
     pub sidebar_grip: Option<(usize, usize)>,
+    /// 设置页的可操作行：`(y 行号, 可操作序号)`。
+    ///
+    /// 只登记**可操作项**，与 `settings_cursor` 同一坐标空间 ——
+    /// 点击后直接复用 Enter 的分支，两条输入路径不会各算一套。
+    pub settings_rows: Vec<(usize, usize)>,
 }
 /// 居中的首屏片段（列由居中逻辑算，不用自己给）
 type Styled = (String, Tone);
@@ -1084,7 +1089,7 @@ impl Screen<'_> {
 
         // 设置视图：占满整屏
         if let Some(sections) = self.settings {
-            self.draw_settings(&mut g, sections);
+            self.draw_settings(&mut g, sections, &mut regions);
             g.fill_background(self.appearance.background, self.custom_background);
             let mut out = format!("{ESC}[H{ESC}[2J");
             out.push_str(&g.lines(&p).join("\r\n"));
@@ -1553,7 +1558,11 @@ impl Screen<'_> {
     }
 
     /// 设置视图：分节列出可配置项与只读项。
-    fn draw_settings(&self, g: &mut Grid, sections: &[SettingSection]) {
+    ///
+    /// `regions.settings_rows` 会登记可操作行的 y 坐标，供鼠标点击命中 ——
+    /// 与 `settings_cursor` 用同一坐标空间（只数可操作行），
+    /// 这样"点第 k 项"与"光标移到第 k 项再回车"必然作用于同一项。
+    fn draw_settings(&self, g: &mut Grid, sections: &[SettingSection], regions: &mut Regions) {
         // 标题
         let title = "设置";
         g.put(0, 2, title, Tone::Text);
@@ -1591,6 +1600,8 @@ impl Screen<'_> {
                 let actionable = r.action.is_some();
                 let selected = actionable && act == self.settings_cursor;
                 if actionable {
+                    // 登记行号 → 可操作序号（鼠标点击即用这个序号，等同于 Enter）
+                    regions.settings_rows.push((row, act));
                     act += 1;
                 }
                 // 光标只停在可操作行上；只读行用弱色 + 说明
@@ -3373,6 +3384,8 @@ enum MouseAction {
     FocusInput,
     /// 点到侧栏（切换显隐）
     ToggleSidebar,
+    /// 点到设置页第 N 个可操作项（N 与 `settings_cursor` 同一空间）
+    SettingsRow(usize),
 }
 
 /// 从当前事件流里的 PatchPreview 打开 diff 查看器。
@@ -3727,6 +3740,19 @@ fn hit_test(
         return None;
     }
 
+    // 设置页：点在可操作行上 → 执行该项（与 Enter 同一分支）。
+    // 排在弹窗之前判断也无妨：设置视图是独占的，不会与弹窗同时出现。
+    //
+    // `+ 1` 是必须的：`settings_rows` 存的是**网格行号（0 基）**，
+    // 而 `ev.y` 来自 SGR 鼠标序列，是**终端行号（1 基）**。
+    // 漏掉这个转换，点击会整体错一行（或永远不命中）——
+    // 与 `popup_items` 用同一约定，不要在这里另立一套。
+    for (y, idx) in &r.settings_rows {
+        if ev.y == *y + 1 {
+            return Some(MouseAction::SettingsRow(*idx));
+        }
+    }
+
     // 侧栏把手（收起状态下唯一能展开的鼠标入口）
     if let Some((gx, gy)) = r.sidebar_grip {
         if ev.x == gx && ev.y == gy {
@@ -3971,7 +3997,12 @@ where
         let (cols, rows) = terminal_size();
 
         // ── 设置视图：独占输入 ──────────────────────────────────────
-        if let Some(sections) = settings_state.as_ref() {
+        if settings_state.is_some() {
+            // 取一份**拥有所有权**的分节快照：本分支里会重新赋值 settings_state
+            // （关闭、或动作后刷新），持着 `as_ref()` 的借用就改不动它。
+            // 快照只有几十个小结构体，每帧一次的开销远小于一次终端重绘。
+            let sections = settings_state.clone().unwrap_or_default();
+            let sections = &sections;
             let screen = Screen {
                 cols,
                 rows,
@@ -3997,10 +4028,14 @@ where
                 appearance: current_appearance,
                 custom_background: custom_bg.as_ref(),
             };
-            write!(stdout, "{}", screen.render())?;
+            let (rendered, sregions) = screen.render_with_regions();
+            write!(stdout, "{rendered}")?;
             stdout.flush()?;
 
             let slots = settings_actionable(sections);
+            // 键盘与鼠标合成同一个"要执行第几项"，之后的执行逻辑只有一份 ——
+            // 两条输入路径各写一套分支，迟早会漂移出"点得到但回车不行"这类差异。
+            let mut activate: Option<usize> = None;
             match read_key_timeout(&mut stdin, 1) {
                 None => continue, // 超时：只在尺寸变化时由顶层判断
                 Some(k) => match k {
@@ -4008,6 +4043,15 @@ where
                     Key::Escape | Key::Char('q') => {
                         settings_state = None;
                         status = "已关闭设置".to_string();
+                    }
+                    // 鼠标点击可操作行 = 光标移过去 + 回车
+                    Key::Mouse(ev) => {
+                        if let Some(MouseAction::SettingsRow(idx)) =
+                            hit_test(&sregions, &ev, None, false)
+                        {
+                            settings_cursor = idx;
+                            activate = Some(idx);
+                        }
                     }
                     // 光标只在**可操作行**之间移动 —— 停在只读行上会让
                     // 用户以为按 enter 能改点什么。
@@ -4023,8 +4067,12 @@ where
                     Key::End | Key::Char('G') => {
                         settings_cursor = slots.len().saturating_sub(1)
                     }
-                    Key::Enter => {
-                        if let Some((si, ri)) = slots.get(settings_cursor).copied() {
+                    Key::Enter => activate = Some(settings_cursor),
+                    _ => {}
+                },
+            }
+            if let Some(activated) = activate {
+                if let Some((si, ri)) = slots.get(activated).copied() {
                             if let Some(action) =
                                 sections.get(si).and_then(|s| s.rows.get(ri)).and_then(|r| r.action)
                             {
@@ -4129,15 +4177,11 @@ current_appearance,
 custom_bg.is_some(),
                                     sessions,
                                 );
-                            }
-                        }
-                    }
-                    _ => {}
-                },
+                }
+            }
             }
             continue;
         }
-
 
         // ── 全屏 diff 查看器：独占输入 ──────────────────────────────
         if let Some(v) = diff_viewer.as_mut() {
@@ -4585,6 +4629,11 @@ custom_bg.is_some(),
             Key::Mouse(ev) => {
                 if let Some(act) = hit_test(&last_regions, &ev, popup_state.as_ref(), sidebar_open) {
                     match act {
+                        // 设置页是**独占输入**的分支（在它自己的循环里处理点击），
+                        // 主循环渲染时 `settings: None`，故 `settings_rows` 必为空、
+                        // 这个动作在此不可达。保留分支是为了让 match 穷尽 ——
+                        // 将来若有人把设置改成非独占，编译器会立刻提醒这里需要接线。
+                        MouseAction::SettingsRow(_) => {}
                         MouseAction::ScrollTranscript(up) => {
                             let body = rows
                                 .saturating_sub(chrome_rows(input.line_count()));
@@ -6935,6 +6984,78 @@ mod tests {
             hit_test(&r, &ev(mouse::Button::Left, x, y, true), None, true),
             Some(MouseAction::FocusInput)
         );
+    }
+
+    #[test]
+    fn clicking_a_settings_row_maps_to_that_exact_row() {
+        // 鼠标点击设置行必须命中**同一项**：命中用的序号与 settings_cursor
+        // 同一坐标空间，点第 k 项就该执行第 k 项（与 Enter 等价）。
+        let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
+            background: "stars".into(), logo: "large".into(), custom_background: false,
+            model_count: 3, session_count: 2,
+            version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
+            workspace: "/w".into(), branch: "".into(), session: "s".into(),
+            context_limit: 0, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 0, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let ed = editor::Editor::new();
+        let (_, r) = Screen {
+            cols: 140, rows: 40, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&about()), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            appearance: appearance::Appearance::default(), custom_background: None,
+        }
+        .render_with_regions();
+        let rows = settings_actionable(&secs);
+        assert_eq!(
+            r.settings_rows.len(),
+            rows.len(),
+            "每个可操作行都应有鼠标命中区"
+        );
+        for (y, idx) in &r.settings_rows {
+            assert!(
+                *idx < rows.len(),
+                "命中序号 {idx} 越界（可操作项 {n} 个）", n = rows.len()
+            );
+            // 关键：用**终端坐标**（1 基）去点，而不是网格行号。
+            // 上一版这里直接传 `*y`，与实现里漏掉 `+1` 的假设一致，
+            // 于是测试通过但真机点击永远错一行 —— 测试复刻了实现的错误假设，
+            // 等于没测。坐标契约必须按真实来源（SGR 是 1 基）来验。
+            assert_eq!(
+                hit_test(&r, &ev(mouse::Button::Left, 20, *y + 1, true), None, false),
+                Some(MouseAction::SettingsRow(*idx)),
+                "点击第 {} 行应命中第 {idx} 项",
+                *y + 1
+            );
+        }
+        // 只读行不该有命中区（点它不能触发任何动作）。
+        // 行号按 draw_settings 的真实布局算：起始 row=2，每节先空一行再标题（+2），
+        // 然后每行占一行。
+        let actionable_ys: Vec<usize> = r.settings_rows.iter().map(|(y, _)| *y).collect();
+        let mut ro_y = 2usize;
+        let mut readonly_ys: Vec<usize> = Vec::new();
+        for sec in &secs {
+            ro_y += 2; // 节前空行 + 节标题
+            for row in &sec.rows {
+                if row.action.is_none() {
+                    readonly_ys.push(ro_y);
+                }
+                ro_y += 1;
+            }
+        }
+        for y in &readonly_ys {
+            assert!(
+                !actionable_ys.contains(y),
+                "只读行 {y} 不该可点击"
+            );
+        }
+        assert!(!readonly_ys.is_empty(), "用例里应存在只读行，否则这条断言没意义");
     }
 
     #[test]
