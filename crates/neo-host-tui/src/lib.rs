@@ -2827,6 +2827,18 @@ pub struct SettingSection {
 #[derive(Debug, Clone)]
 pub struct SettingsInfo {
     pub version: String,
+    /// 二进制自身的构建时间（取自可执行文件 mtime），形如 `2026-09-11 17:45`。
+    ///
+    /// # 为什么需要它
+    ///
+    /// `version` 是编译期常量（`0.1.0`），**改了代码重编译它也不变**，
+    /// 于是"我跑的到底是哪一版"无法判断 —— 真实踩过：用户 PATH 里的 `neo`
+    /// 比源码旧了近一小时，设置页的行为与刚修好的代码不符，却看不出是旧二进制，
+    /// 白白怀疑了一遍修好的逻辑。
+    ///
+    /// 构建时间取自运行中二进制文件，所以**能直接暴露陈旧**：
+    /// 与源码 mtime 一比就知道该不该重装。
+    pub binary_built: String,
     pub model: String,
     pub mode: String,
     pub workspace: String,
@@ -2871,9 +2883,10 @@ pub fn settings_sections(info: &SettingsInfo) -> Vec<SettingSection> {
             rows: vec![
                 SettingRow {
                     label: "版本".into(),
-                    value: info.version.clone(),
+                    value: format!("{}  构建 {}", info.version, info.binary_built),
                     action: None,
-                    readonly_note: "编译期常量",
+                    // 说明为什么这一行能用来判断"我跑的是不是最新构建"
+                    readonly_note: "版本为编译期常量；构建时间取自二进制文件，源码更新需重装",
                 },
                 SettingRow {
                     label: "主题".into(),
@@ -3543,6 +3556,46 @@ fn apply_appearance(ap: &mut appearance::Appearance, eff: &Effect) -> Option<Str
     }
 }
 
+/// 运行中二进制文件的构建时间（mtime），形如 `2026-09-11 17:45`。
+///
+/// 取不到就返回 `"未知"` —— 不编一个假时间。这一项的存在意义是让
+/// **陈旧构建可见**：`version` 是编译期常量，改代码重编译也不会变，
+/// 于是"我跑的到底是哪一版"从界面上判断不出来（真实踩过：
+/// PATH 里的 neo 比源码旧近一小时，行为与刚修好的代码不符却查不出原因）。
+fn binary_build_time() -> String {
+    use std::time::UNIX_EPOCH;
+    let Ok(exe) = std::env::current_exe() else { return "未知".into() };
+    let Ok(meta) = std::fs::metadata(&exe) else { return "未知".into() };
+    let Ok(modified) = meta.modified() else { return "未知".into() };
+    let Ok(d) = modified.duration_since(UNIX_EPOCH) else { return "未知".into() };
+    format_unix_utc_minute(d.as_secs())
+}
+
+/// 把 Unix 秒格式化成 `YYYY-MM-DD HH:MM`（UTC，零依赖实现）。
+///
+/// 为什么不用 chrono：本项目刻意零外部依赖（"调试链要浅"）。
+/// 只需要"能比较新旧"这一点精度，不必引入日历库。
+fn format_unix_utc_minute(secs: u64) -> String {
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let (h, mi) = (rem / 3600, (rem % 3600) / 60);
+    // 民用历：从 1970-01-01 起逐月推进
+    let mut y = 1970i64;
+    let mut d = days as i64;
+    loop {
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let ylen = if leap { 366 } else { 365 };
+        if d < ylen { break; }
+        d -= ylen;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let ml = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0usize;
+    while d >= ml[m] { d -= ml[m]; m += 1; }
+    format!("{y:04}-{:02}-{:02} {h:02}:{mi:02}", m + 1, d + 1)
+}
+
 /// 组装设置视图的内容（**不动光标位置**）。
 ///
 /// 打开时与"动作后刷新"时都调它。光标不在这里复位是刻意的：
@@ -3587,6 +3640,7 @@ fn open_settings(
         logo: appearance.logo.as_str().to_string(),
         custom_background: has_custom_bg,
         version: about.version.clone(),
+        binary_built: binary_build_time(),
         model: about.model.clone(),
         mode: about.mode_short.clone(),
         workspace: about.workspace.clone(),
@@ -6478,7 +6532,7 @@ mod tests {
         background: "stars".into(), logo: "large".into(), custom_background: false,
         model_count: 3,
         session_count: 2,
-            version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
+            version: "0.1.0".into(), binary_built: "test".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
             context_limit: 64_000, theme: "neo".into(),
             details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
@@ -6499,7 +6553,7 @@ mod tests {
         background: "stars".into(), logo: "large".into(), custom_background: false,
         model_count: 3,
         session_count: 2,
-            version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
+            version: "0.1.0".into(), binary_built: "test".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
             context_limit: 64_000, theme: "neo".into(),
             details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
@@ -6537,7 +6591,7 @@ mod tests {
         background: "stars".into(), logo: "large".into(), custom_background: false,
         model_count: 3,
         session_count: 2,
-            version: "0.1.0".into(), model: "deepseek-chat".into(), mode: "default".into(),
+            version: "0.1.0".into(), binary_built: "test".into(), model: "deepseek-chat".into(), mode: "default".into(),
             workspace: "/Volumes/data1/work/office/debug/proteus-code".into(),
             branch: "main".into(), session: "neo-tui".into(),
             context_limit: 64_000, theme: "neo".into(),
@@ -6575,7 +6629,7 @@ mod tests {
             background: "stars".into(), logo: "large".into(), custom_background: false,
             model_count: 3,
             session_count: 2,
-            version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
+            version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
             details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
@@ -6626,7 +6680,7 @@ mod tests {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
             model_count: 3, session_count: 2,
-            version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
+            version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
             details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
@@ -6659,7 +6713,7 @@ mod tests {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
             model_count: 3, session_count: 2,
-            version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
+            version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
             details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
@@ -6700,7 +6754,7 @@ mod tests {
         background: "stars".into(), logo: "large".into(), custom_background: false,
         model_count: 3,
         session_count: 2,
-            version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
+            version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
             details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
@@ -6994,7 +7048,7 @@ mod tests {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
             model_count: 3, session_count: 2,
-            version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
+            version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
             details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
@@ -7056,6 +7110,20 @@ mod tests {
             );
         }
         assert!(!readonly_ys.is_empty(), "用例里应存在只读行，否则这条断言没意义");
+    }
+
+    #[test]
+    fn unix_seconds_format_to_civil_date() {
+        // 手写日历换算最容易错在闰年与月长，用几个已知点钉住。
+        assert_eq!(format_unix_utc_minute(0), "1970-01-01 00:00");
+        // 2026-09-11 17:45:00 UTC
+        assert_eq!(format_unix_utc_minute(1_789_148_700), "2026-09-11 17:45");
+        // 闰日：2024-02-29 12:00:00 UTC
+        assert_eq!(format_unix_utc_minute(1_709_208_000), "2024-02-29 12:00");
+        // 非闰年 3 月 1 日（2 月只有 28 天）
+        assert_eq!(format_unix_utc_minute(1_709_251_200), "2024-03-01 00:00");
+        // 世纪闰年规则：2000-02-29
+        assert_eq!(format_unix_utc_minute(951_782_400), "2000-02-29 00:00");
     }
 
     #[test]
