@@ -24,6 +24,22 @@ impl Default for Config {
     }
 }
 
+/// 协议层的 `SessionPatch` → 配置层的 `ConfigPatch`。
+///
+/// 为什么要这道转换而不是直接用一个类型：**协议层是线协议，配置层是本地策略**。
+/// 两者合并会让线协议随配置项演进而频繁变更版本 —— 那正是 T2（协议确定性）
+/// 最怕的。转换函数把"wire 能改什么"与"本地能配什么"显式分开。
+impl From<dsh_protocol::SessionPatch> for ConfigPatch {
+    fn from(p: dsh_protocol::SessionPatch) -> Self {
+        Self {
+            model: p.model,
+            exec_mode: p.exec_mode,
+            sandbox_mode: p.sandbox_mode,
+            approval_policy: p.approval_policy,
+        }
+    }
+}
+
 /// 后置层覆盖前置层
 pub fn merge(base: Config, over: ConfigPatch) -> Config {
     Config {

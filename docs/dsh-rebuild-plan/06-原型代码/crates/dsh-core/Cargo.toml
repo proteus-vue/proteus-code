@@ -13,3 +13,7 @@ dsh-session = { path = "../dsh-session" }
 dsh-config = { path = "../dsh-config" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+dsh-mock = { path = "../dsh-mock" }
+dsh-capability = { path = "../dsh-capability" }

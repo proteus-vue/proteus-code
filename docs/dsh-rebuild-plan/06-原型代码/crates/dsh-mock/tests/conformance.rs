@@ -7,13 +7,15 @@
 //! 测的是**语义契约**（幂等/顺序/错误语义/能力边界），不是实现细节。
 
 use dsh_core::{
-    HostBackend, ModelProvider, SandboxBackend, SandboxOutcome, SessionPersistence, Tool,
+    CallKind, HostBackend, ModelProvider, SandboxBackend, SandboxOutcome, SessionPersistence, Tool,
+    ToolCtx,
 };
 use dsh_host_desktop::DesktopHost;
 use dsh_mock::{
     BrittleHost, InMemoryPersistence, LeakySandbox, MockHost, MockModelProvider, MockTool,
     NamelessTool, NoopSandbox, ScriptedModelProvider, TamperingPersistence,
 };
+use std::sync::Arc;
 use dsh_protocol::SandboxMode;
 use serde_json::json;
 
@@ -78,12 +80,20 @@ fn host_contract_rejects_a_brittle_backend() {
 
 /// 契约：写入什么、读回什么，顺序与内容都不变。
 fn assert_persistence_contract(mut p: Box<dyn SessionPersistence>) {
-    let events = [r#"{"a":1}"#, r#"{"b":2}"#, r#"{"c":3}"#];
-    for e in events {
-        p.append(e).expect("append 不应失败");
+    let payloads = [
+        serde_json::json!({"a": 1}),
+        serde_json::json!({"b": 2}),
+        serde_json::json!({"c": 3}),
+    ];
+    for v in &payloads {
+        p.append("event", v.clone()).expect("append 不应失败");
     }
     let loaded = p.load().expect("load 不应失败");
-    assert_eq!(loaded, events, "append-only 被破坏：读回的内容与写入不一致");
+    assert_eq!(loaded.len(), payloads.len(), "append-only 被破坏：条数不一致");
+    for (i, r) in loaded.iter().enumerate() {
+        assert_eq!(r.payload, payloads[i], "第 {i} 条内容被改写");
+        assert_eq!(r.seq, (i + 1) as u64, "seq 必须从 1 严格递增");
+    }
 }
 
 #[test]
@@ -152,9 +162,11 @@ fn sandbox_contract_catches_leaky_backend() {
 
 /// 契约：同一输入必得同一输出（否则 Op→Event 回放不确定）。
 fn assert_model_contract(m: &dyn ModelProvider) {
-    let a = m.complete("hello world");
-    let b = m.complete("hello world");
-    assert_eq!(a, b, "模型后端不确定：同输入得到不同输出，破坏 T2 可回放性");
+    use dsh_core::ModelRequest;
+    let req = ModelRequest { system: "sys".into(), messages: Vec::new(), tools: Vec::new() };
+    let a: Vec<_> = m.stream(&req).collect();
+    let b: Vec<_> = m.stream(&req).collect();
+    assert_eq!(a, b, "模型后端不确定：同请求得到不同增量序列，破坏 T2 可回放性");
     assert!(!m.name().is_empty(), "后端必须有名字（用于错误定位）");
 }
 
@@ -162,7 +174,7 @@ fn assert_model_contract(m: &dyn ModelProvider) {
 fn model_contract_holds_for_every_backend() {
     // 同一份契约，跑两个**行为不同**的后端。
     assert_model_contract(&MockModelProvider);
-    assert_model_contract(&ScriptedModelProvider::new("canned"));
+    assert_model_contract(&ScriptedModelProvider::text_only("canned"));
 }
 
 // ─────────────── Tool：契约（名/描述/健壮性）───────────────
@@ -172,9 +184,15 @@ fn model_contract_holds_for_every_backend() {
 fn assert_tool_contract(tool: &dyn Tool) {
     assert!(!tool.name().is_empty(), "工具名为空 —— 模型无法调用它");
     assert!(!tool.describe().is_empty(), "工具描述为空 —— 模型不知道何时用它");
-    // 畸形参数：不得 panic
-    let _ = tool.execute(&json!({"unexpected": [1, 2, 3]}));
-    let _ = tool.execute(&json!(null));
+    // 分类必须可判定（不 panic，且是合法类别）
+    let kind = tool.call_kind(&json!({"unexpected": [1, 2, 3]}));
+    assert!(matches!(kind, CallKind::Read | CallKind::Write | CallKind::Network | CallKind::Interactive),
+        "call_kind 必须返回合法类别");
+    // 畸形参数：不得 panic（工具需自担参数校验）
+    let sandbox = Arc::new(NoopSandbox);
+    let ctx = ToolCtx { sandbox: sandbox.as_ref(), mode: dsh_protocol::SandboxMode::DangerFullAccess, cwd: "/tmp".into() };
+    let _ = tool.execute(&json!({"unexpected": [1, 2, 3]}), &ctx);
+    let _ = tool.execute(&json!(null), &ctx);
 }
 
 #[test]

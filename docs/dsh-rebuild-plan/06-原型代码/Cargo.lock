@@ -34,7 +34,9 @@ dependencies = [
 name = "dsh-core"
 version = "0.1.0"
 dependencies = [
+ "dsh-capability",
  "dsh-config",
+ "dsh-mock",
  "dsh-platform",
  "dsh-protocol",
  "dsh-sandbox",
