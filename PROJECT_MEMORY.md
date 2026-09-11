@@ -393,6 +393,66 @@ rosepine / tokyonight / catppuccin，色值取自 opencode 主题文件的 dark 
 
 ---
 
+## 4.16 审批不能是"盲批"：diff 预览与任务清单
+
+### (a) 发现了一个"定义了却从没发过"的事件
+审计对齐度时 grep 协议层，发现 `EventMsg::PatchProposed` 定义了、
+`neo-exec` 也写了渲染分支，但**内核从来没发出过它**。
+后果是审批时只显示"写入类调用需确认" —— 用户不知道改哪个文件、改了什么，
+实质是盲批。opencode 的权限弹窗会渲染 diff。
+
+修法分三处，**职责边界是重点**：
+- 工具侧 `Tool::preview(args) -> Option<(path, diff)>`：只有工具知道
+  自己的参数怎么变成改动，内核不该解析工具特有的参数格式；
+- 内核在 `GateDecision::Ask` 之前调 `preview`，发出 `PatchProposed`；
+- 宿主渲染。`Fact::PatchPreview` 与 `ApprovalNeeded` **分开建模**：
+  一个是"需要你决定"，一个是"你要决定的内容"，合并会让网络类审批无法表达。
+
+### (b) diff 生成必须内存有界
+朴素 LCS 的 DP 是 O(n×m)：两个 4000 行文件要 1600 万格，足以拖垮进程。
+`neo-capability/src/diff.rs` 三层防护：
+1. 先剥公共前缀/后缀 —— 常见情形（大文件小改动）根本不进 DP；
+2. 中间段乘积超限就不对齐，退化为"N 删/M 增"；
+3. hunk 数上限 + 每 hunk 只留 3 行上下文。
+超限一律如实标注"以上为节选" —— 静默截断会让用户以为"就这么点改动"。
+
+### (c) 任务清单：又一个"工具声明、内核转发"
+opencode 有 todo 面板（`[✓]/[•]/[ ]`）。我们本来没有 todo 概念，本轮补上。
+关键设计是 `Tool::report(args) -> Vec<EventMsg>`，与 `preview` **对称**：
+preview 是"执行前给用户看什么"，report 是"执行后向宿主声明什么"。
+都由工具决定，内核只转发 —— 内核不需要知道 `todowrite` 的 items 长什么样。
+清单用**整表替换**而非增量：模型每次给完整清单，宿主不必维护差量状态，
+也就不会出现"某步增量丢了导致清单错乱"。
+
+### (d) 诚实缺口（为什么这些**没有**对齐）
+opencode 有 21 个 dialog 组件。逐个核对后，**大部分对我们不适用**，
+因为它们选择的对象我们还没有：
+
+| opencode dialog | 为什么没做 |
+|---|---|
+| dialog-model / dialog-provider / dialog-variant | 多模型切换需多 provider 注册表 + 变体，我们只有 single provider |
+| dialog-session-list / rename / move | 多会话管理（列表/改名/迁移）我们没有 |
+| dialog-agent / dialog-skill | 多 Agent / Skill 注册表我们没有 |
+| dialog-mcp / dialog-debug / dialog-console-org | MCP、调试台、组织账号我们没有 |
+| dialog-workspace-* | 多工作区/worktree 我们没有 |
+| dialog-stash / dialog-tag / dialog-timeline / undo / redo / share | 依赖 git 快照、分享服务、时间线回退 |
+
+**做了一个**：`dialog-help` / `dialog-status` 对应的 `/help` `/keys` `/status`
+信息屏（已实现）。以及 `dialog-theme-list` 对应的主题选择（已实现）。
+
+判断标准很简单：**dialog 是"选择器"，得先有可选项**。
+没有多模型却做模型选择器，只会得到一个永远只有一项的假对话框。
+这比不做更糟 —— 用户会以为功能坏了。
+
+其余已知未对齐（真实缺口，非"不适用"）：
+- **markdown 语法高亮 / 代码块着色**：我们按纯文本渲染助手回复
+- **鼠标支持**（点击/选择/滚轮）：我们只处理键盘
+- **输入框内的内联高亮**（`@file` 显示为彩色 chip）：opencode 用 extmark
+- **vim 编辑模式 / 多行输入框**：我们是单行输入
+- **`/undo` `/redo`**：需要 git 快照集成
+
+---
+
 ## 5. 假通过：门禁与测试各抓到过一次自己
 
 这两次都值得记，因为它们说明"看起来有保护"有多危险：
@@ -426,7 +486,7 @@ rosepine / tokyonight / catppuccin，色值取自 opencode 主题文件的 dark 
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 165 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo test --workspace      # 176 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫）
 ```
 

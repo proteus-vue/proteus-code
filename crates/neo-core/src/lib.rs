@@ -204,6 +204,23 @@ pub trait Tool: Send + Sync {
     /// 本工具在**给定参数下**的语义类别。参数可影响分类
     /// （bash 的 `cat` 是读、`rm` 是写）。
     fn call_kind(&self, args: &Value) -> CallKind;
+    /// 执行前可展示的改动预览（路径, diff）。
+    ///
+    /// 为什么放在工具而不是内核：**只有工具知道自己的参数怎么变成改动**。
+    /// 内核只负责"要审批时先把预览发给宿主"，不解析任何工具特有的参数格式。
+    /// 默认 `None` —— 不改文件的工具（bash/grep）无需实现。
+    fn preview(&self, _args: &Value) -> Option<(String, String)> {
+        None
+    }
+    /// 执行后要公告的事件（如 `todowrite` 更新任务清单）。
+    ///
+    /// 与 `preview` 对称：preview 是"执行前给用户看什么"，
+    /// report 是"执行后要向宿主声明什么"。都由**工具**决定 ——
+    /// 只有它知道自己的参数意味着什么状态变化；内核只负责转发。
+    /// 默认空：绝大多数工具不产生协议事件。
+    fn report(&self, _args: &Value) -> Vec<EventMsg> {
+        Vec::new()
+    }
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput;
 }
 
@@ -767,6 +784,15 @@ impl Kernel {
                     });
                 }
                 GateDecision::Ask { detail } => {
+                    // 审批前先给**改动的具体内容**：只说"写入类调用需确认"，
+                    // 用户是在盲批 —— 不知道改哪个文件、改了什么。
+                    // 预览由工具提供（只有它知道参数怎么变成改动），内核只转发。
+                    if let Some(tool) = self.tools.get(&call.name) {
+                        if let Some((path, diff)) = tool.preview(&call.arguments) {
+                            let ev = EventMsg::PatchProposed { path, diff };
+                            self.emit_and_log(&ev)?;
+                        }
+                    }
                     // 确定性 id：由 (turn, step, index) 派生，不用随机/时钟
                     let id = format!("approval-{}-{}-{}", self.turn_counter, self.step_counter, index);
                     let ev = EventMsg::ApprovalRequest { id: id.clone(), detail };
@@ -831,6 +857,13 @@ impl Kernel {
                 truncated: false,
             },
         };
+        // 工具声明的"运行后公告"（如任务清单更新）先于结束事件发出 ——
+        // 顺序对宿主有意义：先看到清单变化，再看到调用结束。
+        if let Some(tool) = self.tools.get(&call.name) {
+            for ev in tool.report(&call.arguments) {
+                self.emit_and_log(&ev)?;
+            }
+        }
         let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: output.exit_code };
         self.emit_and_log(&ev)?;
         self.messages.push(Message::ToolResult {

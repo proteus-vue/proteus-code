@@ -47,6 +47,8 @@ pub enum Action {
     Help,
     /// 显示键位
     Keys,
+    /// 显示状态（模型/沙箱/工作区/分支/主题/工具）
+    Status,
 }
 
 /// 全部可用命令。顺序即 `/` 列表的展示顺序（高频在前）。
@@ -109,6 +111,39 @@ Neo —— 编程 Agent 内核
   ctrl+l       清屏
   esc          关闭弹窗
   ctrl+c       退出"
+}
+
+/// 状态屏正文由宿主在运行时拼（数据来自 About）。
+pub fn status_text(a: &crate::About, theme_name: &str) -> String {
+    format!(
+        "\
+运行状态
+
+  版本      {}
+  模型      {}
+  档位      {}
+  工作区    {}
+  分支      {}
+  会话      {}
+  主题      {}
+
+沙箱
+  模式      {}（OS 级强制；受限档位在无后端平台 fail-closed）
+  写入      fail-closed：无沙箱后端时拒绝执行，不降级放行
+
+能力
+  工具      bash / apply_patch / todowrite / 提问
+  未实现    L4 目标编排（/compact 依赖它）、多会话、多模型切换
+",
+        a.version,
+        a.model,
+        a.mode,
+        a.workspace,
+        if a.branch.is_empty() { "（不在 git 仓库）" } else { &a.branch },
+        a.session,
+        theme_name,
+        a.mode_short,
+    )
 }
 
 /// 键位表（`/keys`）。与 `help_text` 的按键段保持同源，避免两处各说一套。

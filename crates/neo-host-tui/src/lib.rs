@@ -1002,7 +1002,7 @@ impl Screen<'_> {
             };
             (format!("输入任务… 例：{ex}"), Tone::Muted)
         } else {
-            let prefix = if self.awaiting_input { "批准该调用？[y/n] > " } else { "> " };
+            let prefix = if self.awaiting_input { "y 批准 / n 拒绝 > " } else { "> " };
             (format!("{prefix}{}", self.input), Tone::Text)
         };
         g.put(top + 1, left + 2, &text, tone);
@@ -1147,6 +1147,59 @@ impl Screen<'_> {
                         (4, name.clone(), Tone::Text),
                         (after + 1, format!("exit {exit_code}"), Tone::Muted),
                     ]);
+                }
+                Fact::PatchPreview { path, diff } => {
+                    out.push(vec![(2, format!("◆ {path}"), Tone::Info)]);
+                    // diff 可能很长：只给前 DIFF_LINES 行，其余如实标注行数。
+                    // 静默截断会让用户以为"就这么点改动"。
+                    let all: Vec<&str> = diff.lines().collect();
+                    const DIFF_LINES: usize = 200;
+                    for l in all.iter().take(DIFF_LINES) {
+                        let (tone, text) = if l.starts_with("+++") || l.starts_with("---") {
+                            (Tone::Muted, l.to_string())
+                        } else if l.starts_with('+') {
+                            (Tone::Success, l.to_string())
+                        } else if l.starts_with('-') {
+                            (Tone::Error, l.to_string())
+                        } else if l.starts_with("@@") {
+                            (Tone::Accent, l.to_string())
+                        } else {
+                            (Tone::Muted, l.to_string())
+                        };
+                        for w in width::wrap_to_width(&text, inner) {
+                            out.push(vec![(4, w, tone)]);
+                        }
+                    }
+                    if all.len() > DIFF_LINES {
+                        out.push(vec![(
+                            4,
+                            format!("… 另有 {} 行改动未展示", all.len() - DIFF_LINES),
+                            Tone::Muted,
+                        )]);
+                    }
+                }
+                Fact::TodoList(items) => {
+                    // 对齐 opencode：完成 ✓ / 进行中 • / 待办 空格 三态
+                    let done = items
+                        .iter()
+                        .filter(|i| matches!(i.status, neo_protocol::TodoStatus::Completed))
+                        .count();
+                    out.push(vec![(
+                        2,
+                        format!("◇ 任务清单 {done}/{}", items.len()),
+                        Tone::Info,
+                    )]);
+                    for it in items {
+                        let (mark, tone) = match it.status {
+                            neo_protocol::TodoStatus::Completed => ("[✓]", Tone::Success),
+                            neo_protocol::TodoStatus::InProgress => ("[•]", Tone::Warning),
+                            neo_protocol::TodoStatus::Pending => ("[ ]", Tone::Muted),
+                        };
+                        let text = format!("{mark} {}", it.content);
+                        for w in width::wrap_to_width(&text, inner.saturating_sub(2)) {
+                            out.push(vec![(4, w, tone)]);
+                        }
+                    }
                 }
                 Fact::ApprovalNeeded { detail } => {
                     out.push(vec![(2, format!("△ 需要审批：{detail}"), Tone::Warning)]);
@@ -1402,6 +1455,8 @@ enum Effect {
     ClearTranscript,
     /// 打开主题选择弹窗（`/theme`）
     OpenThemePicker,
+    /// 显示状态屏（正文由运行时拼装）
+    ShowStatus,
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -1410,7 +1465,7 @@ fn apply_popup_item(
     input: &mut String,
     status: &mut String,
     theme_name: &mut theme::ThemeName,
-    info_screen: &mut Option<&'static str>,
+    info_screen: &mut Option<String>,
 ) -> Effect {
     match &item.action {
         popup::ItemAction::Insert(text) => {
@@ -1453,11 +1508,12 @@ fn apply_popup_item(
                 Effect::None
             }
             commands::Action::Help => {
-                *info_screen = Some(commands::help_text());
+                *info_screen = Some(commands::help_text().to_string());
                 Effect::None
             }
+            commands::Action::Status => Effect::ShowStatus,
             commands::Action::Keys => {
-                *info_screen = Some(commands::keys_text());
+                *info_screen = Some(commands::keys_text().to_string());
                 Effect::None
             }
             }
@@ -1518,7 +1574,7 @@ where
     // 弹窗（@ / / / 主题 / 面板）
     let mut popup_state: Option<popup::Popup> = None;
     // 只读信息屏（/help、/keys）：显示到用户按任意键
-    let mut info_screen: Option<&'static str> = None;
+    let mut info_screen: Option<String> = None;
     // 由命令/弹窗设置：请求退出主循环
     let mut should_quit = false;
 
@@ -1589,7 +1645,7 @@ where
         let (cols, rows) = terminal_size();
 
         // 信息屏（/help、/keys）：占据正文区，按任意键返回
-        if let Some(text) = info_screen {
+        if let Some(text) = info_screen.as_deref() {
             let body: Vec<Vec<Seg>> = text
                 .lines()
                 .map(|l| vec![(2usize, l.to_string(), Tone::Text)])
@@ -1710,6 +1766,12 @@ where
                                 status = "主题 · ↑↓ 选择，回车应用".to_string();
                                 popup_state = Some(tp);
                             }
+                            Effect::ShowStatus => {
+                                info_screen = Some(commands::status_text(
+                                    &about,
+                                    theme_name.as_str(),
+                                ));
+                            }
                             Effect::None => {}
                         }
                     }
@@ -1824,6 +1886,12 @@ where
                         match eff {
                             Effect::Quit => break,
                             Effect::ClearTranscript => events.clear(),
+                            Effect::ShowStatus => {
+                                info_screen = Some(commands::status_text(
+                                    &about,
+                                    theme_name.as_str(),
+                                ));
+                            }
                             // Tab 接受主题选择后不开新弹窗，直接生效即可
                             Effect::OpenThemePicker | Effect::None => {}
                         }
@@ -1910,6 +1978,12 @@ where
                                     tp.set_items(popup::theme_items(""), false);
                                     status = "主题 · ↑↓ 选择，回车应用".to_string();
                                     popup_state = Some(tp);
+                                }
+                                Effect::ShowStatus => {
+                                    info_screen = Some(commands::status_text(
+                                        &about,
+                                        theme_name.as_str(),
+                                    ));
                                 }
                                 Effect::None => {}
                             }
@@ -2187,7 +2261,7 @@ mod tests {
         let mut input = "/help".to_string();
         let mut status = String::new();
         let mut theme_name = theme::ThemeName::OpenCode;
-        let mut info: Option<&'static str> = None;
+        let mut info: Option<String> = None;
         let eff = apply_popup_item(&item, &mut input, &mut status, &mut theme_name, &mut info);
         assert!(input.is_empty(), "执行命令后输入应清空，实际 {input:?}");
         assert!(info.is_some(), "/help 应打开信息屏");
@@ -2205,7 +2279,7 @@ mod tests {
         let mut input = "@src/ma".to_string();
         let mut status = String::new();
         let mut theme_name = theme::ThemeName::OpenCode;
-        let mut info: Option<&'static str> = None;
+        let mut info: Option<String> = None;
         apply_popup_item(&item, &mut input, &mut status, &mut theme_name, &mut info);
         assert!(input.contains("@src/main.rs"), "引用应留在输入里，实际 {input:?}");
         assert!(!input.contains("ma@"), "不应重复叠加过滤词：{input:?}");
@@ -2233,7 +2307,8 @@ mod tests {
 
     #[test]
     fn info_screen_renders_the_help_text() {
-        let lines: Vec<Vec<Seg>> = commands::help_text()
+        let help = commands::help_text().to_string();
+        let lines: Vec<Vec<Seg>> = help
             .lines()
             .map(|l| vec![(2usize, l.to_string(), Tone::Text)])
             .collect();

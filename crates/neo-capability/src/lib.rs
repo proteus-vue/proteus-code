@@ -12,8 +12,10 @@
 //! [`ToolCtx::exec`]，而 `ToolCtx` 由内核注入并已绑定沙箱档位。
 //! 因此"工具绕过沙箱"在类型层面就不可能 —— 这是内核第 2 条铁律的落地点。
 
+pub mod diff;
+
 use neo_core::{CallKind, SandboxOutcome, Tool, ToolCtx, ToolRegistry};
-use neo_protocol::ToolOutput;
+use neo_protocol::{EventMsg, TodoEntry, TodoStatus, ToolOutput};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -129,6 +131,40 @@ impl Tool for ApplyPatchTool {
     // 无条件写：本工具的存在就是为了写。
     fn call_kind(&self, _args: &Value) -> CallKind { CallKind::Write }
 
+    /// 把"这次要改成什么"算出来给用户看。
+    ///
+    /// 复用与 `execute` 相同的组装规则（省略 old = 整文件写、给出 old = 精确替换），
+    /// 但**纯只读**：不落盘、不改任何状态。算不出改动（参数错、文件读不到）
+    /// 就返回 `None` —— 由 `execute` 给出准确错误，预览不必抢这份责任。
+    fn preview(&self, args: &Value) -> Option<(String, String)> {
+        let path_str = arg_str(args, "path")?;
+        let new = args.get("new").and_then(Value::as_str)?;
+        let old_text = args.get("old").and_then(Value::as_str);
+        let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+
+        let existing = std::fs::read_to_string(path_str).unwrap_or_default();
+        let after = match old_text {
+            None => new.to_string(),
+            Some(o) if o.is_empty() => return None,
+            Some(o) => {
+                let hits = count_occurrences(&existing, o);
+                if hits == 0 {
+                    return None;
+                }
+                if all {
+                    existing.replace(o, new)
+                } else {
+                    existing.replacen(o, new, 1)
+                }
+            }
+        };
+        let (diff, _truncated) = diff::unified_diff(&existing, &after, path_str);
+        if diff.is_empty() {
+            return None;
+        }
+        Some((path_str.to_string(), diff))
+    }
+
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput {
         let Some(path_str) = arg_str(args, "path") else {
             return fail("缺少参数 path");
@@ -219,6 +255,7 @@ pub fn register_defaults(reg: &mut ToolRegistry) {
     reg.register(Arc::new(BashTool));
     reg.register(Arc::new(ApplyPatchTool));
     reg.register(Arc::new(RequestUserInputTool));
+    reg.register(Arc::new(TodoWriteTool));
 }
 
 /// Subagent（对齐 ZCode：Markdown 定义 + 工具白名单）
@@ -229,3 +266,65 @@ pub struct SubagentSpec {
     pub tools: Vec<String>,
     pub body: String,
 }
+
+/// 任务清单工具（对齐 opencode 的 todo 面板）。
+///
+/// 模型用它自述"打算做哪几件事、现在做到哪"。它**不改变文件、不执行命令**，
+/// 因此是只读类调用，不需要审批 —— 只是把计划写下来。
+pub struct TodoWriteTool;
+
+impl Tool for TodoWriteTool {
+    fn name(&self) -> &str { "todowrite" }
+
+    fn describe(&self) -> String {
+        "todowrite(items): 记录任务清单。items 是数组，每项 {content, status}，         status ∈ pending|in_progress|completed。用于长任务中自述进度；         每次给**完整清单**（整表替换）。不修改文件。"
+            .into()
+    }
+
+    // 只记录意图，不触碰系统 → 只读类
+    fn call_kind(&self, _args: &Value) -> CallKind { CallKind::Read }
+
+    /// 清单通过协议事件公告给宿主（宿主据此渲染进度面板）。
+    fn report(&self, args: &Value) -> Vec<EventMsg> {
+        let Some(items) = args.get("items").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        let parsed: Vec<TodoEntry> = items
+            .iter()
+            .filter_map(|it| {
+                let content = it.get("content")?.as_str()?.to_string();
+                let status = match it.get("status").and_then(Value::as_str) {
+                    Some("completed") => TodoStatus::Completed,
+                    Some("in_progress") => TodoStatus::InProgress,
+                    _ => TodoStatus::Pending,
+                };
+                Some(TodoEntry { content, status })
+            })
+            .collect();
+        // 上限：清单是给人看的，过长就失去意义；也避免超大参数写进事件流
+        let capped: Vec<TodoEntry> = parsed.into_iter().take(MAX_TODOS).collect();
+        vec![EventMsg::TodoUpdated { items: capped }]
+    }
+
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput {
+        let n = args.get("items").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+        if n == 0 {
+            return ToolOutput {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: "缺少参数 items（应为数组）".into(),
+                truncated: false,
+            };
+        }
+        let _ = ctx;
+        ToolOutput {
+            exit_code: 0,
+            stdout: format!("已记录 {n} 项任务"),
+            stderr: String::new(),
+            truncated: false,
+        }
+    }
+}
+
+/// 任务清单最多记录多少项（超出部分不展示；见 `report`）。
+const MAX_TODOS: usize = 50;

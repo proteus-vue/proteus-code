@@ -137,6 +137,21 @@ pub enum ApprovalPolicy {
     Never,
 }
 
+/// 任务清单的一项（模型通过 `todowrite` 工具维护）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoEntry {
+    pub content: String,
+    pub status: TodoStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
 pub type ApprovalId = String;
 pub type GoalId = String;
 pub type SubmissionId = u64;
@@ -164,6 +179,11 @@ pub enum EventMsg {
     ApprovalRequest { id: ApprovalId, detail: String },
     PatchProposed { path: String, diff: String },
     CheckpointSaved { checkpoint_id: String },
+    /// 任务清单被更新（整表替换，不是增量）。
+    ///
+    /// 整表替换而非增量：模型每次给出完整清单，宿主不必维护差量状态，
+    /// 也就不会出现"某一步的增量丢了导致清单错乱"。
+    TodoUpdated { items: Vec<TodoEntry> },
     GoalProgress { goal_id: GoalId, done: usize, total: usize },
     Error { message: String },
     TurnComplete { input_tokens: u64, output_tokens: u64 },
@@ -200,6 +220,14 @@ pub enum Fact {
     ToolFinished { name: String, exit_code: i32 },
     /// 需要用户审批。
     ApprovalNeeded { detail: String },
+    /// 任务清单（模型自述的进度）。
+    TodoList(Vec<TodoEntry>),
+    /// 待审批改动的预览（路径 + unified diff）。
+    ///
+    /// 与 `ApprovalNeeded` 分开建模：一个是"需要你决定"，
+    /// 一个是"你要决定的内容是什么"。合并会让没有 diff 的审批
+    /// （如网络类）无法表达。
+    PatchPreview { path: String, diff: String },
     /// 出错。
     Failed(String),
     /// 一轮结束（含用量）。
@@ -242,10 +270,14 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
                     .unwrap_or_default();
                 out.push(Fact::ToolFinished { name, exit_code: *exit_code })
             }
+            EventMsg::PatchProposed { path, diff } => {
+                out.push(Fact::PatchPreview { path: path.clone(), diff: diff.clone() })
+            }
             EventMsg::ApprovalRequest { detail, .. } => {
                 out.push(Fact::ApprovalNeeded { detail: detail.clone() })
             }
             EventMsg::UserSubmitted { text } => out.push(Fact::UserSaid(text.clone())),
+            EventMsg::TodoUpdated { items } => out.push(Fact::TodoList(items.clone())),
             EventMsg::Error { message } => out.push(Fact::Failed(message.clone())),
             EventMsg::TurnComplete { input_tokens, output_tokens } => {
                 out.push(Fact::TurnFinished {

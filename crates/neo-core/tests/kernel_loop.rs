@@ -426,3 +426,115 @@ fn shell_op_missing_argument_fails_loudly() {
     // 沙箱仍会被调用（空命令由 shell 自己处理），但事件必须完整闭合
     assert!(events.iter().any(|e| matches!(e, EventMsg::ToolCallEnd { .. })), "必须有结束事件");
 }
+
+// ─────────────── 审批前的改动预览 ───────────────
+
+/// 一个会声明 preview 的假工具：用于断言"审批前先发 PatchProposed"。
+struct PreviewTool;
+
+impl Tool for PreviewTool {
+    fn name(&self) -> &str { "apply_patch" }
+    fn describe(&self) -> String { "apply_patch".into() }
+    fn call_kind(&self, _a: &Value) -> CallKind { CallKind::Write }
+    fn preview(&self, _a: &Value) -> Option<(String, String)> {
+        Some(("a.txt".into(), "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n".into()))
+    }
+    fn execute(&self, _a: &Value, _c: &ToolCtx) -> ToolOutput {
+        ToolOutput { exit_code: 0, stdout: "ok".into(), stderr: String::new(), truncated: false }
+    }
+}
+
+#[test]
+fn approval_emits_the_patch_preview_before_asking() {
+    // 只说"写入类调用需确认"等于让用户盲批；必须先把改了什么给他看。
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(PreviewTool));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(vec![
+            vec![tool_call("c1", "apply_patch", serde_json::json!({}))],
+            vec![ModelDelta::Text("done".into())],
+        ])),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default, // OnRequest：写要问
+    );
+    let events = k.submit(Op::UserTurn { text: "改文件".into(), refs: vec![] }).unwrap();
+
+    let patch_at = events.iter().position(|e| matches!(e, EventMsg::PatchProposed { .. }));
+    let ask_at = events.iter().position(|e| matches!(e, EventMsg::ApprovalRequest { .. }));
+    let patch_at = patch_at.expect("审批前应发出 PatchProposed（含 diff）");
+    let ask_at = ask_at.expect("写操作应请求审批");
+    assert!(patch_at < ask_at, "预览必须**先于**审批请求发出（否则用户看不到就已被问）");
+
+    if let EventMsg::PatchProposed { path, diff } = &events[patch_at] {
+        assert_eq!(path, "a.txt");
+        assert!(diff.contains("-old") && diff.contains("+new"), "预览应含具体改动：{diff}");
+    }
+}
+
+#[test]
+fn a_read_only_tool_emits_no_patch_preview() {
+    // 只读调用不该弹出 diff（否则每次读文件都有一段无意义预览）
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(MockTool::new("read")));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(vec![
+            vec![tool_call("c1", "read", serde_json::json!({}))],
+            vec![ModelDelta::Text("done".into())],
+        ])),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    let events = k.submit(Op::UserTurn { text: "读".into(), refs: vec![] }).unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(e, EventMsg::PatchProposed { .. })),
+        "只读调用不该有改动预览"
+    );
+}
+
+// ─────────────── 工具声明的"运行后公告" ───────────────
+
+/// 声明 report 的假工具：模拟 todowrite。
+struct ReportingTool;
+
+impl Tool for ReportingTool {
+    fn name(&self) -> &str { "todowrite" }
+    fn describe(&self) -> String { "todowrite".into() }
+    fn call_kind(&self, _a: &Value) -> CallKind { CallKind::Read }
+    fn report(&self, _a: &Value) -> Vec<EventMsg> {
+        vec![EventMsg::TodoUpdated {
+            items: vec![neo_protocol::TodoEntry {
+                content: "写测试".into(),
+                status: neo_protocol::TodoStatus::InProgress,
+            }],
+        }]
+    }
+    fn execute(&self, _a: &Value, _c: &ToolCtx) -> ToolOutput {
+        ToolOutput { exit_code: 0, stdout: "ok".into(), stderr: String::new(), truncated: false }
+    }
+}
+
+#[test]
+fn tool_reported_events_are_logged_before_the_call_ends() {
+    // 先看到清单变化、再看到调用结束 —— 顺序对宿主渲染有意义
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(ReportingTool));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(vec![
+            vec![tool_call("c1", "todowrite", serde_json::json!({}))],
+            vec![ModelDelta::Text("done".into())],
+        ])),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    let events = k.submit(Op::UserTurn { text: "记清单".into(), refs: vec![] }).unwrap();
+    let todo_at = events.iter().position(|e| matches!(e, EventMsg::TodoUpdated { .. }));
+    let end_at = events
+        .iter()
+        .position(|e| matches!(e, EventMsg::ToolCallEnd { .. }));
+    let todo_at = todo_at.expect("工具声明的 TodoUpdated 应被转发");
+    let end_at = end_at.expect("应有 ToolCallEnd");
+    assert!(todo_at < end_at, "清单事件应先于调用结束");
+}

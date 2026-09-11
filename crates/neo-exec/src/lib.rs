@@ -123,6 +123,10 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
         let line = match e {
             // 用户消息也进转录：无头输出应能看出"当时问的是什么"
             EventMsg::UserSubmitted { text } => Some(format!("> {text}")),
+            EventMsg::TodoUpdated { items } => {
+                let done = items.iter().filter(|i| matches!(i.status, neo_protocol::TodoStatus::Completed)).count();
+                Some(format!("[todo] {done}/{} 完成", items.len()))
+            }
             EventMsg::TurnStarted { .. } => Some("[turn] 开始".to_string()),
             EventMsg::AgentMessageDelta { delta } => Some(delta.clone()),
             EventMsg::AgentMessageDone { .. } => None, // 增量已输出，避免重复
