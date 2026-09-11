@@ -20,23 +20,29 @@
 | `SandboxBackend` 真实后端（macOS Seatbelt） | ✅ **已实现**，6 项**真机**越权拦截测试 |
 | `SessionPersistence` 真实后端（JSONL append-only） | ✅ **已实现**，重开续号已验证 |
 | `neo exec` 无头宿主（端到端闭环） | ✅ **已实现**，离线 + 真实 provider 双路径跑通 |
-| `neo tui` 终端宿主（交互式，含审批应答） | ✅ **已实现**，真终端验证（pty 驱动） |
-| **T6 宿主语义等价**（同一事件流多宿主比对） | ✅ **铁律生效**：headless / TUI / desktop 事实完全等价 |
+| `neo tui` 终端宿主（交互式，含审批应答、历史/模糊补全/CJK 宽度） | ✅ **已实现**，真终端验证（pty 驱动） |
+| `neo serve` Web 宿主（浏览器界面 + SSE 事件流 + 审批） | ✅ **已实现**，端到端验证（订阅→提交→审批→真落盘） |
+| **T6 宿主语义等价**（同一事件流多宿主比对） | ✅ **铁律生效**：headless / TUI / desktop / **web** 四宿主事实完全等价 |
 | Shell 工具真实执行（经沙箱） | ✅ **已实现**（`bash` 真跑，输出受限） |
 | **真实模型完整推理** | ⚠️ **待验**：HTTP 链路已验证，但环境里的 `DEEPSEEK_API_KEY` 是占位符，未完成一次真实推理 |
-| `apply_patch` 落盘 | ❌ **未实现**（契约与分类已定，明确返回未实现而非假装成功） |
-| Desktop / Web 宿主 | ❌ **未实现**（契据 `HostBackend` 已定；`exec` 与 `tui` 是前两个真实宿主） |
+| `apply_patch` 落盘 | ✅ **已实现**（经 `ctx.write_file` 走沙箱，唯一匹配校验，真机验证落盘） |
+| Web 宿主（零依赖 HTTP + SSE） | ✅ **已实现**（`dsh-host-web`；`POST /api/turn` 提交、`GET /api/events` SSE、`/api/approve` 审批） |
+| Desktop 宿主（系统 webview 壳） | 🟡 **契据就绪**：`DesktopHost` 的 `HostBackend` 实现与 T6 覆盖已完成；wry window 层未接（原型阶段不拉入平台图形栈） |
 | Goal 编排（L4） | ❌ **未实现** |
 | Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |
 
-**一句话现状**：主循环 + 真实沙箱 + 真实模型链路 + 落盘**已闭环并跑通**；
-界面（TUI/Desktop/Web）与 `apply_patch` 落盘尚未实现。
+**一句话现状**：内核 + 真实沙箱 + 真实模型链路 + 落盘 + **三宿主（exec / TUI / Web）**
+已闭环并跑通，T6 宿主等价铁律在四宿主上生效；剩 Desktop 的系统 webview 窗口层与
+真实模型推理待验（后者卡在环境里的 key 是占位符）。
 
 ### 亲测可用
 
 ```bash
-# 交互式（TUI）：输入任务，写操作会问 y/n
+# 交互式（TUI）：输入任务，写操作会问 y/n；Ctrl+R 历史、Tab 补全 @ 引用
 neo tui --provider selftest --mode default
+
+# Web 宿主：浏览器打开 http://127.0.0.1:8787（SSE 实时事件流 + 页面内审批）
+neo serve --provider selftest --mode default
 
 # 离线跑通（不需要 API key）—— 验证装配 → 内核 → 沙箱 → 落盘
 cd /tmp && neo exec "列出文件" --provider mock --mode auto-edit
@@ -50,8 +56,8 @@ neo exec "用一句话回答 1+1" --mode plan
 
 ```bash
 # 需要 Rust（stable）
-cargo test --workspace     # 32 个测试：内核 16 + 内存 6 + SPI conformance 10
-cargo check --workspace    # 14 个 crate，零 unsafe、零 warning
+cargo test --workspace     # 109 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo check --workspace    # 17 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构守卫 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 测试
 ```
@@ -60,7 +66,7 @@ bash scripts/verify.sh     # 全套门禁：架构守卫 / 协议 / 会话 / 配
 
 ```
 proteus-code/                  ← 项目本体是 Rust 内核
-├── Cargo.toml                 workspace（14 crates）
+├── Cargo.toml                 workspace（17 crates）
 ├── crates/                    ★ 内核与宿主
 │   ├── dsh-protocol/          L0 线协议（Op / EventMsg / 双轴枚举），零业务依赖
 │   ├── dsh-sandbox/           L1 平台（命令包裹：Seatbelt / Landlock+bwrap / ACL）
@@ -70,7 +76,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 │   ├── dsh-orchestration/     L4 目标编排（Goal 引擎）
 │   ├── dsh-host-tui/          L5 宿主：终端
 │   ├── dsh-host-desktop/      L5 宿主：系统 webview（替代 Electron）
-│   ├── dsh-host-web/          L5 宿主：浏览器
+│   ├── dsh-host-web/          L5 宿主：浏览器（零依赖 HTTP + SSE，含内置页面）
 │   ├── dsh-exec/              L5 宿主：无头 / CI
 │   ├── dsh-cli/               `neo` 入口（multitool）
 │   ├── dsh-session/           会话真相源（append-only）
@@ -116,10 +122,10 @@ proteus-code/                  ← 项目本体是 Rust 内核
 
 | SPI | 语义定义 | 已实现后端 | conformance |
 |---|---|---|---|
-| `ModelProvider` | 换模型（流式增量，支持工具调用） | mock / scripted | ✅ |
-| `SandboxBackend` | 换沙箱实现 | mock ×2 | ✅ |
-| `SessionPersistence` | 换会话存储介质 | in-memory / tampering(反例) | ✅ |
-| `HostBackend` | 换宿主（TUI/Desktop/Web/Exec） | desktop / mock ×2 | ✅ |
+| `ModelProvider` | 换模型（流式增量，支持工具调用） | deepseek / scripted / mock ×2 | ✅ |
+| `SandboxBackend` | 换沙箱实现 | local(Seatbelt 真机) / mock ×2 | ✅ |
+| `SessionPersistence` | 换会话存储介质 | jsonl(真落盘) / in-memory / tampering(反例) | ✅ |
+| `HostBackend` | 换宿主（TUI/Desktop/Web/Exec） | desktop / tui / web / mock ×2 | ✅ 4 宿主 T6 等价 |
 | `Tool` | 加能力（Shell-First） | 3 内置 + mock ×4 | ✅ |
 
 **每个 SPI 都配了「坏后端」作为负向用例的被试** —— 一个不能被 conformance 抓住的

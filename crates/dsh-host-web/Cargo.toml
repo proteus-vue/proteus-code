@@ -9,3 +9,6 @@ license.workspace = true
 dsh-protocol = { path = "../dsh-protocol" }
 dsh-core = { path = "../dsh-core" }
 dsh-orchestration = { path = "../dsh-orchestration" }
+dsh-config = { path = "../dsh-config" }
+dsh-capability = { path = "../dsh-capability" }
+serde_json = { workspace = true }

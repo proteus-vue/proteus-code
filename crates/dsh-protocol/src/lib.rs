@@ -211,3 +211,62 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
     }
     out
 }
+
+/// 解析输入里的上下文引用：`@file` / `#session` / `/command` / `$skill`。
+///
+/// **为什么放在协议层而不是各宿主**：引用符号是界面约定，但解析结果
+/// `ContextRef`（"这是一个文件引用"）是协议语义。放在 L0 后，TUI / Desktop / Web
+/// 共用同一份解析，不会各自漂移出"某个宿主不识别 `$`"这类分叉。
+///
+/// 规则：符号后必须有非空目标（单独的 `@` 不算引用）；目标按空白切分，
+/// 因此路径带空格需由上层改用引号语法（当前版本不支持）。
+pub fn parse_refs(input: &str) -> Vec<ContextRef> {
+    let mut out = Vec::new();
+    for token in input.split_whitespace() {
+        let Some(first) = token.chars().next() else { continue };
+        let kind = match first {
+            '@' => RefKind::File,
+            '#' => RefKind::Session,
+            '/' => RefKind::Command,
+            '$' => RefKind::Skill,
+            _ => continue,
+        };
+        let target = &token[first.len_utf8()..];
+        if !target.is_empty() {
+            out.push(ContextRef { kind, target: target.to_string() });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_refs_maps_all_four_sigils() {
+        let refs = parse_refs("看下 @src/main.rs 和 #session-1 用 /compact 与 $skill-x");
+        assert_eq!(
+            refs,
+            vec![
+                ContextRef { kind: RefKind::File, target: "src/main.rs".into() },
+                ContextRef { kind: RefKind::Session, target: "session-1".into() },
+                ContextRef { kind: RefKind::Command, target: "compact".into() },
+                ContextRef { kind: RefKind::Skill, target: "skill-x".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_refs_ignores_lone_sigils_and_plain_words() {
+        assert!(parse_refs("hello @ world").is_empty(), "单独的 @ 不算引用");
+        assert!(parse_refs("plain text").is_empty());
+    }
+
+    #[test]
+    fn parse_refs_handles_multibyte_after_sigil() {
+        // 首字符是 ASCII 符号，但目标含多字节：不能用 len() 而非 len_utf8() 切片
+        let refs = parse_refs("@文件.txt");
+        assert_eq!(refs[0].target, "文件.txt");
+    }
+}

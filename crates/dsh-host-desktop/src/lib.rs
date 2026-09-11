@@ -16,18 +16,8 @@
 use dsh_core::{DiffSupport, HostBackend, HostCapabilities, ImageSupport};
 use dsh_protocol::{EventMsg, Fact};
 
-/// 桌面宿主的输入解析：复用 ZCode 的 @ / # / / / $ 引用体系。
-/// 与 TUI / Web 共享同一解析语义 —— 解析属**语义**，不属宿主实现。
-pub fn parse_refs(input: &str) -> Vec<(char, String)> {
-    let mut out = Vec::new();
-    for token in input.split_whitespace() {
-        let Some(first) = token.chars().next() else { continue };
-        if matches!(first, '@' | '#' | '/' | '$') && token.len() > 1 {
-            out.push((first, token[1..].to_string()));
-        }
-    }
-    out
-}
+/// 输入解析：与 TUI / Web 共用 L0 协议层的同一份实现（自造副本会漂移）。
+pub use dsh_protocol::parse_refs;
 
 pub struct DesktopHost { events: Vec<EventMsg> }
 

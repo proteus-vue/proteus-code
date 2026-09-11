@@ -19,6 +19,9 @@
 //! - 另装 `panic` hook，在 panic 前先还原
 //! - 保存 `stty -g` 的确切状态并原样写回（不是猜一个"合理默认"）
 
+pub mod input;
+pub mod width;
+
 use dsh_core::{HostBackend, HostCapabilities, DiffSupport, ImageSupport};
 use dsh_protocol::{EventMsg, Fact, facts_of};
 use std::io::{IsTerminal, Read, Write};
@@ -124,6 +127,12 @@ pub enum Key {
     ClearScreen,
     /// Ctrl+U 清空输入行
     ClearLine,
+    /// Ctrl+R 历史搜索
+    SearchHistory,
+    /// Ctrl+G 用 $EDITOR 编辑当前输入
+    ExternalEditor,
+    /// Tab：补全 `@` 文件引用
+    Tab,
     Up,
     Down,
     Left,
@@ -141,6 +150,9 @@ pub fn decode_key(bytes: &[u8]) -> Key {
         [0x03] | [0x04] => Key::Quit,
         [0x0c] => Key::ClearScreen,
         [0x15] => Key::ClearLine,
+        [0x12] => Key::SearchHistory,
+        [0x07] => Key::ExternalEditor,
+        [b'\t'] => Key::Tab,
         [b'\r'] | [b'\n'] => Key::Enter,
         [0x7f] | [0x08] => Key::Backspace,
         [0x1b, b'[', b'A'] => Key::Up,
@@ -256,7 +268,7 @@ impl Screen<'_> {
         }
         out.push_str("\r\n");
         // 状态栏
-        out.push_str(&format!("{DIM}{}{RESET}", truncate(self.status, self.cols)));
+        out.push_str(&format!("{DIM}{}{RESET}", width::truncate_to_width(self.status, self.cols)));
         out
     }
 
@@ -267,7 +279,7 @@ impl Screen<'_> {
             match f {
                 Fact::AssistantSaid(text) => {
                     for l in text.lines() {
-                        for w in wrap(l, cols.saturating_sub(2)) {
+                        for w in width::wrap_to_width(l, cols.saturating_sub(2)) {
                             lines.push(w);
                         }
                     }
@@ -295,36 +307,71 @@ impl Screen<'_> {
     }
 }
 
-/// 按显示宽度换行（**按字符数**，CJK 宽字符未按 2 列算 —— 诚实边界）。
-fn wrap(s: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![s.to_string()];
-    }
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    for ch in s.chars() {
-        cur.push(ch);
-        if cur.chars().count() >= width {
-            out.push(std::mem::take(&mut cur));
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    if out.is_empty() {
-        out.push(String::new());
-    }
+/// 用 `$EDITOR`（或 `$VISUAL`，再退到 vi）编辑一段文本，返回编辑结果。
+///
+/// 关键：**编辑期间必须还原终端** —— 外部编辑器要独占终端，
+/// 若仍处于原始模式，编辑器会看到"每敲一个字符就来一个按键"的怪状态。
+/// 因此这里显式 restore，编辑完再重新进入原始模式。
+pub fn edit_externally(initial: &str, raw: &RawMode) -> Option<String> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let path = std::env::temp_dir().join(format!("neo-tui-edit-{}.txt", std::process::id()));
+    std::fs::write(&path, initial).ok()?;
+
+    // 把终端交还给编辑器
+    raw.restore();
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} {}", path.display()))
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status();
+
+    // 无论编辑器成功与否，都要把终端抢回原始模式（否则后续按键读不到）
+    let _ = set_stty("raw -echo");
+
+    let out = match status {
+        Ok(s) if s.success() => std::fs::read_to_string(&path).ok(),
+        _ => None,
+    };
+    let _ = std::fs::remove_file(&path);
     out
 }
 
-fn truncate(s: &str, cols: usize) -> String {
-    if s.chars().count() <= cols {
-        return s.to_string();
+/// 把输入行里最后一个 `@片段` 替换成 `replacement`（`@` 后无空白的部分）。
+///
+/// 抽成纯函数：补全是"改用户正在输入的文字"，算错会让人莫名其妙
+/// （替换错位置、吃掉已有内容），故可单测。
+pub fn complete_at_token(input: &str, replacement: &str) -> String {
+    // 找最后一个 '@'，且其后不含空格（即当前正在输入的引用）
+    let Some(at) = input.rfind('@') else {
+        // 没有 @ 就当追加一个新引用
+        return format!("{input}@{replacement}");
+    };
+    let after = &input[at + 1..];
+    if after.contains(' ') {
+        // @ 之后已有空格 → 上一个引用已完成，追加新的
+        return format!("{input}@{replacement}");
     }
-    s.chars().take(cols.saturating_sub(1)).collect::<String>() + "…"
+    format!("{}@{replacement}", &input[..at])
 }
 
-/// 取一批事件里**最后一个**审批请求的 id。
+/// 取 @ 后面的当前查询串（用于过滤候选）。
+pub fn at_query(input: &str) -> Option<&str> {
+    let at = input.rfind('@')?;
+    let after = &input[at + 1..];
+    if after.contains(' ') {
+        None
+    } else {
+        Some(after)
+    }
+}
+
+/// 取一批事件里**最后一个**审批请求的 id。/// 取一批事件里**最后一个**审批请求的 id。
 ///
 /// 内核是严格顺序的（一次只有一个未决审批），所以取最后一个即可。
 /// 抽成纯函数是为了可单测：审批交互错了会让"需要审批"变成静默挂起。
@@ -335,7 +382,9 @@ pub fn latest_approval_id(events: &[EventMsg]) -> Option<String> {
     })
 }
 
-/// 审批应答的解析：接受 y/Y/yes 批准，n/N/no 拒绝，其它为 None（不提交）。
+/// 审批应答解析：y/Y/yes 批准，n/N/no 拒绝，其它为 None（**不提交**）。
+///
+/// 无法识别时不提交很重要：若把随机输入当"批准"，等于悄悄放水。
 pub fn parse_approval_answer(s: &str) -> Option<bool> {
     match s.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Some(true),
@@ -411,7 +460,12 @@ where
 
     let mut input = String::new();
     let mut events: Vec<EventMsg> = Vec::new();
-    let mut status = String::from("就绪 · 输入任务后回车 · Ctrl+C 退出");
+    let mut status = String::from("就绪 · Enter 提交 · Ctrl+R 历史 · Ctrl+G 编辑器 · @ 引用文件 · Ctrl+C 退出");
+    let mut history = input::History::default();
+    // 历史浏览态：Up/Down 在历史里移动时置位，一旦用户输入字符即退出该态
+    let mut browsing = false;
+    // 文件候选（首次按 @ 时惰性加载 —— 遍历文件系统不该在启动时做）
+    let mut file_cache: Option<Vec<String>> = None;
     // 未决审批：内核挂起后必须由用户应答，否则界面只是"显示"而无法推进。
     let mut outstanding: Option<String> = None;
 
@@ -441,11 +495,87 @@ where
                 write!(stdout, "{ESC}[2J{ESC}[H")?;
                 stdout.flush()?;
             }
-            Key::ClearLine => input.clear(),
+            Key::ClearLine => {
+                input.clear();
+                browsing = false;
+            }
             Key::Backspace => {
                 input.pop();
+                browsing = false;
             }
-            Key::Char(c) => input.push(c),
+            Key::Char(c) => {
+                input.push(c);
+                browsing = false;
+                history.reset_cursor();
+            }
+            Key::Up => {
+                // 输入为空或正在浏览历史时，Up 走历史
+                if input.is_empty() || browsing {
+                    if let Some(h) = history.prev() {
+                        input = h.to_string();
+                        browsing = true;
+                    }
+                }
+            }
+            Key::Down => {
+                if browsing {
+                    match history.next_entry() {
+                        Some(h) => input = h.to_string(),
+                        None => {
+                            input.clear();
+                            browsing = false;
+                        }
+                    }
+                }
+            }
+            Key::SearchHistory => {
+                // Ctrl+R：用当前输入当查询，回填最近一条匹配（再按继续往回找）
+                let needle = input.clone();
+                if let Some(found) = history.search(&needle) {
+                    let found = found.to_string();
+                    // 连续 Ctrl+R 时把游标往上挪一格，实现"继续找更早的"
+                    if found == input && !needle.is_empty() {
+                        let _ = history.prev();
+                    }
+                    input = found;
+                    status = format!("历史搜索：{needle}");
+                } else {
+                    status = format!("历史中未找到：{needle}");
+                }
+                browsing = true;
+            }
+            Key::ExternalEditor => {
+                let initial = input.clone();
+                if let Some(edited) = edit_externally(&initial, &raw) {
+                    // 编辑器返回的是一整段文本；取首行作为任务
+                    input = edited.trim().to_string();
+                    status = "已从外部编辑器取回内容".to_string();
+                } else {
+                    status = "外部编辑器未返回内容".to_string();
+                }
+                browsing = false;
+            }
+            Key::Tab => {
+                // Tab：补全 `@` 引用（只在 @ 上下文中生效）
+                if let Some(q) = at_query(&input) {
+                    if file_cache.is_none() {
+                        let (files, truncated) = input::list_files(&std::env::current_dir().unwrap_or_else(|_| ".".into()), 5000, 8);
+                        // 截断提示与补全结果合并成一句，避免前一句被后一句覆盖而丢失
+                        let suffix = if truncated { "（候选已达上限，列表可能不完整）" } else { "" };
+                        file_cache = Some(files);
+                        status = suffix.to_string();
+                    }
+                    let files = file_cache.as_deref().unwrap_or(&[]);
+                    let ranked = input::fuzzy_rank(q, files, 1);
+                    match ranked.first() {
+                        Some(best) => {
+                            input = complete_at_token(&input, best);
+                            status = format!("补全：{best}{}", status);
+                        }
+                        None => status = format!("无匹配文件：{q}"),
+                    }
+                }
+            }
             Key::Enter => {
                 let line = std::mem::take(&mut input);
 
@@ -483,6 +613,8 @@ where
                 if line.trim().is_empty() {
                     continue;
                 }
+                history.push(&line);
+                browsing = false;
                 status = format!("运行中 · {}", line.trim());
                 // 先画一帧，让用户看到自己提交了什么
                 let (c2, r2) = terminal_size();
@@ -548,13 +680,6 @@ mod tests {
         // 非法序列不得 panic，也不得产出错误字符
         assert_eq!(decode_key(&[0xe5, 0x86]), Key::Unknown, "不完整的 UTF-8 应为 Unknown");
         assert_eq!(decode_key(&[0xff, 0xfe]), Key::Unknown, "非法字节应为 Unknown");
-    }
-
-    #[test]
-    fn wrap_respects_width() {
-        let w = wrap("abcdefgh", 3);
-        assert_eq!(w, vec!["abc", "def", "gh"]);
-        assert_eq!(wrap("", 5), vec![""]);
     }
 
     #[test]

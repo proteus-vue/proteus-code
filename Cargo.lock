@@ -89,9 +89,12 @@ dependencies = [
 name = "dsh-host-web"
 version = "0.1.0"
 dependencies = [
+ "dsh-capability",
+ "dsh-config",
  "dsh-core",
  "dsh-orchestration",
  "dsh-protocol",
+ "serde_json",
 ]
 
 [[package]]
@@ -110,6 +113,7 @@ dependencies = [
  "dsh-core",
  "dsh-host-desktop",
  "dsh-host-tui",
+ "dsh-host-web",
  "dsh-protocol",
  "serde_json",
 ]

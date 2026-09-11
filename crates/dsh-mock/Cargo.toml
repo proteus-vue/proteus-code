@@ -16,3 +16,4 @@ serde_json = { workspace = true }
 [dev-dependencies]
 dsh-host-desktop = { path = "../dsh-host-desktop" }
 dsh-host-tui = { path = "../dsh-host-tui" }
+dsh-host-web = { path = "../dsh-host-web" }

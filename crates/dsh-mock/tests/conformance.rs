@@ -55,6 +55,7 @@ fn host_contract_holds_for_every_backend() {
     assert_host_contract(Box::new(MockHost::new("headless")));
     assert_host_contract(Box::new(DesktopHost::new()));
     assert_host_contract(Box::new(dsh_host_tui::TuiFacts::new()));
+    assert_host_contract(Box::new(dsh_host_web::WebFacts::new()));
 }
 
 #[test]
@@ -63,13 +64,16 @@ fn host_contract_compares_two_backends_on_the_same_stream() {
     let mut a = MockHost::new("headless");
     let mut b = dsh_host_tui::TuiFacts::new();
     let mut c = DesktopHost::new();
+    let mut d = dsh_host_web::WebFacts::new();
     for ev in shared_event_stream() {
         a.consume(&ev).unwrap();
         b.consume(&ev).unwrap();
         c.consume(&ev).unwrap();
+        d.consume(&ev).unwrap();
     }
     assert_eq!(a.facts(), b.facts(), "headless 与 TUI 的事实必须等价");
     assert_eq!(b.facts(), c.facts(), "TUI 与 desktop 的事实必须等价");
+    assert_eq!(c.facts(), d.facts(), "desktop 与 web 的事实必须等价");
 }
 
 /// 负向用例：坏宿主必须被契约抓住。
