@@ -1,0 +1,11 @@
+[package]
+name = "neo-providers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# L3 PROVIDER —— 服务商注册表：从**用户级** JSON 读出多个 OpenAI 兼容服务商
+[dependencies]
+neo-config = { path = "../neo-config" }
+serde = { workspace = true }
+serde_json = { workspace = true }

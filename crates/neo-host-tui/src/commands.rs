@@ -428,7 +428,9 @@ pub fn status_text(a: &crate::About, theme_name: &str) -> String {
 
 能力
   工具      bash / apply_patch / todowrite / 提问
-  未实现    Goal 目标编排（/goal 系列）、技能注册表、MCP 客户端
+  已实现    上下文引用（@file / $skill）、项目指令级联（AGENTS.md）、
+            上下文压缩（/compact）、多会话、服务商注册表（providers.json）
+  未实现    Goal 目标编排（/goal 系列）、MCP 客户端、桌面 webview 窗口层
 ",
         a.version,
         a.model,

@@ -95,6 +95,21 @@ def main():
     if not c4:
         fails.append("C4 32KiB 降级逻辑不符")
 
+    # C5 敏感键判定必须是**白名单**（未知即敏感），不是黑名单。
+    #
+    # 黑名单要把所有敏感键列全，漏一个就放行一个 —— 而且**将来新增的键默认放行**。
+    # 白名单漏一个只会更保守（项目级设置不生效，用户仍可在用户级设置）。
+    # 这里用一个"没人见过的键名"来验：它必须被判定为项目级不可设。
+    PROJECT_ALLOWED = {"model", "exec_mode", "sandbox_mode", "approval_policy"}
+    def allowed_in(scope, key):
+        return scope == "user" or key in PROJECT_ALLOWED
+    unknown = "some_future_secret_key"
+    c5 = (not allowed_in("project", unknown)) and (not allowed_in(None, unknown)) \
+         and allowed_in("user", unknown)
+    print(f"  [{'PASS' if c5 else 'FAIL'}] C5 敏感键用白名单：未知键 {unknown} 项目级被拒、用户级可用")
+    if not c5:
+        fails.append("C5 敏感键判定不是白名单（未知键会被放行）")
+
     print("-" * 62)
     if fails:
         for f in fails:

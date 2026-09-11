@@ -27,6 +27,7 @@ use std::process::{Command, Stdio};
 pub const DEFAULT_ENDPOINT: &str = "api.deepseek.com";
 pub const DEFAULT_PATH: &str = "/chat/completions";
 pub const DEFAULT_MODEL: &str = "deepseek-chat";
+pub const DEFAULT_LABEL: &str = "deepseek";
 
 pub struct DeepSeekProvider {
     pub api_key: String,
@@ -35,6 +36,15 @@ pub struct DeepSeekProvider {
     pub model: String,
     /// 传给模型的温度。默认 0（确定性优先，便于回放与测试）。
     pub temperature: f32,
+    /// 自报名。默认 `"deepseek"`；由服务商注册表构造时设为注册名。
+    ///
+    /// # 为什么需要它
+    ///
+    /// `ModelRegistry::new` 校验"注册名 == provider 自报名"，以免两处各说一套。
+    /// 但同一个 OpenAI 兼容客户端可指向**任意**网关 —— 自建代理也会自报
+    /// `deepseek`，于是以别名注册时校验失败（"注册名 my-gateway 与自报名
+    /// deepseek 不一致"）。名字必须跟着**用途**走，不能硬编码。
+    pub label: String,
 }
 
 impl DeepSeekProvider {
@@ -52,8 +62,12 @@ impl DeepSeekProvider {
             path: DEFAULT_PATH.to_string(),
             model: std::env::var("DEEPSEEK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string()),
             temperature: 0.0,
+            label: DEFAULT_LABEL.to_string(),
         })
     }
+
+    /// 覆盖自报名（用于别名/网关注册）。
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
 
     pub fn with_model(mut self, m: impl Into<String>) -> Self { self.model = m.into(); self }
 
@@ -348,7 +362,7 @@ pub fn parse_completion(resp_body: &str) -> Result<Vec<ModelDelta>, String> {
 }
 
 impl ModelProvider for DeepSeekProvider {
-    fn name(&self) -> &str { "deepseek" }
+    fn name(&self) -> &str { &self.label }
 
     fn stream(&self, request: &ModelRequest<'_>) -> ModelStream {
         let body = self.build_body(request).to_string();
@@ -475,6 +489,7 @@ mod tests {
             api_key: "test".into(),
             model: "m".into(),
             temperature: 0.0,
+            label: DEFAULT_LABEL.into(),
         };
         let encoded = p.encode_messages(&req);
         // 系统消息在最前，工具结果在后面 —— 按 role 找，别硬取下标
@@ -512,6 +527,7 @@ mod tests {
             api_key: "test".into(),
             model: "m".into(),
             temperature: 0.0,
+            label: DEFAULT_LABEL.into(),
         };
         let content = p
             .encode_messages(&req)
@@ -547,6 +563,7 @@ mod tests {
             api_key: "test".into(),
             model: "m".into(),
             temperature: 0.0,
+            label: DEFAULT_LABEL.into(),
         };
         let content = p
             .encode_messages(&req)
@@ -600,7 +617,7 @@ mod tests {
     fn encodes_tool_results_as_tool_role_messages() {
         let p = DeepSeekProvider {
             api_key: "k".into(), endpoint: "e".into(), path: "/p".into(),
-            model: "m".into(), temperature: 0.0,
+            model: "m".into(), temperature: 0.0, label: DEFAULT_LABEL.into(),
         };
         let msgs = vec![
             Message::User("hi".into()),
@@ -737,6 +754,7 @@ pub fn probe_post(host: &str, path: &str, body: &str) -> Result<(u16, String), S
         path: path.to_string(),
         model: "n/a".to_string(),
         temperature: 0.0,
+        label: DEFAULT_LABEL.to_string(),
     };
     probe.post_raw(body)
 }

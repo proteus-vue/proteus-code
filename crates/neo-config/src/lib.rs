@@ -5,6 +5,25 @@ use serde::Deserialize;
 
 pub const AGENTS_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
+/// 允许被**项目级**配置覆盖的键。其余（未知键）一律视为敏感键、项目级忽略。
+///
+/// # 为什么是白名单而不是黑名单
+///
+/// 契约是「安全敏感键只允许在用户级设置」。黑名单要把**所有**敏感键都列出来，
+/// 漏掉一个就等于放行一个（而且将来新增的键默认放行）；白名单漏掉一个只会
+/// 更保守（该项目级设置不生效，用户仍可在用户级设置）。**未知即敏感**。
+pub const PROJECT_ALLOWED: &[&str] = &["model", "exec_mode", "sandbox_mode", "approval_policy"];
+
+/// 某个键是否允许在给定作用域设置。
+///
+/// `scope == Some("user")` 表示用户级（唯一可信层）；`None` = 内置/系统/项目级。
+pub fn key_allowed_in(scope: Option<&str>, key: &str) -> bool {
+    if scope == Some("user") {
+        return true;
+    }
+    PROJECT_ALLOWED.contains(&key)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub model: String,

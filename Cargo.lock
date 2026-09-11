@@ -38,6 +38,7 @@ dependencies = [
  "neo-host-web",
  "neo-llm-deepseek",
  "neo-protocol",
+ "neo-providers",
  "neo-sandbox-local",
  "neo-session-local",
  "neo-session-store",
@@ -166,6 +167,15 @@ dependencies = [
 name = "neo-protocol"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-providers"
+version = "0.1.0"
+dependencies = [
+ "neo-config",
  "serde",
  "serde_json",
 ]

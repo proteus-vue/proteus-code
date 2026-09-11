@@ -3715,7 +3715,9 @@ fn open_settings(
         custom_background: has_custom_bg,
         version: about.version.clone(),
         binary_built: binary_build_time(),
-        model: about.model.clone(),
+        // 用 current_model（实时）而不是 model（启动快照）：切换后必须显示新模型，
+        // 否则"切成功了界面还说旧的"—— 与 session 同一个坑。
+        model: about.current_model.clone(),
         mode: about.mode_short.clone(),
         workspace: about.workspace.clone(),
         branch: about.branch.clone(),

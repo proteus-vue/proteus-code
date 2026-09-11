@@ -597,6 +597,48 @@ fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
         )
         .with_name("selftest"))));
 
+    // ── 用户级注册表里的服务商（providers.json）──────────────────────
+    //
+    // 只在**用户级**读取；项目级文件存在会被明确拒绝（安全敏感配置，
+    // 见 neo-providers 的模块说明）。读失败要如实打印原因 ——
+    // 静默忽略会让用户对着"配了却不生效"想不通。
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match neo_providers::load(&cwd) {
+        neo_providers::LoadOutcome::Loaded(reg) => {
+            for e in &reg.providers {
+                // 密钥取自 `api_key_env` 指名的环境变量；缺了跳过并提示，
+                // 不给一个"切过去就连不上"的条目。
+                let key = e
+                    .api_key_env
+                    .as_deref()
+                    .and_then(|k| std::env::var(k).ok())
+                    .filter(|v| !v.trim().is_empty());
+                let Some(key) = key else {
+                    let hint = e.api_key_env.as_deref().unwrap_or("(未声明 api_key_env)");
+                    eprintln!("[neo] 服务商 {} 已跳过：环境变量 {hint} 未设置", e.name);
+                    continue;
+                };
+                let p = neo_llm_deepseek::DeepSeekProvider {
+                    api_key: key,
+                    endpoint: e.base_url.clone().unwrap_or_default(),
+                    path: "/chat/completions".to_string(),
+                    model: e.model.clone().unwrap_or_else(|| "deepseek-chat".to_string()),
+                    temperature: 0.0,
+                    label: e.name.clone(),
+                };
+                let desc = e
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "用户级 providers.json 注册".to_string());
+                entries.push(mk(&e.name, &desc, e.context_limit, e.production, Box::new(p)));
+            }
+        }
+        neo_providers::LoadOutcome::Absent => {}
+        neo_providers::LoadOutcome::Failed(msg) => {
+            eprintln!("[neo] providers.json 未生效：{msg}");
+        }
+    }
+
     // 校验默认项存在
     if !entries.iter().any(|(i, _)| i.name == provider) {
         let mut names: Vec<&str> = entries.iter().map(|(i, _)| i.name.as_str()).collect();
