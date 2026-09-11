@@ -78,6 +78,7 @@ cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
 #   多行输入：最多显示 6 行（超出滚到末尾），带光标移动与整行编辑
 #     alt+enter 换行 · ctrl+k 删到行尾 · ctrl+u 删到行首 · ctrl+w 删词
 #     ctrl+z 撤销 · ctrl+y 重做 · home/end · alt+b/f 按词移动
+#   转录阅读：pageup/pagedown 半页滚动 · ctrl+e 回最新 · ctrl+f 搜索
 #   Tab 补全 / ctrl+r 历史 / ctrl+g 编辑器 / ctrl+l 清屏 / esc 关弹窗
 neo tui --provider selftest --mode default
 # 等价写法：neo --provider selftest --mode default（裸选项默认进 TUI）

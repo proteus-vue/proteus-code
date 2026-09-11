@@ -25,6 +25,7 @@ pub mod input;
 pub mod popup;
 pub mod markdown;
 pub mod stars;
+pub mod view;
 pub mod syntax;
 pub mod theme;
 pub mod trust;
@@ -214,6 +215,16 @@ pub enum Key {
     /// Alt+B / Alt+F 按词移动
     WordBackward,
     WordForward,
+    /// PageUp / PageDown：整页滚动转录
+    PageUp,
+    PageDown,
+    /// Ctrl+E / Ctrl+Y? 不 —— 用 Ctrl+E 到底、Ctrl+Home/End 跳首尾
+    ScrollToBottom,
+    ScrollToTop,
+    /// Ctrl+F 打开搜索；Ctrl+N / Ctrl+P 下一个 / 上一个命中
+    Search,
+    SearchNext,
+    SearchPrev,
     /// Ctrl+R 历史搜索
     SearchHistory,
     /// Ctrl+G 用 $EDITOR 编辑当前输入
@@ -246,6 +257,11 @@ pub fn decode_key(bytes: &[u8]) -> Key {
         [0x1b, b'[', b'B'] => Key::Down,
         [0x1b, b'[', b'C'] => Key::Right,
         [0x1b, b'[', b'D'] => Key::Left,
+        [0x1b, b'[', b'5', b'~'] => Key::PageUp,
+        [0x1b, b'[', b'6', b'~'] => Key::PageDown,
+        [0x05] => Key::ScrollToBottom,
+        [0x06] => Key::Search,
+        [0x0e] => Key::SearchNext,
         [0x0b] => Key::DeleteToLineEnd,
         [0x17] => Key::DeleteWordBackward,
         [0x1a] => Key::Undo,
@@ -457,6 +473,8 @@ pub struct Screen<'a> {
     pub preformatted: Option<&'a Vec<Vec<Seg>>>,
     /// 侧栏是否展开（`ctrl+b` 切换）。窄终端下强制关闭。
     pub sidebar: bool,
+    /// 转录滚动位置与搜索（`None` = 新建默认视图，贴底跟随）
+    pub view: Option<&'a view::View>,
 }
 
 /// 信任对话框状态。
@@ -703,8 +721,10 @@ const EXAMPLES: [&str; 4] = [
 // 提示行必须能同时塞下左右两栏（否则右栏会被丢弃，提示就白写了）。
 // 76 列的输入框里两栏合计要留得住空档，所以每栏只放最高频的几个键；
 // 完整键位在 `/keys` 里。
-const HINT_LEFT: &str = "tab 补全  ctrl+r 历史";
-const HINT_RIGHT: &str = "@ 引用  alt+enter 换行  ctrl+c 退出";
+// 提示行必须能同时塞下两栏（76 列框内可用约 68 列），否则右栏被丢弃。
+// 完整键位在 `/keys`。
+const HINT_LEFT: &str = "tab 补全  ctrl+f 搜索";
+const HINT_RIGHT: &str = "@ 引用  pgup/pgdn 滚动  ctrl+c 退出";
 
 /// 屏幕网格。
 ///
@@ -944,18 +964,73 @@ impl Screen<'_> {
     fn layout_transcript(&self, g: &mut Grid) -> (usize, Option<(usize, usize)>) {
         let lines = self.fact_lines();
         let body = self.rows.saturating_sub(chrome_rows(self.input.line_count()));
-        // 只显示最后 body 行（自动滚到底），内容不足时贴着输入区
-        let start = lines.len().saturating_sub(body);
-        let shown = &lines[start..];
-        let top = body.saturating_sub(shown.len());
+        let total = lines.len();
+
+        // 滚动窗口由 View 决定；没有 View 时等价于"贴底跟随"
+        let (start, end) = match self.view {
+            Some(v) => v.window(total, body),
+            None => (total.saturating_sub(body), total),
+        };
+        let shown = &lines[start..end.min(total)];
+        // 内容不足时：跟随则贴底，否则贴顶（保持阅读位置稳定）
+        let follow = self.view.map(|v| v.follow()).unwrap_or(true);
+        let top = if follow { body.saturating_sub(shown.len()) } else { 0 };
+
+        // 搜索命中行（用于高亮与当前命中标记）
+        let hit_set: (Option<usize>, Vec<usize>) = match self.view.and_then(|v| v.search()) {
+            Some(s) => (Some(s.current), s.hits.clone()),
+            None => (None, Vec::new()),
+        };
+
         for (i, segs) in shown.iter().enumerate() {
+            let abs = start + i;
+            let is_hit = hit_set.1.contains(&abs);
+            let is_current = hit_set
+                .0
+                .and_then(|c| hit_set.1.get(c).copied())
+                .map(|l| l == abs)
+                .unwrap_or(false);
             for (col, text, tone) in segs {
-                g.put(top + i, *col, text, *tone);
+                // 命中行加左侧标记：搜索"找到了"必须看得见
+                let tone = if is_current {
+                    Tone::Warning
+                } else if is_hit {
+                    Tone::Success
+                } else {
+                    *tone
+                };
+                g.put(top + i, *col, text, tone);
+            }
+            if is_hit {
+                let mark = if is_current { "▶" } else { "│" };
+                // 画在正文最右侧（不压字），窄终端下省略
+                let x = self.body_cols().saturating_sub(2);
+                if x > 4 {
+                    g.put(
+                        top + i,
+                        x,
+                        mark,
+                        if is_current { Tone::Warning } else { Tone::Success },
+                    );
+                }
             }
         }
+
+        // 滚动指示：不在底部时提示"下方还有内容"，避免用户以为到底了。
+        // 位置固定为正文区**最后一行**（而不是"已显示内容的下一行"）——
+        // 后者在贴底布局下会落到正文区之外，提示就永远看不见。
+        if let Some(v) = self.view {
+            let off = v.clamped_offset(total, body);
+            if off > 0 && body > 0 {
+                let msg = format!("↓ 下方还有 {off} 行（ctrl+e 到底）");
+                g.put(body - 1, 2, &msg, Tone::Muted);
+            }
+        }
+
         let top = self.rows - chrome_rows(self.input.line_count());
         (top, self.draw_chrome(g, top))
     }
+
 
     // ── 首屏：整组（logo + 输入区）垂直居中 ───────────────────────────
     fn layout_welcome(&self, g: &mut Grid, p: &Pal, a: &About) -> (usize, Option<(usize, usize)>) {
@@ -1459,123 +1534,10 @@ impl Screen<'_> {
     ///   - 助手正文不加框、顶格直排
     ///   - 工具调用成功 ✓ / 失败 ✗，细节（exit code）压暗
     ///   - 元信息一律 muted，不抢正文
+    /// 把事实渲染成"行 → 片段"。实现见同名的自由函数 ——
+    /// **渲染与搜索必须共用同一份行生成**，否则命中行号会与实际渲染错位。
     fn fact_lines(&self) -> Vec<Vec<Seg>> {
-        // 侧栏存在时正文可用宽度收窄（否则文字会被裁在侧栏左边界，看起来是"断行"）
-        let show_sidebar = self.sidebar && self.cols >= SIDEBAR_MIN_COLS;
-        let body_cols =
-            if show_sidebar { self.cols.saturating_sub(SIDEBAR_COLS) } else { self.cols };
-        let inner = body_cols.saturating_sub(4);
-        let mut out: Vec<Vec<Seg>> = Vec::new();
-        for f in self.facts {
-            match f {
-                Fact::UserSaid(text) => {
-                    // 用户消息也按 Markdown 渲染（经常粘贴代码/清单），
-                    // 但整块保留左侧竖条，与助手正文区分
-                    let body = markdown::render(text, inner.saturating_sub(2));
-                    for mut l in body {
-                        let mut seg = vec![(0, "┃".to_string(), Tone::Accent)];
-                        seg.push((2, " ".to_string(), Tone::Text));
-                        for (col, t, tone) in l.drain(..) {
-                            seg.push((col + 2, t, tone));
-                        }
-                        out.push(seg);
-                    }
-                    out.push(Vec::new());
-                }
-                Fact::AssistantSaid(text) => {
-                    // 助手回复按 Markdown 渲染：代码块高亮、行内代码、标题、列表。
-                    // inner 已扣掉侧栏占用（render 把正文写入裁到侧栏左侧）。
-                    out.extend(markdown::render(text, inner));
-                    out.push(Vec::new());
-                }
-                Fact::ToolFinished { name, exit_code } => {
-                    let (icon, tone) =
-                        if *exit_code == 0 { ("✓", Tone::Success) } else { ("✗", Tone::Error) };
-                    let after = 4 + width::display_width(name);
-                    out.push(vec![
-                        (2, format!("{icon} "), tone),
-                        (4, name.clone(), Tone::Text),
-                        (after + 1, format!("exit {exit_code}"), Tone::Muted),
-                    ]);
-                }
-                Fact::PatchPreview { path, diff } => {
-                    out.push(vec![(2, format!("◆ {path}"), Tone::Info)]);
-                    // diff 可能很长：只给前 DIFF_LINES 行，其余如实标注行数。
-                    // 静默截断会让用户以为"就这么点改动"。
-                    let all: Vec<&str> = diff.lines().collect();
-                    const DIFF_LINES: usize = 200;
-                    for l in all.iter().take(DIFF_LINES) {
-                        let (tone, text) = if l.starts_with("+++") || l.starts_with("---") {
-                            (Tone::Muted, l.to_string())
-                        } else if l.starts_with('+') {
-                            (Tone::Success, l.to_string())
-                        } else if l.starts_with('-') {
-                            (Tone::Error, l.to_string())
-                        } else if l.starts_with("@@") {
-                            (Tone::Accent, l.to_string())
-                        } else {
-                            (Tone::Muted, l.to_string())
-                        };
-                        for w in width::wrap_to_width(&text, inner) {
-                            out.push(vec![(4, w, tone)]);
-                        }
-                    }
-                    if all.len() > DIFF_LINES {
-                        out.push(vec![(
-                            4,
-                            format!("… 另有 {} 行改动未展示", all.len() - DIFF_LINES),
-                            Tone::Muted,
-                        )]);
-                    }
-                }
-                Fact::TodoList(items) => {
-                    // 对齐 opencode：完成 ✓ / 进行中 • / 待办 空格 三态
-                    let done = items
-                        .iter()
-                        .filter(|i| matches!(i.status, neo_protocol::TodoStatus::Completed))
-                        .count();
-                    out.push(vec![(
-                        2,
-                        format!("◇ 任务清单 {done}/{}", items.len()),
-                        Tone::Info,
-                    )]);
-                    for it in items {
-                        let (mark, tone) = match it.status {
-                            neo_protocol::TodoStatus::Completed => ("[✓]", Tone::Success),
-                            neo_protocol::TodoStatus::InProgress => ("[•]", Tone::Warning),
-                            neo_protocol::TodoStatus::Pending => ("[ ]", Tone::Muted),
-                        };
-                        let text = format!("{mark} {}", it.content);
-                        for w in width::wrap_to_width(&text, inner.saturating_sub(2)) {
-                            out.push(vec![(4, w, tone)]);
-                        }
-                    }
-                }
-                Fact::FilesChanged(files) => {
-                    // 正文里只给一行汇总；明细在右侧面板（避免刷屏）
-                    let adds: usize = files.iter().map(|f| f.additions).sum();
-                    let dels: usize = files.iter().map(|f| f.deletions).sum();
-                    out.push(vec![(
-                        2,
-                        format!("◆ 已修改 {} 个文件（+{adds} -{dels}）", files.len()),
-                        Tone::Info,
-                    )]);
-                }
-                Fact::ApprovalNeeded { detail } => {
-                    out.push(vec![(2, format!("△ 需要审批：{detail}"), Tone::Warning)]);
-                }
-                Fact::Failed(msg) => out.push(vec![(2, format!("✗ {msg}"), Tone::Error)]),
-                Fact::TurnFinished { input_tokens, output_tokens } => out.push(vec![(
-                    2,
-                    format!("· {input_tokens} in / {output_tokens} out"),
-                    Tone::Muted,
-                )]),
-                Fact::SessionReady { session_id } => {
-                    out.push(vec![(2, format!("· 会话 {session_id}"), Tone::Muted)]);
-                }
-            }
-        }
-        out
+        fact_lines(self.facts, self.body_cols())
     }
 }
 
@@ -1930,6 +1892,153 @@ fn accept_trust(ws: &std::path::Path) {
     }
 }
 
+/// 把事实渲染成"行 → 片段"（不含 ANSI，色调交给网格统一展开）。
+///
+/// 视觉语言（对标 opencode / MiMo）：
+///   - 用户消息带左侧竖条，与助手正文区分
+///   - 助手正文不加框、顶格直排
+///   - 工具调用成功 ✓ / 失败 ✗，细节（exit code）压暗
+///   - 元信息一律 muted，不抢正文
+///
+/// **这是行生成的唯一事实源**：渲染、搜索、行数估算都走它。
+/// 各算一次的话行号必然对不上（搜索高亮会标在无关的行上）。
+fn fact_lines(facts: &[Fact], body_cols: usize) -> Vec<Vec<Seg>> {
+    let inner = body_cols.saturating_sub(4);
+    let mut out: Vec<Vec<Seg>> = Vec::new();
+    for f in facts {
+        match f {
+            Fact::UserSaid(text) => {
+                // 用户消息也按 Markdown 渲染（经常粘贴代码/清单），
+                // 但整块保留左侧竖条，与助手正文区分
+                let body = markdown::render(text, inner.saturating_sub(2));
+                for mut l in body {
+                    let mut seg = vec![(0, "┃".to_string(), Tone::Accent)];
+                    seg.push((2, " ".to_string(), Tone::Text));
+                    for (col, t, tone) in l.drain(..) {
+                        seg.push((col + 2, t, tone));
+                    }
+                    out.push(seg);
+                }
+                out.push(Vec::new());
+            }
+            Fact::AssistantSaid(text) => {
+                // 助手回复按 Markdown 渲染：代码块高亮、行内代码、标题、列表。
+                // inner 已扣掉侧栏占用（render 把正文写入裁到侧栏左侧）。
+                out.extend(markdown::render(text, inner));
+                out.push(Vec::new());
+            }
+            Fact::ToolFinished { name, exit_code } => {
+                let (icon, tone) =
+                    if *exit_code == 0 { ("✓", Tone::Success) } else { ("✗", Tone::Error) };
+                let after = 4 + width::display_width(name);
+                out.push(vec![
+                    (2, format!("{icon} "), tone),
+                    (4, name.clone(), Tone::Text),
+                    (after + 1, format!("exit {exit_code}"), Tone::Muted),
+                ]);
+            }
+            Fact::PatchPreview { path, diff } => {
+                out.push(vec![(2, format!("◆ {path}"), Tone::Info)]);
+                // diff 可能很长：只给前 DIFF_LINES 行，其余如实标注行数。
+                // 静默截断会让用户以为"就这么点改动"。
+                let all: Vec<&str> = diff.lines().collect();
+                const DIFF_LINES: usize = 200;
+                for l in all.iter().take(DIFF_LINES) {
+                    let (tone, text) = if l.starts_with("+++") || l.starts_with("---") {
+                        (Tone::Muted, l.to_string())
+                    } else if l.starts_with('+') {
+                        (Tone::Success, l.to_string())
+                    } else if l.starts_with('-') {
+                        (Tone::Error, l.to_string())
+                    } else if l.starts_with("@@") {
+                        (Tone::Accent, l.to_string())
+                    } else {
+                        (Tone::Muted, l.to_string())
+                    };
+                    for w in width::wrap_to_width(&text, inner) {
+                        out.push(vec![(4, w, tone)]);
+                    }
+                }
+                if all.len() > DIFF_LINES {
+                    out.push(vec![(
+                        4,
+                        format!("… 另有 {} 行改动未展示", all.len() - DIFF_LINES),
+                        Tone::Muted,
+                    )]);
+                }
+            }
+            Fact::TodoList(items) => {
+                // 对齐 opencode：完成 ✓ / 进行中 • / 待办 空格 三态
+                let done = items
+                    .iter()
+                    .filter(|i| matches!(i.status, neo_protocol::TodoStatus::Completed))
+                    .count();
+                out.push(vec![(
+                    2,
+                    format!("◇ 任务清单 {done}/{}", items.len()),
+                    Tone::Info,
+                )]);
+                for it in items {
+                    let (mark, tone) = match it.status {
+                        neo_protocol::TodoStatus::Completed => ("[✓]", Tone::Success),
+                        neo_protocol::TodoStatus::InProgress => ("[•]", Tone::Warning),
+                        neo_protocol::TodoStatus::Pending => ("[ ]", Tone::Muted),
+                    };
+                    let text = format!("{mark} {}", it.content);
+                    for w in width::wrap_to_width(&text, inner.saturating_sub(2)) {
+                        out.push(vec![(4, w, tone)]);
+                    }
+                }
+            }
+            Fact::FilesChanged(files) => {
+                // 正文里只给一行汇总；明细在右侧面板（避免刷屏）
+                let adds: usize = files.iter().map(|f| f.additions).sum();
+                let dels: usize = files.iter().map(|f| f.deletions).sum();
+                out.push(vec![(
+                    2,
+                    format!("◆ 已修改 {} 个文件（+{adds} -{dels}）", files.len()),
+                    Tone::Info,
+                )]);
+            }
+            Fact::ApprovalNeeded { detail } => {
+                out.push(vec![(2, format!("△ 需要审批：{detail}"), Tone::Warning)]);
+            }
+            Fact::Failed(msg) => out.push(vec![(2, format!("✗ {msg}"), Tone::Error)]),
+            Fact::TurnFinished { input_tokens, output_tokens } => out.push(vec![(
+                2,
+                format!("· {input_tokens} in / {output_tokens} out"),
+                Tone::Muted,
+            )]),
+            Fact::SessionReady { session_id } => {
+                out.push(vec![(2, format!("· 会话 {session_id}"), Tone::Muted)]);
+            }
+        }
+    }
+    out
+}
+
+/// 转录渲染后的行数（滚动边界用）。
+///
+/// 与 `fact_lines` 的换行结果保持一致：用同一个 Markdown 渲染与宽度预算，
+/// 否则滚动上限会与实际可滚范围不符（表现：滚不到底或滚出空白）。
+fn transcript_line_count(events: &[EventMsg], body_cols: usize) -> usize {
+    // 与渲染同源：直接数 fact_lines 的行数
+    fact_lines(&facts_of(events), body_cols).len()
+}
+
+/// 把事实渲染成可搜索的纯文本行。
+///
+/// **直接复用 `fact_lines`**：搜索命中行号必须与渲染行号一致。
+/// 也不能用 `format!("{f:?}")` —— 那会把枚举名纳入匹配，
+/// 用户搜 "Assistant" 会命中每一行（屏幕上根本没这个词）。
+fn searchable_lines(facts: &[Fact], body_cols: usize) -> Vec<String> {
+    // 直接复用 fact_lines：搜索命中行号必须与渲染行号一致
+    fact_lines(facts, body_cols)
+        .into_iter()
+        .map(|segs| segs.into_iter().map(|(_, t, _)| t).collect::<String>())
+        .collect()
+}
+
 /// 从**左侧**截断，保留尾部（文件名）。
 ///
 /// 用途：侧栏的"已修改文件"列表。文件名才是识别信息，
@@ -2017,6 +2126,10 @@ where
     let mut should_quit = false;
     // 侧栏开关（`ctrl+b`）。窄终端下渲染时会强制隐藏。
     let mut sidebar_open = true;
+    // 转录滚动/搜索状态
+    let mut view_state = view::View::new();
+    // 搜索输入模式：Some = 正在输入查询词（Enter 确认，Esc 取消）
+    let mut searching = false;
 
     // ── 首次进入某工作区：先要一次知情同意 ──────────────────────────
     //
@@ -2071,6 +2184,7 @@ where
                 popup: None,
                 preformatted: None,
                 sidebar: false,
+                view: None,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2121,6 +2235,7 @@ where
                 // 改用 preformatted 字段承载
                 preformatted: Some(&body),
                 sidebar: false,
+                view: None,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2151,6 +2266,7 @@ where
                 popup: popup_state.as_ref(),
                 preformatted: None,
                 sidebar: sidebar_open,
+                view: Some(&view_state),
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2258,15 +2374,57 @@ where
         match key {
             Key::Quit => break,
             Key::Escape => {
-                // 无弹窗时 Esc 清空当前输入（与多数 shell 的 Ctrl+U 语义接近，
-                // 但不抢 ctrl+u 的键位）
-                if !input.is_empty() {
+                if searching {
+                    // 退出搜索：保留滚动位置（用户可能正看着某个命中）
+                    searching = false;
                     input.clear();
-                    browsing = false;
+                    status = "已退出搜索（滚动位置保留）".to_string();
+                } else {
+                    // 无弹窗时 Esc 清空当前输入（与多数 shell 的 Ctrl+U 语义接近，
+                    // 但不抢 ctrl+u 的键位）
+                    if !input.is_empty() {
+                        input.clear();
+                        browsing = false;
+                    }
                 }
             }
-            Key::DeleteToLineEnd => input.delete_to_line_end(),
-            Key::DeleteWordBackward => input.delete_word_backward(),
+            Key::PageUp => {
+                let body = rows.saturating_sub(chrome_rows(input.line_count()));
+                let total = transcript_line_count(&events, cols);
+                let half = body / 2;
+                view_state.scroll_up(half.max(1), total, body);
+            }
+            Key::PageDown => {
+                let body = rows.saturating_sub(chrome_rows(input.line_count()));
+                let total = transcript_line_count(&events, cols);
+                let half = body / 2;
+                view_state.scroll_down(half.max(1), total, body);
+            }
+            Key::ScrollToTop => {
+                let body = rows.saturating_sub(chrome_rows(input.line_count()));
+                let total = transcript_line_count(&events, cols);
+                view_state.to_top(total, body);
+            }
+            Key::ScrollToBottom => view_state.to_bottom(),
+            Key::Search => {
+                searching = true;
+                input.clear();
+                status = "搜索：输入关键词，回车确认，esc 取消".to_string();
+            }
+            Key::SearchNext => {
+                let body = rows.saturating_sub(chrome_rows(input.line_count()));
+                let total = transcript_line_count(&events, cols);
+                view_state.search_step(true, total, body);
+            }
+            Key::SearchPrev => {
+                let body = rows.saturating_sub(chrome_rows(input.line_count()));
+                let total = transcript_line_count(&events, cols);
+                view_state.search_step(false, total, body);
+            }
+            Key::DeleteToLineEnd if searching => {
+                // 搜索模式下 ctrl+k 不适用，忽略以免误改
+            }
+            Key::DeleteWordBackward if searching => input.delete_word_backward(),
             Key::Undo => input.undo(),
             Key::Redo => input.redo(),
             Key::Delete => {
@@ -2310,13 +2468,36 @@ where
             Key::Backspace => {
                 input.backspace();
                 browsing = false;
+                if searching {
+                    let ls = searchable_lines(&facts_of(&events), cols);
+                    let q = input.text();
+                    view_state.set_search(&ls, &q);
+                    let n = view_state.search().map(|s| s.hits.len()).unwrap_or(0);
+                    status = format!("搜索「{q}」：{n} 处匹配");
+                }
+            }
+            Key::Char(c) if searching => {
+                input.insert_char(c);
+                // 实时把查询应用到转录（所见即所得）
+                let ls = searchable_lines(&facts_of(&events), cols);
+                let q = input.text();
+                view_state.set_search(&ls, &q);
+                let n = view_state.search().map(|s| s.hits.len()).unwrap_or(0);
+                status = if q.trim().is_empty() {
+                    "搜索：输入关键词，回车确认，esc 取消".to_string()
+                } else if n == 0 {
+                    format!("搜索「{q}」：无匹配")
+                } else {
+                    format!("搜索「{q}」：{n} 处匹配（回车确认 · ctrl+n/ctrl+p 切换）")
+                };
             }
             Key::Char(c) => {
                 input.insert_char(c);
                 browsing = false;
                 history.reset_cursor();
                 // 输入 `@` 或 `/` 即弹出候选（对齐 opencode：输入即列表）
-                if c == '@' || c == '/' {
+                // 搜索模式下不触发 —— 那时输入框装的是查询词，不是任务
+                if !searching && (c == '@' || c == '/') {
                     let t = input.text();
                     open_popup_for(&t, &mut popup_state, &mut file_cache, &mut status);
                 }
@@ -2420,6 +2601,21 @@ where
                         }
                         None => status = format!("无匹配文件：{q}"),
                     }
+                }
+            }
+            Key::Enter if searching => {
+                // 搜索模式：Enter 只确认/跳到下一个命中，不提交任务
+                searching = false;
+                let n = view_state.search().map(|s| s.hits.len()).unwrap_or(0);
+                let q = view_state.search().map(|s| s.query.clone()).unwrap_or_default();
+                input.clear();
+                if n == 0 {
+                    status = format!("搜索「{q}」无匹配");
+                } else {
+                    let body = rows.saturating_sub(chrome_rows(1));
+                    let total = transcript_line_count(&events, cols);
+                    view_state.search_step(false, total, body);
+                    status = format!("搜索「{q}」：{n} 处（ctrl+n 下一个 / ctrl+p 上一个）");
                 }
             }
             Key::Enter => {
@@ -2527,6 +2723,7 @@ where
                             popup: None,
                             preformatted: None,
                             sidebar: sidebar_open,
+                            view: Some(&view_state),
                         }
                         .render()
                     )?;
@@ -2567,6 +2764,7 @@ where
                         popup: None,
                         preformatted: None,
                         sidebar: sidebar_open,
+                        view: Some(&view_state),
                     }
                     .render()
                 )?;
@@ -2614,6 +2812,7 @@ mod tests {
             popup: None,
             preformatted: None,
             sidebar: false,
+            view: None,
         }
         .render()
     }
@@ -2648,6 +2847,7 @@ mod tests {
             popup: None,
             preformatted: None,
             sidebar: false,
+            view: None,
         }
         .render()
     }
@@ -2746,6 +2946,7 @@ mod tests {
             popup: Some(&p),
             preformatted: None,
             sidebar: false,
+            view: None,
         }
         .render();
         // 找出弹窗所在的行区间（含边框），断言这些行里没有 logo 的半块字符
@@ -2840,6 +3041,7 @@ mod tests {
             popup: None,
             preformatted: Some(&lines),
             sidebar: false,
+            view: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -2860,6 +3062,7 @@ mod tests {
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
                 sidebar: true,
+                view: None,
             }
             .render();
             let newlines = out.matches('\n').count();
@@ -2902,6 +3105,7 @@ mod tests {
                     about: Some(&a), trust: None,
                     theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
                     sidebar: true,
+                    view: None,
                 }
                 .render();
                 for (i, l) in plain(&out).iter().enumerate() {
@@ -2928,6 +3132,7 @@ mod tests {
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::OpenCode, popup: Some(&p), preformatted: None,
                 sidebar: true,
+                view: None,
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -2954,6 +3159,7 @@ mod tests {
             popup: None,
             preformatted: None,
             sidebar,
+            view: None,
         }
         .render()
     }
@@ -3004,6 +3210,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
             sidebar: true,
+            view: None,
         }.render();
         let text = plain(&out).join("\n");
         assert!(text.contains("上限未知"), "应说明上限未知：{text}");
@@ -3020,6 +3227,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
             sidebar: true,
+            view: None,
         }.render();
         assert!(plain(&out).join("\n").contains("90% of 1000"), "占用率应为 90%");
     }
@@ -3077,6 +3285,7 @@ mod tests {
                     awaiting_input: false, show_cursor: false,
                     about: Some(&a), trust: None,
                     theme: t, popup: None, preformatted: None, sidebar: false,
+                    view: None,
                 }
                 .render()
             })
@@ -3087,6 +3296,94 @@ mod tests {
         // opencode 主色 #fab283；nord 主色 #88c0d0
         assert!(oc.contains("38;2;250;178;131"), "opencode 主色应为 #fab283");
         assert!(nord.contains("38;2;136;192;208"), "nord 主色应为 #88c0d0");
+    }
+
+    // ── 转录滚动与搜索 ───────────────────────────────────────────────
+
+    #[test]
+    fn scrolled_view_shows_earlier_content() {
+        // 长转录：贴底时看不到开头，上滚后应能看到
+        let facts: Vec<Fact> =
+            (0..60).map(|i| Fact::AssistantSaid(format!("内容{i}"))).collect();
+        let a = about();
+        let mut v = view::View::new();
+        let mk = |v: &view::View| {
+            Screen {
+                cols: 100, rows: 20, facts: &facts, input: &editor::Editor::new(),
+                status: "", awaiting_input: false, show_cursor: false,
+                about: Some(&a), trust: None,
+                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                sidebar: false, view: Some(v),
+            }
+            .render()
+        };
+        let bottom = plain(&mk(&v)).join("\n");
+        assert!(bottom.contains("内容59"), "贴底应显示最新：{bottom}");
+        // 上滚
+        v.scroll_up(200, 200, 15);
+        let top = plain(&mk(&v)).join("\n");
+        assert!(top.contains("内容0"), "上滚后应能看到开头：{top}");
+        assert!(!top.contains("内容59"), "上滚后不该还显示末尾");
+    }
+
+    #[test]
+    fn scrolled_view_reports_remaining_lines_below() {
+        // 不在底部时必须提示"下方还有内容"，否则用户以为到底了
+        let facts: Vec<Fact> =
+            (0..40).map(|i| Fact::AssistantSaid(format!("行{i}"))).collect();
+        let a = about();
+        let mut v = view::View::new();
+        v.scroll_up(10, 80, 15);
+        let out = Screen {
+            cols: 100, rows: 20, facts: &facts, input: &editor::Editor::new(),
+            status: "", awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: Some(&v),
+        }
+        .render();
+        assert!(plain(&out).join("\n").contains("下方还有"), "应提示下方还有内容");
+    }
+
+    #[test]
+    fn search_marks_hits_and_moves_the_view() {
+        let facts: Vec<Fact> =
+            (0..50).map(|i| Fact::AssistantSaid(format!("第{i}条"))).collect();
+        let a = about();
+        let mut v = view::View::new();
+        let ls = searchable_lines(&facts, 100);
+        v.set_search(&ls, "第7条");
+        let n = v.search().map(|s| s.hits.len()).unwrap_or(0);
+        assert_eq!(n, 1, "「第7条」应恰好命中一条");
+        v.search_step(false, ls.len(), 15);
+        let out = Screen {
+            cols: 100, rows: 20, facts: &facts, input: &editor::Editor::new(),
+            status: "", awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: Some(&v),
+        }
+        .render();
+        let t = plain(&out).join("\n");
+        assert!(t.contains("第7条"), "命中行应进入视野：{t}");
+        assert!(t.contains('▶'), "当前命中应有标记：{t}");
+    }
+
+    #[test]
+    fn searchable_lines_reflect_what_is_on_screen() {
+        // 搜索必须匹配**屏幕上可见的文字**，而不是 Debug 输出里的枚举名
+        let facts = vec![Fact::AssistantSaid("代码里有个函数 foo_bar".into())];
+        let ls = searchable_lines(&facts, 80).join("\n");
+        assert!(ls.contains("foo_bar"), "应能搜到正文内容");
+        assert!(!ls.contains("AssistantSaid"), "不该把枚举名纳入搜索：{ls}");
+    }
+
+    #[test]
+    fn transcript_line_count_is_nonzero_and_bounded() {
+        let evs = vec![EventMsg::AgentMessageDone { text: "a\nb\nc".into() }];
+        let n = transcript_line_count(&evs, 80);
+        assert!(n >= 3, "三行文本至少算 3 行，实际 {n}");
+        assert!(n < 1000, "估算不该失控");
     }
 
     // ── 多行输入（行高动态）────────────────────────────────────────
@@ -3102,6 +3399,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false,
+            view: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -3131,6 +3429,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false,
+            view: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -3151,6 +3450,7 @@ mod tests {
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: true,
+                view: None,
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -3175,6 +3475,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false,
+            view: None,
         }
         .render();
         // 提取光标定位序列 ESC[<row>;<col>H（渲染尾部还有 ?25h 之类，需精确匹配）
@@ -3266,6 +3567,7 @@ mod tests {
                 cols, rows, facts: &facts, input: &editor::Editor::from_text("输入中文"), status: "就绪",
                 awaiting_input: false, show_cursor: false, about: Some(&a), trust: None,
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
+                view: None,
             }
             .render();
             for (i, line) in plain(&out).iter().enumerate() {
@@ -3384,8 +3686,11 @@ mod tests {
     fn hints_do_not_advertise_unimplemented_keys() {
         // 提示行只能列真正可用的键 —— 按了没反应比不提示更糟
         let text = plain(&welcome(110, 30)).join("\n");
-        assert!(text.contains("ctrl+r"), "应提示历史：{text}");
+        // 提示行只放最高频的几个键（完整键位在 /keys）
+        assert!(text.contains("tab 补全"), "应提示补全：{text}");
+        assert!(text.contains("ctrl+f"), "应提示搜索：{text}");
         assert!(text.contains("@ 引用"), "应提示引用：{text}");
+        assert!(text.contains("pgup"), "应提示滚动：{text}");
         // 未实现的对话框类命令不得出现
         for bad in ["/themes", "/details", "/thinking"] {
             assert!(!text.contains(bad), "不得提示未实现的 {bad}：{text}");
@@ -3402,6 +3707,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: Some(&TrustPrompt::default()),
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
+            view: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -3421,6 +3727,7 @@ mod tests {
                 awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: Some(&TrustPrompt { selected: sel }),
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
+                view: None,
             }
             .render();
             plain(&out).join("\n")
@@ -3600,6 +3907,7 @@ mod tests {
                     about: Some(&a), trust: None,
                     theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
                     sidebar: false,
+                    view: None,
                 }
                 .render()
             };

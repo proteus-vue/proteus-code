@@ -176,12 +176,18 @@ Neo —— 编程 Agent 内核
   ctrl+k       删到行尾      ctrl+u  删到行首
   ctrl+w       删前一个词    delete  删除光标处字符
   ctrl+z       撤销          ctrl+y  重做
-  ctrl+r       搜索历史
+  ctrl+r       搜索历史（输入框）
   ctrl+g       用 $EDITOR 编辑当前输入
   ctrl+p       命令面板      ctrl+t  切换主题
   ctrl+b       侧栏开关      ctrl+l  清屏
-  esc          关闭弹窗 / 清空输入
-  ctrl+c       退出"
+  esc          关闭弹窗 / 清空输入 / 退出搜索
+  ctrl+c       退出
+
+阅读转录
+  pageup / pagedown   半页上下滚动
+  ctrl+home / ctrl+e  跳到最顶 / 回到最新
+  ctrl+f              搜索转录（回车确认，esc 取消）
+  ctrl+n / ctrl+p     下一个 / 上一个匹配"
 }
 
 /// 状态屏正文由宿主在运行时拼（数据来自 About）。
