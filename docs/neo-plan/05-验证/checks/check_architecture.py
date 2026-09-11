@@ -14,7 +14,7 @@
 import os, re, sys, json
 from collections import defaultdict
 
-ROOT = os.environ.get("NEO_ROOT", os.path.join(os.path.dirname(__file__), "..", "..", "06-原型代码"))
+ROOT = os.environ.get("NEO_ROOT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
 
 LAYER = {
     # 编号 = 真实依赖深度：dsh-protocol 零业务依赖，是整个依赖图的基石

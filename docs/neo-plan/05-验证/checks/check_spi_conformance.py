@@ -21,7 +21,7 @@ import os, re, sys, json
 from collections import defaultdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.environ.get("NEO_ROOT", os.path.join(HERE, "..", "..", "06-原型代码"))
+ROOT = os.environ.get("NEO_ROOT", os.path.join(HERE, "..", "..", "..", ".."))
 
 # 允许的 SPI 上限。超过它说明 seam 又在无序增生 —— 这正是 DSH 的病。
 MAX_SPI = 8

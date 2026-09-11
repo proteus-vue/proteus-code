@@ -1,12 +1,11 @@
-node_modules/
-dist/
-out/
-*.tsbuildinfo
-.DS_Store
-.proteus-code/
-*.log
-
-# Rust 构建产物（任何位置）
+# Rust 构建产物
 target/
 **/target/
-Cargo.lock.bak
+
+# 编辑器 / 系统
+.DS_Store
+*.swp
+
+# 运行时会话数据（本地状态，不入库）
+.neo/
+.neo-home/

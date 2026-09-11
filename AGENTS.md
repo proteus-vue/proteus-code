@@ -1,4 +1,4 @@
-# AGENTS.md — 在本仓库工作的约定
+# AGENTS.md — NEO（Rust 内核）工作约定
 
 ## 效率优先（最高优先级）
 
@@ -13,10 +13,30 @@
 
 ## 项目固有约束（改代码前必读）
 
-- **不 fork DSH。** 一切通过它的官方扩展点。详见 `PROJECT_MEMORY.md`。
-- **DSH 包只能放 `devDependencies`**，运行时 import 由 harness 解析。放 `dependencies`/`peerDependencies` 会导致 `pnpm install` 失败。
-- **bundle 必须用 `file:` 安装**，不能用裸路径（会成为 symlink，导致插件无法解析 DSH 包）。
-- **改 bundle 后必须重启应用**：profile 的 bundle 集合只在启动时读取。
+- **不 fork DSH**，而是按 `docs/neo-plan/` 的方案用 Rust 重写内核。
+  设计依据与取舍见 `docs/neo-plan/02-架构设计/`（方法论纲领先读）。
+- **不 fork Codex**，但可对照它的架构（Apache-2.0）。若确需 Rust agent，
+  诚实路径是 fork Codex 并接 Proteus，而非重写 DSH —— 当前选择是后者，
+  理由见 `PROJECT_MEMORY.md`。
+- **沙箱是内核的结构保证**：`Tool::execute` 必须接收内核注入的 `ToolCtx`，
+  工具**不得**有任何绕开沙箱执行进程的入口。新增工具必须遵守。
+- **模型可见即已落日志**：凡进入模型请求的内容都要能从会话日志重建。
+  新增模型可见输入必须同时落盘，否则回放（T2）与审计失效。
+- **依赖只能向下**：`L0 protocol → L1 platform → L2 core → L3 capability → L4 → L5 host`。
+  由 `docs/neo-plan/05-验证/checks/check_architecture.py` 强制。
+- **零 `unsafe`**（当前 14 crate 全零）。确需引入必须在提交信息里说明理由与安全论证。
+- **零 warning**：`scripts/verify.sh` 会把 warning 判为失败。
+- **每个 SPI 必须 ≥2 真实后端 + conformance**，否则是假 SPI（AP-01/AP-03）。
+  门禁 `check_spi_conformance.py` 会拒。
+- **内存有界性是内核义务**：Rust 只消除 UB，不保证有界。新增可能产生大输出的
+  路径必须受上限约束并如实上报 `truncated`。
+
+## 旧实现的位置
+
+早期 TypeScript 实现（DSH 插件 + Electron 壳）已整体移到 `legacy/`，**不再主线**。
+它是可运行的（129 测试、真机验证过），作为设计参考与经验来源保留：
+- `legacy/PROJECT_MEMORY-proteus-code.md` 记录了 Electron/DSH 路径踩过的全部坑
+  （哪些会随 Rust 重写消失、哪些不会）。重写时值得先读。
 
 ## 提交约定
 

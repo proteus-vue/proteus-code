@@ -1,0 +1,6 @@
+# 旧实现的依赖与产物（legacy 仅作参考，不需要安装即可阅读）
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+*.tsbuildinfo
