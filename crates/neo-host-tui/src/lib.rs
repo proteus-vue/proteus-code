@@ -3053,6 +3053,15 @@ fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<V
                 }
                 out.push(Vec::new());
             }
+            // 引用解析结果：一行一条摘要（"📄 a.rs 已注入" / "🧩 $x 未找到"）。
+            // 正文不在这里渲染 —— 用户要看的是"引用到了没有"，
+            // 几百行文件正文会把对话挤没（模型上下文另有注入渠道）。
+            Fact::RefsResolved(summary) => {
+                for line_text in summary {
+                    out.push(vec![(0, format!("  {line_text}"), Tone::Dim)]);
+                }
+                out.push(Vec::new());
+            }
             Fact::AssistantThought(text) => {
                 // 推理默认**不显示**（`/thinking` 打开）：它常常很长且是过程性
                 // 内容，默认铺开会把答复挤下去。但必须可选可见 —— 排查模型
@@ -5253,7 +5262,13 @@ sessions,
                 )?;
                 stdout.flush()?;
 
-                match submit(neo_protocol::Op::UserTurn { text: line, refs: Vec::new() }) {
+                // 引用必须在**提交前**解析：`@file` / `$skill` 的解析结果
+                // 是协议语义（RefKind），四个宿主共用同一份 `parse_refs`，
+                // 不会各自漂移出"某个宿主不认 `$`"这类分叉。
+                match submit(neo_protocol::Op::UserTurn {
+                    refs: neo_protocol::parse_refs(&line),
+                    text: line,
+                }) {
                     Ok(produced) => {
                         outstanding = latest_approval_id(&produced);
                         events.extend(produced);

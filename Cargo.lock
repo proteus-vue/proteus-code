@@ -76,6 +76,7 @@ dependencies = [
  "neo-core",
  "neo-orchestration",
  "neo-protocol",
+ "neo-skill-loader",
  "serde_json",
 ]
 
@@ -201,6 +202,13 @@ dependencies = [
  "neo-protocol",
  "neo-session",
  "serde_json",
+]
+
+[[package]]
+name = "neo-skill-loader"
+version = "0.1.0"
+dependencies = [
+ "neo-core",
 ]
 
 [[package]]

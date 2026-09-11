@@ -51,7 +51,12 @@ pub fn run_task(
     let mut log: Vec<String> = Vec::new();
     let mut ok = true;
 
-    let events = match kernel.submit(Op::UserTurn { text: opts.task.clone(), refs: vec![] }) {
+    // 与 TUI / Web 走同一份 `parse_refs`：`neo exec "@src/main.rs 解释下"`
+    // 与在 TUI 里敲同一句话必须等价，否则同一输入在不同宿主产生不同请求。
+    let events = match kernel.submit(Op::UserTurn {
+        refs: neo_protocol::parse_refs(&opts.task),
+        text: opts.task.clone(),
+    }) {
         Ok(e) => e,
         Err(e) => return (false, format!("提交失败：{e}")),
     };
@@ -123,6 +128,15 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
         let line = match e {
             // 用户消息也进转录：无头输出应能看出"当时问的是什么"
             EventMsg::UserSubmitted { text } => Some(format!("> {text}")),
+            // 引用解析结果用户必须知道（"引用的文件到底读到了没有"），
+            // 但注入的正文不进无头转录 —— 那是模型上下文，不是对话。
+            EventMsg::RefsResolved { summary, .. } => {
+                if summary.is_empty() {
+                    None
+                } else {
+                    Some(format!("[refs] {}", summary.join("；")))
+                }
+            }
             EventMsg::FilesChanged { files } => {
                 let adds: usize = files.iter().map(|f| f.additions).sum();
                 let dels: usize = files.iter().map(|f| f.deletions).sum();
@@ -205,12 +219,18 @@ pub fn build_kernel(
     let mut tools = ToolRegistry::new();
     neo_capability::register_defaults(&mut tools);
     let cfg = Config { exec_mode: opts.mode, ..Config::default() };
+    // 技能目录在**装配点**加载一次（而不是每次 `$skill` 引用都扫盘）：
+    // 引用是热路径，扫盘是冷路径。代价是会话中途新增技能需要重启才可见 ——
+    // 这个取舍写在 README 的诚实边界里。
+    let roots = neo_skill_loader::default_roots(workspace);
+    let (skills, _report) = neo_skill_loader::load_roots(&roots);
     Kernel::new(session_id, cfg, tools, models, sandbox, persistence, workspace)
         .with_max_steps(opts.max_steps)
         // 压缩策略由 L4 提供（内核只认契据）—— 这样 `/compact` 不是空操作
         .with_compactor(Box::new(
             neo_orchestration::PolicyCompactor::default(),
         ))
+        .with_skills(skills)
 }
 
 /// 档位短名（footer / 状态栏用）。

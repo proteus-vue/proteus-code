@@ -19,6 +19,7 @@ members = [
   "crates/neo-llm-deepseek",
   "crates/neo-session-local",
   "crates/neo-session-store",
+  "crates/neo-skill-loader",
 ]
 
 [workspace.package]

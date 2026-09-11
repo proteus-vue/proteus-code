@@ -1161,3 +1161,147 @@ fn compaction_survives_log_replay() {
         "回放必须重演压缩，重建结果应与压缩后的历史一致"
     );
 }
+
+// ─────────────── 引用解析（@file / $skill）───────────────
+
+/// 会真的返回文件内容的沙箱：`cat <path>` 读盘，其余命令回显。
+/// 引用解析要经沙箱读文件，用 TestSandbox（只回显 `ran:...`）测不出内容注入。
+struct FileSandbox { root: std::path::PathBuf }
+
+impl SandboxBackend for FileSandbox {
+    fn supports(&self, _m: SandboxMode) -> bool { true }
+    fn write_file(&self, _m: SandboxMode, _p: &std::path::Path, c: &str) -> neo_core::FileOutcome {
+        neo_core::FileOutcome::Written { bytes: c.len() }
+    }
+    fn execute(&self, _m: SandboxMode, command: &str, _limit: usize) -> SandboxOutcome {
+        // 只认引用解析发的 `cat -- 'path'`；命令里的单引号已由 shell_quote 转义。
+        if let Some(rest) = command.strip_prefix("cat -- ") {
+            let name = rest.trim_matches('\'').replace("'\\''", "'");
+            let p = self.root.join(name);
+            return match std::fs::read_to_string(&p) {
+                Ok(s) => SandboxOutcome::Ran { stdout: s, truncated: false },
+                Err(e) => SandboxOutcome::Denied { reason: e.to_string() },
+            };
+        }
+        SandboxOutcome::Ran { stdout: format!("ran:{command}"), truncated: false }
+    }
+}
+
+fn kernel_with_parts(
+    sandbox: Arc<dyn SandboxBackend>,
+    skills: neo_core::skills::SkillRegistry,
+    persistence: Box<dyn SessionPersistence>,
+) -> Kernel {
+    Kernel::new(
+        "s1",
+        cfg(ExecMode::Default),
+        ToolRegistry::new(),
+        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::text_only("ok"))),
+        sandbox,
+        persistence,
+        "/tmp",
+    )
+    .with_skills(skills)
+}
+
+#[test]
+fn file_ref_is_resolved_into_the_model_visible_message() {
+    let dir = std::env::temp_dir().join(format!("neo-ref-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(dir.join("hello.txt"), "第一行\n第二行\n第三行\n").unwrap();
+
+    let mut k = kernel_with_parts(Arc::new(FileSandbox { root: dir.clone() }), Default::default(),
+        Box::new(InMemoryPersistence::new()));
+    let refs = neo_protocol::parse_refs("@hello.txt 看下");
+    let events = k.submit(Op::UserTurn { text: "@hello.txt 看下".into(), refs }).unwrap();
+
+    // 事件里要有解析摘要
+    let summary = events.iter().find_map(|e| match e {
+        EventMsg::RefsResolved { summary, .. } => Some(summary.clone()),
+        _ => None,
+    }).expect("必须发 RefsResolved 事件");
+    assert!(summary.iter().any(|s| s.contains("hello.txt") && s.contains("已注入")),
+        "摘要应说明已注入: {summary:?}");
+
+    // 历史里要有文件正文（模型可见）
+    let joined = format!("{:?}", k.messages());
+    assert!(joined.contains("第二行"), "文件正文必须进模型可见历史: {joined}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn file_ref_line_range_selects_lines() {
+    let dir = std::env::temp_dir().join(format!("neo-refline-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(dir.join("n.txt"), "L1\nL2\nL3\nL4\n").unwrap();
+
+    let mut k = kernel_with_parts(Arc::new(FileSandbox { root: dir.clone() }), Default::default(),
+        Box::new(InMemoryPersistence::new()));
+    let refs = neo_protocol::parse_refs("@n.txt#2-3 看看");
+    let _ = k.submit(Op::UserTurn { text: "@n.txt#2-3 看看".into(), refs }).unwrap();
+
+    let joined = format!("{:?}", k.messages());
+    assert!(joined.contains("L2") && joined.contains("L3"), "应含 2-3 行: {joined}");
+    assert!(!joined.contains("L4"), "范围外的行不得注入: {joined}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn skill_ref_injects_registered_body_and_missing_skill_lists_available() {
+    let mut reg = neo_core::skills::SkillRegistry::new();
+    reg.add(neo_core::skills::Skill::new("eff", "效率规范", "# 规则\n不要 sleep\n"));
+
+    let mut k = kernel_with_parts(Arc::new(TestSandbox), reg, Box::new(InMemoryPersistence::new()));
+    let refs = neo_protocol::parse_refs("$eff 执行");
+    let events = k.submit(Op::UserTurn { text: "$eff 执行".into(), refs }).unwrap();
+    let joined = format!("{:?}", k.messages());
+    assert!(joined.contains("不要 sleep"), "技能正文必须进历史: {joined}");
+    assert!(events.iter().any(|e| matches!(e, EventMsg::RefsResolved { .. })));
+
+    // 找不到时：不注入，但摘要要列出可用技能（否则用户面对空注册表无从下手）
+    let refs = neo_protocol::parse_refs("$nope 执行");
+    let events = k.submit(Op::UserTurn { text: "$nope 执行".into(), refs }).unwrap();
+    let summary = events.iter().find_map(|e| match e {
+        EventMsg::RefsResolved { summary, .. } => Some(summary.clone()),
+        _ => None,
+    }).unwrap();
+    assert!(summary.iter().any(|s| s.contains("未找到") && s.contains("eff")),
+        "未找到时必须列出可用技能: {summary:?}");
+}
+
+#[test]
+fn ref_roundtrip_replays_into_identical_history() {
+    // 引用注入的内容**必须能只靠日志重建**（"模型可见即已落日志"）。
+    // 这条是引用功能的回放门禁：若注入块没落盘，重建出的用户消息会短一截。
+    let dir = std::env::temp_dir().join(format!("neo-refrt-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(dir.join("r.txt"), "回放内容标记\n").unwrap();
+
+    let mut k = kernel_with_parts(Arc::new(FileSandbox { root: dir.clone() }), Default::default(),
+        Box::new(InMemoryPersistence::new()));
+    let refs = neo_protocol::parse_refs("@r.txt 读");
+    k.submit(Op::UserTurn { text: "@r.txt 读".into(), refs }).unwrap();
+    let original = k.messages().to_vec();
+    let logs = k.log_for_test();
+
+    let mut k2 = kernel_with_parts(Arc::new(FileSandbox { root: dir.clone() }), Default::default(),
+        Box::new(InMemoryPersistence::new()));
+    k2.rebuild_from_log(&logs);
+    assert_eq!(
+        k2.messages(),
+        original.as_slice(),
+        "回放必须还原注入块（不能重解析、不能丢）"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn parse_refs_and_shell_quote_reject_injection() {
+    // 引用目标来自用户输入，是不可信字符串。带 `;` / 引号的路径
+    // 必须被转义成单个参数，不能被 sh 当命令分隔符执行。
+    let q = neo_core::shell_quote("a.txt; rm -rf /");
+    assert_eq!(q, "'a.txt; rm -rf /'", "分号必须留在引号内");
+
+    let tricky = neo_core::shell_quote("it's.txt");
+    assert_eq!(tricky, "'it'\\''s.txt'", "单引号必须按 POSIX 规则转义");
+}

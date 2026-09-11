@@ -27,6 +27,7 @@ LAYER = {
     "neo-llm-deepseek":  3,  # L3 PROVIDER（ModelProvider 实现）
     "neo-session-local": 3,  # L3 PROVIDER（SessionPersistence 实现）
     "neo-session-store": 3,  # L3 PROVIDER（多会话库：列举/新建/删除）
+    "neo-skill-loader":  3,  # L3 PROVIDER（技能目录发现与加载）
     "neo-orchestration": 4,  # L4
     "neo-host-tui":      5,  # L5
     "neo-host-desktop":  5,  # L5

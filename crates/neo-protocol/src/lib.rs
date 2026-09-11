@@ -182,6 +182,23 @@ pub enum EventMsg {
     /// 回看会话只看到模型说了什么，不知道当时问的是什么。由内核统一发，
     /// 四个宿主才会一致（T6）；让宿主各自记住用户输入则会分叉。
     UserSubmitted { text: String },
+    /// 用户输入里的 `@` / `$` 引用已解析成具体内容并注入本轮请求。
+    ///
+    /// # 为什么必须发事件、且 `block` 必须落日志
+    ///
+    /// `block` 是**模型可见**的内容（拼在用户消息之后进入请求）。若不落盘，
+    /// 回放时只能拿到引用符号（`@src/main.rs`），重建出的历史与真实请求不符 ——
+    /// 直接违反 AGENTS.md「模型可见即已落日志」。
+    ///
+    /// 反过来，回放时**不能重新解析**：文件内容可能已经变了，
+    /// 重解析会得到与当时不同的字节。所以内容必须"当时定格、随日志走"。
+    RefsResolved {
+        /// 人类可读的一行摘要（用户可见事实）：解析成功了几条、哪条失败。
+        summary: Vec<String>,
+        /// 注入模型请求的完整上下文块。
+        #[serde(default)]
+        block: String,
+    },
     SessionConfigured { session_id: String },
     /// 模型已切换（运行时换模型）。
     ///
@@ -273,6 +290,12 @@ pub struct ToolOutput {
 pub enum Fact {
     /// 用户说了什么（转录的第一类事实）
     UserSaid(String),
+    /// 用户引用（`@file` / `$skill`）被解析成内容的**一行摘要**。
+    ///
+    /// 只把摘要纳入事实、不把注入内容纳入：用户需要知道"引用的文件到底读到了没有、
+    /// 哪条失败"，但不需要在转录里看到几百行文件正文（那是模型上下文，
+    /// 不是人要读的对话）。内容本身仍随事件落盘，回放与审计不受影响。
+    RefsResolved(Vec<String>),
     /// 助手说了这段话（流式增量已合并为完整消息）。
     AssistantSaid(String),
     /// 模型的推理过程（`ReasoningDelta` 合并而成）。
@@ -373,6 +396,11 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
                 out.push(Fact::ApprovalNeeded { detail: detail.clone() })
             }
             EventMsg::UserSubmitted { text } => out.push(Fact::UserSaid(text.clone())),
+            EventMsg::RefsResolved { summary, .. } => {
+                if !summary.is_empty() {
+                    out.push(Fact::RefsResolved(summary.clone()))
+                }
+            }
             EventMsg::TodoUpdated { items } => out.push(Fact::TodoList(items.clone())),
             EventMsg::ContextCompacted { removed_messages, .. } => {
                 out.push(Fact::ContextCompacted { removed_messages: *removed_messages })

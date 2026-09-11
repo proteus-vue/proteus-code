@@ -21,6 +21,7 @@ use neo_config::{resolve, Config, FileEditPolicy, ModeResolution};
 use neo_protocol::*;
 use serde_json::Value;
 pub mod models;
+pub mod skills;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -215,6 +216,45 @@ impl ToolCtx<'_> {
         let p = std::path::Path::new(path);
         if p.is_absolute() { p.to_path_buf() } else { self.cwd.join(p) }
     }
+}
+
+/// 引用解析结果：人类可读摘要 + 要注入模型请求的上下文块。
+///
+/// 分开是因为两者受众不同：`summary` 给用户与转录（"哪条读到了"），
+/// `block` 给模型（文件/技能正文）。合并成一个字符串会导致
+/// 要么用户看到几百行文件内容，要么模型看到"📄 已注入"却没拿到正文。
+#[derive(Debug, Clone, Default)]
+pub struct RefResolution {
+    pub summary: Vec<String>,
+    pub block: Option<String>,
+}
+
+/// 单引号 shell 转义（POSIX 语义）：把 `'` 换成 `'\''`。
+///
+/// 独立成函数是为了**只在一处**做转义 —— 转义逻辑散落各处时，
+/// 漏掉一处的后果是把用户输入当命令执行。
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// 按行范围截取（1 基，闭区间），并报告是否因**上限**截断。
+///
+/// `lines = None` 表示整个文件。与 `truncate_utf8` 的分工：
+/// 这里管"用户要的是哪几行"，那里管"字节上限"。
+/// 返回 `(文本, 是否截断)`；越界的范围**不报错**，取交集即可
+/// （文件比引用时短是常态：用户记行号总会偏）。
+pub fn truncate_lines(s: &str, lines: Option<(usize, usize)>, max_bytes: usize) -> (String, bool) {
+    let selected: String = match lines {
+        None => s.to_string(),
+        Some((a, b)) => s
+            .lines()
+            .skip(a.saturating_sub(1))
+            .take(b.saturating_sub(a.saturating_sub(1)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let (text, cut) = truncate_utf8(&selected, max_bytes);
+    (text.to_string(), cut)
 }
 
 /// 按字节上限截断，且**不切开 UTF-8 码点**。
@@ -547,6 +587,8 @@ pub struct Kernel {
     usage_in: u64,
     usage_out: u64,
     pending: Option<PendingApproval>,
+    /// 技能注册表（`$skill` 引用的解析来源）。构造时注入，缺省为空。
+    skills: crate::skills::SkillRegistry,
     /// 本次 submit 产生的事件（宿主收取）
     outbox: Vec<EventMsg>,
 }
@@ -591,12 +633,18 @@ impl Kernel {
             usage_in: 0,
             usage_out: 0,
             pending: None,
+            skills: crate::skills::SkillRegistry::new(),
             outbox: Vec::new(),
         }
     }
 
     pub fn with_max_steps(mut self, n: usize) -> Self { self.max_steps = n; self }
     pub fn with_output_cap(mut self, bytes: usize) -> Self { self.max_output_bytes = bytes; self }
+    /// 注入技能注册表（`$skill` 引用据此解析）。缺省为空 = `$x` 如实报告找不到。
+    pub fn with_skills(mut self, skills: crate::skills::SkillRegistry) -> Self {
+        self.skills = skills;
+        self
+    }
     pub fn with_context_cap(mut self, messages: usize) -> Self {
         self.max_context_messages = messages;
         self
@@ -653,14 +701,32 @@ impl Kernel {
                 let started = EventMsg::TurnStarted { turn_id };
                 self.emit_and_log(&started)?;
 
-                // 引用（@ / # / / / $）作为用户输入的一部分进入历史。
-                // 真实实现会在此把引用解析成具体内容；当前**只记录不解析**
-                // （诚实边界：解析属 M1 后续工作）。
-                let user_text =
-                    if refs.is_empty() { text } else { format!("{text}\n[refs: {}]", refs.len()) };
-                // 先回显用户消息，再报 turn 开始 —— 转录顺序与用户感知一致
-                let echo = EventMsg::UserSubmitted { text: user_text.clone() };
+                // 引用（@ / # / / / $）解析成具体内容，随用户消息一起进历史。
+                //
+                // 解析失败**不阻断本轮** —— 一条引用的路径打错不该让整个提问发不出去，
+                // 但要如实把失败写进事件与摘要，让模型和用户都知道"这条没读到"。
+                let resolution = self.resolve_refs(&refs);
+                let user_text = match &resolution.block {
+                    Some(block) => format!("{text}\n\n{block}"),
+                    None => text.clone(),
+                };
+                // 先回显**用户原话**（不含注入块 —— 用户要看到自己打的字，
+                // 而不是几百行文件正文），再报 turn 开始：转录顺序与用户感知一致。
+                let echo = EventMsg::UserSubmitted { text: text.clone() };
                 self.emit_and_log(&echo)?;
+                // 注入块单独成事件：它模型可见（必须落盘），但用户不必在转录里读到。
+                // 紧接着 UserSubmitted 发出，回放时"把块拼到刚推入的用户消息后"。
+                //
+                // **有摘要就要发**（哪怕 block 为空）：`$nope` 找不到技能时没有块，
+                // 但"未找到，可用的是 X/Y"这条恰恰是用户唯一能得到的反馈 ——
+                // 只在有块时发事件会让失败静默（本功能的第一个 bug）。
+                if !resolution.summary.is_empty() {
+                    let ev = EventMsg::RefsResolved {
+                        summary: resolution.summary.clone(),
+                        block: resolution.block.clone().unwrap_or_default(),
+                    };
+                    self.emit_and_log(&ev)?;
+                }
                 self.messages.push(Message::User(user_text));
 
                 self.drive_steps()?;
@@ -1031,20 +1097,26 @@ impl Kernel {
         for rec in logs {
             match rec.kind.as_str() {
                 "op" => {
-                    if let Ok(Op::UserTurn { text, refs }) =
-                        serde_json::from_value::<Op>(rec.payload.clone())
-                    {
-                        // 与 submit 的拼装保持一致（引用数追加到文本后）
-                        let user_text = if refs.is_empty() {
-                            text
-                        } else {
-                            format!("{text}\n[refs: {}]", refs.len())
-                        };
-                        rebuilt.push(Message::User(user_text));
-                    }
+                    // 用户消息由紧随其后的 UserSubmitted 事件恢复（见下）。
+                    // 这里**不推入** —— 否则同一条用户消息会被计两次。
+                    // 引用也**不在此重解析**：文件内容早已变化，重读会得到
+                    // 与当时不同的字节；真实注入的块在 RefsResolved 里（已落盘）。
                 }
                 "event" => {
                     match serde_json::from_value::<EventMsg>(rec.payload.clone()) {
+                        Ok(EventMsg::UserSubmitted { text }) => {
+                            rebuilt.push(Message::User(text));
+                        }
+                        // 注入块拼到刚推入的用户消息之后：submit 里就是
+                        // `{text}\n\n{block}`，这里必须还原同一顺序。
+                        Ok(EventMsg::RefsResolved { block, .. }) => {
+                            if !block.is_empty() {
+                                if let Some(Message::User(t)) = rebuilt.last_mut() {
+                                    t.push_str("\n\n");
+                                    t.push_str(&block);
+                                }
+                            }
+                        }
                         Ok(EventMsg::ToolCallBegin { id, name, arguments }) => {
                             pending_calls.push(ToolInvocation { id, name, arguments });
                         }
@@ -1135,6 +1207,88 @@ impl Kernel {
             Some(t) => t.call_kind(&call.arguments),
             None => CallKind::Write,
         }
+    }
+
+    /// 把 `@file` / `$skill` 引用解析成一段可注入的上下文块。
+    ///
+    /// **只解析这两类**，其余按开放语义不产生块：
+    /// - `@file`：读文件（经沙箱），支持 `#行号` 范围；读不到则如实记一条失败。
+    /// - `$skill`：查注册表；找到则注入正文，找不到则把**可用技能名**列出来
+    ///   （只报"找不到"会让用户面对空注册表而不知道下一步）。
+    /// - `#session` / `/command`：**刻意不注入为文本**。它们是"去某个宿主动作"
+    ///   而不是"给模型的内容"。早期把 `/compact` 也塞进文本，
+    ///   模型会把它当成一个要自己处理的词 —— 命令该由宿主解析执行。
+    ///
+    /// 每条引用的字节上限用 `max_output_bytes`（与工具输出同一把尺），
+    /// 超限置 `truncated` 标记 —— 内存有界是内核义务，引用不能开后门。
+    fn resolve_refs(&self, refs: &[ContextRef]) -> RefResolution {
+        let mut summary: Vec<String> = Vec::new();
+        let mut sections: Vec<String> = Vec::new();
+
+        for r in refs {
+            match r.kind {
+                RefKind::File => {
+                    match self.sandbox.execute(
+                        self.resolution().sandbox,
+                        &format!("cat -- {}", shell_quote(&r.target)),
+                        self.max_output_bytes,
+                    ) {
+                        SandboxOutcome::Ran { stdout, truncated } => {
+                            let (body, cut) = truncate_lines(&stdout, r.lines, self.max_output_bytes);
+                            let cut = cut || truncated;
+                            let range = match r.lines {
+                                Some((a, b)) => format!(":{a}-{b}"),
+                                None => String::new(),
+                            };
+                            summary.push(format!(
+                                "📄 {}{}{} 已注入",
+                                r.target,
+                                range,
+                                if cut { " [截断]" } else { "" }
+                            ));
+                            sections.push(format!(
+                                "<file path=\"{}{}\"{}>\n{}\n</file>",
+                                r.target,
+                                range,
+                                if cut { " truncated=\"true\"" } else { "" },
+                                body
+                            ));
+                        }
+                        SandboxOutcome::Denied { reason } => {
+                            summary.push(format!("📄 {} 读取被拒：{reason}", r.target));
+                        }
+                    }
+                }
+                RefKind::Skill => match self.skills.get(&r.target) {
+                    Some(s) => {
+                        summary.push(format!("🧩 ${} 已注入（{} 字节）", s.name, s.body.len()));
+                        sections.push(format!(
+                            "<skill name=\"{}\">\n{}\n</skill>",
+                            s.name, s.body
+                        ));
+                    }
+                    None => {
+                        let avail = self.skills.names();
+                        let hint = if avail.is_empty() {
+                            "（当前未加载任何技能）".to_string()
+                        } else {
+                            format!("（可用：{}）", avail.join(", "))
+                        };
+                        summary.push(format!("🧩 ${} 未找到 {hint}", r.target));
+                    }
+                },
+                RefKind::Session | RefKind::Command => {
+                    // 宿主负责解释这两类，内核不把它们当模型上下文注入。
+                }
+            }
+        }
+
+        let block = if sections.is_empty() {
+            None
+        } else {
+            Some(format!("[上下文引用]\n{}", sections.join("\n\n")))
+        };
+        RefResolution { summary, block }
     }
 
     /// 真正执行一个调用：经沙箱、落日志、进历史。
