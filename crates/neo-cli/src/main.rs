@@ -406,7 +406,7 @@ fn cmd_tui(args: &[String]) -> i32 {
     let mut sessions = TuiSessions::new(kernel.clone(), store);
     let submit_kernel = kernel.clone();
     // 注入 submit：TUI 只认契据，业务在 kernel
-    let mut providers = TuiProviders::new();
+    let mut providers = TuiProviders::new(kernel.clone());
     let result = neo_host_tui::run(about, gate, theme_name, &mut sessions, &mut providers, move |op| {
         submit_kernel.borrow_mut().submit(op).map_err(|e| e.to_string())
     });
@@ -445,6 +445,47 @@ impl TuiSessions {
     }
 }
 
+/// 由注册表条目 + 密钥造一个 provider 与其元信息。
+///
+/// 抽成函数是为了让"启动时注册"与"设置页新增时热加载"走**同一段**构造逻辑 ——
+/// 两处各写一遍必然会漂移（比如一边规范化 base_url、另一边忘了）。
+fn provider_of(
+    e: &neo_providers::ProviderEntry,
+    key: &str,
+) -> (neo_core::models::ModelInfo, Box<dyn neo_core::ModelProvider>) {
+    let (host, url_path) = e
+        .base_url
+        .as_deref()
+        .map(neo_providers::normalize_base_url)
+        .unwrap_or_default();
+    let p = neo_llm_deepseek::DeepSeekProvider {
+        api_key: key.to_string(),
+        endpoint: if host.is_empty() {
+            neo_llm_deepseek::DEFAULT_ENDPOINT.to_string()
+        } else {
+            host
+        },
+        path: if url_path.is_empty() {
+            neo_llm_deepseek::DEFAULT_PATH.to_string()
+        } else {
+            format!("{}/chat/completions", url_path.trim_end_matches('/'))
+        },
+        model: e.model.clone().unwrap_or_else(|| "deepseek-chat".to_string()),
+        temperature: 0.0,
+        label: e.name.clone(),
+    };
+    let info = neo_core::models::ModelInfo {
+        name: e.name.clone(),
+        description: e
+            .description
+            .clone()
+            .unwrap_or_else(|| "用户级 providers.json 注册".to_string()),
+        context_limit: e.context_limit,
+        production: e.production,
+    };
+    (info, Box::new(p))
+}
+
 /// TUI 的服务商管理实现。
 ///
 /// 活在 CLI 层而不是宿主里：宿主不碰配置文件；密钥的读写策略
@@ -455,10 +496,13 @@ struct TuiProviders {
     registry: neo_providers::ProviderRegistry,
     /// 已存的密钥（按服务商名），与注册表分文件保存
     keys: std::collections::BTreeMap<String, String>,
+    /// 内核句柄：新增/删除服务商后**立刻**把 provider 装进内核，
+    /// 这样不必重启进程（"重启后生效"对正在跑的会话等于不可用）。
+    kernel: std::rc::Rc<std::cell::RefCell<neo_core::Kernel>>,
 }
 
 impl TuiProviders {
-    fn new() -> Self {
+    fn new(kernel: std::rc::Rc<std::cell::RefCell<neo_core::Kernel>>) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let registry = match neo_providers::load(&cwd) {
             neo_providers::LoadOutcome::Loaded(r) => r,
@@ -466,7 +510,22 @@ impl TuiProviders {
             // 但**不会**在保存前把它写掉（保存是显式动作）。
             _ => neo_providers::ProviderRegistry::default(),
         };
-        Self { registry, keys: neo_providers::load_keys() }
+        Self { registry, keys: neo_providers::load_keys(), kernel }
+    }
+
+    /// 把某个服务商装进内核（若有可用密钥）。没密钥就只是"存了配置"，
+    /// 不进模型列表 —— 与启动时的行为一致（缺 key 的条目跳过并提示）。
+    fn hot_load(&mut self, name: &str) -> Result<(), String> {
+        let Some(entry) = self.registry.get(name).cloned() else {
+            return Ok(());
+        };
+        let Some(key) = neo_providers::key_for(&entry, &self.keys) else {
+            return Ok(()); // 只有配置、还没密钥：不算错误
+        };
+        let (info, p) = provider_of(&entry, &key);
+        self.kernel
+            .borrow_mut()
+            .add_model(info, p)
     }
 
     fn save(&self) -> Result<(), String> {
@@ -487,6 +546,19 @@ impl neo_host_tui::ProviderControl for TuiProviders {
                 (p.name.clone(), p.description.clone().unwrap_or_default(), has)
             })
             .collect()
+    }
+
+    fn models(&self) -> Vec<(String, String, bool)> {
+        self.kernel
+            .borrow()
+            .available_models()
+            .into_iter()
+            .map(|m| (m.name, m.description, m.production))
+            .collect()
+    }
+
+    fn current_model(&self) -> String {
+        self.kernel.borrow().current_model().to_string()
     }
 
     fn get(&self, name: &str) -> Option<(String, String, String, u64)> {
@@ -531,7 +603,9 @@ impl neo_host_tui::ProviderControl for TuiProviders {
         if !api_key.is_empty() {
             self.keys.insert(name.to_string(), api_key.to_string());
         }
-        self.save()
+        self.save()?;
+        // 立刻装进内核：若该服务商有密钥，马上就能切过去用，不必重启。
+        self.hot_load(name)
     }
 
     fn delete(&mut self, name: &str) -> Result<bool, String> {
@@ -539,9 +613,15 @@ impl neo_host_tui::ProviderControl for TuiProviders {
         let had_key = self.keys.remove(name).is_some();
         if removed || had_key {
             self.save()?;
+            // 从内核里摘掉（正在使用的那个会被拒绝 —— 如实报给用户）
+            if let Err(e) = self.kernel.borrow_mut().remove_model(name) {
+                return Err(e);
+            }
         }
         Ok(removed)
     }
+
+
 }
 
 impl neo_host_tui::SessionControl for TuiSessions {
@@ -718,36 +798,10 @@ fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
                     );
                     continue;
                 };
-                // base_url 要规范化：用户会写 `https://host/v1`，
-                // 而底层要裸主机（openssl -connect host:443）+ 路径。
-                // 不规范化会让"看起来填对了的 URL"连不上。
-                let (host, url_path) = e
-                    .base_url
-                    .as_deref()
-                    .map(neo_providers::normalize_base_url)
-                    .unwrap_or_default();
-                let p = neo_llm_deepseek::DeepSeekProvider {
-                    api_key: key,
-                    endpoint: if host.is_empty() {
-                        neo_llm_deepseek::DEFAULT_ENDPOINT.to_string()
-                    } else {
-                        host
-                    },
-                    path: if url_path.is_empty() {
-                        neo_llm_deepseek::DEFAULT_PATH.to_string()
-                    } else {
-                        // 用户给的是 `/v1` 这类基础路径，要补上 /chat/completions
-                        format!("{}/chat/completions", url_path.trim_end_matches('/'))
-                    },
-                    model: e.model.clone().unwrap_or_else(|| "deepseek-chat".to_string()),
-                    temperature: 0.0,
-                    label: e.name.clone(),
-                };
-                let desc = e
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| "用户级 providers.json 注册".to_string());
-                entries.push(mk(&e.name, &desc, e.context_limit, e.production, Box::new(p)));
+                // 构造逻辑与"设置页新增时热加载"共用 provider_of，
+                // 避免两处漂移（比如一处规范化 base_url、另一处忘了）。
+                let (info, p) = provider_of(e, &key);
+                entries.push((info, p));
             }
         }
         neo_providers::LoadOutcome::Absent => {}

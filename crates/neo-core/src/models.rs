@@ -109,6 +109,34 @@ impl ModelRegistry {
         Self { providers, infos, current: name }
     }
 
+    /// 追加或替换一个 provider（用于**运行时新增服务商**，不必重启进程）。
+    ///
+    /// 名字校验与 `new` 一致：注册名必须等于 provider 自报名，
+    /// 否则列表显示 A、日志记 B（两处各说一套）。
+    pub fn add(&mut self, info: ModelInfo, p: Box<dyn ModelProvider>) -> Result<(), String> {
+        if p.name() != info.name {
+            return Err(format!(
+                "注册名 {} 与 provider 自报名 {} 不一致",
+                info.name,
+                p.name()
+            ));
+        }
+        self.infos.insert(info.name.clone(), info);
+        self.providers.insert(p.name().to_string(), p);
+        Ok(())
+    }
+
+    /// 移除一个 provider。**不允许移除当前正在使用的那个** ——
+    /// 那会让 `current_provider()` 立刻无 provider 可用（它不返回 Option）。
+    /// 调用方应先切换到别的模型再删。
+    pub fn remove(&mut self, name: &str) -> Result<bool, String> {
+        if name == self.current {
+            return Err(format!("{name} 正在使用中，请先切到别的模型再删除"));
+        }
+        self.infos.remove(name);
+        Ok(self.providers.remove(name).is_some())
+    }
+
     /// 当前模型名。
     pub fn current(&self) -> &str {
         &self.current

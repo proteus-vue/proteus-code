@@ -2960,6 +2960,16 @@ pub trait ProviderControl {
     /// 列出服务商：(名字, 描述, 是否已配密钥)。
     fn list(&self) -> Vec<(String, String, bool)>;
 
+    /// 当前**内核里可用**的模型：(名字, 描述, 是否可用于真实任务)。
+    ///
+    /// 与 `list()` 的区别：`list()` 是配置文件里的服务商，这里是内核
+    /// 实际加载成功的模型（缺密钥的不会出现）。新增服务商后宿主据此
+    /// **立刻刷新模型列表**，不必重启。
+    fn models(&self) -> Vec<(String, String, bool)>;
+
+    /// 当前选中的模型名（用于判断新模型是否已生效）。
+    fn current_model(&self) -> String;
+
     /// 查一条的完整字段（供编辑时回填）：(base_url, model, 描述, 上下文上限)。
     fn get(&self, name: &str) -> Option<(String, String, String, u64)>;
 
@@ -4052,7 +4062,15 @@ fn commit_provider_form(form: &SettingsForm, providers: &mut dyn ProviderControl
     ) {
         Ok(()) => {
             let verb = if form.editing.is_some() { "已更新" } else { "已新增" };
-            format!("{verb}服务商 {name}（重启后生效）")
+            // **立刻生效**，所以不再写"重启后生效" —— 那句话既没说清重启什么，
+            // 也让用户以为现在不能用。若该服务商还没配密钥，如实说明它为何
+            // 不在模型列表里（否则用户会以为新增失败）。
+            let has_key = providers.list().iter().any(|(n, _, k)| n == &name && *k);
+            if has_key {
+                format!("{verb}服务商 {name}（已可切换，见「模型」）")
+            } else {
+                format!("{verb}服务商 {name}（尚无密钥，填了才会出现在「模型」里）")
+            }
         }
         Err(e) => format!("保存失败：{e}"),
     }
@@ -4628,7 +4646,7 @@ where
                     Some(Key::Char('y')) | Some(Key::Char('Y')) => {
                         let name = pending_delete.take().unwrap_or_default();
                         status = match providers.delete(&name) {
-                            Ok(true) => format!("已删除服务商 {name}（重启后生效）"),
+                            Ok(true) => format!("已删除服务商 {name}（已从模型列表移除）"),
                             Ok(false) => format!("服务商 {name} 已不存在"),
                             Err(e) => format!("删除失败：{e}"),
                         };
@@ -4659,6 +4677,10 @@ where
                     confirm_delete = Some(name);
                 } else {
                 status = commit_provider_form(&form, providers);
+                // 新增/编辑可能引入了新模型：立刻刷新宿主手里那份列表，
+                // 否则「模型」里看不到它，用户以为没生效（真实困惑过）。
+                about.models = providers.models();
+                about.current_model = providers.current_model();
                 // 刷新设置页：服务商数量变了
                 open_settings(
                     &mut settings_state,
@@ -8119,6 +8141,8 @@ mod tests {
     }
     impl ProviderControl for FakeProviders {
         fn list(&self) -> Vec<(String, String, bool)> { self.entries.clone() }
+        fn models(&self) -> Vec<(String, String, bool)> { self.entries.clone() }
+        fn current_model(&self) -> String { "fake".to_string() }
         fn get(&self, name: &str) -> Option<(String, String, String, u64)> {
             self.entries
                 .iter()

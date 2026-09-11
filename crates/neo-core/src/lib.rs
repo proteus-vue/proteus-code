@@ -1220,6 +1220,24 @@ impl Kernel {
         self.models.current()
     }
 
+    /// 运行时新增/替换一个模型 provider。
+    ///
+    /// 让"设置页新增服务商"**立即生效**，不必重启进程 ——
+    /// 之前注册表在启动时建好就不可变，用户改完只能重启，而提示里写
+    /// "重启后生效"既没说清重启什么，也让一台正在跑的会话没法用上新服务商。
+    pub fn add_model(
+        &mut self,
+        info: crate::models::ModelInfo,
+        p: Box<dyn ModelProvider>,
+    ) -> Result<(), String> {
+        self.models.add(info, p)
+    }
+
+    /// 运行时移除一个模型 provider（不允许移除当前在用的）。
+    pub fn remove_model(&mut self, name: &str) -> Result<bool, String> {
+        self.models.remove(name)
+    }
+
     /// 全部可选模型（宿主列表用）。
     pub fn available_models(&self) -> Vec<crate::models::ModelInfo> {
         self.models.list()
