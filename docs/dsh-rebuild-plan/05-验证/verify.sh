@@ -43,10 +43,12 @@ done
 # ---- 可选：Rust 编译校验（需本地工具链，沙盒默认无）----
 echo
 echo "############################################################"
-echo "#  Rust 原型编译校验（可选）"
+echo "#  Rust 原型编译 + SPI conformance 执行（可选）"
 echo "############################################################"
 if command -v cargo >/dev/null 2>&1; then
-  ( cd "$NEO_ROOT" && cargo check --workspace ) || fail=$((fail+1))
+  # 用 test 而非 check：SPI conformance 契约测试必须真正被执行，
+  # 否则"有 conformance"只是文件存在（AP-03）。
+  ( cd "$NEO_ROOT" && cargo test --workspace ) || fail=$((fail+1))
 else
   echo "  [SKIP] 未检测到 cargo。本次交付的 Rust 原型未经编译验证。"
   echo "         请在本地执行：cd 06-原型代码 && cargo check --workspace"

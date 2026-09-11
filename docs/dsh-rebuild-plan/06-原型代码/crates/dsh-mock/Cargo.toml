@@ -1,0 +1,17 @@
+[package]
+name = "dsh-mock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 旁挂（test-support）：为每个 SPI 提供 Mock/Headless 后端。
+#
+# 存在理由（SPI-First Step 2）：单后端 SPI = 假 SPI（AP-01），可替换性从未被验证。
+# Mock 是**强制项**，不是可选项 —— 它同时是 conformance 的第二个被试对象。
+[dependencies]
+dsh-protocol = { path = "../dsh-protocol" }
+dsh-core = { path = "../dsh-core" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+dsh-host-desktop = { path = "../dsh-host-desktop" }

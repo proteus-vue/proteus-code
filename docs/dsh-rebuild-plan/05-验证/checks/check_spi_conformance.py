@@ -37,33 +37,33 @@ MAX_SPI = 8
 SPI_SPEC = {
     "ModelProvider": {
         "trait": "ModelProvider",
-        "backends": ["deepseek", "openai-compat", "mock"],
         "conformance": "T2",
-        "status": "planned",
+        "test": "crates/dsh-mock/tests/conformance.rs",
+        "status": "landed",
     },
     "SandboxBackend": {
-        "trait": None,  # 平台层由 SandboxMode 语义约束，后端按 OS 分
-        "backends": ["seatbelt", "landlock", "noop"],
+        "trait": "SandboxBackend",
         "conformance": "T4",
-        "status": "planned",
+        "test": "crates/dsh-mock/tests/conformance.rs",
+        "status": "landed",
     },
     "SessionPersistence": {
-        "trait": None,
-        "backends": ["jsonl", "in-memory"],
+        "trait": "SessionPersistence",
         "conformance": "T3",
-        "status": "planned",
+        "test": "crates/dsh-mock/tests/conformance.rs",
+        "status": "landed",
     },
     "HostBackend": {
         "trait": "HostBackend",
-        "backends": ["tui", "desktop", "web", "exec"],
         "conformance": "T6",
+        "test": "crates/dsh-mock/tests/conformance.rs",
         "status": "landed",
     },
     "ToolTransport": {
         "trait": "Tool",
-        "backends": ["in-process", "mcp"],
         "conformance": "T5",
-        "status": "planned",
+        "test": "crates/dsh-mock/tests/conformance.rs",
+        "status": "landed",
     },
 }
 
@@ -106,34 +106,82 @@ def run():
         else:
             summary.append(f"  ✓ {spi} 契约 trait `{trait}` 存在")
 
-    # ---- S2 每个 SPI >= 2 后端（杜绝假 SPI）-----------------------------
+    # ---- S2 每个 SPI >= 2 个**真实实现**（杜绝假 SPI）-------------------
+    #
+    # 这是本检查的核心修正。首版按「源码里是否出现后端名」计数，结果
+    # HostBackend 在只有一个实现时也报 4 个后端 —— 因为 tui/web/exec
+    # 只出现在注释里。**假门禁给假保证，比没有门禁更糟。**
+    # 现在只认 `impl <Trait> for` 这个语法事实。
+    impl_re = lambda t: re.compile(rf"^\s*impl(?:<[^>]*>)?\s+{re.escape(t)}\s+for\s+", re.M)
     pending = []
     for spi, spec in SPI_SPEC.items():
-        backends = spec["backends"]
-        found = [b for b in backends if b.lower() in corpus.lower()]
-        landed = spec.get("status") == "landed"
-
-        if len(backends) < 2:
-            problems.append(f"S2 {spi}: 只声明 {len(backends)} 个后端，不构成 seam（需 >= 2）")
-        elif len(found) >= 2:
-            summary.append(f"  ✓ {spi}: {len(found)} 个后端（{', '.join(found)}）")
-        elif landed:
+        trait = spec["trait"]
+        if trait is None:
+            continue
+        total, per_crate = 0, []
+        for crate, text in srcs.items():
+            k = len(impl_re(trait).findall(text))
+            if k:
+                total += k
+                per_crate.append(f"{crate}({k})")
+        if total >= 2:
+            summary.append(f"  ✓ {spi} (`{trait}`): {total} 个真实实现 — {', '.join(sorted(per_crate))}")
+        elif spec.get("status") == "landed":
             problems.append(
-                f"S2 {spi} 已宣称 landed，但源码只找到 {len(found)}/{len(backends)} 个后端 "
-                f"({found}) —— 假 SPI"
+                f"S2 {spi} 已宣称 landed，但只找到 {total} 个 `impl {trait} for` "
+                f"({', '.join(per_crate) or '无'}) —— 假 SPI，可替换性从未被验证（AP-01）"
             )
         else:
-            pending.append(f"{spi}: 待实现后端 {[b for b in backends if b not in found]}")
+            pending.append(f"{spi}: 待实现（当前 {total} 个 impl）")
 
-    # ---- S3 每个 SPI 必须有 conformance 断言 ----------------------------
+    # ---- S2b landed SPI 必须有 conformance 测试文件 --------------------
     for spi, spec in SPI_SPEC.items():
-        tag = spec["conformance"]
-        if re.search(rf"\b{re.escape(tag)}\b", corpus):
-            summary.append(f"  ✓ {spi} 关联 {tag}")
-        elif spec.get("status") == "landed":
-            problems.append(f"S3 {spi} 已宣称 landed，但未关联 conformance 断言（期望 {tag}）")
+        if spec.get("status") != "landed":
+            continue
+        rel = spec.get("test")
+        path = os.path.join(ROOT, rel) if rel else None
+        if not (path and os.path.isfile(path)):
+            problems.append(f"S2b {spi} 已宣称 landed，但 conformance 测试缺失（{rel}）—— 无契约测试的抽象是假 SPI（AP-03）")
         else:
-            pending.append(f"{spi}: 待接入 conformance {tag}")
+            # 测试文件里应能看到该 SPI 的 **trait 名**，避免"文件存在但没测它"。
+            # 用 trait 名而非 SPI id 判定：id 是人取的（"ToolTransport"），
+            # trait 名才是代码事实（"Tool"）—— 首版用 id 判定产生了假阴性。
+            body = open(path, encoding="utf-8").read()
+            trait = spec["trait"]
+            if not re.search(rf"\b{re.escape(trait)}\b", body):
+                problems.append(f"S2b {spi}: conformance 文件存在但未见 `{trait}` 的契约用例")
+            else:
+                summary.append(f"  ✓ {spi} conformance 用例存在且含 `{trait}` 契约")
+
+    # ---- S2c SPI 版本漂移检测（契约口径变化须改版本号）------------------
+    import hashlib
+    digests = {}
+    for spi, spec in SPI_SPEC.items():
+        t = spec["trait"]
+        if not t:
+            continue
+        # 取契约 trait 的声明体作为口径指纹
+        m = re.search(rf"pub trait {re.escape(t)}[^{{]*\{{(.*?)\n\}}", corpus, re.S)
+        if m:
+            digests[spi] = hashlib.sha256(m.group(1).encode()).hexdigest()[:12]
+    stamp_path = os.path.join(HERE, "spi_contract_digests.json")
+    if os.path.isfile(stamp_path):
+        with open(stamp_path, encoding="utf-8") as f:
+            recorded = json.load(f)
+        for spi, d in digests.items():
+            if spi in recorded and recorded[spi] != d:
+                problems.append(
+                    f"S2c {spi} 契约口径已变（{recorded[spi]} -> {d}）："
+                    f"**必须显式确认这是有意变更，并更新 spi_contract_digests.json**。"
+                    f"契约静默漂移是 SPI 最常见的隐性腐化。"
+                )
+        new_spis = [k for k in digests if k not in recorded]
+        if new_spis:
+            summary.append(f"  · 新增 SPI 待登记指纹：{', '.join(new_spis)}")
+    else:
+        summary.append("  · 无指纹基线（首次运行不校验漂移）")
+    with open(stamp_path, "w", encoding="utf-8") as f:
+        json.dump(digests, f, indent=2, sort_keys=True)
 
     # ---- S4 SPI 总数不得膨胀 -------------------------------------------
     n = len(SPI_SPEC)

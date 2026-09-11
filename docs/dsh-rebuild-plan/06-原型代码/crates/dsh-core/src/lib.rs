@@ -158,3 +158,43 @@ impl HostRegistry {
         self.hosts.iter_mut().map(|h| (h.id(), h.consume(event_json))).collect()
     }
 }
+
+// ---------- SPI 语义接口（Step 1：只定义"做什么"，禁厂商/技术名词）----------
+
+/// 会话持久化：append-only 日志语义。
+///
+/// 命名纪律（SPI-First Step 1）：不使用 "JSONL"/"SQLite"/"S3" 等实现名，
+/// 只用领域动词 append/load。实现可换而接口不变。
+pub trait SessionPersistence: Send + Sync {
+    /// 追加一条原始事件。**实现必须保证 append-only**：不得改写已写入的内容。
+    fn append(&mut self, event_json: &str) -> Result<(), PersistenceError>;
+    /// 读回全部事件，顺序与写入一致。
+    fn load(&self) -> Result<Vec<String>, PersistenceError>;
+}
+
+/// 持久化的领域错误码（不用底层 IO 异常类型）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistenceError {
+    /// 日志被检测到非 append-only 改写（不可恢复，须报错而非静默）。
+    Tampered,
+    /// 底层不可用。
+    Unavailable(String),
+}
+
+/// 沙箱：在某档安全语义下执行一条命令。
+///
+/// 参数用领域类型（`SandboxMode` 来自 dsh-protocol），不用 OS 专有结构体。
+/// 实现按平台分（seatbelt/landlock+bwrap/noop），接口不变。
+pub trait SandboxBackend: Send + Sync {
+    /// 本后端对给定模式的**能力声明**，供降级判断（能力可缺，但不得静默失败）。
+    fn supports(&self, mode: SandboxMode) -> bool;
+    /// 执行。越权必须被拒 —— 这是 T4 断言的核心。
+    fn execute(&self, mode: SandboxMode, command: &str) -> SandboxOutcome;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxOutcome {
+    Ran { stdout: String },
+    /// 因沙箱策略被拒（结构化事实，不是字符串报错）。
+    Denied { reason: String },
+}

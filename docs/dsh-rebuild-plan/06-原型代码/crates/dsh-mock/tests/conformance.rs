@@ -1,0 +1,193 @@
+//! SPI conformance 契约测试（SPI-First Step 3）
+//!
+//! 两条纪律：
+//!   1. **同一份用例代码跑所有后端** —— 契约是后端的公共义务，不是某一个的行为。
+//!   2. **至少一个负向用例** —— 一个"坏后端"必须被抓出来，否则套件没有牙齿。
+//!
+//! 测的是**语义契约**（幂等/顺序/错误语义/能力边界），不是实现细节。
+
+use dsh_core::{
+    HostBackend, ModelProvider, SandboxBackend, SandboxOutcome, SessionPersistence, Tool,
+};
+use dsh_host_desktop::DesktopHost;
+use dsh_mock::{
+    BrittleHost, InMemoryPersistence, LeakySandbox, MockHost, MockModelProvider, MockTool,
+    NamelessTool, NoopSandbox, ScriptedModelProvider, TamperingPersistence,
+};
+use dsh_protocol::SandboxMode;
+use serde_json::json;
+
+/// 一段共享的事件流：所有宿主后端都必须能完整消费。
+const EVENT_STREAM: &[&str] = &[
+    r#"{"kind":"turn_start"}"#,
+    r#"{"kind":"assistant_message"}"#,
+    r#"{"kind":"tool_call"}"#,
+    r#"{"kind":"turn_end"}"#,
+];
+
+// ─────────────── HostBackend：T6 语义等价 ───────────────
+
+/// 契约：任何宿主后端都必须能消费完整事件流，且事实数一致（可渲染性可不同）。
+fn assert_host_contract(mut host: Box<dyn HostBackend>) {
+    for ev in EVENT_STREAM {
+        host.consume(ev)
+            .unwrap_or_else(|e| panic!("host {} 未能消费事件: {e}", host.id()));
+    }
+    assert_eq!(
+        host.rendered_facts().len(),
+        EVENT_STREAM.len(),
+        "host {} 的事实数与事件数不符 —— 说明它偷偷丢弃了事件",
+        host.id()
+    );
+}
+
+#[test]
+fn host_contract_holds_for_every_backend() {
+    // 同一份契约，跑两个真实/无头后端 —— 这就是"可替换"被验证的方式。
+    assert_host_contract(Box::new(MockHost::new("headless")));
+    assert_host_contract(Box::new(DesktopHost::new()));
+}
+
+#[test]
+fn host_contract_compares_two_backends_on_the_same_stream() {
+    // T6 运行时形态：同一事件流广播给多个宿主，逐个断言都不丢事件。
+    let mut a = MockHost::new("headless");
+    let mut b = DesktopHost::new();
+    for ev in EVENT_STREAM {
+        a.consume(ev).unwrap();
+        b.consume(ev).unwrap();
+    }
+    assert_eq!(a.rendered_facts().len(), b.rendered_facts().len());
+}
+
+/// 负向用例：坏宿主必须被契约抓住。
+#[test]
+fn host_contract_rejects_a_brittle_backend() {
+    let mut bad = BrittleHost;
+    let ok = bad.consume(r#"{"kind":"turn_start"}"#);
+    assert!(ok.is_ok(), "正常事件不该失败");
+
+    let rejected = bad.consume(r#"{"kind":"unsupported"}"#);
+    assert!(
+        rejected.is_err(),
+        "负向用例失败：坏宿主未能被识别 —— 说明套件没有牙齿"
+    );
+}
+
+// ─────────────── SessionPersistence：append-only ───────────────
+
+/// 契约：写入什么、读回什么，顺序与内容都不变。
+fn assert_persistence_contract(mut p: Box<dyn SessionPersistence>) {
+    let events = [r#"{"a":1}"#, r#"{"b":2}"#, r#"{"c":3}"#];
+    for e in events {
+        p.append(e).expect("append 不应失败");
+    }
+    let loaded = p.load().expect("load 不应失败");
+    assert_eq!(loaded, events, "append-only 被破坏：读回的内容与写入不一致");
+}
+
+#[test]
+fn persistence_contract_holds_for_memory_backend() {
+    assert_persistence_contract(Box::new(InMemoryPersistence::new()));
+}
+
+/// 负向用例：会静默改写内容的持久化必须被抓出来。
+#[test]
+fn persistence_contract_catches_tampering_backend() {
+    // 真正的契约断言：坏后端无法通过上面那条**通用**检查。
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_persistence_contract(Box::new(TamperingPersistence::new()));
+    }));
+    assert!(
+        caught.is_err(),
+        "负向用例失败：破坏 append-only 的实现未被 conformance 抓住 —— 套件没有牙齿"
+    );
+}
+
+// ─────────────── SandboxBackend：能力边界 ───────────────
+
+/// 契约：声称不支持的模式，必须**显式拒绝**，不得静默放行。
+fn assert_sandbox_contract(s: &dyn SandboxBackend, mode: SandboxMode) {
+    if !s.supports(mode) {
+        match s.execute(mode, "rm -rf /") {
+            SandboxOutcome::Denied { .. } => {}
+            SandboxOutcome::Ran { .. } => panic!(
+                "契约违反：后端声明不支持 {mode:?}，却仍然执行了命令 —— 安全边界形同虚设"
+            ),
+        }
+    }
+}
+
+#[test]
+fn sandbox_contract_holds_for_noop_backend() {
+    let s = NoopSandbox;
+    assert!(s.supports(SandboxMode::DangerFullAccess), "noop 应支持全权限档");
+    assert!(!s.supports(SandboxMode::ReadOnly), "noop 不应声称支持 read-only");
+    // 声称不支持的档位必须拒绝
+    assert_sandbox_contract(&s, SandboxMode::ReadOnly);
+    // 声称支持的档位必须真的执行
+    assert!(matches!(
+        s.execute(SandboxMode::DangerFullAccess, "echo hi"),
+        SandboxOutcome::Ran { .. }
+    ));
+}
+
+/// 负向用例：声称支持 read-only 却照样执行的沙箱是最危险的实现，必须被抓住。
+#[test]
+fn sandbox_contract_catches_leaky_backend() {
+    let leaky = LeakySandbox;
+    assert!(leaky.supports(SandboxMode::ReadOnly), "它确实**声称**支持");
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // 这个后端 supports() 返回 true，所以走不到 Denied 分支；
+        // 下面直接断言"安全边界"这一语义：read-only 下执行必须被拒。
+        match leaky.execute(SandboxMode::ReadOnly, "rm -rf /") {
+            SandboxOutcome::Denied { .. } => {}
+            SandboxOutcome::Ran { .. } => panic!("契约违反：read-only 档位竟然执行了删除命令"),
+        }
+    }));
+    assert!(caught.is_err(), "负向用例失败：泄漏的沙箱未被抓住");
+}
+
+// ─────────────── ModelProvider：确定性（T2 可回放前提）───────────────
+
+/// 契约：同一输入必得同一输出（否则 Op→Event 回放不确定）。
+fn assert_model_contract(m: &dyn ModelProvider) {
+    let a = m.complete("hello world");
+    let b = m.complete("hello world");
+    assert_eq!(a, b, "模型后端不确定：同输入得到不同输出，破坏 T2 可回放性");
+    assert!(!m.name().is_empty(), "后端必须有名字（用于错误定位）");
+}
+
+#[test]
+fn model_contract_holds_for_every_backend() {
+    // 同一份契约，跑两个**行为不同**的后端。
+    assert_model_contract(&MockModelProvider);
+    assert_model_contract(&ScriptedModelProvider::new("canned"));
+}
+
+// ─────────────── Tool：契约（名/描述/健壮性）───────────────
+
+/// 契约：工具必须可被模型寻址（名非空）、可被模型理解（描述非空）、
+/// 且对畸形参数**不得 panic**（注册表会把它当基础设施错误，但不应崩溃进程）。
+fn assert_tool_contract(tool: &dyn Tool) {
+    assert!(!tool.name().is_empty(), "工具名为空 —— 模型无法调用它");
+    assert!(!tool.describe().is_empty(), "工具描述为空 —— 模型不知道何时用它");
+    // 畸形参数：不得 panic
+    let _ = tool.execute(&json!({"unexpected": [1, 2, 3]}));
+    let _ = tool.execute(&json!(null));
+}
+
+#[test]
+fn tool_contract_holds_for_mock_tool() {
+    assert_tool_contract(&MockTool::new("bash"));
+    assert_tool_contract(&MockTool::new("apply_patch"));
+}
+
+/// 负向用例：空名工具必须被契约抓住。
+#[test]
+fn tool_contract_catches_nameless_tool() {
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_tool_contract(&NamelessTool);
+    }));
+    assert!(caught.is_err(), "负向用例失败：空名工具未被抓住");
+}

@@ -80,6 +80,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsh-mock"
+version = "0.1.0"
+dependencies = [
+ "dsh-core",
+ "dsh-host-desktop",
+ "dsh-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "dsh-orchestration"
 version = "0.1.0"
 dependencies = [

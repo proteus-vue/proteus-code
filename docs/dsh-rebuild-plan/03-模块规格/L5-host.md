@@ -167,6 +167,25 @@ Proteus 明说：**单个角色不构成 seam**。宿主只有一种实现时，
 
 ---
 
+## 九点半、现状与目标状态的差距（SPI-First 审计结论）
+
+耦合审计实测（见 [`05-验证/spi-first-audit.md`](../05-验证/spi-first-audit.md)）：
+
+| | 现状 | 目标 |
+|---|---|---|
+| Electron 耦合 | **2 个文件**（`main.ts` 21 处 API、`probe.ts` 4 处） | 0（全部收进 `dsh-host-desktop`） |
+| `HostBackend` 实现 | **3 个**（`DesktopHost` 原型 + 2 个 Mock） | `tui` / `desktop` / `web` / `exec` 四个真实后端 |
+| conformance | 已有（10 用例，含 3 负向） | 保持 + 接 CI |
+
+**好消息**：Electron 只渗进 2 个文件，说明壳层**本来就已经隔离好了**。
+`HostBackend` 的工作是把这条**已存在的好边界形式化**，而不是新建边界——改造风险很低。
+
+**待修**：AP-04（业务绕过接口直调底层）的现存漏洞就在这 2 个文件里
+（`import { app, BrowserWindow, dialog, shell } from 'electron'`），
+是下一步试点的首选目标。
+
+---
+
 ## 十、验收
 
 - [ ] 四宿主消费同一 `EventMsg` 流，业务逻辑零重复（T6 机器校验）
