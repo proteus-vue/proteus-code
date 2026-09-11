@@ -51,6 +51,8 @@ pub enum Action {
     Status,
     /// 打开全屏 diff 查看器
     DiffViewer,
+    /// 回退对话一轮（不还原文件）
+    Rewind,
 }
 
 /// **必须由命令触发**的动作。新增变体时要加进这里 ——
@@ -65,6 +67,7 @@ const COMMAND_ACTIONS: &[Action] = &[
     Action::Keys,
     Action::Status,
     Action::DiffViewer,
+    Action::Rewind,
 ];
 
 /// **只在界面内部产生**的动作（不经过命令表）。
@@ -87,6 +90,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "new", aliases: &["clear"], desc: "开始新对话（清空当前转录）", action: Action::NewSession },
     Command { name: "compact", aliases: &["summarize"], desc: "压缩上下文以腾出预算", action: Action::Compact },
     Command { name: "diff", aliases: &["changes"], desc: "查看本次会话的改动", action: Action::DiffViewer },
+    Command { name: "undo", aliases: &["rewind"], desc: "回退对话一轮（不还原文件）", action: Action::Rewind },
     Command { name: "exit", aliases: &["quit", "q"], desc: "退出 Neo", action: Action::Quit },
 ];
 
@@ -162,6 +166,7 @@ Neo —— 编程 Agent 内核
     /keys      键盘快捷键
     /status    运行状态与环境
     /diff      查看改动（全屏：hunk/文件跳转、双列视图）
+    /undo      回退对话一轮（**不还原文件**，见下方说明）
     /diff      查看改动（全屏查看器：hunk/文件跳转、双列视图）
     /theme     选择配色主题（6 套）
     /next      直接切到下一个主题
@@ -186,6 +191,7 @@ Neo —— 编程 Agent 内核
   ctrl+g       用 $EDITOR 编辑当前输入
   ctrl+p       命令面板      ctrl+t  切换主题
   ctrl+b       侧栏开关      ctrl+l  清屏
+  ctrl+/       键位提示（显示当前上下文可用的键）
   esc          关闭弹窗 / 清空输入 / 退出搜索
   ctrl+c       退出
 

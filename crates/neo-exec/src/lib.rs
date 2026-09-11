@@ -130,6 +130,10 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
             }
             // 未聚合前的单文件改动不单独输出（否则同一文件会刷屏）；由 FilesChanged 汇总
             EventMsg::FileChanged { .. } => None,
+            EventMsg::Rewound { turns, removed_messages, files_kept } => Some(format!(
+                "[rewind] 回退 {turns} 轮（删除 {removed_messages} 条消息）；\
+                 磁盘上 {files_kept} 个文件改动**未**撤销"
+            )),
             EventMsg::TodoUpdated { items } => {
                 let done = items.iter().filter(|i| matches!(i.status, neo_protocol::TodoStatus::Completed)).count();
                 Some(format!("[todo] {done}/{} 完成", items.len()))

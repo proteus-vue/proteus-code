@@ -85,6 +85,11 @@ pub enum Op {
     ConfigureSession { patch: SessionPatch },
     Compact,
     Fork,
+    /// 回退对话到之前某轮：删掉最近 `turns` 个用户轮次的全部消息。
+    ///
+    /// **只回退对话，不还原文件** —— 见 `EventMsg::Rewound` 的说明。
+    /// 用途：某个方向做错了想重新问一次，而不必开新会话丢掉前面有用的上下文。
+    Rewind { turns: usize },
     GoalSet { goal: String },
     GoalPause { goal_id: GoalId },
     GoalResume { goal_id: GoalId },
@@ -195,6 +200,12 @@ pub enum EventMsg {
     /// 让每个宿主自己维护增量状态，一旦某条增量丢了就会显示错乱。
     /// 内核已经持有累计状态，广播整表最省事也最不容易错。
     FilesChanged { files: Vec<FileChange> },
+    /// 对话已回退。
+    ///
+    /// **明确区分"对话"与"文件"**：回退只动对话历史，磁盘上的改动**不会**
+    /// 被撤销（我们没有 git 快照）。宿主必须把这一点告诉用户 ——
+    /// 让人以为"undo 了文件也回去了"是最危险的那种错觉。
+    Rewound { turns: usize, removed_messages: usize, files_kept: usize },
     /// 任务清单被更新（整表替换，不是增量）。
     ///
     /// 整表替换而非增量：模型每次给出完整清单，宿主不必维护差量状态，
@@ -238,6 +249,8 @@ pub enum Fact {
     ApprovalNeeded { detail: String },
     /// 任务清单（模型自述的进度）。
     TodoList(Vec<TodoEntry>),
+    /// 对话已回退（回退了 N 轮，删掉 M 条消息，有 K 个文件改动被保留）。
+    Rewound { turns: usize, removed_messages: usize, files_kept: usize },
     /// 本次会话已修改的文件（含增删行数）。
     FilesChanged(Vec<FileChange>),
     /// 待审批改动的预览（路径 + unified diff）。
@@ -296,6 +309,11 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
             }
             EventMsg::UserSubmitted { text } => out.push(Fact::UserSaid(text.clone())),
             EventMsg::TodoUpdated { items } => out.push(Fact::TodoList(items.clone())),
+            EventMsg::Rewound { turns, removed_messages, files_kept } => out.push(Fact::Rewound {
+                turns: *turns,
+                removed_messages: *removed_messages,
+                files_kept: *files_kept,
+            }),
             EventMsg::FilesChanged { files } => out.push(Fact::FilesChanged(files.clone())),
             EventMsg::Error { message } => out.push(Fact::Failed(message.clone())),
             EventMsg::TurnComplete { input_tokens, output_tokens } => {

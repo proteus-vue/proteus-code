@@ -28,6 +28,7 @@ pub mod markdown;
 pub mod mouse;
 pub mod stars;
 pub mod view;
+pub mod whichkey;
 pub mod syntax;
 pub mod theme;
 pub mod trust;
@@ -272,6 +273,8 @@ pub enum Key {
     Search,
     SearchNext,
     SearchPrev,
+    /// Ctrl+O：显示当前上下文的可用键（which-key）
+    WhichKey,
     /// 鼠标事件（SGR 扩展模式）
     Mouse(mouse::MouseEvent),
     /// Ctrl+R 历史搜索
@@ -310,6 +313,9 @@ pub fn decode_key(bytes: &[u8]) -> Key {
         [0x1b, b'[', b'6', b'~'] => Key::PageDown,
         [0x05] => Key::ScrollToBottom,
         [0x06] => Key::Search,
+        // ctrl+/ 在很多终端就是 0x1f；同时接受 ctrl+o（0x0f）作为别名 ——
+        // ctrl+/ 被部分终端/输入法截获，留一个稳的备选。
+        [0x1f] | [0x0f] => Key::WhichKey,
         [0x0e] => Key::SearchNext,
         [0x0b] => Key::DeleteToLineEnd,
         [0x17] => Key::DeleteWordBackward,
@@ -551,6 +557,8 @@ pub struct Screen<'a> {
     pub view: Option<&'a view::View>,
     /// 全屏 diff 查看器（`Some` = 占满屏幕）
     pub diff_viewer: Option<&'a diffview::Viewer>,
+    /// which-key 提示分组（`Some` = 覆盖层，任意键关闭）
+    pub whichkey: Option<&'a [whichkey::Group]>,
 }
 
 /// 信任对话框状态。
@@ -821,7 +829,7 @@ const EXAMPLES: [&str; 4] = [
 // 完整键位在 `/keys` 里。
 // 提示行必须能同时塞下两栏（76 列框内可用约 68 列），否则右栏被丢弃。
 // 完整键位在 `/keys`。
-const HINT_LEFT: &str = "tab 补全  ctrl+f 搜索";
+const HINT_LEFT: &str = "tab 补全  ctrl+/ 键位提示";
 const HINT_RIGHT: &str = "@ 引用  pgup/pgdn 滚动  ctrl+c 退出";
 
 /// 屏幕网格。
@@ -1038,6 +1046,11 @@ impl Screen<'_> {
         if let Some(pop) = self.popup {
             self.draw_popup(&mut g, &p, pop, chrome_top);
         }
+        // which-key 覆盖层：放在正文区右下角，不压输入框（用户还要继续打字）
+        if let Some(groups) = self.whichkey {
+            self.draw_whichkey(&mut g, groups, chrome_top);
+        }
+
         // 侧栏最后画：它占的是自己的列区，且要求不被正文侵入
         if let Some(x0) = side_x0 {
             g.clamp_put(usize::MAX);
@@ -1420,6 +1433,79 @@ impl Screen<'_> {
             .take(visible)
             .map(|(i, _)| ((top + 2 + (i - start), left, left + box_w), i))
             .collect()
+    }
+
+    /// which-key 覆盖层：右下的键位提示卡片。
+    ///
+    /// 放在**右下**而不是居中：用户通常还在打字，居中会盖住刚看的内容。
+    fn draw_whichkey(&self, g: &mut Grid, groups: &[whichkey::Group], chrome_top: usize) {
+        if groups.is_empty() || chrome_top < 4 {
+            return;
+        }
+        // 计算卡片尺寸：键列 + 说明列
+        let key_w = groups
+            .iter()
+            .flat_map(|g| g.keys.iter().map(|(k, _)| width::display_width(k)))
+            .max()
+            .unwrap_or(5);
+        let desc_w = groups
+            .iter()
+            .flat_map(|g| g.keys.iter().map(|(_, d)| width::display_width(d)))
+            .max()
+            .unwrap_or(10);
+        // 卡片宽度：边框 2 + 键列 + 间隔 2 + 说明列
+        let card_w = (key_w + desc_w + 6).min(self.cols.saturating_sub(4)).max(20);
+        // 高度：每个分组 1 行标题 + 若干键行 + 1 行间距
+        let rows_needed: usize =
+            groups.iter().map(|g| g.keys.len() + 2).sum::<usize>() + 1;
+        let card_h = rows_needed.min(chrome_top.saturating_sub(1));
+        if card_h < 3 {
+            return;
+        }
+        let x0 = self.body_cols().saturating_sub(card_w + 1);
+        let y0 = chrome_top.saturating_sub(card_h + 1);
+
+        // 先填空整块（不透明），否则底下的正文会从缝隙里透上来
+        for r in y0..(y0 + card_h).min(self.rows) {
+            g.blank(r, x0, x0 + card_w, Tone::Text);
+        }
+        let bar = "─".repeat(card_w.saturating_sub(2));
+        g.put(y0, x0, "╭", Tone::BorderActive);
+        g.put(y0, x0 + 1, &bar, Tone::BorderActive);
+        g.put(y0, x0 + card_w - 1, "╮", Tone::BorderActive);
+
+        let mut row = y0 + 1;
+        let bottom = y0 + card_h - 1;
+        for grp in groups {
+            if row >= bottom {
+                break;
+            }
+            g.put(row, x0, "│", Tone::BorderActive);
+            let t = width::truncate_to_width(grp.title, card_w.saturating_sub(4)).to_string();
+            g.put(row, x0 + 2, &t, Tone::Accent);
+            g.put(row, x0 + card_w - 1, "│", Tone::BorderActive);
+            row += 1;
+            for (k, d) in grp.keys {
+                if row >= bottom {
+                    break;
+                }
+                g.put(row, x0, "│", Tone::BorderActive);
+                let kw = width::pad_to_width(k, key_w);
+                g.put(row, x0 + 2, &kw, Tone::Primary);
+                let dw = card_w.saturating_sub(key_w + 5);
+                let desc = width::truncate_to_width(d, dw).to_string();
+                g.put(row, x0 + 2 + key_w + 2, &desc, Tone::Muted);
+                g.put(row, x0 + card_w - 1, "│", Tone::BorderActive);
+                row += 1;
+            }
+            row += 1; // 分组间距
+        }
+        // 底部：补一条提示（说明这是 which-key 以及怎么关）
+        if bottom > y0 {
+            g.put(bottom, x0, "╰", Tone::BorderActive);
+            g.put(bottom, x0 + 1, &bar, Tone::BorderActive);
+            g.put(bottom, x0 + card_w - 1, "╯", Tone::BorderActive);
+        }
     }
 
     /// 全屏 diff 查看器：左侧文件树（可关）+ 右侧 diff。
@@ -2144,6 +2230,8 @@ enum Effect {
     ShowStatus,
     /// 打开 diff 查看器
     ShowDiff,
+    /// 回退对话一轮（需要向内核提交 Op，故交给主循环执行）
+    Rewind,
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -2201,6 +2289,8 @@ fn apply_popup_item(
             }
             commands::Action::Status => Effect::ShowStatus,
             commands::Action::DiffViewer => Effect::ShowDiff,
+            // 回退要提交 Op 给内核，因此交给主循环执行
+            commands::Action::Rewind => Effect::Rewind,
             commands::Action::Keys => {
                 *info_screen = Some(commands::keys_text().to_string());
                 Effect::None
@@ -2369,6 +2459,21 @@ fn fact_lines(facts: &[Fact], body_cols: usize) -> Vec<Vec<Seg>> {
             Fact::ApprovalNeeded { detail } => {
                 out.push(vec![(2, format!("△ 需要审批：{detail}"), Tone::Warning)]);
             }
+            Fact::Rewound { turns, removed_messages, files_kept } => {
+                // 必须同时说明"文件没回退" —— 让人以为文件也回去了最危险
+                out.push(vec![(
+                    2,
+                    format!("↩ 已回退 {turns} 轮（{removed_messages} 条消息）"),
+                    Tone::Info,
+                )]);
+                if *files_kept > 0 {
+                    out.push(vec![(
+                        4,
+                        format!("注意：磁盘上 {files_kept} 个文件的改动未被撤销"),
+                        Tone::Warning,
+                    )]);
+                }
+            }
             Fact::Failed(msg) => out.push(vec![(2, format!("✗ {msg}"), Tone::Error)]),
             Fact::TurnFinished { input_tokens, output_tokens } => out.push(vec![(
                 2,
@@ -2474,6 +2579,23 @@ fn open_diff_viewer(events: &[EventMsg], slot: &mut Option<diffview::Viewer>) {
     }
     let parsed = diffview::parse(&text);
     *slot = Some(diffview::Viewer::new(parsed));
+}
+
+/// 提交一次对话回退并把结果并入事件流。
+///
+/// 抽成函数是因为三个入口（弹窗 Enter / `/命令` / Tab 接受）都要用它；
+/// 各写一遍必然漂移（例如某处忘了把命中事件并进 events）。
+fn do_rewind<F>(submit: &mut F, events: &mut Vec<EventMsg>, status: &mut String)
+where
+    F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
+{
+    match submit(neo_protocol::Op::Rewind { turns: 1 }) {
+        Ok(produced) => {
+            events.extend(produced);
+            *status = "已回退一轮对话（文件改动未撤销；/diff 可查看）".to_string();
+        }
+        Err(e) => *status = format!("回退失败：{e}"),
+    }
 }
 
 /// 正文可用列数（与 `Screen::body_cols` 同一判据）。
@@ -2622,6 +2744,8 @@ where
     let mut view_state = view::View::new();
     // 全屏 diff 查看器（`/diff` 或审批时按 d 打开）
     let mut diff_viewer: Option<diffview::Viewer> = None;
+    // which-key 提示（`ctrl+/`）：任意键关闭
+    let mut whichkey_groups: Option<Vec<whichkey::Group>> = None;
     // 最近一次渲染记录的命中区域。**必须跨迭代保留** ——
     // 只有 dirty 时才重绘，若把它声明在循环内，鼠标事件到达时
     // 区域是空的，命中测试永远失败（点击/滚动全部无效）。
@@ -2684,6 +2808,7 @@ where
                 sidebar: false,
                 view: None,
                 diff_viewer: None,
+                whichkey: None,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2731,6 +2856,7 @@ where
                 sidebar: false,
                 view: None,
                 diff_viewer: Some(v),
+                whichkey: None,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2808,6 +2934,7 @@ where
                 sidebar: false,
                 view: None,
                 diff_viewer: None,
+                whichkey: None,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2840,6 +2967,7 @@ where
                 sidebar: sidebar_open,
                 view: Some(&view_state),
                 diff_viewer: diff_viewer.as_ref(),
+                whichkey: whichkey_groups.as_deref(),
             };
             let (out, regs) = screen.render_with_regions();
             write!(stdout, "{out}")?;
@@ -2858,6 +2986,11 @@ where
         };
         // 有任何按键进来都要重绘（状态可能已变）
         dirty = true;
+        // which-key 是"看一眼"的提示：任何**其它**键都把它关掉，
+        // 否则它会一直挂在屏幕上挡住正文（用户以为界面卡了）。
+        if whichkey_groups.is_some() && !matches!(key, Key::WhichKey) {
+            whichkey_groups = None;
+        }
 
         // ── 弹窗打开时，按键先交给弹窗 ──────────────────────────────
         //
@@ -2918,6 +3051,9 @@ where
                             &mut info_screen,
                         ) {
                             Effect::Quit => should_quit = true,
+                            Effect::Rewind => {
+                                do_rewind(&mut submit, &mut events, &mut status)
+                            }
                             Effect::ClearTranscript => {
                                 events.clear();
                                 status = "新对话（已清空转录；文件改动不受影响）".to_string();
@@ -2948,6 +3084,29 @@ where
         }
 
         match key {
+            Key::WhichKey => {
+                // 已显示则再按一次关掉（开关语义，避免只有"任意键关闭"一种退路）
+                if whichkey_groups.is_some() {
+                    whichkey_groups = None;
+                    status = "已关闭键位提示".to_string();
+                } else {
+                    let ctx = whichkey::detect(
+                        popup_state.is_some(),
+                        searching,
+                        outstanding.is_some(),
+                        false,
+                        view_state.clamped_offset(
+                            transcript_line_count(&events, self_body_cols(cols, sidebar_open)),
+                            rows.saturating_sub(chrome_rows(input.line_count())),
+                        ) > 0,
+                        sidebar_open && cols >= SIDEBAR_MIN_COLS,
+                    );
+                    let visible = sidebar_open && cols >= SIDEBAR_MIN_COLS;
+                    whichkey_groups = Some(whichkey::groups_for(ctx, visible));
+                    status = "键位提示（任意键关闭；ctrl+/ 再按一次也可）".to_string();
+                }
+            }
+
             Key::Quit => break,
             Key::Escape => {
                 if searching {
@@ -2996,6 +3155,9 @@ where
                                 );
                                 match eff {
                                     Effect::Quit => break,
+                                    Effect::Rewind => {
+                                        do_rewind(&mut submit, &mut events, &mut status)
+                                    }
                                     Effect::ClearTranscript => events.clear(),
                                     Effect::ShowStatus => {
                                         info_screen = Some(commands::status_text(
@@ -3217,6 +3379,9 @@ where
                         popup_state = None;
                         match eff {
                             Effect::Quit => break,
+                            Effect::Rewind => {
+                                do_rewind(&mut submit, &mut events, &mut status)
+                            }
                             Effect::ClearTranscript => events.clear(),
                             Effect::ShowStatus => {
                                 info_screen = Some(commands::status_text(
@@ -3320,6 +3485,9 @@ where
                             match eff {
                                 // 直接 break 出主循环；不需要再走一遍 should_quit
                                 Effect::Quit => break,
+                                Effect::Rewind => {
+                                    do_rewind(&mut submit, &mut events, &mut status)
+                                }
                                 Effect::ClearTranscript => {
                                     events.clear();
                                     status =
@@ -3376,6 +3544,7 @@ where
                             sidebar: sidebar_open,
                             view: Some(&view_state),
                             diff_viewer: None,
+                            whichkey: None,
                         }
                         .render()
                     )?;
@@ -3418,6 +3587,7 @@ where
                         sidebar: sidebar_open,
                         view: Some(&view_state),
                         diff_viewer: None,
+                        whichkey: None,
                     }
                     .render()
                 )?;
@@ -3468,6 +3638,7 @@ mod tests {
             sidebar: false,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }
         .render()
     }
@@ -3504,6 +3675,7 @@ mod tests {
             sidebar: false,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }
         .render()
     }
@@ -3567,6 +3739,9 @@ mod tests {
         // 单独 ESC 现在是"关弹窗"，必须是 Escape 而非 Unknown
         assert_eq!(decode_key(&[0x1b]), Key::Escape, "单独 ESC 应为 Escape");
         assert_eq!(decode_key(&[0x10]), Key::CommandPalette);
+        // ctrl+/（0x1f）与 ctrl+o（0x0f）都应解成 which-key
+        assert_eq!(decode_key(&[0x1f]), Key::WhichKey);
+        assert_eq!(decode_key(&[0x0f]), Key::WhichKey);
         assert_eq!(decode_key(&[0x14]), Key::NextTheme);
         assert_eq!(decode_key(&[0x1b, b'[', b'Z']), Key::Unknown, "未支持的序列应为 Unknown");
     }
@@ -3604,6 +3779,7 @@ mod tests {
             sidebar: false,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }
         .render();
         // 找出弹窗所在的行区间（含边框），断言这些行里没有 logo 的半块字符
@@ -3700,6 +3876,7 @@ mod tests {
             sidebar: false,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -3722,6 +3899,7 @@ mod tests {
                 sidebar: true,
                 view: None,
                 diff_viewer: None,
+                whichkey: None,
             }
             .render();
             let newlines = out.matches('\n').count();
@@ -3766,6 +3944,7 @@ mod tests {
                     sidebar: true,
                     view: None,
                     diff_viewer: None,
+                    whichkey: None,
                 }
                 .render();
                 for (i, l) in plain(&out).iter().enumerate() {
@@ -3794,6 +3973,7 @@ mod tests {
                 sidebar: true,
                 view: None,
                 diff_viewer: None,
+                whichkey: None,
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -3822,6 +4002,7 @@ mod tests {
             sidebar,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }
         .render()
     }
@@ -3874,6 +4055,7 @@ mod tests {
             sidebar: true,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }.render();
         let text = plain(&out).join("\n");
         assert!(text.contains("上限未知"), "应说明上限未知：{text}");
@@ -3892,6 +4074,7 @@ mod tests {
             sidebar: true,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }.render();
         assert!(plain(&out).join("\n").contains("90% of 1000"), "占用率应为 90%");
     }
@@ -3951,6 +4134,7 @@ mod tests {
                     theme: t, popup: None, preformatted: None, sidebar: false,
                     view: None,
                     diff_viewer: None,
+                    whichkey: None,
                 }
                 .render()
             })
@@ -3976,12 +4160,85 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
-            sidebar: false, view: None, diff_viewer: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
         }
         .render_with_regions();
         let text = plain(&out).join("\n");
         assert!(text.contains('╭'), "矮终端也必须画出弹窗：{text}");
         assert!(text.contains("命令"), "至少应显示标题：{text}");
+    }
+
+    // ── which-key ────────────────────────────────────────────────────
+
+    #[test]
+    fn whichkey_overlay_renders_a_card() {
+        let a = about();
+        let ed = editor::Editor::new();
+        let groups = whichkey::groups_for(whichkey::Context::Input, false);
+        let out = Screen {
+            cols: 120, rows: 34, facts: &[], input: &ed, status: "就绪",
+            awaiting_input: false, show_cursor: true,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None,
+            whichkey: Some(&groups),
+        }
+        .render();
+        let text = plain(&out).join("\n");
+        assert!(text.contains('╭'), "应画出卡片边框：{text}");
+        assert!(text.contains("提交 / 编辑"), "应显示分组标题：{text}");
+        assert!(text.contains("ctrl+k"), "应列出键位：{text}");
+    }
+
+    #[test]
+    fn whichkey_overlay_does_not_cover_the_input_box() {
+        // 用户按 which-key 时通常还要继续打字 → 卡片不能压在输入框上
+        let a = about();
+        let ed = editor::Editor::from_text("正在输入的任务");
+        let groups = whichkey::groups_for(whichkey::Context::Input, false);
+        let out = Screen {
+            cols: 120, rows: 34, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: true,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None,
+            whichkey: Some(&groups),
+        }
+        .render();
+        let text = plain(&out).join("\n");
+        assert!(text.contains("正在输入的任务"), "输入内容必须仍可见：{text}");
+        assert!(text.contains("default ⏵"), "输入框状态行必须仍可见：{text}");
+    }
+
+    #[test]
+    fn whichkey_card_stays_within_width_and_is_opaque() {
+        let a = about();
+        let ed = editor::Editor::new();
+        let groups = whichkey::groups_for(whichkey::Context::Input, true);
+        for cols in [70usize, 96, 120, 200] {
+            let out = Screen {
+                cols, rows: 34, facts: &[], input: &ed, status: "",
+                awaiting_input: false, show_cursor: true,
+                about: Some(&a), trust: None,
+                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                sidebar: cols >= 96, view: None, diff_viewer: None,
+                whichkey: Some(&groups),
+            }
+            .render();
+            let lines = plain(&out);
+            for (i, l) in lines.iter().enumerate() {
+                let w = width::display_width(l);
+                assert!(w <= cols, "{cols} 第 {i} 行宽 {w} 超宽");
+            }
+            // 卡片区域内不得漏出 logo 的半块字符（不透明）
+            let card_rows: Vec<&String> =
+                lines.iter().filter(|l| l.contains('╭') || l.contains('│')).collect();
+            for l in card_rows {
+                if l.contains("提交 / 编辑") {
+                    assert!(!l.contains('█'), "卡片里漏进了背景：{l:?}");
+                }
+            }
+        }
     }
 
     // ── diff 查看器 ──────────────────────────────────────────────────
@@ -3994,7 +4251,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: Some(v),
+            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None,
         }
         .render()
     }
@@ -4120,7 +4377,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup, preformatted: None,
-            sidebar: true, view: None, diff_viewer: None,
+            sidebar: true, view: None, diff_viewer: None, whichkey: None,
         }
         .render_with_regions()
         .1
@@ -4185,7 +4442,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
         }
         .render_with_regions();
         let (gx, gy) = r.sidebar_grip.expect("侧栏收起时应留一个把手");
@@ -4256,7 +4513,7 @@ mod tests {
                 status: "", awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-                sidebar: false, view: Some(v), diff_viewer: None,
+                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None,
             }
             .render()
         };
@@ -4282,7 +4539,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None,
         }
         .render();
         assert!(plain(&out).join("\n").contains("下方还有"), "应提示下方还有内容");
@@ -4304,7 +4561,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -4344,6 +4601,7 @@ mod tests {
             sidebar: false,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4375,6 +4633,7 @@ mod tests {
             sidebar: false,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -4397,6 +4656,7 @@ mod tests {
                 sidebar: true,
                 view: None,
                 diff_viewer: None,
+                whichkey: None,
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -4423,6 +4683,7 @@ mod tests {
             sidebar: false,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }
         .render();
         // 提取光标定位序列 ESC[<row>;<col>H（渲染尾部还有 ?25h 之类，需精确匹配）
@@ -4516,6 +4777,7 @@ mod tests {
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
                 view: None,
                 diff_viewer: None,
+                whichkey: None,
             }
             .render();
             for (i, line) in plain(&out).iter().enumerate() {
@@ -4636,7 +4898,7 @@ mod tests {
         let text = plain(&welcome(110, 30)).join("\n");
         // 提示行只放最高频的几个键（完整键位在 /keys）
         assert!(text.contains("tab 补全"), "应提示补全：{text}");
-        assert!(text.contains("ctrl+f"), "应提示搜索：{text}");
+        assert!(text.contains("ctrl+/"), "应提示 which-key（可发现性入口）：{text}");
         assert!(text.contains("@ 引用"), "应提示引用：{text}");
         assert!(text.contains("pgup"), "应提示滚动：{text}");
         // 未实现的对话框类命令不得出现
@@ -4657,6 +4919,7 @@ mod tests {
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
             view: None,
             diff_viewer: None,
+            whichkey: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4678,6 +4941,7 @@ mod tests {
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
                 view: None,
                 diff_viewer: None,
+                whichkey: None,
             }
             .render();
             plain(&out).join("\n")
@@ -4859,6 +5123,7 @@ mod tests {
                     sidebar: false,
                     view: None,
                     diff_viewer: None,
+                    whichkey: None,
                 }
                 .render()
             };

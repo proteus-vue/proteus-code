@@ -669,3 +669,109 @@ fn tool_reported_events_are_logged_before_the_call_ends() {
     let end_at = end_at.expect("应有 ToolCallEnd");
     assert!(todo_at < end_at, "清单事件应先于调用结束");
 }
+
+// ─────────────── 对话回退（Op::Rewind）───────────────
+
+#[test]
+fn rewind_drops_the_last_turn_and_its_messages() {
+    // 三轮对话后回退一轮：最后一轮的消息应全部消失，且**必须**包含
+    // 那一轮的助手回复与工具结果（只删用户消息会留下无主的助手发言）。
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(MockTool::new("read")));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(vec![
+            vec![tool_call("c1", "read", serde_json::json!({}))],
+            vec![ModelDelta::Text("第一轮".into())],
+        ])),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    k.submit(Op::UserTurn { text: "问题一".into(), refs: vec![] }).unwrap();
+    k.submit(Op::UserTurn { text: "问题二".into(), refs: vec![] }).unwrap();
+    let before = k.messages().len();
+
+    let ev = k.submit(Op::Rewind { turns: 1 }).unwrap();
+    assert!(
+        ev.iter().any(|e| matches!(e, EventMsg::Rewound { turns: 1, .. })),
+        "应发出 Rewound 事件"
+    );
+    let after = k.messages().len();
+    assert!(after < before, "回退后消息应减少（{before} → {after}）");
+    // 第二轮的内容不该还在
+    let has_second = k.messages().iter().any(|m| matches!(m, Message::User(t) if t.contains("问题二")));
+    assert!(!has_second, "被回退轮次的用户消息应已删除");
+    // 第一轮的内容应保留
+    let has_first = k.messages().iter().any(|m| matches!(m, Message::User(t) if t.contains("问题一")));
+    assert!(has_first, "更早的轮次必须保留");
+    assert_eq!(*k.state(), KernelState::Idle, "回退后应回到空闲");
+}
+
+#[test]
+fn rewind_reports_how_many_file_changes_were_kept() {
+    // 回退**不撤销文件**，但必须如实报告有多少改动被保留 ——
+    // 让人以为"undo 连文件一起回去了"是最危险的那种错觉。
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(PreviewTool));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(vec![
+            vec![tool_call("c1", "apply_patch", serde_json::json!({}))],
+            vec![ModelDelta::Text("done".into())],
+        ])),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    k.submit(Op::UserTurn { text: "改文件".into(), refs: vec![] }).unwrap();
+    let ev = k.submit(Op::Rewind { turns: 1 }).unwrap();
+    let kept = ev.iter().find_map(|e| match e {
+        EventMsg::Rewound { files_kept, .. } => Some(*files_kept),
+        _ => None,
+    }).expect("应有 Rewound");
+    assert_eq!(kept, 1, "应报告 1 个文件改动被保留（未撤销）");
+}
+
+#[test]
+fn rewind_too_far_is_an_error_not_a_silent_noop() {
+    // 回退超过已有轮次必须报错。静默不动会让用户以为回退了。
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("x")),
+        ToolRegistry::new(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    k.submit(Op::UserTurn { text: "只有一轮".into(), refs: vec![] }).unwrap();
+    let err = k.submit(Op::Rewind { turns: 5 });
+    assert!(err.is_err(), "回退 5 轮但只有 1 轮，必须报错");
+    let msg = format!("{}", err.unwrap_err());
+    assert!(msg.contains("无法回退"), "错误信息应说明原因：{msg}");
+}
+
+#[test]
+fn rewind_clears_a_pending_approval() {
+    // 若正等审批时回退，那批调用已经无意义 —— 必须清掉挂起状态，
+    // 否则内核会停在一个"等一个已经不存在的轮次"的状态里。
+    struct WriteTool;
+    impl Tool for WriteTool {
+        fn name(&self) -> &str { "apply_patch" }
+        fn describe(&self) -> String { "x".into() }
+        fn call_kind(&self, _a: &Value) -> CallKind { CallKind::Write }
+        fn execute(&self, _a: &Value, _c: &ToolCtx) -> ToolOutput {
+            ToolOutput { exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false }
+        }
+    }
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(WriteTool));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(vec![
+            vec![tool_call("c1", "apply_patch", serde_json::json!({}))],
+        ])),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default, // 写要问 → 会挂起
+    );
+    k.submit(Op::UserTurn { text: "改".into(), refs: vec![] }).unwrap();
+    assert!(matches!(k.state(), KernelState::AwaitingApproval { .. }), "应先挂起");
+    k.submit(Op::Rewind { turns: 1 }).unwrap();
+    assert_eq!(*k.state(), KernelState::Idle, "回退应清掉挂起的审批");
+}

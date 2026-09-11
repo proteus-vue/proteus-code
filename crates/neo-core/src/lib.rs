@@ -419,6 +419,11 @@ pub enum KernelError {
     Persistence(PersistenceError),
     /// 尚未实现的 Op（明确报错，不静默忽略）。
     Unimplemented(String),
+    /// 请求回退的轮次超过已有历史（参数不合法，不是"没实现"）。
+    ///
+    /// 与 `Unimplemented` 分开：一个说"这个能力还没有"，一个说"你的参数不成立"。
+    /// 混用会让用户以为功能缺失，而实际只是 requested too far back。
+    RewindTooFar { requested: usize, available: usize },
     /// 上下文超上限：要求压缩，而不是静默丢消息。
     ///
     /// 为什么不静默丢弃最老的：模型的视角必须与日志一致（"模型可见即已落盘"）。
@@ -432,6 +437,10 @@ impl std::fmt::Display for KernelError {
             Self::NoPendingApproval(id) => write!(f, "无待审批调用：{id}"),
             Self::Persistence(e) => write!(f, "{e}"),
             Self::Unimplemented(what) => write!(f, "该 Op 尚未实现：{what}"),
+            Self::RewindTooFar { requested, available } => write!(
+                f,
+                "无法回退 {requested} 轮：当前只有 {available} 个用户轮次"
+            ),
             Self::ContextBudgetExceeded { messages, limit } => write!(
                 f,
                 "上下文超上限（{messages} > {limit} 条），需压缩后再继续；压缩属 L4 职责，当前未实现"
@@ -652,6 +661,37 @@ impl Kernel {
                 }
                 // 继续同一步的剩余调用，然后进入下一步
                 self.finish_step_from(&pending.calls, pending.index + 1)?;
+            }
+
+            Op::Rewind { turns } => {
+                // 找到倒数第 `turns` 个用户消息的下标，从那里截断。
+                // 用"用户消息"当轮次边界，而不是"助手消息"—— 一轮可能包含
+                // 多个助手消息（工具调用），只有用户消息才是轮的起点。
+                let mut seen = 0usize;
+                let mut cut = None;
+                for (i, m) in self.messages.iter().enumerate().rev() {
+                    if matches!(m, Message::User(_)) {
+                        seen += 1;
+                        if seen == turns {
+                            cut = Some(i);
+                            break;
+                        }
+                    }
+                }
+                let Some(cut) = cut else {
+                    return Err(KernelError::RewindTooFar { requested: turns, available: seen });
+                };
+                let removed = self.messages.len() - cut;
+                self.messages.truncate(cut);
+                // 状态回到空闲：回退时可能在等审批，那批调用已经没有意义
+                self.pending = None;
+                self.state = KernelState::Idle;
+                let ev = EventMsg::Rewound {
+                    turns,
+                    removed_messages: removed,
+                    files_kept: self.file_changes.len(),
+                };
+                self.emit_and_log(&ev)?;
             }
 
             Op::Interrupt => {
