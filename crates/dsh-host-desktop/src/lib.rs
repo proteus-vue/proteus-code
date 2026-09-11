@@ -14,6 +14,7 @@
 //! 只固定契据与分层；真实实现时在 window 层接入。
 
 use dsh_core::{DiffSupport, HostBackend, HostCapabilities, ImageSupport};
+use dsh_protocol::{EventMsg, Fact};
 
 /// 桌面宿主的输入解析：复用 ZCode 的 @ / # / / / $ 引用体系。
 /// 与 TUI / Web 共享同一解析语义 —— 解析属**语义**，不属宿主实现。
@@ -28,10 +29,10 @@ pub fn parse_refs(input: &str) -> Vec<(char, String)> {
     out
 }
 
-pub struct DesktopHost { facts: Vec<String> }
+pub struct DesktopHost { events: Vec<EventMsg> }
 
 impl DesktopHost {
-    pub fn new() -> Self { Self { facts: Vec::new() } }
+    pub fn new() -> Self { Self { events: Vec::new() } }
 }
 
 impl Default for DesktopHost {
@@ -50,12 +51,12 @@ impl HostBackend for DesktopHost {
         }
     }
 
-    fn consume(&mut self, event_json: &str) -> Result<(), String> {
-        // 真实实现：解析 EventMsg 并驱动 webview 渲染。
-        // 原型只登记"用户可见事实"，供 T6 等价性断言使用。
-        self.facts.push(format!("[desktop] {event_json}"));
+    fn consume(&mut self, event: &EventMsg) -> Result<(), String> {
+        // 真实实现：把事件推给 webview 渲染。
+        // 当前只累积，供 T6 等价性断言使用。
+        self.events.push(event.clone());
         Ok(())
     }
 
-    fn rendered_facts(&self) -> Vec<String> { self.facts.clone() }
+    fn facts(&self) -> Vec<Fact> { dsh_protocol::facts_of(&self.events) }
 }

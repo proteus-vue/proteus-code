@@ -20,10 +20,12 @@
 | `SandboxBackend` 真实后端（macOS Seatbelt） | ✅ **已实现**，6 项**真机**越权拦截测试 |
 | `SessionPersistence` 真实后端（JSONL append-only） | ✅ **已实现**，重开续号已验证 |
 | `neo exec` 无头宿主（端到端闭环） | ✅ **已实现**，离线 + 真实 provider 双路径跑通 |
+| `neo tui` 终端宿主（交互式，含审批应答） | ✅ **已实现**，真终端验证（pty 驱动） |
+| **T6 宿主语义等价**（同一事件流多宿主比对） | ✅ **铁律生效**：headless / TUI / desktop 事实完全等价 |
 | Shell 工具真实执行（经沙箱） | ✅ **已实现**（`bash` 真跑，输出受限） |
 | **真实模型完整推理** | ⚠️ **待验**：HTTP 链路已验证，但环境里的 `DEEPSEEK_API_KEY` 是占位符，未完成一次真实推理 |
 | `apply_patch` 落盘 | ❌ **未实现**（契约与分类已定，明确返回未实现而非假装成功） |
-| TUI / Desktop / Web 宿主 | ❌ **未实现**（契据 `HostBackend` 已定；`exec` 是第一个真实宿主） |
+| Desktop / Web 宿主 | ❌ **未实现**（契据 `HostBackend` 已定；`exec` 与 `tui` 是前两个真实宿主） |
 | Goal 编排（L4） | ❌ **未实现** |
 | Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |
 
@@ -33,6 +35,9 @@
 ### 亲测可用
 
 ```bash
+# 交互式（TUI）：输入任务，写操作会问 y/n
+neo tui --provider selftest --mode default
+
 # 离线跑通（不需要 API key）—— 验证装配 → 内核 → 沙箱 → 落盘
 cd /tmp && neo exec "列出文件" --provider mock --mode auto-edit
 

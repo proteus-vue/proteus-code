@@ -858,13 +858,19 @@ pub enum ImageSupport { None, Inline, External }
 pub enum DiffSupport { None, Text, Hunk }
 
 /// 宿主后端契据。实现在 L5；宿主之间不得互相依赖（check_architecture 强制）。
+///
+/// 收 `&EventMsg` 而非 JSON 字符串：宿主与内核同进程，
+/// 中间加一层序列化只是白白的开销与出错点（解析失败、字段漂移）。
 pub trait HostBackend: Send {
     fn id(&self) -> &'static str;
     fn capabilities(&self) -> HostCapabilities;
-    /// 消费一条事件（JSON）。返回 Err 表示该事件不被本宿主支持 —— T6 断言 (a) 的判据。
-    fn consume(&mut self, event_json: &str) -> Result<(), String>;
-    /// 已渲染的"用户可见事实"集合，用于 T6 断言 (b) 语义等价。
-    fn rendered_facts(&self) -> Vec<String>;
+    /// 消费一条事件。返回 Err 表示本宿主无法处理该事件 —— T6 断言 (a) 的判据。
+    fn consume(&mut self, event: &EventMsg) -> Result<(), String>;
+    /// 本宿主已向用户传达的事实集合。**T6 断言 (b) 的比较对象。**
+    ///
+    /// 返回协议层的 [`Fact`] 而非渲染后的字符串：
+    /// "等价"要能机器判定，前提是两边用同一套语义词表。
+    fn facts(&self) -> Vec<Fact>;
 }
 
 /// 宿主注册表：内核只认契据，不认具体后端。
@@ -876,8 +882,8 @@ impl HostRegistry {
     pub fn ids(&self) -> Vec<&'static str> { self.hosts.iter().map(|h| h.id()).collect() }
 
     /// 把同一事件流喂给所有宿主。T6 的运行时形态。
-    pub fn broadcast(&mut self, event_json: &str) -> Vec<(&'static str, Result<(), String>)> {
-        self.hosts.iter_mut().map(|h| (h.id(), h.consume(event_json))).collect()
+    pub fn broadcast(&mut self, event: &EventMsg) -> Vec<(&'static str, Result<(), String>)> {
+        self.hosts.iter_mut().map(|h| (h.id(), h.consume(event))).collect()
     }
 }
 

@@ -10,6 +10,7 @@ use dsh_core::{
     CallKind, HostBackend, ModelProvider, SandboxBackend, SandboxOutcome, SessionPersistence, Tool,
     ToolCtx,
 };
+use dsh_protocol::EventMsg;
 use dsh_host_desktop::DesktopHost;
 use dsh_mock::{
     BrittleHost, InMemoryPersistence, LeakySandbox, MockHost, MockModelProvider, MockTool,
@@ -20,60 +21,64 @@ use dsh_protocol::SandboxMode;
 use serde_json::json;
 
 /// 一段共享的事件流：所有宿主后端都必须能完整消费。
-const EVENT_STREAM: &[&str] = &[
-    r#"{"kind":"turn_start"}"#,
-    r#"{"kind":"assistant_message"}"#,
-    r#"{"kind":"tool_call"}"#,
-    r#"{"kind":"turn_end"}"#,
-];
+fn shared_event_stream() -> Vec<EventMsg> {
+    vec![
+        EventMsg::TurnStarted { turn_id: "t1".into() },
+        EventMsg::AgentMessageDone { text: "hello".into() },
+        EventMsg::ToolCallBegin { id: "c1".into(), name: "bash".into() },
+        EventMsg::ToolCallEnd { id: "c1".into(), exit_code: 0 },
+        EventMsg::TurnComplete { input_tokens: 1, output_tokens: 2 },
+    ]
+}
 
-// ─────────────── HostBackend：T6 语义等价 ───────────────
-
-/// 契约：任何宿主后端都必须能消费完整事件流，且事实数一致（可渲染性可不同）。
+/// 契约：任何宿主后端都必须能消费完整事件流，且事实数一致。
+///
+/// 注意断言的是 **`Fact`**（协议层语义），不是渲染字符串 ——
+/// TUI 画彩色、exec 打日志、desktop 渲染卡片，但三者必须传达同一组事实。
 fn assert_host_contract(mut host: Box<dyn HostBackend>) {
-    for ev in EVENT_STREAM {
-        host.consume(ev)
+    for ev in shared_event_stream() {
+        host.consume(&ev)
             .unwrap_or_else(|e| panic!("host {} 未能消费事件: {e}", host.id()));
     }
+    let facts = host.facts();
     assert_eq!(
-        host.rendered_facts().len(),
-        EVENT_STREAM.len(),
-        "host {} 的事实数与事件数不符 —— 说明它偷偷丢弃了事件",
+        facts.len(),
+        3,
+        "host {} 的事实数不符（应为 助手发言/工具结束/本轮结束 三条），实际 {facts:?}",
         host.id()
     );
 }
 
 #[test]
 fn host_contract_holds_for_every_backend() {
-    // 同一份契约，跑两个真实/无头后端 —— 这就是"可替换"被验证的方式。
+    // 同一份契约，跑多个真实/无头后端 —— 这就是"可替换"被验证的方式。
     assert_host_contract(Box::new(MockHost::new("headless")));
     assert_host_contract(Box::new(DesktopHost::new()));
+    assert_host_contract(Box::new(dsh_host_tui::TuiFacts::new()));
 }
 
 #[test]
 fn host_contract_compares_two_backends_on_the_same_stream() {
-    // T6 运行时形态：同一事件流广播给多个宿主，逐个断言都不丢事件。
+    // T6 运行时形态：同一事件流广播给多个宿主，断言**语义等价**。
     let mut a = MockHost::new("headless");
-    let mut b = DesktopHost::new();
-    for ev in EVENT_STREAM {
-        a.consume(ev).unwrap();
-        b.consume(ev).unwrap();
+    let mut b = dsh_host_tui::TuiFacts::new();
+    let mut c = DesktopHost::new();
+    for ev in shared_event_stream() {
+        a.consume(&ev).unwrap();
+        b.consume(&ev).unwrap();
+        c.consume(&ev).unwrap();
     }
-    assert_eq!(a.rendered_facts().len(), b.rendered_facts().len());
+    assert_eq!(a.facts(), b.facts(), "headless 与 TUI 的事实必须等价");
+    assert_eq!(b.facts(), c.facts(), "TUI 与 desktop 的事实必须等价");
 }
 
 /// 负向用例：坏宿主必须被契约抓住。
 #[test]
 fn host_contract_rejects_a_brittle_backend() {
     let mut bad = BrittleHost;
-    let ok = bad.consume(r#"{"kind":"turn_start"}"#);
-    assert!(ok.is_ok(), "正常事件不该失败");
-
-    let rejected = bad.consume(r#"{"kind":"unsupported"}"#);
-    assert!(
-        rejected.is_err(),
-        "负向用例失败：坏宿主未能被识别 —— 说明套件没有牙齿"
-    );
+    assert!(bad.consume(&EventMsg::TurnStarted { turn_id: "t".into() }).is_ok(), "正常事件不该失败");
+    let rejected = bad.consume(&EventMsg::GoalProgress { goal_id: "g".into(), done: 1, total: 2 });
+    assert!(rejected.is_err(), "负向用例失败：坏宿主未被识别 —— 套件没有牙齿");
 }
 
 // ─────────────── SessionPersistence：append-only ───────────────

@@ -11,16 +11,16 @@ use dsh_core::{
     ModelDelta, ModelProvider, ModelRequest, ModelStream, PersistenceError, SandboxBackend,
     SandboxOutcome, SessionPersistence, Tool, ToolCtx, ToolInvocation,
 };
-use dsh_protocol::{SandboxMode, ToolOutput};
+use dsh_protocol::{EventMsg, Fact, SandboxMode, ToolOutput};
 
 // ---------- HostBackend ----------
 
 /// 无头宿主 Mock：只登记事实，不渲染。
-pub struct MockHost { facts: Vec<String>, id: &'static str }
+pub struct MockHost { events: Vec<EventMsg>, id: &'static str }
 
 impl MockHost {
     /// `id` 用于在等价性断言里定位是哪个宿主。
-    pub fn new(id: &'static str) -> Self { Self { facts: Vec::new(), id } }
+    pub fn new(id: &'static str) -> Self { Self { events: Vec::new(), id } }
 }
 
 impl HostBackend for MockHost {
@@ -33,12 +33,12 @@ impl HostBackend for MockHost {
             diffs: DiffSupport::None,
         }
     }
-    fn consume(&mut self, event_json: &str) -> Result<(), String> {
+    fn consume(&mut self, event: &EventMsg) -> Result<(), String> {
         // Headless 契约：任何事件都必须能"消费"（不渲染 ≠ 不消费）。
-        self.facts.push(format!("[{}] {event_json}", self.id));
+        self.events.push(event.clone());
         Ok(())
     }
-    fn rendered_facts(&self) -> Vec<String> { self.facts.clone() }
+    fn facts(&self) -> Vec<Fact> { dsh_protocol::facts_of(&self.events) }
 }
 
 /// 故意违规的坏宿主：遇到无法处理的事件直接报错。
@@ -50,11 +50,15 @@ impl HostBackend for BrittleHost {
     fn capabilities(&self) -> HostCapabilities {
         HostCapabilities { images: ImageSupport::None, rich_text: false, interactive_prompt: false, diffs: DiffSupport::None }
     }
-    fn consume(&mut self, event_json: &str) -> Result<(), String> {
-        if event_json.contains("\"kind\":\"unsupported\"") { Err("cannot render this event".into()) }
-        else { Ok(()) }
+    fn consume(&mut self, event: &EventMsg) -> Result<(), String> {
+        // 对某类事件故意拒绝 —— 负向用例的被试
+        if matches!(event, EventMsg::GoalProgress { .. }) {
+            Err("cannot render this event".into())
+        } else {
+            Ok(())
+        }
     }
-    fn rendered_facts(&self) -> Vec<String> { Vec::new() }
+    fn facts(&self) -> Vec<Fact> { Vec::new() }
 }
 
 // ---------- ModelProvider ----------
