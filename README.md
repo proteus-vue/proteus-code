@@ -91,6 +91,9 @@ cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
 #   ctrl+z 挂起回 shell（需终端支持作业控制；fg 恢复）
 #   提醒（提示音/桌面通知）：默认关，/notify 或 NEO_TUI_NOTIFY=1 开启
 #     完成 / 出错 / 需审批时提醒（macOS osascript+afplay / Linux notify-send）
+#   外观：/background 切背景纹理（星场/点阵/斜纹/纯色）
+#         /logo 切 Logo 样式（大 6 行 / 小 3 行 / 极简 1 行 / 隐藏）
+#         NEO_TUI_BG_FILE=<字符画文件> 可用自定义背景（零依赖，不做图像解码）
 #   Tab 补全 / ctrl+r 历史 / ctrl+g 编辑器 / ctrl+l 清屏 / esc 关弹窗
 neo tui --provider selftest --mode default
 # 等价写法：neo --provider selftest --mode default（裸选项默认进 TUI）

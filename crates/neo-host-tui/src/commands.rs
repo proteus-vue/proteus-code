@@ -112,6 +112,18 @@ pub enum Action {
     ToggleNotify,
     /// 开 / 关提醒声音
     ToggleNotifySound,
+    /// 切换背景纹理
+    NextBackground,
+    /// 打开背景选择
+    BackgroundPicker,
+    /// 切换 Logo 样式
+    NextLogo,
+    /// 打开 Logo 样式选择
+    LogoPicker,
+    /// 设置背景 / Logo（走设置弹窗里的选择列表）
+    SetBackground(crate::appearance::Background),
+    /// 设置 Logo 样式
+    SetLogo(crate::appearance::LogoStyle),
 }
 
 /// **必须由命令触发**的动作。新增变体时要加进这里 ——
@@ -134,13 +146,21 @@ const COMMAND_ACTIONS: &[Action] = &[
     Action::ToggleSidebar,
     Action::ToggleNotify,
     Action::ToggleNotifySound,
+    Action::NextBackground,
+    Action::BackgroundPicker,
+    Action::NextLogo,
+    Action::LogoPicker,
 ];
 
 /// **只在界面内部产生**的动作（不经过命令表）。
 ///
 /// `SetTheme` 只由主题选择弹窗产生 —— 让用户敲 `/settheme nord`
 /// 不如让他从列表里选（名字要记，也没法预览）。这类动作刻意不注册命令。
-const INTERNAL_ONLY_ACTIONS: &[Action] = &[Action::SetTheme(crate::theme::ThemeName::Nord)];
+const INTERNAL_ONLY_ACTIONS: &[Action] = &[
+    Action::SetTheme(crate::theme::ThemeName::Nord),
+    Action::SetBackground(crate::appearance::Background::Dots),
+    Action::SetLogo(crate::appearance::LogoStyle::Small),
+];
 
 /// 命令表本体（单一事实源）。
 ///
@@ -204,6 +224,22 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "notify-sound", aliases: &["sound"], desc: "开 / 关提醒声音",
         action: Action::ToggleNotifySound, category: Category::Display, keybinding: "",
+    },
+    Command {
+        name: "background", aliases: &["bg"], desc: "切换背景纹理（星场/点阵/斜纹/纯色）",
+        action: Action::NextBackground, category: Category::Display, keybinding: "",
+    },
+    Command {
+        name: "background-list", aliases: &["bg-list"], desc: "选择背景纹理",
+        action: Action::BackgroundPicker, category: Category::Display, keybinding: "",
+    },
+    Command {
+        name: "logo", aliases: &["logo-style"], desc: "切换 Logo 样式（大/小/极简/隐藏）",
+        action: Action::NextLogo, category: Category::Display, keybinding: "",
+    },
+    Command {
+        name: "logo-list", aliases: &["logo-styles"], desc: "选择 Logo 样式",
+        action: Action::LogoPicker, category: Category::Display, keybinding: "",
     },
     Command {
         name: "keys", aliases: &["keybindings"], desc: "键盘快捷键",
@@ -308,6 +344,8 @@ Neo —— 编程 Agent 内核
     /sidebar   收起 / 展开右侧面板
     /notify    开 / 关提醒（默认关）
     /notify-sound 开 / 关提醒声音
+    /background  切换背景纹理（/background-list 可选）
+    /logo        切换 Logo 样式（/logo-list 可选）
     /copy      复制最近一条回复
     /details   展开 / 折叠工具输出
     /thinking  显示 / 隐藏推理

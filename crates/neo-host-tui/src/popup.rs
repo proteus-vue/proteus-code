@@ -26,6 +26,10 @@ pub enum Kind {
     Theme,
     /// `ctrl+p` 命令面板（含非斜杠动作）
     Palette,
+    /// 背景选择
+    Background,
+    /// Logo 样式选择
+    Logo,
 }
 
 impl Kind {
@@ -35,6 +39,8 @@ impl Kind {
             Kind::Slash => "命令",
             Kind::Theme => "主题",
             Kind::Palette => "命令面板",
+            Kind::Background => "背景",
+            Kind::Logo => "Logo 样式",
         }
     }
 
@@ -44,6 +50,8 @@ impl Kind {
             Kind::File => 8,
             Kind::Slash | Kind::Palette => 8,
             Kind::Theme => 6,
+            Kind::Background => 4,
+            Kind::Logo => 4,
         }
     }
 }
@@ -57,6 +65,10 @@ pub enum ItemAction {
     Run(commands::Action),
     /// 应用某个主题
     SetTheme(crate::theme::ThemeName),
+    /// 应用背景纹理
+    SetBackground(crate::appearance::Background),
+    /// 应用 Logo 样式
+    SetLogo(crate::appearance::LogoStyle),
 }
 
 /// 列表项。
@@ -229,6 +241,42 @@ pub fn theme_items(query: &str) -> Vec<Item> {
                 crate::theme::ThemeName::Catppuccin => "柔和马卡龙",
             };
             Item::plain(t.as_str().to_string(), d.to_string(), ItemAction::SetTheme(t))
+        })
+        .collect()
+}
+
+/// 背景候选。
+pub fn background_items(query: &str) -> Vec<Item> {
+    let q = query.trim().to_ascii_lowercase();
+    crate::appearance::Background::all()
+        .into_iter()
+        .filter(|b| q.is_empty() || b.as_str().contains(&q))
+        .map(|b| {
+            let d = match b {
+                crate::appearance::Background::Stars => "星场（默认）：稀疏点阵，最有氛围",
+                crate::appearance::Background::Dots => "点阵网格：规律安静，适合长时间看",
+                crate::appearance::Background::Diagonal => "斜纹：轻微纹理感",
+                crate::appearance::Background::None => "纯色：无纹理，最省心",
+            };
+            Item::plain(b.as_str().to_string(), d.to_string(), ItemAction::SetBackground(b))
+        })
+        .collect()
+}
+
+/// Logo 样式候选。
+pub fn logo_items(query: &str) -> Vec<Item> {
+    let q = query.trim().to_ascii_lowercase();
+    crate::appearance::LogoStyle::all()
+        .into_iter()
+        .filter(|l| q.is_empty() || l.as_str().contains(&q))
+        .map(|l| {
+            let d = match l {
+                crate::appearance::LogoStyle::Large => "大词标（6 行渐变，默认）",
+                crate::appearance::LogoStyle::Small => "小词标（3 行）",
+                crate::appearance::LogoStyle::Minimal => "极简（一行 NEO）",
+                crate::appearance::LogoStyle::Hidden => "隐藏（首屏只留信息与输入框）",
+            };
+            Item::plain(l.as_str().to_string(), d.to_string(), ItemAction::SetLogo(l))
         })
         .collect()
 }

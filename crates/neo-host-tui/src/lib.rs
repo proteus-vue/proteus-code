@@ -19,6 +19,7 @@
 //! - 另装 `panic` hook，在 panic 前先还原
 //! - 保存 `stty -g` 的确切状态并原样写回（不是猜一个"合理默认"）
 
+pub mod appearance;
 pub mod commands;
 pub mod diffview;
 pub mod editor;
@@ -574,6 +575,10 @@ pub struct Screen<'a> {
     pub settings: Option<&'a Vec<SettingSection>>,
     /// 设置视图当前选中的可操作行（用于高亮）
     pub settings_cursor: usize,
+    /// 外观（背景纹理 + Logo 样式）
+    pub appearance: appearance::Appearance,
+    /// 自定义背景字符画（`NEO_TUI_BG_FILE` 读入；优先于内置纹理）
+    pub custom_background: Option<&'a Vec<String>>,
 }
 
 /// 信任对话框状态。
@@ -944,7 +949,53 @@ impl Grid {
         self.put(row, col, text, tone);
     }
 
-    /// 给尚未写入的格子铺星场。**确定性**，所以多帧之间星位完全静止。
+    /// 给尚未写入的格子铺背景纹理。**确定性**，所以多帧之间完全静止。
+    ///
+    /// 自定义字符画（`rows` 非空时）优先：它按行给出字符，
+    /// 超出画布尺寸时按取模重复，形成平铺效果。
+    fn fill_background(&mut self, bg: appearance::Background, custom: Option<&Vec<String>>) {
+        if let Some(art) = custom {
+            let ar = art.len();
+            for r in 0..self.rows {
+                let line = &art[r % ar];
+                let chars: Vec<char> = line.chars().collect();
+                if chars.is_empty() {
+                    continue;
+                }
+                for c in 0..self.cols {
+                    let i = r * self.cols + c;
+                    if self.tone[i] != Tone::None {
+                        continue;
+                    }
+                    let ch = chars[c % chars.len()];
+                    if ch == ' ' {
+                        continue; // 空格视为"透空"，保留纯色
+                    }
+                    self.ch[i] = ch;
+                    self.tone[i] = Tone::Border;
+                }
+            }
+            return;
+        }
+        for r in 0..self.rows {
+            for c in 0..self.cols {
+                let i = r * self.cols + c;
+                if self.tone[i] != Tone::None {
+                    continue;
+                }
+                if let Some((ch, bright)) = bg.cell(r, c, self.cols) {
+                    self.ch[i] = ch;
+                    self.tone[i] = match bright {
+                        appearance::Brightness::Bright => Tone::StarBright,
+                        appearance::Brightness::Dim => Tone::StarDim,
+                    };
+                }
+            }
+        }
+    }
+
+    /// 旧的星场入口（保留给测试与向后兼容）。
+    #[allow(dead_code)]
     fn fill_stars(&mut self) {
         for r in 0..self.rows {
             for c in 0..self.cols {
@@ -1017,6 +1068,7 @@ impl Screen<'_> {
         // 全屏 diff 查看器：占满整屏，不画输入框/侧栏/状态栏。
         if let Some(v) = self.diff_viewer {
             self.draw_diff_viewer(&mut g, &p, v);
+            g.fill_background(appearance::Background::None, None);
             let mut out = format!("{ESC}[H{ESC}[2J");
             out.push_str(&g.lines(&p).join("\r\n"));
             out.push_str(&format!("{ESC}[?25l"));
@@ -1026,6 +1078,7 @@ impl Screen<'_> {
         // 设置视图：占满整屏
         if let Some(sections) = self.settings {
             self.draw_settings(&mut g, sections);
+            g.fill_background(self.appearance.background, self.custom_background);
             let mut out = format!("{ESC}[H{ESC}[2J");
             out.push_str(&g.lines(&p).join("\r\n"));
             out.push_str(&format!("{ESC}[?25l"));
@@ -1103,7 +1156,7 @@ impl Screen<'_> {
             regions.popup_items = self.popup_item_rows(chrome_top);
         }
 
-        g.fill_stars();
+        g.fill_background(self.appearance.background, self.custom_background);
         let mut out = format!("{ESC}[H{ESC}[2J");
         out.push_str(&g.lines(&p).join("\r\n"));
         match cursor {
@@ -1224,8 +1277,8 @@ impl Screen<'_> {
         ];
 
         let mut chosen: Vec<Styled> = Vec::new();
-        for &(logo, subtitle, meta, gaps) in &tiers {
-            let hero = self.hero_lines(a, logo, subtitle, meta, gaps);
+        for &(_logo, subtitle, meta, gaps) in &tiers {
+            let hero = self.hero_lines(a, true, subtitle, meta, gaps);
             // 整组要放得下，否则会被"显示末尾 N 行"从**顶部**裁掉 ——
             // 用户看到的是"少了 logo 的半截首屏"，且不会有任何报错
             if hero.len() + chrome_rows(1) <= self.rows {
@@ -1248,17 +1301,50 @@ impl Screen<'_> {
 
     fn hero_lines(&self, a: &About, logo: bool, subtitle: bool, meta: bool, gaps: bool) -> Vec<Styled> {
         let mut hero: Vec<Styled> = Vec::new();
-        if logo && self.cols >= WORDMARK_MIN_COLS {
-            // 竖向渐变：主色 → 强调色。单色 logo 太平，渐变让它"有光"
-            let t = theme::get(self.theme);
-            let (pr, ac) = (t.primary, t.accent);
-            let n = (WORDMARK.len() - 1) as f32;
-            for (i, row) in WORDMARK.iter().enumerate() {
-                let (r, gg, b) = lerp_rgb(pr, ac, i as f32 / n);
-                hero.push((row.trim_end().to_string(), Tone::Rgb(r, gg, b)));
+        // Logo 由**样式**决定，而不是"够宽就画大的" —— 后者让用户无法选择。
+        // 样式为 Large 且终端够宽时画 6 行大词标；否则按样式退到小/极简。
+        let t = theme::get(self.theme);
+        let (pr, ac) = (t.primary, t.accent);
+        let grad = |n: usize| -> Vec<Tone> {
+            (0..n)
+                .map(|i| {
+                    let f = if n <= 1 { 0.0 } else { i as f32 / (n - 1) as f32 };
+                    let (r, g, b) = lerp_rgb(pr, ac, f);
+                    Tone::Rgb(r, g, b)
+                })
+                .collect()
+        };
+        match self.appearance.logo {
+            appearance::LogoStyle::Hidden => {}
+            appearance::LogoStyle::Minimal => {
+                hero.push(("NEO".to_string(), Tone::Primary));
             }
-        } else {
-            hero.push(("NEO".to_string(), Tone::Primary));
+            appearance::LogoStyle::Small if self.cols >= 24 => {
+                let tones = grad(appearance::LOGO_SMALL.len());
+                for (i, row) in appearance::LOGO_SMALL.iter().enumerate() {
+                    hero.push((row.to_string(), tones[i]));
+                }
+            }
+            appearance::LogoStyle::Small => {
+                hero.push(("NEO".to_string(), Tone::Primary));
+            }
+            appearance::LogoStyle::Large if self.cols >= WORDMARK_MIN_COLS && logo => {
+                let tones = grad(WORDMARK.len());
+                for (i, row) in WORDMARK.iter().enumerate() {
+                    hero.push((row.trim_end().to_string(), tones[i]));
+                }
+            }
+            appearance::LogoStyle::Large => {
+                // 大词标放不下（或首屏降级）→ 退到小词标，而不是不画
+                if self.cols >= 24 {
+                    let tones = grad(appearance::LOGO_SMALL.len());
+                    for (i, row) in appearance::LOGO_SMALL.iter().enumerate() {
+                        hero.push((row.to_string(), tones[i]));
+                    }
+                } else {
+                    hero.push(("NEO".to_string(), Tone::Primary));
+                }
+            }
         }
 
         if gaps {
@@ -2345,6 +2431,14 @@ fn refresh_popup(p: &mut popup::Popup, kind: popup::Kind, files: &mut Option<Vec
             let n = p.query.clone();
             p.set_items(popup::theme_items(&n), false);
         }
+        popup::Kind::Background => {
+            let n = p.query.clone();
+            p.set_items(popup::background_items(&n), false);
+        }
+        popup::Kind::Logo => {
+            let n = p.query.clone();
+            p.set_items(popup::logo_items(&n), false);
+        }
     }
 }
 
@@ -2379,7 +2473,7 @@ fn open_popup_for(
 /// 拆出来的原因：`apply_popup_item` 不该拿到 `events`/`popup_state`
 /// 这些主循环状态。让它返回一个"请求"，由循环统一执行 ——
 /// 这样清转录、开面板这类动作只有一条实现路径，不会两处各写一遍。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Effect {
     None,
     Quit,
@@ -2407,6 +2501,18 @@ enum Effect {
     ToggleNotify,
     /// 开 / 关提醒声音
     ToggleNotifySound,
+    /// 切到下一个背景
+    NextBackground,
+    /// 打开背景选择列表
+    BackgroundPicker,
+    /// 切到下一个 Logo 样式
+    NextLogo,
+    /// 打开 Logo 样式选择列表
+    LogoPicker,
+    /// 应用背景（来自选择列表）
+    SetBackground(appearance::Background),
+    /// 应用 Logo 样式（来自选择列表）
+    SetLogo(appearance::LogoStyle),
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -2431,6 +2537,17 @@ fn apply_popup_item(
             theme::save_preference(*t);
             *status = format!("主题：{}", t.as_str());
             Effect::None
+        }
+        // 背景/Logo 由主循环落盘（apply_popup_item 拿不到外观状态）
+        popup::ItemAction::SetBackground(b) => {
+            input.clear();
+            *status = format!("背景：{}", b.as_str());
+            Effect::SetBackground(*b)
+        }
+        popup::ItemAction::SetLogo(l) => {
+            input.clear();
+            *status = format!("Logo：{}", l.as_str());
+            Effect::SetLogo(*l)
         }
         popup::ItemAction::Run(action) => {
             // 执行命令后必须清空输入框：`/help` 已经"用掉"了，
@@ -2473,6 +2590,13 @@ fn apply_popup_item(
             commands::Action::ToggleSidebar => Effect::ToggleSidebar,
             commands::Action::ToggleNotify => Effect::ToggleNotify,
             commands::Action::ToggleNotifySound => Effect::ToggleNotifySound,
+            commands::Action::NextBackground => Effect::NextBackground,
+            commands::Action::BackgroundPicker => Effect::BackgroundPicker,
+            commands::Action::NextLogo => Effect::NextLogo,
+            commands::Action::LogoPicker => Effect::LogoPicker,
+            // 这两个由选择列表内部产生（不注册命令）
+            commands::Action::SetBackground(b) => Effect::SetBackground(*b),
+            commands::Action::SetLogo(l) => Effect::SetLogo(*l),
             commands::Action::Keys => {
                 *info_screen = Some(commands::keys_text().to_string());
                 Effect::None
@@ -2580,6 +2704,10 @@ pub enum SettingAction {
     ToggleNotify,
     /// 开 / 关提醒声音
     ToggleNotifySound,
+    /// 切到下一个背景
+    NextBackground,
+    /// 切到下一个 Logo 样式
+    NextLogo,
 }
 
 /// 设置视图的一个分组。
@@ -2611,6 +2739,12 @@ pub struct SettingsInfo {
     pub notify_sound: bool,
     /// 是否启用提醒
     pub notify_enabled: bool,
+    /// 当前背景
+    pub background: String,
+    /// 当前 Logo 样式
+    pub logo: String,
+    /// 是否有自定义背景字符画
+    pub custom_background: bool,
     pub messages: usize,
     pub files_changed: usize,
 }
@@ -2746,6 +2880,28 @@ pub fn settings_sections(info: &SettingsInfo) -> Vec<SettingSection> {
                     value: if info.notify_sound { "开".into() } else { "关".to_string() },
                     action: Some(SettingAction::ToggleNotifySound),
                     readonly_note: "",
+                },
+                SettingRow {
+                    label: "背景".into(),
+                    value: if info.custom_background {
+                        format!("{}（自定义字符画覆盖）", info.background)
+                    } else {
+                        info.background.clone()
+                    },
+                    action: Some(SettingAction::NextBackground),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "Logo 样式".into(),
+                    value: info.logo.clone(),
+                    action: Some(SettingAction::NextLogo),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "自定义背景".into(),
+                    value: if info.custom_background { "已加载".into() } else { "未设置".to_string() },
+                    action: None,
+                    readonly_note: "用 NEO_TUI_BG_FILE 指定字符画文件（每行即背景一行）",
                 },
                 SettingRow {
                     label: "提醒后端".into(),
@@ -3117,6 +3273,33 @@ where
     }
 }
 
+/// 应用外观变更并落盘。返回给状态栏的文案。
+fn apply_appearance(ap: &mut appearance::Appearance, eff: Effect) -> Option<String> {
+    match eff {
+        Effect::NextBackground => {
+            ap.background = ap.background.next();
+            appearance::save_preference(*ap);
+            Some(format!("背景：{}", ap.background.as_str()))
+        }
+        Effect::NextLogo => {
+            ap.logo = ap.logo.next();
+            appearance::save_preference(*ap);
+            Some(format!("Logo：{}", ap.logo.as_str()))
+        }
+        Effect::SetBackground(b) => {
+            ap.background = b;
+            appearance::save_preference(*ap);
+            Some(format!("背景：{}", b.as_str()))
+        }
+        Effect::SetLogo(l) => {
+            ap.logo = l;
+            appearance::save_preference(*ap);
+            Some(format!("Logo：{}", l.as_str()))
+        }
+        _ => None,
+    }
+}
+
 /// 组装并打开设置视图。
 #[allow(clippy::too_many_arguments)]
 fn open_settings(
@@ -3132,6 +3315,8 @@ fn open_settings(
     notify_enabled: bool,
     notify_sound: bool,
     theme_name: theme::ThemeName,
+    appearance: appearance::Appearance,
+    has_custom_bg: bool,
 ) {
     let facts = facts_of(events);
     let files_changed = facts
@@ -3148,6 +3333,9 @@ fn open_settings(
         notify: notify_backend.available(),
         notify_sound,
         notify_enabled,
+        background: appearance.background.as_str().to_string(),
+        logo: appearance.logo.as_str().to_string(),
+        custom_background: has_custom_bg,
         version: about.version.clone(),
         model: about.model.clone(),
         mode: about.mode_short.clone(),
@@ -3393,6 +3581,12 @@ where
     let mut whichkey_groups: Option<Vec<whichkey::Group>> = None;
     // 工具输出 / 推理的显示方式（`/details` `/thinking` 切换）
     let mut display = ToolDisplay::default();
+    // 外观：背景纹理 + Logo 样式（`/background` `/logo` 切换，落盘记忆）
+    let mut current_appearance = appearance::load_preference();
+    // 自定义背景字符画（`NEO_TUI_BG_FILE` 指到文件时优先）
+    let custom_bg = std::env::var_os("NEO_TUI_BG_FILE")
+        .map(std::path::PathBuf::from)
+        .and_then(|p| appearance::load_custom_background(&p, 200, 400));
     // 设置视图（`ctrl+p` → 设置，或 `/settings`）
     let mut settings_state: Option<Vec<SettingSection>> = None;
     let mut settings_cursor: usize = 0;
@@ -3481,6 +3675,8 @@ where
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                appearance: appearance::Appearance::default(),
+                custom_background: None,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -3532,6 +3728,8 @@ where
                 display,
                 settings: Some(sections),
                 settings_cursor,
+                appearance: current_appearance,
+                custom_background: custom_bg.as_ref(),
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -3610,6 +3808,16 @@ where
                                     SettingAction::ToggleNotifySound => {
                                         notify_sound = !notify_sound;
                                     }
+                                    SettingAction::NextBackground => {
+                                        current_appearance.background =
+                                            current_appearance.background.next();
+                                        appearance::save_preference(current_appearance);
+                                    }
+                                    SettingAction::NextLogo => {
+                                        current_appearance.logo =
+                                            current_appearance.logo.next();
+                                        appearance::save_preference(current_appearance);
+                                    }
                                 }
                                 // 刷新设置页上的值（改完之后数字/状态要跟着变）
                                 open_settings(
@@ -3624,7 +3832,9 @@ where
                                     notify_backend.as_ref(),
                                     notify_enabled,
                                     notify_sound,
-                                    theme_name,
+theme_name,
+current_appearance,
+custom_bg.is_some(),
                                 );
                             }
                         }
@@ -3658,6 +3868,8 @@ where
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                appearance: current_appearance,
+                custom_background: custom_bg.as_ref(),
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -3739,6 +3951,8 @@ where
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                appearance: appearance::Appearance::default(),
+                custom_background: None,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -3790,6 +4004,8 @@ where
                 display,
                 settings: settings_state.as_ref(),
                 settings_cursor,
+                appearance: current_appearance,
+                custom_background: custom_bg.as_ref(),
             };
             let (out, regs) = screen.render_with_regions();
             write!(stdout, "{out}")?;
@@ -3865,13 +4081,14 @@ where
                     let chosen = popup_state.as_ref().and_then(|p| p.selected_item().cloned());
                     popup_state = None;
                     if let Some(item) = chosen {
-                        match apply_popup_item(
+                        let eff = apply_popup_item(
                             &item,
                             &mut input,
                             &mut status,
                             &mut theme_name,
                             &mut info_screen,
-                        ) {
+                        );
+                        match eff {
                             Effect::Quit => should_quit = true,
                             Effect::Rewind => {
                                 do_rewind(&mut submit, &mut events, &mut status)
@@ -3908,7 +4125,9 @@ where
                                     notify_backend.as_ref(),
                                     notify_enabled,
                                     notify_sound,
-                                    theme_name,
+theme_name,
+current_appearance,
+custom_bg.is_some(),
                                 );
                             }
                             Effect::ToggleSidebar => {
@@ -3943,7 +4162,20 @@ where
                                 ));
                             }
                             Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
-                            Effect::None => {}
+                            // 外观类 Effect 统一处理（避免在每处弹窗分支重复一遍）
+                            other => {
+                                if let Some(m) = apply_appearance(&mut current_appearance, other) {
+                                    status = m;
+                                } else if let Effect::BackgroundPicker = other {
+                                    let mut tp = popup::Popup::new(popup::Kind::Background, "");
+                                    tp.set_items(popup::background_items(""), false);
+                                    popup_state = Some(tp);
+                                } else if let Effect::LogoPicker = other {
+                                    let mut tp = popup::Popup::new(popup::Kind::Logo, "");
+                                    tp.set_items(popup::logo_items(""), false);
+                                    popup_state = Some(tp);
+                                }
+                            }
                         }
                     }
                 }
@@ -4097,7 +4329,9 @@ where
                                             notify_backend.as_ref(),
                                             notify_enabled,
                                             notify_sound,
-                                            theme_name,
+theme_name,
+current_appearance,
+custom_bg.is_some(),
                                         );
                                     }
                                     Effect::ToggleSidebar => {
@@ -4131,7 +4365,20 @@ where
                                     Effect::ShowDiff => {
                                         open_diff_viewer(&events, &mut diff_viewer)
                                     }
-                                    Effect::None => {}
+                                    // 外观类 Effect 统一处理（避免在每处弹窗分支重复一遍）
+                                other => {
+                                    if let Some(m) = apply_appearance(&mut current_appearance, other) {
+                                        status = m;
+                                    } else if let Effect::BackgroundPicker = other {
+                                        let mut tp = popup::Popup::new(popup::Kind::Background, "");
+                                        tp.set_items(popup::background_items(""), false);
+                                        popup_state = Some(tp);
+                                    } else if let Effect::LogoPicker = other {
+                                        let mut tp = popup::Popup::new(popup::Kind::Logo, "");
+                                        tp.set_items(popup::logo_items(""), false);
+                                        popup_state = Some(tp);
+                                    }
+                                }
                                 }
                             }
                         }
@@ -4371,7 +4618,9 @@ where
                                     notify_backend.as_ref(),
                                     notify_enabled,
                                     notify_sound,
-                                    theme_name,
+theme_name,
+current_appearance,
+custom_bg.is_some(),
                                 );
                             }
                             Effect::ToggleSidebar => {
@@ -4399,6 +4648,24 @@ where
                             Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
                             // Tab 接受主题选择后不开新弹窗，直接生效即可
                             Effect::OpenThemePicker | Effect::None => {}
+                            // 外观类：统一交给 apply_appearance
+                            other => {
+                                if let Some(m) =
+                                    apply_appearance(&mut current_appearance, other)
+                                {
+                                    status = m;
+                                } else if let Effect::BackgroundPicker = other {
+                                    let mut tp =
+                                        popup::Popup::new(popup::Kind::Background, "");
+                                    tp.set_items(popup::background_items(""), false);
+                                    popup_state = Some(tp);
+                                } else if let Effect::LogoPicker = other {
+                                    let mut tp =
+                                        popup::Popup::new(popup::Kind::Logo, "");
+                                    tp.set_items(popup::logo_items(""), false);
+                                    popup_state = Some(tp);
+                                }
+                            }
                         }
                         continue;
                     }
@@ -4523,7 +4790,9 @@ where
                                         notify_backend.as_ref(),
                                         notify_enabled,
                                         notify_sound,
-                                        theme_name,
+theme_name,
+current_appearance,
+custom_bg.is_some(),
                                     );
                                 }
                                 Effect::ToggleSidebar => {
@@ -4559,6 +4828,27 @@ where
                                     ));
                                 }
                                 Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
+                                Effect::NextBackground
+                                | Effect::NextLogo
+                                | Effect::SetBackground(_)
+                                | Effect::SetLogo(_) => {
+                                    if let Some(m) =
+                                        apply_appearance(&mut current_appearance, eff)
+                                    {
+                                        status = m;
+                                    }
+                                }
+                                Effect::BackgroundPicker => {
+                                    let mut tp =
+                                        popup::Popup::new(popup::Kind::Background, "");
+                                    tp.set_items(popup::background_items(""), false);
+                                    popup_state = Some(tp);
+                                }
+                                Effect::LogoPicker => {
+                                    let mut tp = popup::Popup::new(popup::Kind::Logo, "");
+                                    tp.set_items(popup::logo_items(""), false);
+                                    popup_state = Some(tp);
+                                }
                                 Effect::None => {}
                             }
                         }
@@ -4601,6 +4891,8 @@ where
                             display,
                             settings: None,
                             settings_cursor: 0,
+                            appearance: current_appearance,
+                            custom_background: custom_bg.as_ref(),
                         }
                         .render()
                     )?;
@@ -4647,6 +4939,8 @@ where
                         display,
                         settings: None,
                         settings_cursor: 0,
+                        appearance: current_appearance,
+                        custom_background: custom_bg.as_ref(),
                     }
                     .render()
                 )?;
@@ -4701,6 +4995,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render()
     }
@@ -4741,6 +5037,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render()
     }
@@ -4850,6 +5148,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render();
         // 找出弹窗所在的行区间（含边框），断言这些行里没有 logo 的半块字符
@@ -4954,6 +5254,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4980,6 +5282,8 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                appearance: appearance::Appearance::default(),
+                custom_background: None,
             }
             .render();
             let newlines = out.matches('\n').count();
@@ -5028,6 +5332,8 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+                    appearance: appearance::Appearance::default(),
+                    custom_background: None,
                 }
                 .render();
                 for (i, l) in plain(&out).iter().enumerate() {
@@ -5060,6 +5366,8 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                appearance: appearance::Appearance::default(),
+                custom_background: None,
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -5092,6 +5400,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render()
     }
@@ -5148,6 +5458,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }.render();
         let text = plain(&out).join("\n");
         assert!(text.contains("上限未知"), "应说明上限未知：{text}");
@@ -5170,6 +5482,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }.render();
         assert!(plain(&out).join("\n").contains("90% of 1000"), "占用率应为 90%");
     }
@@ -5233,6 +5547,8 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+                    appearance: appearance::Appearance::default(),
+                    custom_background: None,
                 }
                 .render()
             })
@@ -5258,12 +5574,138 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
         let text = plain(&out).join("\n");
         assert!(text.contains('╭'), "矮终端也必须画出弹窗：{text}");
         assert!(text.contains("命令"), "至少应显示标题：{text}");
+    }
+
+    // ── 外观（背景 / Logo 样式）──────────────────────────────────────
+
+    fn welcome_with(ap: appearance::Appearance, cols: usize, rows: usize) -> String {
+        let a = about();
+        let ed = editor::Editor::new();
+        plain(&Screen {
+            cols, rows, facts: &[], input: &ed, status: "就绪",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            appearance: ap, custom_background: None,
+        }.render()).join("\n")
+    }
+
+    #[test]
+    fn logo_style_controls_the_wordmark_size() {
+        let mut ap = appearance::Appearance::default();
+        // Large（默认）：6 行大词标
+        ap.logo = appearance::LogoStyle::Large;
+        let large = welcome_with(ap, 100, 40);
+        assert!(large.contains('╗'), "Large 应显示大词标：{large}");
+        // Small：3 行小词标
+        ap.logo = appearance::LogoStyle::Small;
+        let small = welcome_with(ap, 100, 40);
+        assert!(small.contains("█▀▀█"), "Small 应显示小词标：{small}");
+        assert!(!small.contains('╗'), "Small 不该出现大词标：{small}");
+        // Minimal：单行
+        ap.logo = appearance::LogoStyle::Minimal;
+        let min = welcome_with(ap, 100, 40);
+        assert!(min.contains("NEO"), "Minimal 应显示一行 NEO：{min}");
+        assert!(!min.contains("█▀▀█"), "Minimal 不该有小词标：{min}");
+        // Hidden：没有 logo 字符
+        ap.logo = appearance::LogoStyle::Hidden;
+        let hid = welcome_with(ap, 100, 40);
+        assert!(!hid.contains("█▀▀█") && !hid.contains('╗'), "Hidden 不该有 logo：{hid}");
+        // 但首屏信息仍在
+        assert!(hid.contains("输入任务") || hid.contains("版本"), "Hidden 仍要显示首屏信息");
+    }
+
+    #[test]
+    fn background_style_changes_the_texture() {
+        let mut ap = appearance::Appearance::default();
+        ap.logo = appearance::LogoStyle::Hidden; // 去掉 logo 干扰，只看背景
+        ap.background = appearance::Background::Stars;
+        let stars = welcome_with(ap, 100, 30);
+        ap.background = appearance::Background::Dots;
+        let dots = welcome_with(ap, 100, 30);
+        ap.background = appearance::Background::None;
+        let none = welcome_with(ap, 100, 30);
+
+        assert_ne!(stars, dots, "不同背景应渲出不同纹理");
+        assert!(stars.contains('·') || stars.contains('+'), "星场应有点：{stars}");
+        assert!(dots.contains('·'), "点阵应有点：{dots}");
+        // 纯色：没有任何纹理字符（只剩内容）
+        // 纯色：**空白区域**不该有背景字符。
+        // 不能整段断言"没有 ·"—— 欢迎页副标题里本来就有 `·`（"Rust 内核 · TUI"），
+        // 那是内容不是背景。这里只检查"没有内容的行"。
+        for l in none.lines() {
+            let trimmed = l.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // 有内容的行不参与判定；只看那些"只有背景字符"的行
+            let only_bg = trimmed.chars().all(|c| c == '·' || c == '+' || c == '\\');
+            assert!(!only_bg, "纯色下出现了纯背景行：{l:?}");
+        }
+    }
+
+    #[test]
+    fn background_never_covers_content() {
+        // 铁律：装饰只填"从未被写入"的格子，绝不盖内容
+        let mut ap = appearance::Appearance::default();
+        for bg in appearance::Background::all() {
+            ap.background = bg;
+            let t = welcome_with(ap, 100, 30);
+            assert!(t.contains("输入任务"), "{bg:?} 背景盖住了输入框：{t}");
+            assert!(t.contains("Neo"), "{bg:?} 背景盖住了品牌名");
+        }
+    }
+
+    #[test]
+    fn custom_background_replaces_the_builtin_texture() {
+        let a = about();
+        let ed = editor::Editor::new();
+        let art: Vec<String> = vec!["XXXX".into(), "    ".into()];
+        let out = plain(&Screen {
+            cols: 60, rows: 20, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            appearance: appearance::Appearance {
+                background: appearance::Background::Stars,
+                logo: appearance::LogoStyle::Hidden,
+            },
+            custom_background: Some(&art),
+        }.render()).join("\n");
+        assert!(out.contains('X'), "自定义字符画应出现在背景：{out}");
+        // 自定义画里的空格表示"透空"，不该有字符
+        assert!(out.contains("输入任务"), "内容仍应可见");
+    }
+
+    #[test]
+    fn appearance_preference_round_trips() {
+        // 落盘后再读回应一致（用独立 NEO_HOME 避免污染真实配置）
+        let dir = std::env::temp_dir().join(format!("neo-appear-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = std::env::var_os("NEO_HOME");
+        std::env::set_var("NEO_HOME", &dir);
+        let want = appearance::Appearance {
+            background: appearance::Background::Diagonal,
+            logo: appearance::LogoStyle::Small,
+        };
+        appearance::save_preference(want);
+        let got = appearance::load_preference();
+        match old {
+            Some(v) => std::env::set_var("NEO_HOME", v),
+            None => std::env::remove_var("NEO_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, want, "外观偏好应可往返");
     }
 
     // ── 提醒触发 ─────────────────────────────────────────────────────
@@ -5422,6 +5864,8 @@ mod tests {
             display: disp,
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render()
     }
@@ -5531,7 +5975,7 @@ mod tests {
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+                display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
             let lines = plain(&out);
@@ -5582,7 +6026,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -5595,6 +6039,7 @@ mod tests {
     fn settings_lists_the_four_sections() {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
+        background: "stars".into(), logo: "large".into(), custom_background: false,
             version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
             context_limit: 64_000, theme: "neo".into(),
@@ -5613,6 +6058,7 @@ mod tests {
         // 必须标为只读并给出原因 —— 假控件比缺控件更糟。
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
+        background: "stars".into(), logo: "large".into(), custom_background: false,
             version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
             context_limit: 64_000, theme: "neo".into(),
@@ -5644,6 +6090,7 @@ mod tests {
         let ed = editor::Editor::new();
         let info = SettingsInfo {
         notify: true, notify_sound: true, notify_enabled: false,
+        background: "stars".into(), logo: "large".into(), custom_background: false,
             version: "0.1.0".into(), model: "deepseek-chat".into(), mode: "default".into(),
             workspace: "/Volumes/data1/work/office/debug/proteus-code".into(),
             branch: "main".into(), session: "neo-tui".into(),
@@ -5660,6 +6107,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
             let text = plain(&out).join("\n");
@@ -5676,6 +6124,7 @@ mod tests {
         // 光标必须只在可操作行间移动 —— 停在只读行上会让人以为能改
         let info = SettingsInfo {
         notify: true, notify_sound: true, notify_enabled: false,
+        background: "stars".into(), logo: "large".into(), custom_background: false,
             version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
@@ -5711,6 +6160,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -5735,6 +6186,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -5758,6 +6211,8 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                appearance: appearance::Appearance::default(),
+                custom_background: None,
             }
             .render();
             let lines = plain(&out);
@@ -5786,7 +6241,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render()
     }
@@ -5912,7 +6367,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup, preformatted: None,
-            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions()
         .1
@@ -5977,7 +6432,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
         let (gx, gy) = r.sidebar_grip.expect("侧栏收起时应留一个把手");
@@ -6048,7 +6503,7 @@ mod tests {
                 status: "", awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render()
         };
@@ -6074,7 +6529,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         assert!(plain(&out).join("\n").contains("下方还有"), "应提示下方还有内容");
@@ -6096,7 +6551,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -6140,6 +6595,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -6175,6 +6632,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -6201,6 +6660,8 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                appearance: appearance::Appearance::default(),
+                custom_background: None,
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -6231,6 +6692,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render();
         // 提取光标定位序列 ESC[<row>;<col>H（渲染尾部还有 ?25h 之类，需精确匹配）
@@ -6334,6 +6797,8 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                appearance: appearance::Appearance::default(),
+                custom_background: None,
             }
             .render();
             for (i, line) in plain(&out).iter().enumerate() {
@@ -6424,10 +6889,18 @@ mod tests {
 
     #[test]
     fn welcome_degrades_on_small_terminals() {
-        // 小终端必须降级而不是把内容裁掉（裁剪会从顶部裁，最难看）
+        // 小终端必须降级而不是把内容裁掉（裁剪会从顶部裁，最难看）。
+        // 默认样式是 Large，但终端不够宽时应退到 3 行小词标，而不是硬塞 6 行。
         let text = plain(&welcome(30, 10)).join("\n");
         assert!(text.contains("Neo"), "小终端仍要显示品牌：{text}");
-        assert!(!text.contains('█'), "小终端不该硬塞大 logo：{text}");
+        // 小词标用 ▀/█ 方块字符（3 行），大词标用 ╗╔ 等框线（6 行）。
+        // 断言"没有大词标特有的框线字符"比"没有 █"更准确。
+        assert!(
+            !text.contains('╗') && !text.contains('╔'),
+            "小终端不该硬塞 6 行大词标：{text}"
+        );
+        // 且确实退到了小词标（而不是什么都不画）
+        assert!(text.contains('▀') || text.contains('█'), "应显示小词标：{text}");
     }
 
     #[test]
@@ -6491,6 +6964,8 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -6516,6 +6991,8 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                appearance: appearance::Appearance::default(),
+                custom_background: None,
             }
             .render();
             plain(&out).join("\n")
@@ -6707,6 +7184,8 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+                    appearance: appearance::Appearance::default(),
+                    custom_background: None,
                 }
                 .render()
             };
