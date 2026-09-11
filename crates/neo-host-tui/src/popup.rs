@@ -84,6 +84,10 @@ pub enum ItemAction {
     SwitchSession(String),
     /// 删除指定会话
     DeleteSession(String),
+    /// 编辑指定服务商（打开表单）
+    RunProvider(String),
+    /// 删除指定服务商（需确认）
+    DeleteProvider(String),
 }
 
 /// 列表项。

@@ -32,7 +32,7 @@
 | Desktop 宿主（系统 webview 壳） | 🟡 **契据就绪**：`DesktopHost` 的 `HostBackend` 实现与 T6 覆盖已完成；wry window 层未接（原型阶段不拉入平台图形栈） |
 | 上下文压缩（L4 策略） | ✅ **已实现**：`Compactor` seam 在 L2、策略在 L4；`/compact` 端到端，摘要与移除条数可回放 |
 | Goal 目标编排（`/goal` 系列） | 🟡 **状态机就绪、未接线**：`GoalEngine`（Plan→Code→Review→Learn + Checkpoint/StopConditions）有测试，但 `Op::GoalSet/Pause/Resume` 在内核仍落到"未实现" |
-| **服务商注册表**（`providers.json`） | ✅ **已实现**：用户级 JSON 配多个 OpenAI 兼容服务商（`api_key_env` 存变量名不存密钥）；项目级文件**明确拒绝**。缺 key 的条目跳过并提示 |
+| **服务商管理**（设置页可增删改） | ✅ **已实现**：设置页内联表单新增/编辑（密钥字段打码、留空不改），删除需确认。密钥存 `~/.neo/provider_keys.json`（**0600**，与配置分离）；`base_url` 自动规范化为裸主机。缺 key 的条目跳过并提示 |
 | **上下文引用解析**（`@file` / `$skill`） | ✅ **已实现**：`@path` 与 `@path#行范围` 经沙箱读入并注入请求；`$skill` 查注册表注入正文、找不到则列出可用项。注入块落 `RefsResolved` 日志，回放一致 |
 | **项目指令级联**（`AGENTS.md`） | ✅ **已实现**：`~/.neo/AGENTS.override.md` → `~/.neo/AGENTS.md` → 仓库根 → 子目录（越具体越靠后），合并上限 32 KiB，超限如实标注截断。并入系统提示词并落 `InstructionsLoaded` 日志，回放还原同一份提示词 |
 | Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |
@@ -130,7 +130,7 @@ neo exec "用一句话回答 1+1" --mode plan
 cargo run -p neo-cli -- tui --provider mock    # 不装 PATH，直接用 cargo 跑 TUI
 cargo install --path crates/neo-cli --locked   # 或装成全局命令 neo
 
-cargo test --workspace     # 478 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo test --workspace     # 487 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
 cargo check --workspace    # 21 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试

@@ -588,6 +588,10 @@ pub struct Screen<'a> {
     /// 观感是"两个界面来回跳"。内联展开让候选长在那一行下面 ——
     /// 全程留在同一页里，移动和选择都在原上下文完成。
     pub settings_picker: Option<&'a SettingsPicker>,
+    /// 设置页里的表单（新增/编辑服务商）。`Some` = 显示表单并接管输入。
+    pub settings_form: Option<&'a SettingsForm>,
+    /// 危险操作的确认提示（如删除服务商）。`Some` = 显示并等待 y/n。
+    pub settings_confirm: Option<&'a str>,
     /// 外观（背景纹理 + Logo 样式）
     pub appearance: appearance::Appearance,
     /// 自定义背景字符画（`NEO_TUI_BG_FILE` 读入；优先于内置纹理）
@@ -1102,10 +1106,14 @@ impl Screen<'_> {
             // 纹理会一个格子都画不出来（表现为"点了背景只换了名字、画面没变"）。
             // 主界面几处渲染都是这个顺序，设置页曾写反。
             g.fill_background(self.appearance.background, self.custom_background);
-            self.draw_settings(&mut g, sections, &mut regions);
+            let cur = self.draw_settings(&mut g, sections, &mut regions);
             let mut out = format!("{ESC}[H{ESC}[2J");
             out.push_str(&g.lines(&p).join("\r\n"));
-            out.push_str(&format!("{ESC}[?25l"));
+            // 表单打开时要显示硬件光标（否则输入看不见插入点）
+            match cur {
+                Some((r, c)) => out.push_str(&format!("{ESC}[{r};{c}H{ESC}[?25h")),
+                None => out.push_str(&format!("{ESC}[?25l")),
+            }
             return (out, regions);
         }
 
@@ -1614,7 +1622,12 @@ impl Screen<'_> {
     /// `regions.settings_rows` 会登记可操作行的 y 坐标，供鼠标点击命中 ——
     /// 与 `settings_cursor` 用同一坐标空间（只数可操作行），
     /// 这样"点第 k 项"与"光标移到第 k 项再回车"必然作用于同一项。
-    fn draw_settings(&self, g: &mut Grid, sections: &[SettingSection], regions: &mut Regions) {
+    fn draw_settings(
+        &self,
+        g: &mut Grid,
+        sections: &[SettingSection],
+        regions: &mut Regions,
+    ) -> Option<(usize, usize)> {
         // 标题
         let title = "设置";
         g.put(0, 2, title, Tone::Text);
@@ -1711,13 +1724,92 @@ impl Screen<'_> {
         }
         // 底部：说明光标只能停在可操作行
         if self.rows > 2 {
-            g.put(
-                self.rows - 1,
-                2,
-                "灰字为只读项（右侧是原因）；▸ 停在可操作项上",
-                Tone::Border,
-            );
+            let hint = if self.settings_form.is_some() {
+                "tab / ↑↓ 切字段 · enter 保存 · esc 取消"
+            } else {
+                "灰字为只读项（右侧是原因）；▸ 停在可操作项上"
+            };
+            g.put(self.rows - 1, 2, hint, Tone::Border);
         }
+        // 确认条：**必须可见**，否则用户按了删除却不知道在等自己回答什么。
+        if let Some(q) = self.settings_confirm {
+            let txt = format!("{q}  [y 确认 / 其它键取消]");
+            let txt = width::truncate_to_width(&txt, self.cols.saturating_sub(4)).to_string();
+            // 用 Warning 色：这是"需要你回答"的状态，不是普通提示
+            g.put(self.rows.saturating_sub(2), 2, &txt, Tone::Warning);
+        }
+        // 表单：设置页内的模态（新增/编辑服务商）。**最后画**，盖在列表之上。
+        // 返回真实光标位置，否则输入时看不见插入点。
+        self.draw_settings_form(g)
+    }
+
+    /// 画设置页里的表单；返回应放置硬件光标的位置。
+    ///
+    /// 密钥字段**打码显示**：明文铺在屏幕上，旁人一眼就能抄走，
+    /// 而这是终端（可能共享屏幕/录屏）。编辑时也不回显明文。
+    fn draw_settings_form(&self, g: &mut Grid) -> Option<(usize, usize)> {
+        let form = self.settings_form?;
+        let w = self.cols.saturating_sub(8).min(76).max(30);
+        let fields = form.fields.len();
+        let h = fields + 4; // 标题 + 分隔 + 字段 + 提示 + 边框
+        let top = self.rows.saturating_sub(h).saturating_sub(2).max(2);
+        let left = (self.cols.saturating_sub(w)) / 2;
+
+        // 先清出整块矩形：不清的话下面的列表文字会从空隙里透出来
+        for r in top..(top + h).min(self.rows) {
+            g.blank(r, left, (left + w).min(self.cols - 1), Tone::Text);
+        }
+        let bar = "─".repeat(w.saturating_sub(2));
+        g.put(top, left, "╭", Tone::Border);
+        g.put(top, left + 1, &bar, Tone::Border);
+        g.put(top, left + w - 1, "╮", Tone::Border);
+        let title = width::truncate_to_width(&form.title, w.saturating_sub(4)).to_string();
+        g.put(top, left + 2, &title, Tone::Accent);
+
+        let label_w = 10usize;
+        let mut cursor = None;
+        for (i, f) in form.fields.iter().enumerate() {
+            let r = top + 1 + i;
+            g.put(r, left, "│", Tone::Border);
+            g.put(r, left + w - 1, "│", Tone::Border);
+            let active = i == form.active;
+            let lt = if active { Tone::Primary } else { Tone::Muted };
+            let mark = if active { "▸ " } else { "  " };
+            let padded = width::pad_to_width(&f.label, label_w);
+            g.put(r, left + 2, mark, lt);
+            g.put(r, left + 4, &padded, lt);
+            let vx = left + 4 + label_w + 1;
+            let avail = (left + w - 2).saturating_sub(vx);
+            let raw = f.editor.text();
+            // 密钥打码：长度也模糊化（固定 8 个点），不泄露密钥长度
+            let shown = if f.secret {
+                if raw.is_empty() { String::new() } else { "••••••••".to_string() }
+            } else {
+                raw.clone()
+            };
+            let shown = width::truncate_to_width(&shown, avail).to_string();
+            let vt = if active { Tone::Text } else { Tone::Muted };
+            g.put(r, vx, &shown, vt);
+            if active {
+                // 光标列 = 字段值**显示宽度**（与输入框同一个换算教训：
+                // 字符下标 ≠ 显示列，中文/打码都不等长）
+                let (_, col) = f.editor.cursor();
+                let before: String = raw.chars().take(col).collect();
+                let cw = if f.secret {
+                    // 打码后长度与原文无关：按已显示的点数定位（上限 8）
+                    before.chars().count().min(8)
+                } else {
+                    width::display_width(&before)
+                };
+                let cx = (vx + cw).min(left + w - 2);
+                cursor = Some((r + 1, cx + 1)); // 1 基
+            }
+        }
+        let br = top + 1 + fields;
+        g.put(br, left, "╰", Tone::Border);
+        g.put(br, left + 1, &bar, Tone::Border);
+        g.put(br, left + w - 1, "╯", Tone::Border);
+        cursor
     }
 
     /// which-key 覆盖层：右下的键位提示卡片。
@@ -2638,6 +2730,10 @@ enum Effect {
     NewSessionReal,
     /// 删除会话
     DeleteSession(String),
+    /// 打开某服务商的编辑表单
+    EditProvider(String),
+    /// 删除某服务商（候选列表里带删除项，或编辑表单里删）
+    RemoveProvider(String),
     /// 提交压缩请求给内核
     CompactSubmit,
 }
@@ -2689,6 +2785,9 @@ fn apply_popup_item(
             input.clear();
             Effect::DeleteSession(id.clone())
         }
+        // 服务商编辑交给调用方（打开表单需要 ProviderControl，这里拿不到）
+        popup::ItemAction::RunProvider(name) => Effect::EditProvider(name.clone()),
+        popup::ItemAction::DeleteProvider(name) => Effect::RemoveProvider(name.clone()),
         popup::ItemAction::Run(action) => {
             // 执行命令后必须清空输入框：`/help` 已经"用掉"了，
             // 留在框里会让用户以为还没执行，且盖住占位提示。
@@ -2841,6 +2940,40 @@ pub trait SessionControl {
     fn current(&self) -> String;
 }
 
+/// 服务商管理契据。
+///
+/// # 为什么是契据而不是让宿主直接依赖 neo-providers
+///
+/// 与 `SessionControl` 同一个理由：宿主**不持有配置**。它只把用户的编辑意图
+/// 转成契据调用，真正的读写在 L3（neo-providers）。这样：
+/// 1. 宿主可脱离文件系统单测（用假实现）；
+/// 2. 密钥的读写策略（0600、只读用户级）只在一个地方实现，不会在宿主里被绕过。
+pub trait ProviderControl {
+    /// 列出服务商：(名字, 描述, 是否已配密钥)。
+    fn list(&self) -> Vec<(String, String, bool)>;
+
+    /// 查一条的完整字段（供编辑时回填）：(base_url, model, 描述, 上下文上限)。
+    fn get(&self, name: &str) -> Option<(String, String, String, u64)>;
+
+    /// 新增或更新。`api_key` 为空 = 不改动已存的密钥（编辑时"留空即保持"）。
+    ///
+    /// 这个约定是刻意的：让用户能看到"已配置"而不必重新粘贴密钥
+    /// （把密钥回显到终端里既不安全也没必要）。
+    fn upsert(
+        &mut self,
+        name: &str,
+        base_url: &str,
+        model: &str,
+        api_key: &str,
+        description: &str,
+        context_limit: u64,
+        editing_original: Option<&str>,
+    ) -> Result<(), String>;
+
+    /// 删除。返回是否真的删掉了。
+    fn delete(&mut self, name: &str) -> Result<bool, String>;
+}
+
 /// 设置视图的一行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingRow {
@@ -2885,10 +3018,59 @@ pub enum SettingAction {
     NextLogo,
     /// 打开模型选择
     ModelPicker,
+    /// 打开服务商列表（选择后可编辑/删除）
+    ProviderPicker,
+    /// 新增服务商（打开表单）
+    ProviderAdd,
+    /// 编辑当前选中的服务商
+    ProviderEdit,
+    /// 删除某个服务商（选中后需确认）
+    ProviderDelete,
     /// 打开会话选择
     SessionPicker,
 }
 
+/// 设置页里的表单（新增/编辑服务商）。
+///
+/// 为什么在宿主里做输入而不另开一个"对话框"：与内联选择器同一个理由 ——
+/// 设置页是全屏的，输入也该在同一页里完成，不再跳出去。
+#[derive(Debug, Clone)]
+pub struct SettingsForm {
+    pub title: String,
+    pub fields: Vec<FormField>,
+    /// 当前字段下标（tab / ↑↓ 切换）
+    pub active: usize,
+    /// 哪个字段是密钥（渲染时打码）
+    pub key_field: Option<usize>,
+    /// 编辑已有服务商时的原名；`None` = 新增（改名时用于删除旧条目）
+    pub editing: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FormField {
+    pub label: String,
+    pub editor: editor::Editor,
+    /// 是否打码显示（密钥）
+    pub secret: bool,
+}
+
+impl SettingsForm {
+    pub fn new(title: impl Into<String>, fields: Vec<FormField>, key_field: Option<usize>) -> Self {
+        Self { title: title.into(), fields, active: 0, key_field, editing: None }
+    }
+
+    pub fn value(&self, i: usize) -> String {
+        self.fields.get(i).map(|f| f.editor.text()).unwrap_or_default()
+    }
+
+    /// 取值并去掉首尾空白。
+    pub fn trimmed(&self, i: usize) -> String {
+        self.value(i).trim().to_string()
+    }
+}
+
+/// 设置页内联选择器的候选：某项后面的动作已由 `popup::ItemAction` 承载。
+///
 /// 设置视图的一个分组。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingSection {
@@ -2950,6 +3132,8 @@ pub struct SettingsInfo {
     pub custom_background: bool,
     /// 可选模型数量
     pub model_count: usize,
+    /// 注册表里的服务商数量（设置页展示）
+    pub provider_count: usize,
     /// 会话数（供设置页展示）
     pub session_count: usize,
     pub messages: usize,
@@ -3009,6 +3193,27 @@ pub fn settings_sections(info: &SettingsInfo) -> Vec<SettingSection> {
                     label: "模型".into(),
                     value: format!("{}（{} 个可选）", info.model, info.model_count),
                     action: Some(SettingAction::ModelPicker),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "服务商".into(),
+                    // 说明"选了能做什么"：只显示数量会让人以为只能看
+                    value: format!("{} 个（选中可改/可删）", info.provider_count),
+                    action: Some(SettingAction::ProviderPicker),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    label: "新增服务商".into(),
+                    value: "填写 base_url / 模型 / 密钥".into(),
+                    action: Some(SettingAction::ProviderAdd),
+                    readonly_note: "",
+                },
+                SettingRow {
+                    // 删除做成独立一行（而不是藏在表单里的隐藏键）：
+                    // 隐藏键没人发现得了，而删除是管理功能的一半。
+                    label: "删除服务商".into(),
+                    value: "选中后需确认".into(),
+                    action: Some(SettingAction::ProviderDelete),
                     readonly_note: "",
                 },
                 SettingRow {
@@ -3704,6 +3909,7 @@ fn open_settings(
     theme_name: theme::ThemeName,
     appearance: appearance::Appearance,
     has_custom_bg: bool,
+    provider_count: usize,
     sessions: &dyn SessionControl,
 ) {
     let facts = facts_of(events);
@@ -3722,6 +3928,7 @@ fn open_settings(
         notify_sound,
         notify_enabled,
         model_count: about.models.len(),
+        provider_count,
         session_count: sessions.list().len(),
         background: appearance.background.as_str().to_string(),
         logo: appearance.logo.as_str().to_string(),
@@ -3766,13 +3973,81 @@ fn open_settings_fresh(
     theme_name: theme::ThemeName,
     appearance: appearance::Appearance,
     has_custom_bg: bool,
+    provider_count: usize,
     sessions: &dyn SessionControl,
 ) {
     *cursor = 0;
     open_settings(
         slot, about, events, display, sidebar, mouse, clipboard, notify_backend,
-        notify_enabled, notify_sound, theme_name, appearance, has_custom_bg, sessions,
+        notify_enabled, notify_sound, theme_name, appearance, has_custom_bg,
+        provider_count, sessions,
     );
+}
+
+/// 构造服务商表单。`existing = Some(...)` 时是编辑（密钥留空表示不修改）。
+fn provider_form(name: Option<&str>, providers: &dyn ProviderControl) -> SettingsForm {
+    let mk = |label: &str, val: &str, secret: bool| FormField {
+        label: label.to_string(),
+        editor: editor::Editor::from_text(val),
+        secret,
+    };
+    let (n, base, model, desc, limit) = match name {
+        Some(n) => {
+            let (b, m, d, l) = providers.get(n).unwrap_or_default();
+            (n.to_string(), b, m, d, l)
+        }
+        None => (String::new(), String::new(), String::new(), String::new(), 0),
+    };
+    let key_label = if name.is_some() { "密钥(留空不改)" } else { "密钥" };
+    let mut form = SettingsForm::new(
+        if name.is_some() { format!("编辑服务商：{n}") } else { "新增服务商".to_string() },
+        vec![
+            mk("名称", &n, false),
+            mk("base_url", &base, false),
+            mk("模型", &model, false),
+            FormField { label: key_label.to_string(), editor: editor::Editor::new(), secret: true },
+            mk("描述", &desc, false),
+            mk("上下文", &if limit == 0 { String::new() } else { limit.to_string() }, false),
+        ],
+        Some(3),
+    );
+    form.editing = name.map(String::from);
+    form
+}
+
+/// 把表单提交给契据。返回给状态栏的文案。
+fn commit_provider_form(form: &SettingsForm, providers: &mut dyn ProviderControl) -> String {
+    let name = form.trimmed(0);
+    let base_url = form.trimmed(1);
+    let model = form.trimmed(2);
+    let api_key = form.trimmed(3);
+    let desc = form.trimmed(4);
+    // 上下文上限：留空 = 0（未知）。非数字**如实报错**，不要静默当 0 ——
+    // 静默会让用户以为自己填对了。
+    let limit_txt = form.trimmed(5);
+    let limit = if limit_txt.is_empty() {
+        0
+    } else {
+        match limit_txt.parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => return format!("上下文上限不是数字：{limit_txt}"),
+        }
+    };
+    match providers.upsert(
+        &name,
+        &base_url,
+        &model,
+        &api_key,
+        &desc,
+        limit,
+        form.editing.as_deref(),
+    ) {
+        Ok(()) => {
+            let verb = if form.editing.is_some() { "已更新" } else { "已新增" };
+            format!("{verb}服务商 {name}（重启后生效）")
+        }
+        Err(e) => format!("保存失败：{e}"),
+    }
 }
 
 /// 设置视图里"可操作行"的扁平序号 → (节, 行)。
@@ -3956,6 +4231,7 @@ pub fn run<F>(
     trust_workspace: Option<std::path::PathBuf>,
     mut theme_name: theme::ThemeName,
     sessions: &mut dyn SessionControl,
+    providers: &mut dyn ProviderControl,
     mut submit: F,
 ) -> std::io::Result<()>
 where
@@ -4027,6 +4303,17 @@ where
     let mut settings_picker: Option<SettingsPicker> = None;
     // 选择器里确认的一项：在本帧结束时统一执行（与 popup 的 ItemAction 复用同一处理）
     let mut picker_apply: Option<popup::Item> = None;
+    // 服务商表单（新增/编辑）。Some = 接管设置页输入。
+    let mut settings_form: Option<SettingsForm> = None;
+    // 注册表里的服务商数量（设置页展示）—— 来自契据，宿主不自己读配置
+    let provider_count = providers.list().len();
+    // 表单保存后要落盘的动作（在表单关闭后执行，避免借用冲突）
+    let mut form_commit: Option<SettingsForm> = None;
+    // 待删除的服务商名（表单里按 ctrl+d）。**执行前要确认**：
+    // 删除会连带密钥一起丢掉，误触的代价太大。
+    let mut pending_delete: Option<String> = None;
+    // 确认对话：Some((问题, 是→待执行的动作))
+    let mut confirm_delete: Option<String> = None;
     // 提醒：默认关闭（对齐 opencode 的 attention.enabled 默认 false）——
     // 没人喜欢工具自己响。要就显式开：/settings 或 NEO_TUI_NOTIFY=1。
     let mut notify_enabled = std::env::var_os("NEO_TUI_NOTIFY").is_some();
@@ -4112,6 +4399,7 @@ where
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
@@ -4174,6 +4462,8 @@ where
                 settings: Some(sections),
                 settings_cursor,
                 settings_picker: settings_picker.as_ref(),
+                settings_form: settings_form.as_ref(),
+                settings_confirm: confirm_delete.as_deref(),
                 appearance: current_appearance,
                 custom_background: custom_bg.as_ref(),
             };
@@ -4227,6 +4517,18 @@ where
                         current_appearance.logo = l;
                         appearance::save_preference(current_appearance);
                     }
+                    // 服务商：编辑打开表单；删除走确认。两者都必须显式处理 ——
+                    // 落到 `_` catch-all 会变成静默无操作（真实踩过：删除按了没反应，
+                    // 因为 Effect::RemoveProvider 没有分支、被 `_` 吞掉，且编译器不报错）。
+                    Effect::EditProvider(name) => {
+                        settings_form = Some(provider_form(Some(&name), providers));
+                    }
+                    Effect::RemoveProvider(name) => {
+                        confirm_delete = Some(format!("删除服务商 {name}？（连带其密钥）"));
+                        // 确认时要真正删除的名字：暂存在一个独立槽里，
+                        // 避免让展示文案参与逻辑（文案改了就不能删了）。
+                        pending_delete = Some(name);
+                    }
                     // 主题在 apply_popup_item 里已直接改好 theme_name 并落盘
                     _ => {}
                 }
@@ -4246,8 +4548,127 @@ where
                         theme_name,
                         current_appearance,
                         custom_bg.is_some(),
+                        provider_count,
                         sessions,
                     );
+                }
+            }
+            // 服务商表单打开时**独占输入**（它是模态：底下列表不可点）。
+            // 与内联选择器同一页，不跳出去 —— 与"设置页全屏"的范式一致。
+            if let Some(form) = settings_form.as_mut() {
+                match read_key_timeout(&mut stdin, 1) {
+                    None => { dirty = true; continue; }
+                    Some(Key::Quit) => break,
+                    Some(Key::Escape) => {
+                        settings_form = None;
+                        status = "已取消".to_string();
+                    }
+                    Some(Key::Tab) | Some(Key::Down) => {
+                        form.active = (form.active + 1) % form.fields.len().max(1);
+                    }
+                    Some(Key::Up) => {
+                        let n = form.fields.len().max(1);
+                        form.active = (form.active + n - 1) % n;
+                    }
+                    // Enter 保存：**校验失败要留住表单**并说明原因，
+                    // 关掉表单再报错会让用户重填一遍（真实体验过的那种糟）。
+                    Some(Key::Enter) => {
+                        let name = form.trimmed(0);
+                        if name.is_empty() {
+                            status = "服务商名字不能为空".to_string();
+                        } else {
+                            form_commit = Some(form.clone());
+                            settings_form = None;
+                        }
+                    }
+                    Some(Key::Backspace) => {
+                        if let Some(f) = form.fields.get_mut(form.active) { f.editor.backspace(); }
+                    }
+                    Some(Key::Delete) => {
+                        if let Some(f) = form.fields.get_mut(form.active) { f.editor.delete_forward(); }
+                    }
+                    Some(Key::Left) => {
+                        if let Some(f) = form.fields.get_mut(form.active) { f.editor.move_left(); }
+                    }
+                    Some(Key::Right) => {
+                        if let Some(f) = form.fields.get_mut(form.active) { f.editor.move_right(); }
+                    }
+                    Some(Key::Home) => {
+                        if let Some(f) = form.fields.get_mut(form.active) { f.editor.move_home(); }
+                    }
+                    Some(Key::End) => {
+                        if let Some(f) = form.fields.get_mut(form.active) { f.editor.move_end(); }
+                    }
+                    // 其余可打印字符进当前字段。**不做字符白名单**：
+                    // 密钥/URL 里出现什么字符都不奇怪，拦反而会挡住合法输入。
+                    Some(Key::Char(c)) => {
+                        if let Some(f) = form.fields.get_mut(form.active) { f.editor.insert_char(c); }
+                    }
+                    Some(_) => {}
+                }
+                dirty = true;
+                continue;
+            }
+            // 表单保存：在读取输入**之前**落实（与 picker_apply 同一个教训 ——
+            // 状态在上一轮置好，下一轮读键前就该执行，否则会被 None 超时吞掉）。
+            // 删除确认：y 确认 / 其它取消
+            if let Some(question) = confirm_delete.clone() {
+                let _ = &question;
+                match read_key_timeout(&mut stdin, 1) {
+                    None => { dirty = true; continue; }
+                    Some(Key::Quit) => break,
+                    Some(Key::Char('y')) | Some(Key::Char('Y')) => {
+                        let name = pending_delete.take().unwrap_or_default();
+                        status = match providers.delete(&name) {
+                            Ok(true) => format!("已删除服务商 {name}（重启后生效）"),
+                            Ok(false) => format!("服务商 {name} 已不存在"),
+                            Err(e) => format!("删除失败：{e}"),
+                        };
+                        confirm_delete = None;
+                        // 数量变了，刷新设置页
+                        open_settings(
+                            &mut settings_state, &about, &events, &mut display,
+                            sidebar_open, mouse_on, clipboard.as_ref(),
+                            notify_backend.as_ref(), notify_enabled, notify_sound,
+                            theme_name, current_appearance, custom_bg.is_some(),
+                            providers.list().len(), sessions,
+                        );
+                    }
+                    Some(_) => {
+                        status = "已取消删除".to_string();
+                        confirm_delete = None;
+                        pending_delete = None;
+                    }
+                }
+                dirty = true;
+                continue;
+            }
+            // 表单保存：在读取输入**之前**落实（与 picker_apply 同一个教训 ——
+            // 状态在上一轮置好，下一轮读键前就该执行，否则会被 None 超时吞掉）。
+            if let Some(form) = form_commit.take() {
+                if let Some(name) = pending_delete.take() {
+                    // 不保存，先问
+                    confirm_delete = Some(name);
+                } else {
+                status = commit_provider_form(&form, providers);
+                // 刷新设置页：服务商数量变了
+                open_settings(
+                    &mut settings_state,
+                    &about,
+                    &events,
+                    &mut display,
+                    sidebar_open,
+                    mouse_on,
+                    clipboard.as_ref(),
+                    notify_backend.as_ref(),
+                    notify_enabled,
+                    notify_sound,
+                    theme_name,
+                    current_appearance,
+                    custom_bg.is_some(),
+                    providers.list().len(),
+                    sessions,
+                );
                 }
             }
             // 内联选择器打开时，按键**先给选择器**：↑↓ 在候选间移动、enter 确认、
@@ -4407,6 +4828,63 @@ where
                                             selected: 0,
                                         });
                                     }
+                                    SettingAction::ProviderPicker => {
+                                        // 候选由契据提供；选中后进入编辑表单
+                                        settings_picker = Some(SettingsPicker {
+                                            label: "服务商".into(),
+                                            items: providers
+                                                .list()
+                                                .into_iter()
+                                                .map(|(n, d, has_key)| {
+                                                    let keymark =
+                                                        if has_key { "已配密钥" } else { "缺密钥" };
+                                                    popup::Item::plain(
+                                                        n.clone(),
+                                                        format!("{d} · {keymark}"),
+                                                        popup::ItemAction::RunProvider(n),
+                                                    )
+                                                })
+                                                .collect(),
+                                            selected: 0,
+                                        });
+                                    }
+                                    SettingAction::ProviderAdd => {
+                                        settings_form = Some(provider_form(None, providers));
+                                    }
+                                    SettingAction::ProviderEdit => {
+                                        // 没有服务商时如实说，不开一个空表单
+                                        let list = providers.list();
+                                        match list.first() {
+                                            Some((n, _, _)) => {
+                                                settings_form =
+                                                    Some(provider_form(Some(n), providers));
+                                            }
+                                            None => {
+                                                status = "还没有服务商，先用「新增服务商」".to_string()
+                                            }
+                                        }
+                                    }
+                                    SettingAction::ProviderDelete => {
+                                        let list = providers.list();
+                                        if list.is_empty() {
+                                            status = "还没有服务商可删".to_string();
+                                        } else {
+                                            settings_picker = Some(SettingsPicker {
+                                                label: "删除服务商".into(),
+                                                items: list
+                                                    .into_iter()
+                                                    .map(|(n, d, _)| {
+                                                        popup::Item::plain(
+                                                            n.clone(),
+                                                            d,
+                                                            popup::ItemAction::DeleteProvider(n),
+                                                        )
+                                                    })
+                                                    .collect(),
+                                                selected: 0,
+                                            });
+                                        }
+                                    }
                                     SettingAction::ModelPicker => {
                                         settings_picker = Some(SettingsPicker {
                                             label: "模型".into(),
@@ -4436,6 +4914,7 @@ where
 theme_name,
 current_appearance,
 custom_bg.is_some(),
+                                        provider_count,
                                         sessions,
                                     );
                                 }
@@ -4473,6 +4952,7 @@ custom_bg.is_some(),
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: current_appearance,
                 custom_background: custom_bg.as_ref(),
@@ -4557,6 +5037,7 @@ custom_bg.is_some(),
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
@@ -4612,6 +5093,7 @@ custom_bg.is_some(),
                 settings: settings_state.as_ref(),
                 settings_cursor,
                 settings_picker: None,
+            settings_form: None, settings_confirm: None,
                 appearance: current_appearance,
                 custom_background: custom_bg.as_ref(),
             };
@@ -4736,6 +5218,7 @@ custom_bg.is_some(),
 theme_name,
 current_appearance,
 custom_bg.is_some(),
+                                    provider_count,
                                     sessions,
                                 );
                             }
@@ -4976,6 +5459,7 @@ custom_bg.is_some(),
 theme_name,
 current_appearance,
 custom_bg.is_some(),
+providers.list().len(),
 sessions,
                                         );
                                     }
@@ -5294,6 +5778,7 @@ sessions,
 theme_name,
 current_appearance,
 custom_bg.is_some(),
+                                    provider_count,
                                     sessions,
                                 );
                             }
@@ -5478,6 +5963,7 @@ custom_bg.is_some(),
 theme_name,
 current_appearance,
 custom_bg.is_some(),
+providers.list().len(),
 sessions,
                                     );
                                 }
@@ -5596,6 +6082,7 @@ sessions,
                             display,
                             settings: None,
                             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                             settings_picker: None,
                             appearance: current_appearance,
                             custom_background: custom_bg.as_ref(),
@@ -5645,6 +6132,7 @@ sessions,
                         display,
                         settings: None,
                         settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                         settings_picker: None,
                         appearance: current_appearance,
                         custom_background: custom_bg.as_ref(),
@@ -5708,6 +6196,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -5753,6 +6242,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -5865,6 +6355,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -5972,6 +6463,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -6001,6 +6493,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
@@ -6052,6 +6545,7 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                     settings_picker: None,
                     appearance: appearance::Appearance::default(),
                     custom_background: None,
@@ -6087,6 +6581,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
@@ -6122,6 +6617,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -6181,6 +6677,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -6206,6 +6703,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -6272,6 +6770,7 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                     settings_picker: None,
                     appearance: appearance::Appearance::default(),
                     custom_background: None,
@@ -6300,7 +6799,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
         let text = plain(&out).join("\n");
@@ -6319,7 +6818,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None,
             appearance: ap, custom_background: None,
         }.render()).join("\n")
     }
@@ -6401,7 +6900,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance {
                 background: appearance::Background::Stars,
                 logo: appearance::LogoStyle::Hidden,
@@ -6590,6 +7089,7 @@ mod tests {
             display: disp,
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -6702,7 +7202,7 @@ mod tests {
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
+                display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
             let lines = plain(&out);
@@ -6753,7 +7253,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -6767,7 +7267,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
-        model_count: 3,
+        model_count: 3, provider_count: 2,
         session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
@@ -6788,7 +7288,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
-        model_count: 3,
+        model_count: 3, provider_count: 2,
         session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
@@ -6826,7 +7326,7 @@ mod tests {
         let info = SettingsInfo {
         notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
-        model_count: 3,
+        model_count: 3, provider_count: 2,
         session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "deepseek-chat".into(), mode: "default".into(),
             workspace: "/Volumes/data1/work/office/debug/proteus-code".into(),
@@ -6845,6 +7345,7 @@ mod tests {
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
                 settings_picker: None,
+            settings_form: None, settings_confirm: None,
                 appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
@@ -6875,6 +7376,7 @@ mod tests {
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: None, settings_cursor: 0,
                 settings_picker: None,
+            settings_form: None, settings_confirm: None,
                 appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
@@ -6916,7 +7418,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
-            model_count: 3,
+            model_count: 3, provider_count: 2,
             session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
@@ -6937,6 +7439,7 @@ mod tests {
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: cursor,
                 settings_picker: None,
+            settings_form: None, settings_confirm: None,
                 appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
@@ -6969,7 +7472,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
-            model_count: 3, session_count: 2,
+            model_count: 3, provider_count: 2, session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
@@ -6986,6 +7489,7 @@ mod tests {
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
             settings_picker: None,
+            settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
@@ -7003,7 +7507,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
-            model_count: 3, session_count: 2,
+            model_count: 3, provider_count: 2, session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
@@ -7022,6 +7526,7 @@ mod tests {
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
                 settings_picker: None,
+            settings_form: None, settings_confirm: None,
                 appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
@@ -7044,7 +7549,7 @@ mod tests {
         let info = SettingsInfo {
         notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
-        model_count: 3,
+        model_count: 3, provider_count: 2,
         session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
@@ -7081,6 +7586,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -7108,6 +7614,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -7134,6 +7641,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
@@ -7165,7 +7673,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render()
     }
@@ -7291,7 +7799,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup, preformatted: None,
-            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions()
         .1
@@ -7342,7 +7850,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
-            model_count: 3, session_count: 2,
+            model_count: 3, provider_count: 2, session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
@@ -7359,6 +7867,7 @@ mod tests {
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
             settings_picker: None,
+            settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
@@ -7430,7 +7939,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
-            model_count: 3, session_count: 2,
+            model_count: 3, provider_count: 2, session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
@@ -7450,6 +7959,7 @@ mod tests {
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
                 settings_picker: None,
+            settings_form: None, settings_confirm: None,
                 appearance: ap, custom_background: None,
             }
             .render()
@@ -7471,7 +7981,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
-            model_count: 3, session_count: 2,
+            model_count: 3, provider_count: 2, session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
@@ -7498,7 +8008,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
-            model_count: 3, session_count: 2,
+            model_count: 3, provider_count: 2, session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
@@ -7538,7 +8048,7 @@ mod tests {
             &mut slot, &mut cursor, &a, &[], &ToolDisplay::default(), true, true,
             &neo_platform::NoopClipboard::new("test"), &neo_platform::NoopNotify::new("test"),
             false, true, theme::ThemeName::Neo, appearance::Appearance::default(),
-            false, &mut sess,
+            false, 2, &mut sess,
         );
         let value = slot
             .expect("应生成设置分节")
@@ -7564,6 +8074,99 @@ mod tests {
         );
     }
 
+    /// 假的服务商契据（宿主可脱离文件系统单测 —— 这正是用契据的收益）。
+    struct FakeProviders {
+        entries: Vec<(String, String, bool)>,
+        deleted: Vec<String>,
+    }
+    impl ProviderControl for FakeProviders {
+        fn list(&self) -> Vec<(String, String, bool)> { self.entries.clone() }
+        fn get(&self, name: &str) -> Option<(String, String, String, u64)> {
+            self.entries
+                .iter()
+                .find(|(n, _, _)| n == name)
+                .map(|_| ("https://gw/v1".into(), "m".into(), "d".into(), 64000))
+        }
+        fn upsert(
+            &mut self, name: &str, _b: &str, _m: &str, _k: &str, _d: &str, _l: u64,
+            _orig: Option<&str>,
+        ) -> Result<(), String> {
+            self.entries.push((name.to_string(), String::new(), false));
+            Ok(())
+        }
+        fn delete(&mut self, name: &str) -> Result<bool, String> {
+            self.deleted.push(name.to_string());
+            self.entries.retain(|(n, _, _)| n != name);
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn provider_form_masks_the_key_field() {
+        // 密钥**不能明文铺在屏幕上**：终端可能被共享/录屏。
+        // 打码显示，且点数与真实长度无关（不泄露密钥长度）。
+        let mut providers = FakeProviders { entries: vec![], deleted: vec![] };
+        let mut form = provider_form(None, &providers);
+        form.fields[3].editor.set("sk-super-secret-value");
+        let pk = SettingsForm { key_field: Some(3), ..form.clone() };
+        // 表单画在**设置页之内**（settings 必须为 Some，否则整个设置分支不渲染 ——
+        // 第一版这里传了 None，表单根本没画出来，测试失败暴露的正是这一点）。
+        let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
+            background: "stars".into(), logo: "large".into(), custom_background: false,
+            model_count: 3, provider_count: 1, session_count: 2,
+            version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(),
+            mode: "m".into(), workspace: "/w".into(), branch: "".into(),
+            session: "s".into(), context_limit: 0, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 0, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let ed = editor::Editor::new();
+        let out = Screen {
+            cols: 100, rows: 30, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&about()), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            settings_picker: None, settings_form: Some(&pk), settings_confirm: None,
+            appearance: appearance::Appearance::default(), custom_background: None,
+        }
+        .render();
+        let text = plain(&out).join("\n");
+        assert!(!text.contains("sk-super-secret-value"), "密钥不得明文出现在屏幕上");
+        assert!(text.contains("••••••••"), "应显示打码占位");
+        let _ = &mut providers; // 契据仍需可变（表单提交时会用到）
+    }
+
+    #[test]
+    fn provider_control_contract_is_exercised_by_the_fake() {
+        // 负向保护：契据的五个方法都要能被实现（否则宿主换个后端就编不过）。
+        let mut p = FakeProviders { entries: vec![("a".into(), "x".into(), true)], deleted: vec![] };
+        assert_eq!(p.list().len(), 1);
+        assert!(p.get("a").is_some());
+        p.upsert("b", "u", "m", "k", "d", 1, None).unwrap();
+        assert_eq!(p.list().len(), 2);
+        assert_eq!(p.delete("a").unwrap(), true);
+        assert_eq!(p.deleted, vec!["a"]);
+    }
+
+    #[test]
+    fn commit_form_reports_bad_context_limit_instead_of_silently_zero() {
+        // 上下文上限填了非数字必须**如实报错**：静默当 0 会让用户以为填对了。
+        let mut providers = FakeProviders { entries: vec![], deleted: vec![] };
+        let mut form = provider_form(None, &providers);
+        form.fields[0].editor.set("gw");
+        form.fields[5].editor.set("abc");
+        let msg = commit_provider_form(&form, &mut providers);
+        assert!(msg.contains("不是数字"), "应报错而不是静默：{msg}");
+        // 留空 = 未知（0），这是允许的
+        form.fields[5].editor.set("");
+        let msg = commit_provider_form(&form, &mut providers);
+        assert!(msg.contains("已新增"), "留空应可保存：{msg}");
+    }
+
     #[test]
     fn settings_picker_expands_inline_under_its_row() {
         // 内联选择器必须长在**那一行下面**，且不跳回聊天界面。
@@ -7572,7 +8175,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
-            model_count: 3, session_count: 2,
+            model_count: 3, provider_count: 2, session_count: 2,
             version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
@@ -7593,7 +8196,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
-            settings_picker: Some(&pk),
+            settings_picker: Some(&pk), settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
@@ -7625,7 +8228,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
         let (gx, gy) = r.sidebar_grip.expect("侧栏收起时应留一个把手");
@@ -7696,7 +8299,7 @@ mod tests {
                 status: "", awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
+                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render()
         };
@@ -7722,7 +8325,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         assert!(plain(&out).join("\n").contains("下方还有"), "应提示下方还有内容");
@@ -7744,7 +8347,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -7788,6 +8391,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -7826,6 +8430,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -7855,6 +8460,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
@@ -7888,6 +8494,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -7994,6 +8601,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
@@ -8162,6 +8770,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
@@ -8190,6 +8799,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
@@ -8384,6 +8994,7 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+            settings_form: None, settings_confirm: None,
                     settings_picker: None,
                     appearance: appearance::Appearance::default(),
                     custom_background: None,

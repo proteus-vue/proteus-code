@@ -406,7 +406,8 @@ fn cmd_tui(args: &[String]) -> i32 {
     let mut sessions = TuiSessions::new(kernel.clone(), store);
     let submit_kernel = kernel.clone();
     // 注入 submit：TUI 只认契据，业务在 kernel
-    let result = neo_host_tui::run(about, gate, theme_name, &mut sessions, move |op| {
+    let mut providers = TuiProviders::new();
+    let result = neo_host_tui::run(about, gate, theme_name, &mut sessions, &mut providers, move |op| {
         submit_kernel.borrow_mut().submit(op).map_err(|e| e.to_string())
     });
     match result {
@@ -441,6 +442,105 @@ impl TuiSessions {
     /// 为某个会话 id 造一个 JSONL 持久化（指向该会话自己的文件）。
     fn persistence_for(&self, id: &str) -> Box<dyn neo_core::SessionPersistence> {
         Box::new(neo_session_local::JsonlPersistence::new(self.store.path_for(id)))
+    }
+}
+
+/// TUI 的服务商管理实现。
+///
+/// 活在 CLI 层而不是宿主里：宿主不碰配置文件；密钥的读写策略
+/// （只读用户级、0600）在 `neo-providers` 里实现，这里只做转发 ——
+/// 策略只有一处，宿主与 CLI 都无法绕过它。
+struct TuiProviders {
+    /// 内存中的注册表（磁盘是持久层，这里是在用的那份）
+    registry: neo_providers::ProviderRegistry,
+    /// 已存的密钥（按服务商名），与注册表分文件保存
+    keys: std::collections::BTreeMap<String, String>,
+}
+
+impl TuiProviders {
+    fn new() -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let registry = match neo_providers::load(&cwd) {
+            neo_providers::LoadOutcome::Loaded(r) => r,
+            // 读不动时不覆盖磁盘上的内容：以空注册表开始编辑，
+            // 但**不会**在保存前把它写掉（保存是显式动作）。
+            _ => neo_providers::ProviderRegistry::default(),
+        };
+        Self { registry, keys: neo_providers::load_keys() }
+    }
+
+    fn save(&self) -> Result<(), String> {
+        let path = neo_providers::resolve_path()
+            .ok_or_else(|| "无法确定 NEO_HOME".to_string())?;
+        neo_providers::save(&self.registry, &path)?;
+        neo_providers::save_keys(&self.keys)
+    }
+}
+
+impl neo_host_tui::ProviderControl for TuiProviders {
+    fn list(&self) -> Vec<(String, String, bool)> {
+        self.registry
+            .providers
+            .iter()
+            .map(|p| {
+                let has = neo_providers::key_for(p, &self.keys).is_some();
+                (p.name.clone(), p.description.clone().unwrap_or_default(), has)
+            })
+            .collect()
+    }
+
+    fn get(&self, name: &str) -> Option<(String, String, String, u64)> {
+        self.registry.get(name).map(|p| {
+            (
+                p.base_url.clone().unwrap_or_default(),
+                p.model.clone().unwrap_or_default(),
+                p.description.clone().unwrap_or_default(),
+                p.context_limit,
+            )
+        })
+    }
+
+    fn upsert(
+        &mut self,
+        name: &str,
+        base_url: &str,
+        model: &str,
+        api_key: &str,
+        description: &str,
+        context_limit: u64,
+        editing_original: Option<&str>,
+    ) -> Result<(), String> {
+        // 改名（编辑时改了 name）要先删旧条目，否则会留下一个孤儿
+        if let Some(old) = editing_original {
+            if old != name {
+                self.registry.remove(old);
+                self.keys.remove(old);
+            }
+        }
+        let entry = neo_providers::ProviderEntry {
+            name: name.to_string(),
+            base_url: if base_url.is_empty() { None } else { Some(base_url.to_string()) },
+            model: if model.is_empty() { None } else { Some(model.to_string()) },
+            api_key_env: None,
+            description: if description.is_empty() { None } else { Some(description.to_string()) },
+            context_limit,
+            production: true,
+        };
+        self.registry.upsert(entry);
+        // 密钥留空 = 不改动已存的（避免让用户重新粘贴一遍）
+        if !api_key.is_empty() {
+            self.keys.insert(name.to_string(), api_key.to_string());
+        }
+        self.save()
+    }
+
+    fn delete(&mut self, name: &str) -> Result<bool, String> {
+        let removed = self.registry.remove(name);
+        let had_key = self.keys.remove(name).is_some();
+        if removed || had_key {
+            self.save()?;
+        }
+        Ok(removed)
     }
 }
 
@@ -603,25 +703,42 @@ fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
     // 见 neo-providers 的模块说明）。读失败要如实打印原因 ——
     // 静默忽略会让用户对着"配了却不生效"想不通。
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let key_store = neo_providers::load_keys();
     match neo_providers::load(&cwd) {
         neo_providers::LoadOutcome::Loaded(reg) => {
             for e in &reg.providers {
-                // 密钥取自 `api_key_env` 指名的环境变量；缺了跳过并提示，
-                // 不给一个"切过去就连不上"的条目。
-                let key = e
-                    .api_key_env
-                    .as_deref()
-                    .and_then(|k| std::env::var(k).ok())
-                    .filter(|v| !v.trim().is_empty());
+                // 密钥：**先密钥库（设置页里填的），再环境变量**。
+                // 缺了跳过并提示，不给一个"切过去就连不上"的条目。
+                let key = neo_providers::key_for(e, &key_store);
                 let Some(key) = key else {
                     let hint = e.api_key_env.as_deref().unwrap_or("(未声明 api_key_env)");
-                    eprintln!("[neo] 服务商 {} 已跳过：环境变量 {hint} 未设置", e.name);
+                    eprintln!(
+                        "[neo] 服务商 {} 已跳过：设置页未填密钥，环境变量 {hint} 也未设置",
+                        e.name
+                    );
                     continue;
                 };
+                // base_url 要规范化：用户会写 `https://host/v1`，
+                // 而底层要裸主机（openssl -connect host:443）+ 路径。
+                // 不规范化会让"看起来填对了的 URL"连不上。
+                let (host, url_path) = e
+                    .base_url
+                    .as_deref()
+                    .map(neo_providers::normalize_base_url)
+                    .unwrap_or_default();
                 let p = neo_llm_deepseek::DeepSeekProvider {
                     api_key: key,
-                    endpoint: e.base_url.clone().unwrap_or_default(),
-                    path: "/chat/completions".to_string(),
+                    endpoint: if host.is_empty() {
+                        neo_llm_deepseek::DEFAULT_ENDPOINT.to_string()
+                    } else {
+                        host
+                    },
+                    path: if url_path.is_empty() {
+                        neo_llm_deepseek::DEFAULT_PATH.to_string()
+                    } else {
+                        // 用户给的是 `/v1` 这类基础路径，要补上 /chat/completions
+                        format!("{}/chat/completions", url_path.trim_end_matches('/'))
+                    },
                     model: e.model.clone().unwrap_or_else(|| "deepseek-chat".to_string()),
                     temperature: 0.0,
                     label: e.name.clone(),
