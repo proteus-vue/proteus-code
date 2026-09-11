@@ -89,11 +89,30 @@ impl DeepSeekProvider {
                     out.push(obj);
                 }
                 Message::ToolResult { id, name, output } => {
+                    // **stderr 必须带上**：拒绝、沙箱拦截、命令失败的原因都在
+                    // stderr 里。只发 stdout 会让模型看到"成功但无输出" ——
+                    // 实测时它真的据此推断"工具返回空、无报错"，然后请求重试，
+                    // 完全不知道是自己被审批拒绝了。
+                    let mut content = output.stdout.clone();
+                    if !output.stderr.trim().is_empty() {
+                        if !content.is_empty() && !content.ends_with('\n') {
+                            content.push('\n');
+                        }
+                        content.push_str("[stderr] ");
+                        content.push_str(&output.stderr);
+                    }
+                    // 非零退出码也明确告知：模型需要区分"命令成功"与"命令失败"
+                    if output.exit_code != 0 {
+                        content.push_str(&format!("\n[exit_code] {}", output.exit_code));
+                    }
+                    if output.truncated {
+                        content.push_str("\n[truncated] 输出已被截断");
+                    }
                     out.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": id,
                         "name": name,
-                        "content": output.stdout,
+                        "content": content,
                     }));
                 }
             }
@@ -188,7 +207,7 @@ impl DeepSeekProvider {
         // 拆 HTTP 头 / 体
         let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
         let head = &raw[..body_start.min(raw.len())];
-        let resp_body = &raw[body_start.min(raw.len())..];
+        let raw_body = &raw[body_start.min(raw.len())..];
 
         // 状态码
         let status = head
@@ -201,7 +220,74 @@ impl DeepSeekProvider {
         if status == 0 {
             return Err(format!("未收到 HTTP 响应（原始前 200 字符）：{}", &raw[..raw.len().min(200)]));
         }
-        Ok((status, resp_body.to_string()))
+
+        // **必须处理 chunked**：真实 API 走 HTTP/1.1 分块传输，
+        // 响应体形如 `1d1\r\n{...}\r\n0\r\n\r\n` —— 直接把这段交给
+        // serde_json 会得到 "trailing characters at line 1 column 2"
+        // （它把长度前缀 `1d1` 当成数字字面量 `1`，后面 `d` 就成了多余字符）。
+        // 之前的帧格式测试用 httpbin，那个服务用 Content-Length，
+        // 所以这条路径一直没被覆盖 —— 只有真实 API 才暴露。
+        let chunked = head.lines().any(|l| {
+            let l = l.to_ascii_lowercase();
+            l.starts_with("transfer-encoding") && l.contains("chunked")
+        });
+        let resp_body = if chunked {
+            decode_chunked(raw_body)?
+        } else {
+            raw_body.to_string()
+        };
+        Ok((status, resp_body))
+    }
+}
+
+/// 解码 HTTP/1.1 chunked 传输编码。
+///
+/// 格式：`<十六进制长度>[;扩展]CRLF <数据> CRLF`，重复；以长度 0 结束，
+/// 之后可能有 trailer（可忽略）。
+///
+/// 为什么必须自己解：我们走 `openssl s_client` 裸谈 HTTP，没有 HTTP 库
+/// 帮忙。真实 API 用 chunked，不解就会把长度前缀送进 JSON 解析器。
+///
+/// 内存有界：按声明长度 `with_capacity`，并对**异常大的声明长度**设上限 ——
+/// 避免一个坏响应让我们预先分配巨量内存。
+pub fn decode_chunked(body: &str) -> Result<String, String> {
+    /// 单块上限（16 MiB）。真实响应的单块通常几十 KB 到几 MB。
+    const MAX_CHUNK: usize = 16 * 1024 * 1024;
+
+    let mut out = String::new();
+    let mut rest = body;
+    loop {
+        // 块头：十六进制长度，可能带 `;ext`
+        let Some(nl) = rest.find("\r\n") else {
+            // 没有更多块头：若剩余全是空白就正常结束，否则格式不对
+            return if rest.trim().is_empty() {
+                Ok(out)
+            } else {
+                Err("chunked 响应格式错误：块头缺少 CRLF".into())
+            };
+        };
+        let size_line = &rest[..nl];
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        // 空长度行 = 端点（有些实现用裸 CRLF 结尾）
+        if size_hex.is_empty() {
+            return Ok(out);
+        }
+        let size = usize::from_str_radix(size_hex, 16)
+            .map_err(|_| format!("chunked 块长度不是合法十六进制：{size_hex:?}"))?;
+        if size > MAX_CHUNK {
+            return Err(format!("chunked 单块长度 {size} 超出上限 {MAX_CHUNK}"));
+        }
+        if size == 0 {
+            return Ok(out); // 结束块；trailer 可忽略
+        }
+        let data_start = nl + 2;
+        let data_end = data_start
+            .checked_add(size)
+            .filter(|e| *e <= rest.len())
+            .ok_or_else(|| format!("chunked 数据不完整：声明 {size} 字节但剩余不足"))?;
+        out.push_str(&rest[data_start..data_end]);
+        // 块数据后应跟 CRLF
+        rest = rest[data_end..].strip_prefix("\r\n").unwrap_or(&rest[data_end..]);
     }
 }
 
@@ -277,6 +363,203 @@ impl ModelProvider for DeepSeekProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── chunked 传输解码 ──────────────────────────────────────────────
+    //
+    // 这些用例是照着**真实响应的字节**写的：DeepSeek API 走 chunked，
+    // 手动拼出分块格式，确保不联网也能覆盖这条路径。
+
+    #[test]
+    fn decodes_a_single_chunk() {
+        let body = "1d1\r\n{\"ok\":true}\r\n0\r\n\r\n";
+        // 长度按其真实字节数算，避免手写错误
+        let payload = "{\"ok\":true}";
+        let manual = format!("{:x}\r\n{payload}\r\n0\r\n\r\n", payload.len());
+        assert_eq!(decode_chunked(&manual).unwrap(), payload);
+        let _ = body;
+    }
+
+    #[test]
+    fn decodes_multiple_chunks_and_concatenates() {
+        let a = "{\"a\":";
+        let b = "1}";
+        let raw = format!(
+            "{:x}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n",
+            a.len(),
+            b.len()
+        );
+        assert_eq!(decode_chunked(&raw).unwrap(), "{\"a\":1}");
+    }
+
+    #[test]
+    fn tolerates_chunk_extensions_and_trailers() {
+        // 有些实现会在长度后带 `;ext`，结束块后带 trailer —— 都要能跳过
+        let p = "{\"x\":1}";
+        let raw = format!("{:x};ext=1\r\n{p}\r\n0\r\nX-Trace: abc\r\n\r\n", p.len());
+        assert_eq!(decode_chunked(&raw).unwrap(), p);
+    }
+
+    #[test]
+    fn handles_uppercase_hex_lengths() {
+        let p = "A".repeat(0x1A);
+        let raw = format!("1A\r\n{p}\r\n0\r\n\r\n");
+        assert_eq!(decode_chunked(&raw).unwrap(), p);
+    }
+
+    #[test]
+    fn decodes_a_realistic_api_response_prefix() {
+        // 真实响应实测以 `1d1\r\n{...` 开头；这里用缩小的等价结构
+        let json = r#"{"id":"x","object":"chat.completion","choices":[{"message":{"content":"你好"}}]}"#;
+        let raw = format!("{:x}\r\n{json}\r\n0\r\n\r\n", json.len());
+        let decoded = decode_chunked(&raw).unwrap();
+        assert_eq!(decoded, json);
+        // 解出来的必须是合法 JSON（这才是最初的目的）
+        assert!(serde_json::from_str::<serde_json::Value>(&decoded).is_ok());
+    }
+
+    #[test]
+    fn chunked_decoding_is_what_makes_json_parse_work() {
+        // 正向证明：不解码则 JSON 解析失败（复现真实报错），解码后成功。
+        let json = r#"{"ok":true}"#;
+        let raw = format!("{:x}\r\n{json}\r\n0\r\n\r\n", json.len());
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&raw).is_err(),
+            "原始 chunked 文本不该能当 JSON 解析（这正是修复前的症状）"
+        );
+        let decoded = decode_chunked(&raw).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&decoded).is_ok());
+    }
+
+    #[test]
+    fn malformed_chunked_is_an_error_not_a_silent_truncation() {
+        // 声明长度超过实际数据：必须报错，不能悄悄给一段截断的 JSON
+        let raw = "100\r\nshort\r\n0\r\n\r\n";
+        assert!(decode_chunked(raw).is_err(), "声明 256 字节但只有 5 字节，应报错");
+        // 长度不是十六进制
+        assert!(decode_chunked("zz\r\ndata\r\n").is_err());
+    }
+
+    #[test]
+    fn oversized_chunk_is_rejected_before_allocating() {
+        // 内存有界：异常大的单块声明要在分配前拒绝
+        let raw = "7fffffff\r\nx\r\n0\r\n\r\n";
+        let err = decode_chunked(raw).unwrap_err();
+        assert!(err.contains("上限"), "应提示超过上限：{err}");
+    }
+
+    #[test]
+    fn empty_body_is_an_empty_chunk_stream() {
+        assert_eq!(decode_chunked("0\r\n\r\n").unwrap(), "");
+    }
+
+    #[test]
+    fn tool_result_carries_stderr_and_exit_code_to_the_model() {
+        // 真实教训：只发 stdout 会让"被审批拒绝"看起来像"成功但无输出"。
+        // 实测时模型据此说"工具返回空、无报错"，然后要求重试 —— 它完全
+        // 不知道是自己被拒了。
+        let msgs = vec![Message::ToolResult {
+            id: "c1".into(),
+            name: "apply_patch".into(),
+            output: neo_protocol::ToolOutput {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: "用户拒绝了该调用".into(),
+                truncated: false,
+            },
+        }];
+        let tools: Vec<neo_core::ToolSchema> = Vec::new();
+        let req = ModelRequest { system: "sys", messages: &msgs, tools: &tools };
+        let p = DeepSeekProvider {
+            endpoint: "example.invalid".into(),
+            path: "/x".into(),
+            api_key: "test".into(),
+            model: "m".into(),
+            temperature: 0.0,
+        };
+        let encoded = p.encode_messages(&req);
+        // 系统消息在最前，工具结果在后面 —— 按 role 找，别硬取下标
+        let content = encoded
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("应有 tool 消息")["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(content.contains("用户拒绝了该调用"), "拒绝原因必须到达模型：{content}");
+        assert!(content.contains("-1"), "退出码必须到达模型：{content}");
+    }
+
+    #[test]
+    fn successful_tool_result_without_stderr_is_not_polluted() {
+        // 正常成功且无 stderr 时不该插入多余标记（否则提示词里全是噪声）
+        let msgs = vec![Message::ToolResult {
+            id: "c1".into(),
+            name: "bash".into(),
+            output: neo_protocol::ToolOutput {
+                exit_code: 0,
+                stdout: "file.txt".into(),
+                stderr: String::new(),
+                truncated: false,
+            },
+        }];
+        let tools: Vec<neo_core::ToolSchema> = Vec::new();
+        let req = ModelRequest { system: "sys", messages: &msgs, tools: &tools };
+        let p = DeepSeekProvider {
+            endpoint: "example.invalid".into(),
+            path: "/x".into(),
+            api_key: "test".into(),
+            model: "m".into(),
+            temperature: 0.0,
+        };
+        let content = p
+            .encode_messages(&req)
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("应有 tool 消息")["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(content, "file.txt", "干净的成功结果不该加标记：{content}");
+    }
+
+    #[test]
+    fn truncated_tool_result_is_labelled_for_the_model() {
+        // 模型必须知道输出被截断，否则会把不完整内容当成全部
+        let msgs = vec![Message::ToolResult {
+            id: "c1".into(),
+            name: "bash".into(),
+            output: neo_protocol::ToolOutput {
+                exit_code: 0,
+                stdout: "head".into(),
+                stderr: String::new(),
+                truncated: true,
+            },
+        }];
+        let tools: Vec<neo_core::ToolSchema> = Vec::new();
+        let req = ModelRequest { system: "sys", messages: &msgs, tools: &tools };
+        let p = DeepSeekProvider {
+            endpoint: "example.invalid".into(),
+            path: "/x".into(),
+            api_key: "test".into(),
+            model: "m".into(),
+            temperature: 0.0,
+        };
+        let content = p
+            .encode_messages(&req)
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("应有 tool 消息")["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(content.contains("truncated"), "应标注截断：{content}");
+    }
 
     #[test]
     fn parses_a_plain_text_completion() {
