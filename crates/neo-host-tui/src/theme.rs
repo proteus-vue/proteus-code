@@ -42,6 +42,8 @@ pub struct Theme {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeName {
+    /// NEO 自有配色（默认）：紫为主色，紫→品红渐变
+    Neo,
     OpenCode,
     Nord,
     Gruvbox,
@@ -52,13 +54,14 @@ pub enum ThemeName {
 
 impl Default for ThemeName {
     fn default() -> Self {
-        Self::OpenCode
+        Self::Neo
     }
 }
 
 impl ThemeName {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Neo => "neo",
             Self::OpenCode => "opencode",
             Self::Nord => "nord",
             Self::Gruvbox => "gruvbox",
@@ -71,7 +74,9 @@ impl ThemeName {
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim().to_ascii_lowercase();
         Some(match s.as_str() {
-            "opencode" | "default" => Self::OpenCode,
+            // `default` 仍解析到 NEO 自有配色（它是默认主题）
+            "neo" | "default" => Self::Neo,
+            "opencode" => Self::OpenCode,
             "nord" => Self::Nord,
             "gruvbox" => Self::Gruvbox,
             "rosepine" | "rose-pine" => Self::RosePine,
@@ -82,8 +87,9 @@ impl ThemeName {
     }
 
     /// 按名字顺序列出（切换键遍历用；顺序稳定，用户能习惯）。
-    pub fn all() -> [ThemeName; 6] {
+    pub fn all() -> [ThemeName; 7] {
         [
+            Self::Neo,
             Self::OpenCode,
             Self::Nord,
             Self::Gruvbox,
@@ -105,6 +111,29 @@ impl ThemeName {
 pub fn get(name: ThemeName) -> Theme {
     match name {
         // 默认：opencode darkStep* 系列（主色暖橙 #fab283、强调紫 #9d7cd8）
+        // NEO 自有配色：紫是主色。
+        //
+        // 为什么把紫放在 primary 而不是 accent：`primary` 承担的是**最常出现
+        // 的强调**（代码里的函数名、列表圆点、弹窗选中标记、logo 渐变起点），
+        // 这些位置的颜色就是"这个产品的颜色"。`accent` 只用在标题、用户消息
+        // 竖条这类结构性位置，用同色系的品红把渐变拉开层次。
+        ThemeName::Neo => Theme {
+            name: "neo",
+            primary: (0xa7, 0x8b, 0xfa),      // violet 400，主品牌紫
+            accent: (0xe8, 0x79, 0xf9),       // fuchsia 400，渐变终点/标题
+            success: (0x6e, 0xe7, 0xb7),
+            error: (0xf8, 0x71, 0x71),
+            warning: (0xfb, 0xbf, 0x24),
+            info: (0x7d, 0xd3, 0xfc),
+            text: (0xed, 0xed, 0xed),
+            muted: (0x8a, 0x8a, 0x94),       // 略带紫调的灰，与主色同族
+            border: (0x45, 0x45, 0x52),
+            border_active: (0x5c, 0x5c, 0x6e),
+            star_dim: (0x2b, 0x2b, 0x33),
+            star_bright: (0x3f, 0x3f, 0x4d),
+        },
+        // 参考主题：opencode 官方暗色（暖橙主色 #fab283 + 紫强调 #9d7cd8）。
+        // 保留它是为了可对照 —— 但 NEO 的默认是自己的紫。
         ThemeName::OpenCode => Theme {
             name: "opencode",
             primary: (0xfa, 0xb2, 0x83),
@@ -267,10 +296,31 @@ mod tests {
 
     #[test]
     fn parse_accepts_aliases_and_rejects_junk() {
-        assert_eq!(ThemeName::parse("default"), Some(ThemeName::OpenCode));
+        assert_eq!(ThemeName::parse("default"), Some(ThemeName::Neo));
         assert_eq!(ThemeName::parse("Rose-Pine"), Some(ThemeName::RosePine));
         assert_eq!(ThemeName::parse("  NORD "), Some(ThemeName::Nord));
         assert_eq!(ThemeName::parse("不存在"), None);
+    }
+
+    #[test]
+    fn the_default_theme_is_neos_own_purple() {
+        // 默认主题必须是 NEO 自己的紫，而不是参考主题的橙。
+        // 判据用色相族而不是硬编码三原色值：紫 = 蓝/红高、绿低。
+        assert_eq!(ThemeName::default(), ThemeName::Neo);
+        let t = get(ThemeName::default());
+        let (r, g, b) = t.primary;
+        assert!(
+            b as u16 > g as u16 + 60 && r as u16 > g as u16 + 20,
+            "默认主色应是紫（蓝红高、绿低），实际 #{r:02x}{g:02x}{b:02x}"
+        );
+    }
+
+    #[test]
+    fn opencode_reference_theme_is_still_reachable() {
+        // 参考主题保留，供对照；但它不再是默认
+        assert_ne!(ThemeName::default(), ThemeName::OpenCode);
+        assert!(ThemeName::all().contains(&ThemeName::OpenCode));
+        assert!(ThemeName::parse("opencode").is_some());
     }
 
     #[test]

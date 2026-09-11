@@ -162,7 +162,8 @@ pub fn theme_items(query: &str) -> Vec<Item> {
         .map(|t| Item {
             label: t.as_str().to_string(),
             detail: match t {
-                crate::theme::ThemeName::OpenCode => "默认（暖橙 / 紫）",
+                crate::theme::ThemeName::Neo => "NEO 默认（紫）",
+                crate::theme::ThemeName::OpenCode => "opencode 官方（暖橙 / 紫）",
                 crate::theme::ThemeName::Nord => "冷蓝灰",
                 crate::theme::ThemeName::Gruvbox => "复古暖色",
                 crate::theme::ThemeName::RosePine => "柔和玫瑰",
