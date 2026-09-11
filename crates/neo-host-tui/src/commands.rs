@@ -124,6 +124,11 @@ pub enum Action {
     SetBackground(crate::appearance::Background),
     /// 设置 Logo 样式
     SetLogo(crate::appearance::LogoStyle),
+    /// 打开模型选择列表
+    ModelPicker,
+    /// 切换到指定模型（名字来自运行时注册表，不是编译期常量，
+    /// 故这里用 owned String 的**索引**表达不了；改由 ItemAction 承载。）
+    SwitchModel,
 }
 
 /// **必须由命令触发**的动作。新增变体时要加进这里 ——
@@ -150,6 +155,7 @@ const COMMAND_ACTIONS: &[Action] = &[
     Action::BackgroundPicker,
     Action::NextLogo,
     Action::LogoPicker,
+    Action::ModelPicker,
 ];
 
 /// **只在界面内部产生**的动作（不经过命令表）。
@@ -157,6 +163,7 @@ const COMMAND_ACTIONS: &[Action] = &[
 /// `SetTheme` 只由主题选择弹窗产生 —— 让用户敲 `/settheme nord`
 /// 不如让他从列表里选（名字要记，也没法预览）。这类动作刻意不注册命令。
 const INTERNAL_ONLY_ACTIONS: &[Action] = &[
+    Action::SwitchModel,
     Action::SetTheme(crate::theme::ThemeName::Nord),
     Action::SetBackground(crate::appearance::Background::Dots),
     Action::SetLogo(crate::appearance::LogoStyle::Small),
@@ -240,6 +247,10 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "logo-list", aliases: &["logo-styles"], desc: "选择 Logo 样式",
         action: Action::LogoPicker, category: Category::Display, keybinding: "",
+    },
+    Command {
+        name: "models", aliases: &["model"], desc: "切换模型（运行时，无需重启）",
+        action: Action::ModelPicker, category: Category::Recommended, keybinding: "",
     },
     Command {
         name: "keys", aliases: &["keybindings"], desc: "键盘快捷键",
@@ -346,6 +357,7 @@ Neo —— 编程 Agent 内核
     /notify-sound 开 / 关提醒声音
     /background  切换背景纹理（/background-list 可选）
     /logo        切换 Logo 样式（/logo-list 可选）
+    /models      切换模型（运行时，无需重启）
     /copy      复制最近一条回复
     /details   展开 / 折叠工具输出
     /thinking  显示 / 隐藏推理
@@ -518,10 +530,17 @@ mod tests {
             assert!(h.contains(needle), "help 应提到 {needle}");
             assert!(k.contains(needle), "keys 应提到 {needle}");
         }
-        // 未实现的功能不得出现在文案里
-        for bad in ["/models", "/agents", "/sessions", "/mcps", "/share"] {
+        // 未实现的功能不得出现在文案里。
+        // 注意 `/models` 已从这条清单**移除** —— 它在本轮补上了后端能力
+        // （内核持模型注册表，运行时可切换）。这条守卫的作用正是提醒：
+        // 能力从"无"变"有"时，要把名字从黑名单挪出来，别留下过时的断言。
+        for bad in ["/agents", "/sessions", "/mcps", "/share", "/undo-tree"] {
             assert!(!h.contains(bad), "不得宣传未实现命令 {bad}");
             assert!(!k.contains(bad), "不得宣传未实现命令 {bad}");
+        }
+        // 已实现的反面：必须出现在帮助里
+        for good in ["/models", "/settings", "/diff"] {
+            assert!(h.contains(good), "已实现命令 {good} 应出现在帮助里");
         }
     }
 }

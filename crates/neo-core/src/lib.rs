@@ -20,6 +20,8 @@
 use neo_config::{resolve, Config, FileEditPolicy, ModeResolution};
 use neo_protocol::*;
 use serde_json::Value;
+pub mod models;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -419,6 +421,11 @@ pub enum KernelError {
     Persistence(PersistenceError),
     /// 尚未实现的 Op（明确报错，不静默忽略）。
     Unimplemented(String),
+    /// 模型切换失败（名字不存在等）。
+    ///
+    /// 单独变体而不是复用 `Unimplemented`：一个说"能力还没有"，
+    /// 一个说"你要的模型不存在"，混用会让用户以为功能缺失。
+    ModelSwitch(String),
     /// 请求回退的轮次超过已有历史（参数不合法，不是"没实现"）。
     ///
     /// 与 `Unimplemented` 分开：一个说"这个能力还没有"，一个说"你的参数不成立"。
@@ -437,6 +444,7 @@ impl std::fmt::Display for KernelError {
             Self::NoPendingApproval(id) => write!(f, "无待审批调用：{id}"),
             Self::Persistence(e) => write!(f, "{e}"),
             Self::Unimplemented(what) => write!(f, "该 Op 尚未实现：{what}"),
+            Self::ModelSwitch(msg) => write!(f, "{msg}"),
             Self::RewindTooFar { requested, available } => write!(
                 f,
                 "无法回退 {requested} 轮：当前只有 {available} 个用户轮次"
@@ -473,7 +481,8 @@ struct PendingApproval {
 pub struct Kernel {
     cfg: Config,
     tools: ToolRegistry,
-    model: Box<dyn ModelProvider>,
+    /// 模型注册表（多 provider + 当前选中）。运行时可切换。
+    models: crate::models::ModelRegistry,
     sandbox: Arc<dyn SandboxBackend>,
     persistence: Box<dyn SessionPersistence>,
     cwd: PathBuf,
@@ -510,7 +519,7 @@ impl Kernel {
         session_id: impl Into<String>,
         cfg: Config,
         tools: ToolRegistry,
-        model: Box<dyn ModelProvider>,
+        model: crate::models::ModelRegistry,
         sandbox: Arc<dyn SandboxBackend>,
         persistence: Box<dyn SessionPersistence>,
         cwd: impl Into<PathBuf>,
@@ -524,7 +533,7 @@ impl Kernel {
         Self {
             cfg,
             tools,
-            model,
+            models: model,
             sandbox,
             persistence,
             cwd: cwd.into(),
@@ -702,7 +711,21 @@ impl Kernel {
             }
 
             Op::ConfigureSession { patch } => {
+                // 模型切换要**先校验再改配置**：若名字不存在，报错并保持原样，
+                // 而不是把 cfg.model 改成不存在的名字（那会让会话日志说谎）。
+                if let Some(want) = patch.model.as_deref() {
+                    self.models
+                        .switch(want)
+                        .map_err(KernelError::ModelSwitch)?;
+                    let ev = EventMsg::ModelSwitched {
+                        model: want.to_string(),
+                        context_limit: self.models.current_context_limit(),
+                    };
+                    self.emit_and_log(&ev)?;
+                }
                 self.cfg = neo_config::merge(self.cfg.clone(), patch.into());
+                // cfg.model 与实际生效的 provider 保持一致（避免两处各说一套）
+                self.cfg.model = self.models.current().to_string();
                 let ev = EventMsg::SessionConfigured { session_id: self.session_id.clone() };
                 self.emit_and_log(&ev)?;
             }
@@ -777,7 +800,7 @@ impl Kernel {
             let mut calls = Vec::new();
             let mut result: Result<(), KernelError> = Ok(());
 
-            for delta in self.model.stream(&request) {
+            for delta in self.models.current_provider().stream(&request) {
                 match delta {
                     ModelDelta::Text(chunk) => {
                         text.push_str(&chunk);
@@ -858,6 +881,21 @@ impl Kernel {
             }
         }
         self.drive_steps()
+    }
+
+    /// 当前模型名（宿主展示用）。
+    pub fn current_model(&self) -> &str {
+        self.models.current()
+    }
+
+    /// 全部可选模型（宿主列表用）。
+    pub fn available_models(&self) -> Vec<crate::models::ModelInfo> {
+        self.models.list()
+    }
+
+    /// 当前模型的上下文窗口（0 = 未知）。
+    pub fn current_context_limit(&self) -> u64 {
+        self.models.current_context_limit()
     }
 
     /// 上下文预算检查。超限即报错，绝不静默丢弃。

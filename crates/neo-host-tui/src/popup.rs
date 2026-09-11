@@ -30,6 +30,8 @@ pub enum Kind {
     Background,
     /// Logo 样式选择
     Logo,
+    /// 模型选择
+    Models,
 }
 
 impl Kind {
@@ -41,6 +43,7 @@ impl Kind {
             Kind::Palette => "命令面板",
             Kind::Background => "背景",
             Kind::Logo => "Logo 样式",
+            Kind::Models => "模型",
         }
     }
 
@@ -52,6 +55,8 @@ impl Kind {
             Kind::Theme => 6,
             Kind::Background => 4,
             Kind::Logo => 4,
+            // 模型列表可能较长（多服务商），给 8 行
+            Kind::Models => 8,
         }
     }
 }
@@ -69,6 +74,8 @@ pub enum ItemAction {
     SetBackground(crate::appearance::Background),
     /// 应用 Logo 样式
     SetLogo(crate::appearance::LogoStyle),
+    /// 切换到指定模型（名字由内核注册表决定，运行时才知道）
+    SwitchModel(String),
 }
 
 /// 列表项。
@@ -241,6 +248,22 @@ pub fn theme_items(query: &str) -> Vec<Item> {
                 crate::theme::ThemeName::Catppuccin => "柔和马卡龙",
             };
             Item::plain(t.as_str().to_string(), d.to_string(), ItemAction::SetTheme(t))
+        })
+        .collect()
+}
+
+/// 模型候选（由主循环把内核注册表传进来 —— 宿主不自己维护模型清单）。
+pub fn model_items(models: &[(String, String, bool)], current: &str) -> Vec<Item> {
+    models
+        .iter()
+        .map(|(name, desc, production)| {
+            let mark = if name == current { "● " } else { "  " };
+            let tag = if *production { "" } else { "（桩）" };
+            Item::plain(
+                format!("{mark}{name}{tag}"),
+                desc.clone(),
+                ItemAction::SwitchModel(name.clone()),
+            )
         })
         .collect()
 }

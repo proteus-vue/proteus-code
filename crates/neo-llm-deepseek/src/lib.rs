@@ -646,11 +646,21 @@ mod tests {
 pub struct ScriptedProvider {
     pub script: Vec<Vec<ModelDelta>>,
     pub tail: String,
+    /// 自报名字。默认 `"mock"`（保持既有行为），可用 `with_name` 改成
+    /// `demo` / `selftest` 等 —— 注册表要求"注册名 == 自报名"，
+    /// 一个 provider 想以多个名字注册就必须能自报不同名字。
+    pub label: String,
 }
 
 impl ScriptedProvider {
     pub fn text_only(text: &str) -> Self {
-        Self { script: Vec::new(), tail: text.to_string() }
+        Self { script: Vec::new(), tail: text.to_string(), label: "mock".into() }
+    }
+
+    /// 改自报名字（供注册表以不同名字注册同一类桩）。
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.label = name.to_string();
+        self
     }
 
     /// 按步给出响应；每一步用完后回落到 `tail`。
@@ -684,12 +694,12 @@ impl ScriptedProvider {
     }
 
     pub fn scripted(steps: Vec<Vec<ModelDelta>>, tail: &str) -> Self {
-        Self { script: steps, tail: tail.to_string() }
+        Self { script: steps, tail: tail.to_string(), label: "mock".into() }
     }
 }
 
 impl ModelProvider for ScriptedProvider {
-    fn name(&self) -> &str { "mock" }
+    fn name(&self) -> &str { &self.label }
 
     fn stream(&self, req: &ModelRequest<'_>) -> ModelStream {
         let step = req

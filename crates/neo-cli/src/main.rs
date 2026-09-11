@@ -148,7 +148,7 @@ fn cmd_serve(args: &[String]) -> i32 {
         i += 1;
     }
 
-    let Some(model) = build_model(&provider) else {
+    let Some(models) = build_models(&provider) else {
         return 2;
     };
     let sandbox = Arc::new(neo_sandbox_local::LocalSandbox::new(&workspace));
@@ -156,7 +156,7 @@ fn cmd_serve(args: &[String]) -> i32 {
         workspace.join(".neo/sessions/neo-web.jsonl"),
     ));
     let opts = ExecOptions { mode, max_steps: 32, ..Default::default() };
-    let mut kernel = build_kernel("neo-web", &workspace, &opts, model, sandbox, persistence);
+    let mut kernel = build_kernel("neo-web", &workspace, &opts, models, sandbox, persistence);
 
     // 内核线程的闭包：只做「Op 进 / 事件出」，不含任何 HTTP 细节。
     let (server, kernel_thread) = match neo_host_web::start(&bind, move |op| {
@@ -248,7 +248,7 @@ fn cmd_exec(args: &[String]) -> i32 {
     opts.task = task_parts.join(" ");
 
     // ── 装配：provider / sandbox / persistence ──────────────────────────
-    let Some(model) = build_model(&provider) else {
+    let Some(models) = build_models(&provider) else {
         return 2;
     };
 
@@ -275,7 +275,7 @@ fn cmd_exec(args: &[String]) -> i32 {
         "neo-cli",
         &workspace,
         &opts,
-        model,
+        models,
         sandbox,
         persistence,
     );
@@ -337,7 +337,7 @@ fn cmd_tui(args: &[String]) -> i32 {
     }
 
     let opts = ExecOptions { mode, ..ExecOptions::default() };
-    let model = match build_model(&provider) {
+    let models = match build_models(&provider) {
         Some(m) => m,
         None => return 2,
     };
@@ -346,7 +346,7 @@ fn cmd_tui(args: &[String]) -> i32 {
         workspace.join(".neo/sessions/tui.jsonl"),
     ));
     let session_id = "neo-tui";
-    let mut kernel = build_kernel(session_id, &workspace, &opts, model, sandbox, persistence);
+    let mut kernel = build_kernel(session_id, &workspace, &opts, models, sandbox, persistence);
 
     // 首屏信息由 CLI 装配（宿主不读环境）—— 与 exec 启动时打印的那三行同源，
     // 避免"命令行提示"与"TUI 首屏"两处各说一套。
@@ -357,6 +357,13 @@ fn cmd_tui(args: &[String]) -> i32 {
         mode_short: mode_short(mode).to_string(),
         workspace: workspace.display().to_string(),
         branch: detect_branch(&workspace),
+        // 模型清单由 CLI 注入（宿主不持有内核，也不需要知道注册表）
+        models: kernel
+            .available_models()
+            .into_iter()
+            .map(|m| (m.name, m.description, m.production))
+            .collect(),
+        current_model: kernel.current_model().to_string(),
         // 每次启动换一个示例（不需要真随机：只要别每次都一样）
         example: neo_host_tui::pick_example(),
         // deepseek-chat 的上下文窗口。写错不如不写：侧栏在 0 时显示"上限未知"。
@@ -435,6 +442,84 @@ fn detect_branch(ws: &std::path::Path) -> String {
 /// - `deepseek`：真实模型，需要 `DEEPSEEK_API_KEY`
 /// - `mock`：只回一句话，用于离线验证「装配 → 内核 → 沙箱 → 落盘」链路
 /// - `selftest`：按脚本调用一次工具，用于离线验证「模型 → 工具 → 真实落盘」闭环
+/// 构造模型**注册表**（多 provider，支持运行时切换）。
+///
+/// 与旧的 `build_model` 的区别：一次把所有可用 provider 都注册进去，
+/// 于是 `/models` 能列出、能在会话中切换 —— 之前只有单个 provider，
+/// 设置页只能把"服务商"标成只读。
+///
+/// **哪一个是默认**由 `--provider` 指定；`deepseek` 缺 key 时**不静默换成 mock**
+/// （那会让用户以为在跟真模型聊），而是报错并提示替代方案。
+fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
+    use neo_core::models::{ModelInfo, ModelRegistry};
+    let mk = |name: &str, desc: &str, limit: u64, production: bool,
+              p: Box<dyn neo_core::ModelProvider>| {
+        (ModelInfo { name: name.into(), description: desc.into(), context_limit: limit, production }, p)
+    };
+
+    let mut entries: Vec<(ModelInfo, Box<dyn neo_core::ModelProvider>)> = Vec::new();
+
+    // 真实模型：只在 key 可用时注册。缺 key 时不给一个"假 deepseek"条目 ——
+    // 那会让 /models 列出一个切过去就报错的选项。
+    let mut deepseek_ok = false;
+    match neo_llm_deepseek::DeepSeekProvider::from_env() {
+        Ok(p) => {
+            entries.push(mk("deepseek", "DeepSeek chat-completions（真实模型）", 64_000, true, Box::new(p)));
+            deepseek_ok = true;
+        }
+        Err(e) => {
+            if provider == "deepseek" {
+                eprintln!("[neo] {e}");
+                eprintln!("       设置后重试：export DEEPSEEK_API_KEY=sk-...");
+                eprintln!("       或离线试用：--provider mock | selftest");
+                return None;
+            }
+        }
+    }
+
+    // 离线可用的桩：始终注册，便于随时对照（标 production=false，UI 可区分）
+    entries.push(mk("mock", "确定性桩：只回一句话，不调真实模型", 0, false,
+        Box::new(neo_llm_deepseek::ScriptedProvider::text_only(
+            "（mock provider）本回答由确定性桩产生，未调用真实模型。"))));
+    entries.push(mk("demo", "演示渲染：Markdown + 任务清单", 0, false,
+        Box::new(neo_llm_deepseek::ScriptedProvider::demo().with_name("demo"))));
+    entries.push(mk("selftest", "自检：按脚本调一次 apply_patch", 0, false,
+        Box::new(neo_llm_deepseek::ScriptedProvider::scripted(
+            vec![vec![neo_llm_deepseek::tool_call(
+                "apply_patch",
+                serde_json::json!({
+                    "path": "selftest.txt",
+                    "new": "由 selftest provider 经 apply_patch 写入。
+",
+                }),
+            )]],
+            "selftest 脚本执行完毕（工具是否成功见上方工具行与失败原因）。",
+        )
+        .with_name("selftest"))));
+
+    // 校验默认项存在
+    if !entries.iter().any(|(i, _)| i.name == provider) {
+        let mut names: Vec<&str> = entries.iter().map(|(i, _)| i.name.as_str()).collect();
+        names.sort();
+        eprintln!(
+            "[neo] 未知 provider：{provider}（可选 {}）{}",
+            names.join(" | "),
+            if !deepseek_ok { "；deepseek 需要 DEEPSEEK_API_KEY" } else { "" }
+        );
+        return None;
+    }
+
+    match ModelRegistry::new(provider, entries) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            eprintln!("[neo] 模型注册表构造失败：{e}");
+            None
+        }
+    }
+}
+
+/// 旧的单 provider 构造（保留给需要"只有一个模型"的调用方）。
+#[allow(dead_code)]
 fn build_model(provider: &str) -> Option<Box<dyn neo_core::ModelProvider>> {
     match provider {
         "deepseek" => match neo_llm_deepseek::DeepSeekProvider::from_env() {
@@ -464,7 +549,7 @@ fn build_model(provider: &str) -> Option<Box<dyn neo_core::ModelProvider>> {
             "selftest 脚本执行完毕（工具是否成功见上方工具行与失败原因）。",
         ))),
         other => {
-            eprintln!("[neo] 未知 provider：{other}（可选 deepseek | mock | selftest）");
+            eprintln!("[neo] 未知 provider：{other}（可选 deepseek | mock | selftest | demo）");
             None
         }
     }

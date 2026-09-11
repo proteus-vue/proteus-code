@@ -183,6 +183,12 @@ pub enum EventMsg {
     /// 四个宿主才会一致（T6）；让宿主各自记住用户输入则会分叉。
     UserSubmitted { text: String },
     SessionConfigured { session_id: String },
+    /// 模型已切换（运行时换模型）。
+    ///
+    /// 单独发事件而不是只发 SessionConfigured：模型切换是用户**会关心**的
+    /// 状态变化（直接影响后续回答的风格与成本），而 SessionConfigured 是
+    /// 一次笼统的"配置更新"。
+    ModelSwitched { model: String, context_limit: u64 },
     TurnStarted { turn_id: String },
     AgentMessageDelta { delta: String },
     AgentMessageDone { text: String },
@@ -291,6 +297,8 @@ pub enum Fact {
     TurnFinished { input_tokens: u64, output_tokens: u64 },
     /// 会话已就绪。
     SessionReady { session_id: String },
+    /// 模型已切换（含新模型的上下文窗口，0 = 未知）。
+    ModelSwitched { model: String, context_limit: u64 },
 }
 
 /// 从事件序列抽取用户可见事实。
@@ -365,6 +373,12 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
             }
             EventMsg::SessionConfigured { session_id } => {
                 out.push(Fact::SessionReady { session_id: session_id.clone() })
+            }
+            EventMsg::ModelSwitched { model, context_limit } => {
+                out.push(Fact::ModelSwitched {
+                    model: model.clone(),
+                    context_limit: *context_limit,
+                })
             }
             // 其余事件不承载"必须知道"的事实：
             // TurnStarted/ToolCallBegin 是过程提示；ReasoningDelta 是思考过程；

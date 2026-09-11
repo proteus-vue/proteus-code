@@ -84,7 +84,17 @@ fn kernel_with(
     persistence: Box<dyn SessionPersistence>,
     mode: ExecMode,
 ) -> Kernel {
-    Kernel::new("s1", cfg(mode), tools, model, Arc::new(TestSandbox), persistence, "/tmp")
+    // 单 provider 包装成注册表：本文件的用例都不测模型切换，
+    // 用 single() 保持调用点简洁。
+    Kernel::new(
+        "s1",
+        cfg(mode),
+        tools,
+        neo_core::models::ModelRegistry::single(model),
+        Arc::new(TestSandbox),
+        persistence,
+        "/tmp",
+    )
 }
 
 fn read_tool() -> ToolRegistry {
@@ -482,14 +492,14 @@ fn real_apply_patch_reports_its_change_after_writing() {
         "s",
         cfg(ExecMode::AutoEdit),
         tools,
-        Box::new(ScriptedModelProvider::new(vec![
+        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::new(vec![
             vec![tool_call(
                 "c1",
                 "apply_patch",
                 serde_json::json!({ "path": target.to_str().unwrap(), "old": "old line", "new": "new line" }),
             )],
             vec![ModelDelta::Text("done".into())],
-        ])),
+        ]))),
         Arc::new(DiskSandbox),
         Box::new(InMemoryPersistence::new()),
         dir.clone(),
@@ -774,4 +784,152 @@ fn rewind_clears_a_pending_approval() {
     assert!(matches!(k.state(), KernelState::AwaitingApproval { .. }), "应先挂起");
     k.submit(Op::Rewind { turns: 1 }).unwrap();
     assert_eq!(*k.state(), KernelState::Idle, "回退应清掉挂起的审批");
+}
+
+// ─────────────── 运行时切换模型 ───────────────
+
+/// 自报名字的极简 provider：用来验证"切换后真的换了实现"。
+/// 每个实例回一句带自己名字的话，于是从回答就能看出用的是哪个。
+struct ReplyAs(&'static str);
+impl ModelProvider for ReplyAs {
+    fn name(&self) -> &str { self.0 }
+    fn stream(&self, _r: &neo_core::ModelRequest<'_>) -> neo_core::ModelStream {
+        Box::new(vec![ModelDelta::Text(format!("reply-from-{}", self.0))].into_iter())
+    }
+}
+
+#[test]
+fn configure_session_actually_switches_the_provider() {
+    // 这是"声明了没接线"的修复证明：`SessionPatch.model` 之前被接受、
+    // 存进 cfg、然后**从未使用**（Kernel 持有固定的 Box<dyn ModelProvider>）。
+    // 断言方式是**看回答来自哪个 provider**，而不只是看 cfg 里的字符串。
+    use neo_core::models::{ModelInfo, ModelRegistry};
+
+    let mk = |name: &'static str, limit: u64| {
+        (
+            ModelInfo {
+                name: name.into(),
+                description: String::new(),
+                context_limit: limit,
+                production: true,
+            },
+            Box::new(ReplyAs(name)) as Box<dyn ModelProvider>,
+        )
+    };
+    let reg = ModelRegistry::new("small", vec![mk("small", 32_000), mk("big", 128_000)]).unwrap();
+    let mut k = Kernel::new(
+        "s",
+        cfg(ExecMode::Default),
+        read_tool(),
+        reg,
+        Arc::new(TestSandbox),
+        Box::new(InMemoryPersistence::new()),
+        "/tmp",
+    );
+
+    assert_eq!(k.current_model(), "small");
+    assert_eq!(k.current_context_limit(), 32_000);
+
+    // 第一轮：回答应来自 small
+    let ev1 = k.submit(Op::UserTurn { text: "hi".into(), refs: vec![] }).unwrap();
+    let said1 = ev1.iter().find_map(|e| match e {
+        EventMsg::AgentMessageDone { text } => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(said1.as_deref(), Some("reply-from-small"), "初始应走 small");
+
+    // 切到 big
+    let ev2 = k
+        .submit(Op::ConfigureSession {
+            patch: neo_protocol::SessionPatch {
+                model: Some("big".into()),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    assert_eq!(k.current_model(), "big");
+    assert_eq!(k.current_context_limit(), 128_000, "上下文窗口应跟着换");
+    assert!(
+        ev2.iter().any(|e| matches!(e, EventMsg::ModelSwitched { model, .. } if model == "big")),
+        "应发出 ModelSwitched：{ev2:?}"
+    );
+
+    // 第二轮：回答应来自 **big**（证明真的换了 provider，而不只是改了配置）
+    let ev3 = k.submit(Op::UserTurn { text: "again".into(), refs: vec![] }).unwrap();
+    let said3 = ev3.iter().find_map(|e| match e {
+        EventMsg::AgentMessageDone { text } => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(said3.as_deref(), Some("reply-from-big"), "切换后应走 big");
+
+    // 切到不存在的模型：报错且不改变当前模型
+    let err = k
+        .submit(Op::ConfigureSession {
+            patch: neo_protocol::SessionPatch {
+                model: Some("不存在".into()),
+                ..Default::default()
+            },
+        })
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("不存在"), "错误应指出模型名：{msg}");
+    assert!(msg.contains("small") && msg.contains("big"), "应列出可用模型：{msg}");
+    assert_eq!(k.current_model(), "big", "失败的切换不该改变当前模型");
+}
+
+#[test]
+fn model_switch_emits_an_event_and_updates_the_config() {
+    use neo_core::models::{ModelInfo, ModelRegistry};
+
+    let reg = ModelRegistry::new(
+        "solo",
+        vec![(
+            ModelInfo {
+                name: "solo".into(),
+                description: "桩".into(),
+                context_limit: 64_000,
+                production: false,
+            },
+            Box::new(ReplyAs("solo")) as Box<dyn ModelProvider>,
+        )],
+    )
+    .unwrap();
+    let mut k = Kernel::new(
+        "s",
+        cfg(ExecMode::Default),
+        read_tool(),
+        reg,
+        Arc::new(TestSandbox),
+        Box::new(InMemoryPersistence::new()),
+        "/tmp",
+    );
+    // 切到自身（幂等）：应成功并发事件
+    let ev = k
+        .submit(Op::ConfigureSession {
+            patch: neo_protocol::SessionPatch {
+                model: Some("solo".into()),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    assert!(
+        ev.iter().any(|e| matches!(e, EventMsg::ModelSwitched { .. })),
+        "切换应发出 ModelSwitched 事件：{ev:?}"
+    );
+    assert_eq!(k.current_context_limit(), 64_000, "上下文窗口应随模型更新");
+}
+
+#[test]
+fn available_models_are_listed_for_the_host() {
+    // 宿主（TUI 设置页/模型列表）要能拿到全部选项
+    let k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("x")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    let list = k.available_models();
+    assert_eq!(list.len(), 1);
+    // neo-mock 的 ScriptedModelProvider 自报名为 "scripted"
+    assert_eq!(list[0].name, "scripted");
 }

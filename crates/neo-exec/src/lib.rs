@@ -165,6 +165,11 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
             EventMsg::SessionConfigured { session_id } => {
                 Some(format!("[session] {session_id} 配置已更新"))
             }
+            EventMsg::ModelSwitched { model, context_limit } => Some(if *context_limit == 0 {
+                format!("[model] 已切换到 {model}（上下文窗口未知）")
+            } else {
+                format!("[model] 已切换到 {model}（上下文 {context_limit} tokens）")
+            }),
             // 推理默认不单独打（噪声大）；`--json` 时它在事件流里，
             // 需要时按需取。这里只给一个极简标记，避免刷屏。
             EventMsg::ReasoningDelta { .. } => None,
@@ -190,14 +195,14 @@ pub fn build_kernel(
     session_id: &str,
     workspace: &std::path::Path,
     opts: &ExecOptions,
-    model: Box<dyn neo_core::ModelProvider>,
+    models: neo_core::models::ModelRegistry,
     sandbox: std::sync::Arc<dyn neo_core::SandboxBackend>,
     persistence: Box<dyn neo_core::SessionPersistence>,
 ) -> Kernel {
     let mut tools = ToolRegistry::new();
     neo_capability::register_defaults(&mut tools);
     let cfg = Config { exec_mode: opts.mode, ..Config::default() };
-    Kernel::new(session_id, cfg, tools, model, sandbox, persistence, workspace)
+    Kernel::new(session_id, cfg, tools, models, sandbox, persistence, workspace)
         .with_max_steps(opts.max_steps)
 }
 

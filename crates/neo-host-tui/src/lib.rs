@@ -469,6 +469,13 @@ pub struct About {
     /// 模型上下文窗口（token）。用于侧栏 Context 面板的占用率。
     /// 0 = 未知 → 不显示百分比（宁可不显示，也不给假数字）。
     pub context_limit: u64,
+    /// 可选模型清单：(名字, 描述, 是否可用于真实任务)。
+    ///
+    /// **由调用方注入**：宿主不持有内核，也不知道注册表长什么样。
+    /// 这样"模型列表"是数据，宿主只负责显示与把选择转成 Op。
+    pub models: Vec<(String, String, bool)>,
+    /// 当前模型名（可与 `model` 不同：切换后要显示新的）
+    pub current_model: String,
     pub session: String,
 }
 
@@ -2439,6 +2446,8 @@ fn refresh_popup(p: &mut popup::Popup, kind: popup::Kind, files: &mut Option<Vec
             let n = p.query.clone();
             p.set_items(popup::logo_items(&n), false);
         }
+        // 模型列表由调用方装配（需要 about 里的清单，refresh 拿不到）
+        popup::Kind::Models => {}
     }
 }
 
@@ -2473,7 +2482,7 @@ fn open_popup_for(
 /// 拆出来的原因：`apply_popup_item` 不该拿到 `events`/`popup_state`
 /// 这些主循环状态。让它返回一个"请求"，由循环统一执行 ——
 /// 这样清转录、开面板这类动作只有一条实现路径，不会两处各写一遍。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Effect {
     None,
     Quit,
@@ -2513,6 +2522,10 @@ enum Effect {
     SetBackground(appearance::Background),
     /// 应用 Logo 样式（来自选择列表）
     SetLogo(appearance::LogoStyle),
+    /// 打开模型选择列表
+    ModelPicker,
+    /// 切换模型（提交给内核）
+    SwitchModel(String),
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -2548,6 +2561,11 @@ fn apply_popup_item(
             input.clear();
             *status = format!("Logo：{}", l.as_str());
             Effect::SetLogo(*l)
+        }
+        popup::ItemAction::SwitchModel(name) => {
+            input.clear();
+            *status = format!("正在切换到 {name}…");
+            Effect::SwitchModel(name.clone())
         }
         popup::ItemAction::Run(action) => {
             // 执行命令后必须清空输入框：`/help` 已经"用掉"了，
@@ -2594,6 +2612,8 @@ fn apply_popup_item(
             commands::Action::BackgroundPicker => Effect::BackgroundPicker,
             commands::Action::NextLogo => Effect::NextLogo,
             commands::Action::LogoPicker => Effect::LogoPicker,
+            commands::Action::ModelPicker => Effect::ModelPicker,
+            commands::Action::SwitchModel => Effect::None,
             // 这两个由选择列表内部产生（不注册命令）
             commands::Action::SetBackground(b) => Effect::SetBackground(*b),
             commands::Action::SetLogo(l) => Effect::SetLogo(*l),
@@ -2708,6 +2728,8 @@ pub enum SettingAction {
     NextBackground,
     /// 切到下一个 Logo 样式
     NextLogo,
+    /// 打开模型选择
+    ModelPicker,
 }
 
 /// 设置视图的一个分组。
@@ -2745,6 +2767,8 @@ pub struct SettingsInfo {
     pub logo: String,
     /// 是否有自定义背景字符画
     pub custom_background: bool,
+    /// 可选模型数量
+    pub model_count: usize,
     pub messages: usize,
     pub files_changed: usize,
 }
@@ -2795,11 +2819,13 @@ pub fn settings_sections(info: &SettingsInfo) -> Vec<SettingSection> {
             title: "模型",
             rows: vec![
                 SettingRow {
-                    label: "服务商".into(),
-                    value: info.model.clone(),
-                    action: None,
-                    // 诚实边界：内核持有 Box<dyn ModelProvider>，运行中不可换
-                    readonly_note: "运行中不可切换；用 --provider 启动参数指定",
+                    // 这是本轮补上的能力：内核现在持**注册表**，运行时可切换，
+                    // 所以这一项从"只读"变成"可选"。注释保留变迁理由，
+                    // 免得后人以为早就可以。
+                    label: "模型".into(),
+                    value: format!("{}（{} 个可选）", info.model, info.model_count),
+                    action: Some(SettingAction::ModelPicker),
+                    readonly_note: "",
                 },
                 SettingRow {
                     label: "档位".into(),
@@ -3137,6 +3163,15 @@ fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<V
             Fact::SessionReady { session_id } => {
                 out.push(vec![(2, format!("· 会话 {session_id}"), Tone::Muted)]);
             }
+            Fact::ModelSwitched { model, context_limit } => {
+                // 模型切换是用户会关心的状态变化 —— 明确告知
+                let tail = if *context_limit == 0 {
+                    String::new()
+                } else {
+                    format!("（上下文 {context_limit}）")
+                };
+                out.push(vec![(2, format!("⇄ 模型已切换为 {model}{tail}"), Tone::Info)]);
+            }
         }
     }
     out
@@ -3273,8 +3308,47 @@ where
     }
 }
 
+/// 处理外观与模型这类"纯界面状态"的 Effect。
+///
+/// 抽成一个函数是为了让四处弹窗分支都用同一套逻辑 —— 之前每处各写一段
+/// match，加一个变体就要改四处（而且很容易漏掉某一处）。
+///
+/// 返回 `Some(文案)` 表示已处理；`None` 表示"不是这里管的"（调用方应忽略）。
+fn handle_ui_effect(
+    eff: &Effect,
+    ap: &mut appearance::Appearance,
+    popup_state: &mut Option<popup::Popup>,
+    about: &About,
+) -> Option<String> {
+    // 外观类
+    if let Some(m) = apply_appearance(ap, eff) {
+        return Some(m);
+    }
+    match eff {
+        Effect::BackgroundPicker => {
+            let mut tp = popup::Popup::new(popup::Kind::Background, "");
+            tp.set_items(popup::background_items(""), false);
+            *popup_state = Some(tp);
+            Some("背景 · ↑↓ 选择，回车应用".into())
+        }
+        Effect::LogoPicker => {
+            let mut tp = popup::Popup::new(popup::Kind::Logo, "");
+            tp.set_items(popup::logo_items(""), false);
+            *popup_state = Some(tp);
+            Some("Logo 样式 · ↑↓ 选择，回车应用".into())
+        }
+        Effect::ModelPicker => {
+            let mut tp = popup::Popup::new(popup::Kind::Models, "");
+            tp.set_items(popup::model_items(&about.models, &about.current_model), false);
+            *popup_state = Some(tp);
+            Some("模型 · ↑↓ 选择，回车切换".into())
+        }
+        _ => None,
+    }
+}
+
 /// 应用外观变更并落盘。返回给状态栏的文案。
-fn apply_appearance(ap: &mut appearance::Appearance, eff: Effect) -> Option<String> {
+fn apply_appearance(ap: &mut appearance::Appearance, eff: &Effect) -> Option<String> {
     match eff {
         Effect::NextBackground => {
             ap.background = ap.background.next();
@@ -3287,12 +3361,12 @@ fn apply_appearance(ap: &mut appearance::Appearance, eff: Effect) -> Option<Stri
             Some(format!("Logo：{}", ap.logo.as_str()))
         }
         Effect::SetBackground(b) => {
-            ap.background = b;
+            ap.background = *b;
             appearance::save_preference(*ap);
             Some(format!("背景：{}", b.as_str()))
         }
         Effect::SetLogo(l) => {
-            ap.logo = l;
+            ap.logo = *l;
             appearance::save_preference(*ap);
             Some(format!("Logo：{}", l.as_str()))
         }
@@ -3333,6 +3407,7 @@ fn open_settings(
         notify: notify_backend.available(),
         notify_sound,
         notify_enabled,
+        model_count: about.models.len(),
         background: appearance.background.as_str().to_string(),
         logo: appearance.logo.as_str().to_string(),
         custom_background: has_custom_bg,
@@ -3818,6 +3893,19 @@ where
                                             current_appearance.logo.next();
                                         appearance::save_preference(current_appearance);
                                     }
+                                    SettingAction::ModelPicker => {
+                                        let mut tp =
+                                            popup::Popup::new(popup::Kind::Models, "");
+                                        tp.set_items(
+                                            popup::model_items(
+                                                &about.models,
+                                                &about.current_model,
+                                            ),
+                                            false,
+                                        );
+                                        popup_state = Some(tp);
+                                        settings_state = None;
+                                    }
                                 }
                                 // 刷新设置页上的值（改完之后数字/状态要跟着变）
                                 open_settings(
@@ -4164,18 +4252,28 @@ custom_bg.is_some(),
                             Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
                             // 外观类 Effect 统一处理（避免在每处弹窗分支重复一遍）
                             other => {
-                                if let Some(m) = apply_appearance(&mut current_appearance, other) {
+                                if let Effect::SwitchModel(name) = &other {
+                                    match submit(neo_protocol::Op::ConfigureSession {
+                                        patch: neo_protocol::SessionPatch {
+                                            model: Some(name.clone()),
+                                            ..Default::default()
+                                        },
+                                    }) {
+                                        Ok(produced) => {
+                                            events.extend(produced);
+                                            status = format!("已切换到 {name}");
+                                        }
+                                        Err(e) => status = format!("切换失败：{e}"),
+                                    }
+                                } else if let Some(m) = handle_ui_effect(
+                                    &other,
+                                    &mut current_appearance,
+                                    &mut popup_state,
+                                    &about,
+                                ) {
                                     status = m;
-                                } else if let Effect::BackgroundPicker = other {
-                                    let mut tp = popup::Popup::new(popup::Kind::Background, "");
-                                    tp.set_items(popup::background_items(""), false);
-                                    popup_state = Some(tp);
-                                } else if let Effect::LogoPicker = other {
-                                    let mut tp = popup::Popup::new(popup::Kind::Logo, "");
-                                    tp.set_items(popup::logo_items(""), false);
-                                    popup_state = Some(tp);
                                 }
-                            }
+                            },
                         }
                     }
                 }
@@ -4367,16 +4465,27 @@ custom_bg.is_some(),
                                     }
                                     // 外观类 Effect 统一处理（避免在每处弹窗分支重复一遍）
                                 other => {
-                                    if let Some(m) = apply_appearance(&mut current_appearance, other) {
+                                    if let Effect::SwitchModel(name) = &other {
+                                        // 模型切换要提交 Op 给内核（宿主不持有内核）
+                                        match submit(neo_protocol::Op::ConfigureSession {
+                                            patch: neo_protocol::SessionPatch {
+                                                model: Some(name.clone()),
+                                                ..Default::default()
+                                            },
+                                        }) {
+                                            Ok(produced) => {
+                                                events.extend(produced);
+                                                status = format!("已切换到 {name}");
+                                            }
+                                            Err(e) => status = format!("切换失败：{e}"),
+                                        }
+                                    } else if let Some(m) = handle_ui_effect(
+                                        &other,
+                                        &mut current_appearance,
+                                        &mut popup_state,
+                                        &about,
+                                    ) {
                                         status = m;
-                                    } else if let Effect::BackgroundPicker = other {
-                                        let mut tp = popup::Popup::new(popup::Kind::Background, "");
-                                        tp.set_items(popup::background_items(""), false);
-                                        popup_state = Some(tp);
-                                    } else if let Effect::LogoPicker = other {
-                                        let mut tp = popup::Popup::new(popup::Kind::Logo, "");
-                                        tp.set_items(popup::logo_items(""), false);
-                                        popup_state = Some(tp);
                                     }
                                 }
                                 }
@@ -4651,7 +4760,7 @@ custom_bg.is_some(),
                             // 外观类：统一交给 apply_appearance
                             other => {
                                 if let Some(m) =
-                                    apply_appearance(&mut current_appearance, other)
+                                    apply_appearance(&mut current_appearance, &other)
                                 {
                                     status = m;
                                 } else if let Effect::BackgroundPicker = other {
@@ -4828,28 +4937,30 @@ custom_bg.is_some(),
                                     ));
                                 }
                                 Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
-                                Effect::NextBackground
-                                | Effect::NextLogo
-                                | Effect::SetBackground(_)
-                                | Effect::SetLogo(_) => {
-                                    if let Some(m) =
-                                        apply_appearance(&mut current_appearance, eff)
-                                    {
+                                other => {
+                                    if let Effect::SwitchModel(name) = &other {
+                                        // 模型切换要提交 Op 给内核（宿主不持有内核）
+                                        match submit(neo_protocol::Op::ConfigureSession {
+                                            patch: neo_protocol::SessionPatch {
+                                                model: Some(name.clone()),
+                                                ..Default::default()
+                                            },
+                                        }) {
+                                            Ok(produced) => {
+                                                events.extend(produced);
+                                                status = format!("已切换到 {name}");
+                                            }
+                                            Err(e) => status = format!("切换失败：{e}"),
+                                        }
+                                    } else if let Some(m) = handle_ui_effect(
+                                        &other,
+                                        &mut current_appearance,
+                                        &mut popup_state,
+                                        &about,
+                                    ) {
                                         status = m;
                                     }
                                 }
-                                Effect::BackgroundPicker => {
-                                    let mut tp =
-                                        popup::Popup::new(popup::Kind::Background, "");
-                                    tp.set_items(popup::background_items(""), false);
-                                    popup_state = Some(tp);
-                                }
-                                Effect::LogoPicker => {
-                                    let mut tp = popup::Popup::new(popup::Kind::Logo, "");
-                                    tp.set_items(popup::logo_items(""), false);
-                                    popup_state = Some(tp);
-                                }
-                                Effect::None => {}
                             }
                         }
                         None => status = format!("未知命令：/{name}（输入 / 查看列表）"),
@@ -5011,6 +5122,8 @@ mod tests {
             branch: "main".into(),
             example: "修一下代码里的 TODO".into(),
             context_limit: 64_000,
+            models: vec![("mock".into(), "确定性桩".into(), false)],
+            current_model: "mock".into(),
             session: "neo-tui".into(),
         }
     }
@@ -6040,6 +6153,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
+        model_count: 3,
             version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
             context_limit: 64_000, theme: "neo".into(),
@@ -6059,6 +6173,7 @@ mod tests {
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
+        model_count: 3,
             version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
             context_limit: 64_000, theme: "neo".into(),
@@ -6073,12 +6188,16 @@ mod tests {
                 .unwrap_or_else(|| panic!("应有设置项 {label}"))
                 .clone()
         };
-        for label in ["服务商", "档位", "上下文上限"] {
+        // 模型切换现在**可操作**（本轮补的后端能力：内核持注册表）
+        let m = find("模型");
+        assert!(m.action.is_some(), "模型应可切换（内核已支持运行时切换）");
+        // 真正改不了的仍标只读并给出原因
+        for label in ["档位", "上下文上限"] {
             let r = find(label);
-            assert!(r.action.is_none(), "{label} 不该可点击（内核不支持运行时切换）");
+            assert!(r.action.is_none(), "{label} 不该可点击");
             assert!(!r.readonly_note.is_empty(), "{label} 只读项必须给出原因");
         }
-        for label in ["主题", "侧栏", "工具输出", "推理过程"] {
+        for label in ["主题", "侧栏", "工具输出", "推理过程", "模型"] {
             let r = find(label);
             assert!(r.action.is_some(), "{label} 应当可操作");
         }
@@ -6091,6 +6210,7 @@ mod tests {
         let info = SettingsInfo {
         notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
+        model_count: 3,
             version: "0.1.0".into(), model: "deepseek-chat".into(), mode: "default".into(),
             workspace: "/Volumes/data1/work/office/debug/proteus-code".into(),
             branch: "main".into(), session: "neo-tui".into(),
@@ -6125,6 +6245,7 @@ mod tests {
         let info = SettingsInfo {
         notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
+        model_count: 3,
             version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),
