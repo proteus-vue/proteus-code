@@ -371,7 +371,15 @@ fn read_key_timeout(stdin: &mut impl Read, timeout_tenths: u8) -> Option<Key> {
         // 它们会送来 0x03 / 0x04 字节而不是 EOF。
         return None;
     }
-    let _ = set_stty("raw -echo");
+    // **不要**在这里重新 `stty raw`。
+    //
+    // `raw` 会把 `min`/`time` 复位成**阻塞**（min=1），于是下面
+    // `decode_first` 为转义序列续读的那几字节会永久阻塞：
+    //   · 方向键没事 —— `ESC [ A` 三个字节早已在缓冲里，续读立即命中；
+    //   · 单独按 ESC **会卡死** —— 后面没有字节，read 一直等，
+    //     界面因此"按了没反应"，而下一个按键还会被当成序列的续字节吃掉。
+    // 这正是用户报的"q 能退出、esc 不行"。
+    // 保持 `min 0 time N`，单独 ESC 会在 N 个 0.1 秒后落到 `[0x1b] => Escape`。
     Some(decode_first(&b, stdin))
 }
 
@@ -4829,24 +4837,34 @@ where
                                         });
                                     }
                                     SettingAction::ProviderPicker => {
-                                        // 候选由契据提供；选中后进入编辑表单
-                                        settings_picker = Some(SettingsPicker {
-                                            label: "服务商".into(),
-                                            items: providers
-                                                .list()
-                                                .into_iter()
-                                                .map(|(n, d, has_key)| {
-                                                    let keymark =
-                                                        if has_key { "已配密钥" } else { "缺密钥" };
-                                                    popup::Item::plain(
-                                                        n.clone(),
-                                                        format!("{d} · {keymark}"),
-                                                        popup::ItemAction::RunProvider(n),
-                                                    )
-                                                })
-                                                .collect(),
-                                            selected: 0,
-                                        });
+                                        // 候选由契据提供；选中后进入编辑表单。
+                                        // **空列表不开空弹窗**：一个"0 项"的候选框
+                                        // 只会让人以为坏了 —— 直接说怎么开始。
+                                        let list = providers.list();
+                                        if list.is_empty() {
+                                            status =
+                                                "还没有服务商，用「新增服务商」添加".to_string();
+                                        } else {
+                                            settings_picker = Some(SettingsPicker {
+                                                label: "服务商".into(),
+                                                items: list
+                                                    .into_iter()
+                                                    .map(|(n, d, has_key)| {
+                                                        let keymark = if has_key {
+                                                            "已配密钥"
+                                                        } else {
+                                                            "缺密钥"
+                                                        };
+                                                        popup::Item::plain(
+                                                            n.clone(),
+                                                            format!("{d} · {keymark}"),
+                                                            popup::ItemAction::RunProvider(n),
+                                                        )
+                                                    })
+                                                    .collect(),
+                                                selected: 0,
+                                            });
+                                        }
                                     }
                                     SettingAction::ProviderAdd => {
                                         settings_form = Some(provider_form(None, providers));
@@ -8061,6 +8079,26 @@ mod tests {
             value, "LIVE-SESSION",
             "会话 ID 必须取自 SessionControl 的实时值，而不是 About 的启动快照"
         );
+    }
+
+    #[test]
+    fn bare_escape_resolves_without_blocking() {
+        // 真实 bug：read_key_timeout 读到首字节后 `stty raw` 把 min/time 复位成阻塞，
+        // 于是下面为转义序列续读的第一步会**永久阻塞** —— 单独按 ESC 表现为
+        // "按了没反应"（界面卡在 read 上），而方向键因字节已在缓冲里不受影响，
+        // 所以这个坑藏了很久。用户的反馈是"q 能退出、esc 不行"。
+        //
+        // 这里用一个"续读立刻 EOF"的 reader 钉住契约：ESC 之后没有字节时，
+        // decode_first 必须返回 Escape 而不是等待。
+        let mut empty = std::io::empty();
+        assert_eq!(
+            decode_first(&[0x1b], &mut empty),
+            Key::Escape,
+            "单独 ESC 必须立刻解析为 Escape（不得阻塞等待续字节）"
+        );
+        // 有续字节时仍应正常解析为方向键（不能因为修 ESC 而破坏它们）
+        let mut buf = std::io::Cursor::new(vec![b'[', b'B']);
+        assert_eq!(decode_first(&[0x1b], &mut buf), Key::Down);
     }
 
     #[test]

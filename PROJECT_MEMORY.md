@@ -1457,6 +1457,48 @@ Picker 动作的处理是 `settings_state = None; popup_state = Some(弹窗)`，
 
 全门禁通过：487 测试、零 warning、架构/协议/会话/配置/SPI/效率守卫全绿。
 
+## 4.43 ESC 按了没反应：`stty raw` 把超时模式复位成阻塞
+
+用户报"提示说 esc 取消，但我测的 q 是退出、esc 没反应"。
+
+实测确认：在候选列表里按 **ESC 什么都不发生**（进程活着、界面不动），
+按 **q 才关掉候选**。所以那句提示不是"文案写错"，而是**ESC 真的失效了**。
+
+### 根因在 `read_key_timeout` 里一行看似无害的重置
+```
+set_stty("min 0 time N");   // 超时模式：读不到就返回
+read(&mut b);               // 读到首字节
+set_stty("raw -echo");      // ← 这里把 min/time 复位成**阻塞**
+decode_first(&b, stdin);    // 为转义序列续读 → 卡在 read 上
+```
+`stty raw` 会把 `min` 复位成 1（阻塞）。于是 `decode_first` 里
+"为转义序列再读几字节"的那一步**永久等待**：
+
+- **方向键没事**：`ESC [ A` 三个字节早已在输入缓冲里，续读立即命中；
+- **单独 ESC 卡死**：后面根本没有字节，read 一直等 ——
+  界面表现为"按了没反应"，而**下一个按键还会被当成序列的续字节吃掉**。
+
+这就是为什么它藏了这么久：所有多字节序列都正常，只有"孤立的 ESC"失败，
+而 ESC 恰好是最常见的"取消"键。修法是删掉那行重置，让 `min 0 time N`
+一直生效 —— 单独 ESC 会在 0.1 秒后落到 `[0x1b] => Escape`。
+
+### 验证
+pty 驱动真机：修前 ESC「picker 仍在」、q「picker 已关」；
+修后 ESC 与 q 都能关掉候选。并逐项确认没回归：
+方向键移动、鼠标点击执行（隐藏→显示）、输入框左移插入（abXc）、
+设置页/diff/主界面按 ESC 均正确且进程不退出。
+
+### 诚实说明测试的边界
+补的单元测试（`bare_escape_resolves_without_blocking`）钉的是
+`decode_first` 的契约（ESC 后无字节时必须立刻返回 Escape），
+**但它抓不住这次的真实 bug** —— 问题在 `read_key_timeout` 的 stty 调用，
+不在 `decode_first` 的逻辑里。单元测试进不到 stty；这次的真正验证是 pty 真机。
+把它记下来，是为了避免以后看到绿测试就以为这条路径有保护。
+
+### 顺带
+「服务商」为空时不再弹一个"（0 项）"的空候选框（用户截图里那个），
+改为提示"还没有服务商，用「新增服务商」添加" —— 空候选框只会让人以为坏了。
+
 ## 5. 假通过：门禁与测试各抓到过一次自己
 
 这两次都值得记，因为它们说明"看起来有保护"有多危险：
@@ -1490,7 +1532,7 @@ Picker 动作的处理是 `settings_state = None; popup_state = Some(弹窗)`，
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 487 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo test --workspace      # 488 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫）
 ```
 
