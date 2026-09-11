@@ -1,0 +1,11 @@
+[package]
+name = "dsh-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dsh-protocol = { path = "../dsh-protocol" }
+dsh-host-tui = { path = "../dsh-host-tui" }
+dsh-host-web = { path = "../dsh-host-web" }
+dsh-exec = { path = "../dsh-exec" }

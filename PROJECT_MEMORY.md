@@ -169,7 +169,16 @@
 | `copy-overrides.test.ts` | 替换/可逆/后渲染副本 |
 | `integration.test.ts` | 对真实 Proteus 工程跑 CLI（`PROTEUS_CODE_TEST_CHECKOUT` 门控） |
 
-**回归守卫是刻意留的**：上面第 4 节的每个坑都有一条测试锁死（侧边栏不得有 filter/isolation/z-index、浮层不得改 position、玻璃不得创建层叠上下文、清底色不得用通配符）。改玻璃层前先看这些测试。
+**4 条回归守卫是刻意留的**，专锁第 4 节那两个坑，改玻璃层前先看它们（都在 `brand.test.ts`）：
+
+| 守卫 | 锁住的事实 |
+|---|---|
+| `never puts backdrop-filter, isolation, or stacking changes on the sidebar` | 侧边栏是弹窗的祖先，不得打滤镜/隔离/改 z-index |
+| `never creates a stacking context on a glazed host` | 不得用 `isolation: isolate`（会困住 fixed 弹窗） |
+| `leaves overlay host rules free of position overrides` | 浮层定位归客户端，宿主规则不得改 `position` |
+| `clears the opaque token fill, or the backdrop could never show through` | 不清不透明底色，背景透不过来 |
+
+**注意**：「清底色不得用通配符」这条教训**只有代码注释、没有测试**——它靠人工遵守。若日后有人改回 `*:not(button)`，测试不会失败。
 
 ---
 

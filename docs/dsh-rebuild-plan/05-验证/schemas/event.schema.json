@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NEO SessionEvent",
+  "type": "object",
+  "required": ["v", "ts", "seq", "kind", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "v":    { "const": 1, "description": "schema 版本" },
+    "ts":   { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
+    "seq":  { "type": "integer", "minimum": 1, "description": "严格从 1 递增，无空洞无重复" },
+    "kind": { "type": "string", "enum": [
+      "op", "event",
+      "session_configured", "turn_started", "agent_message_delta", "agent_message_done",
+      "reasoning_delta", "tool_call_begin", "tool_call_end", "approval_request",
+      "patch_proposed", "checkpoint_saved", "goal_progress", "error",
+      "turn_complete", "shutdown_complete"
+    ]},
+    "payload": { "type": "object" }
+  }
+}

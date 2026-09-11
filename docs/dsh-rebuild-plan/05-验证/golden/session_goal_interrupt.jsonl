@@ -1,0 +1,11 @@
+{"v": 1, "ts": "2026-09-10T10:00:01Z", "seq": 1, "kind": "op", "payload": {"UserTurn": {"text": "重构认证模块", "refs": [{"kind": "File", "target": "src/auth.rs"}]}}}
+{"v": 1, "ts": "2026-09-10T10:00:02Z", "seq": 2, "kind": "turn_started", "payload": {"turn_id": "t_0001"}}
+{"v": 1, "ts": "2026-09-10T10:00:03Z", "seq": 3, "kind": "agent_message_done", "payload": {"text": "先改 src/auth.rs"}}
+{"v": 1, "ts": "2026-09-10T10:00:04Z", "seq": 4, "kind": "tool_call_begin", "payload": {"id": "tc_0002", "name": "apply_patch"}}
+{"v": 1, "ts": "2026-09-10T10:00:05Z", "seq": 5, "kind": "approval_request", "payload": {"id": "ap_0003", "detail": "修改 src/auth.rs"}}
+{"v": 1, "ts": "2026-09-10T10:00:06Z", "seq": 6, "kind": "tool_call_end", "payload": {"id": "tc_0002", "exit_code": 0}}
+{"v": 1, "ts": "2026-09-10T10:00:07Z", "seq": 7, "kind": "turn_complete", "payload": {"input_tokens": 200, "output_tokens": 40}}
+{"v": 1, "ts": "2026-09-10T10:00:08Z", "seq": 8, "kind": "op", "payload": {"GoalSet": {"goal": "重构认证模块"}}}
+{"v": 1, "ts": "2026-09-10T10:00:09Z", "seq": 9, "kind": "goal_progress", "payload": {"goal_id": "goal_1", "done": 0, "total": 5}}
+{"v": 1, "ts": "2026-09-10T10:00:10Z", "seq": 10, "kind": "checkpoint_saved", "payload": {"checkpoint_id": "cp-goal_1-3"}}
+{"v": 1, "ts": "2026-09-10T10:00:11Z", "seq": 11, "kind": "turn_complete", "payload": {"input_tokens": 50, "output_tokens": 10}}

@@ -1,0 +1,6 @@
+{"v": 1, "ts": "2026-09-10T10:00:01Z", "seq": 1, "kind": "op", "payload": {"UserTurn": {"text": "读一下 README", "refs": []}}}
+{"v": 1, "ts": "2026-09-10T10:00:02Z", "seq": 2, "kind": "turn_started", "payload": {"turn_id": "t_0001"}}
+{"v": 1, "ts": "2026-09-10T10:00:03Z", "seq": 3, "kind": "agent_message_done", "payload": {"text": "好的"}}
+{"v": 1, "ts": "2026-09-10T10:00:04Z", "seq": 4, "kind": "tool_call_begin", "payload": {"id": "tc_0002", "name": "bash"}}
+{"v": 1, "ts": "2026-09-10T10:00:05Z", "seq": 5, "kind": "tool_call_end", "payload": {"id": "tc_0002", "exit_code": 0}}
+{"v": 1, "ts": "2026-09-10T10:00:06Z", "seq": 6, "kind": "turn_complete", "payload": {"input_tokens": 100, "output_tokens": 20}}

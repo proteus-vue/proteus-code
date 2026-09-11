@@ -1,0 +1,11 @@
+[package]
+name = "dsh-capability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dsh-protocol = { path = "../dsh-protocol" }
+dsh-core = { path = "../dsh-core" }
+dsh-sandbox = { path = "../dsh-sandbox" }
+serde_json = { workspace = true }

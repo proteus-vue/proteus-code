@@ -1,0 +1,10 @@
+[package]
+name = "dsh-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# L0 PLATFORM: 只允许向下/同层，禁止依赖 L2 及以上
+[dependencies]
+dsh-protocol = { path = "../dsh-protocol" }
+thiserror = { workspace = true }

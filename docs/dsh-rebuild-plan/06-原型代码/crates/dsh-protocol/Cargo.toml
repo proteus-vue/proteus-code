@@ -1,0 +1,10 @@
+[package]
+name = "dsh-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# L1 PROTOCOL: 只允许 serde。禁止依赖任何业务 crate。
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
