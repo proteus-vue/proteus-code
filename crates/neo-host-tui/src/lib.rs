@@ -530,8 +530,11 @@ impl Pal {
         let t = &self.theme;
         let (r, g, bl) = match b {
             Bg::Panel => t.bg_panel,
-            Bg::Surface => t.bg_surface,
             Bg::Selected => t.bg_selected,
+            Bg::Element => t.bg_element,
+            Bg::Menu => t.bg_menu,
+            // 遮罩：三档都取很暗的值，压出"背景退后"的效果
+            Bg::Backdrop => (0x0a, 0x0a, 0x0c),
         };
         Color::Rgb(r, g, bl).bg(self.mode, t)
     }
@@ -634,8 +637,12 @@ pub struct Screen<'a> {
 pub struct ApprovalPrompt {
     /// 这次要审批的说明（内核给的 detail）
     pub detail: String,
-    /// 要执行的调用摘要（工具名 + 关键参数），让用户知道"批的是什么"
-    pub call: String,
+    /// 标题（opencode 风格的类型化标题，如 "Edit src/foo.rs"）
+    pub title: String,
+    /// 类型图标（`→` `#` `✱` …，见 docs/opencode-parity.md §3.1）
+    pub icon: String,
+    /// 具体动作摘要（命令 / 路径）
+    pub summary: String,
     /// 改动预览（路径, unified diff）—— 有则显示
     pub diff: Option<(String, String)>,
     /// 0 = 批准一次 · 1 = 总是允许这类 · 2 = 拒绝
@@ -644,8 +651,10 @@ pub struct ApprovalPrompt {
 
 impl ApprovalPrompt {
     /// 三个选项的文案（`selected` 是下标）。
+    /// 选项文案：与 opencode 一致用**动作短语**，键位提示放右侧（不塞进文案）——
+    /// 之前写成"批准一次（y）"，把键位混进标签，既挤又让人以为必须按那个键。
     pub const CHOICES: [&'static str; 3] =
-        ["批准一次（y）", "总是允许这类（a）", "拒绝（n）"];
+        ["允许一次 once", "总是允许 always", "拒绝 reject"];
 
     pub fn choice_at(&self) -> neo_protocol::Decision {
         match self.selected {
@@ -955,9 +964,17 @@ const HINT_RIGHT: &str = "@ 引用  pgup/pgdn 滚动  ctrl+c 退出";
 /// 面板（侧栏/设置页底）→ 表面（模态卡片）→ 选中（列表高亮条）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Bg {
+    /// 面板（对话框、侧栏）—— 对应 opencode backgroundPanel
     Panel,
-    Surface,
     Selected,
+    /// 二级容器（底部选项条）—— 比面板亮一档
+    Element,
+    /// 未选中的药丸/菜单项
+    Menu,
+    /// 模态遮罩：终端没有 alpha，用**近黑**把背景压暗 ——
+    /// opencode 用 150/255 黑遮罩；这里等效为"把背景换成很暗的一档"。
+    /// 遮罩是"模态"最重要的视觉信号：分不清哪层是当前焦点，用户就会乱按。
+    Backdrop,
 }
 
 struct Grid {
@@ -1524,9 +1541,10 @@ impl Screen<'_> {
         // 只画一条竖线只能表达边界，表达不了"这是一块独立的区域"——
         // 用户说"没有层级边界感"主要指的就是这个。
         g.fill_bg(0, self.rows, x0, self.cols, Bg::Panel);
-        // 左侧竖线保留：底色在浅色终端下可能不够明显，线是双保险
+        // 左侧竖条用 `┃`（opencode 的 SplitBorder）—— 比 `│` 更明确地表达
+        // "这是一块独立面板的边界"，而不是一条普通的表格线。
         for r in 0..self.rows {
-            g.put(r, x0, "│", Tone::Border);
+            g.put(r, x0, "┃", Tone::Border);
         }
 
         let mut row = 1usize;
@@ -1946,21 +1964,25 @@ impl Screen<'_> {
     /// 2. **改动预览**（若有）—— 决定放不放行的关键信息；
     /// 3. 三个选项（↑↓ 选、回车确认，y/a/n 直接生效）。
     fn draw_approval(&self, g: &mut Grid, ap: &ApprovalPrompt, chrome_top: usize) {
-        let w = self.cols.saturating_sub(8).min(78).max(30);
-        // 内容行先算出来，再据此定高 —— 之前用 `body.len()+choices+4` 多留了
-        // 4 行，卡片底部因此挂着一块**没有左右边框**的空白（用户截图的现象）。
-        // 高度必须由**实际要画的内容**决定。
+        // 范式对齐 opencode（docs/opencode-parity.md §2、§3）：
+        //   遮罩 → 面板（底色 + 左竖条）→ 内容 → 独立底色的选项条（药丸）
+        // 不用四角框：层级来自底色与单边条，边框会把内容"关进盒子"、吃宽度。
+        let w = self.cols.saturating_sub(6).min(88).max(36);
         let mut body: Vec<(String, Tone)> = Vec::new();
-        body.push((format!("要执行  {}", ap.call), Tone::Text));
-        if !ap.detail.is_empty() {
-            body.push((ap.detail.clone(), Tone::Warning));
+        // 两行标题（与 opencode 一致）：
+        //   ① 固定的"需要审批"（warning 三角）—— 说明**这是什么**
+        //   ② 类型化描述（图标 + 具体动作）—— 说明**在批什么**
+        // 只有 ② 会让人不知道这是权限请求；只有 ① 又不知道批的是什么。
+        body.push(("△ 需要审批".to_string(), Tone::Warning));
+        body.push((format!("  {} {}", ap.icon, ap.title), Tone::Text));
+        if !ap.summary.is_empty() {
+            body.push((format!("    {}", ap.summary), Tone::Muted));
         }
         if let Some((path, diff)) = &ap.diff {
-            body.push((format!("改动  {path}"), Tone::Info));
+            body.push((format!("  {}", path), Tone::Muted));
             let lines: Vec<&str> = diff.lines().collect();
-            const MAX_DIFF: usize = 8;
+            const MAX_DIFF: usize = 10;
             for l in lines.iter().take(MAX_DIFF) {
-                // 增删行用不同色调，扫一眼就知道改了什么
                 let tone = if l.starts_with('+') && !l.starts_with("+++") {
                     Tone::Success
                 } else if l.starts_with('-') && !l.starts_with("---") {
@@ -1968,72 +1990,75 @@ impl Screen<'_> {
                 } else {
                     Tone::Muted
                 };
-                body.push((l.to_string(), tone));
+                body.push((format!("  {l}"), tone));
             }
             if lines.len() > MAX_DIFF {
-                body.push((format!("… 还有 {} 行（d 看完整 diff）", lines.len() - MAX_DIFF), Tone::Border));
+                body.push((format!("  … 还有 {} 行（d 看完整）", lines.len() - MAX_DIFF), Tone::Border));
             }
         }
-        let choices = ApprovalPrompt::CHOICES.len();
-        // 边框 2 + 内容 + 选项 + 标题下方一条分隔
-        let h = body.len() + choices + 3;
-        if h + 1 >= chrome_top || w < 30 {
-            return; // 放不下就不画，宁可退回输入框路径
+        // 不再显示内核的原始 detail（"写入类调用需确认"）——
+        // 类型化标题已经更准确地说明了在批什么，重复一遍只是噪音。
+        // 高度：内容 + 选项条(1) + 上下内边距
+        let h = body.len() + 3;
+        if h + 2 >= chrome_top || w < 36 {
+            return;
         }
-        let top = chrome_top.saturating_sub(h) / 2;
+        // 垂直位置：约上 1/4（opencode 是 paddingTop = height/4，不是居中）
+        let top = (chrome_top.saturating_sub(h)) / 4;
         let left = (self.cols.saturating_sub(w)) / 2;
-        let inner = w.saturating_sub(4);
 
-        // 表面底色：卡片是"浮在正文之上的一层"，靠底色区分而不是靠更多边框
-        g.fill_bg(top, top + h, left, left + w, Bg::Surface);
-        // 先清字符（底色之上再写内容）
+        // ① 遮罩：整屏压暗（模态的关键信号）
+        g.fill_bg(0, self.rows, 0, self.cols, Bg::Backdrop);
+        // ② 面板底色
+        g.fill_bg(top, top + h, left, left + w, Bg::Panel);
         for r in top..top + h {
             g.blank(r, left, (left + w).min(self.cols.saturating_sub(1)), Tone::Text);
         }
-        let bar = "─".repeat(w.saturating_sub(2));
-        // 圆角边框 + 醒目色：这是"需要你决定"的状态
-        let bd = Tone::Warning;
-        g.put(top, left, "╭", bd);
-        g.put(top, left + 1, &bar, bd);
-        g.put(top, left + w - 1, "╮", bd);
-        let title = " 需要审批 ";
-        g.put(top, left + 2, title, Tone::Warning);
-
+        // ③ 左竖条（opencode 用 ┃ + warning 色）
+        for r in top..top + h {
+            g.put(r, left, "┃", Tone::Warning);
+        }
+        // 内容（左内边距 2）
+        let inner = w.saturating_sub(4);
         let mut row = top + 1;
         for (text, tone) in &body {
-            g.put(row, left, "│", bd);
+            if row >= top + h - 2 {
+                break;
+            }
             let shown = width::truncate_to_width(text, inner).to_string();
             g.put(row, left + 2, &shown, *tone);
-            // 右侧补边框：整行都要有左右边界，否则"面"不闭合
-            g.put(row, left + w - 1, "│", bd);
             row += 1;
         }
-        // 分隔线：把"看什么"与"选什么"分开（层级感的另一半）
-        g.put(row, left, "│", bd);
-        g.put(row, left + 1, &"·".repeat(w.saturating_sub(2)), Tone::Border);
-        g.put(row, left + w - 1, "│", bd);
-        row += 1;
-        for (i, c) in ApprovalPrompt::CHOICES.iter().enumerate() {
+        // ④ 选项条：独立底色带（element，比面板亮一档），横向药丸
+        let bar_row = top + h - 2;
+        g.fill_bg(bar_row, bar_row + 1, left + 1, left + w, Bg::Element);
+        let mut x = left + 2;
+        for (i, label) in ApprovalPrompt::CHOICES.iter().enumerate() {
             let sel = i == ap.selected;
-            g.put(row, left, "│", bd);
-            if sel {
-                // 选中行给**底色条**（不是只加一个符号）—— 列表选中态在
-                // opencode/mimo 里是一整条高亮，不是一个箭头
-                g.fill_bg(row, row + 1, left + 1, left + w - 1, Bg::Selected);
+            let text = format!(" {label} ");
+            let tw = width::display_width(&text);
+            if x + tw >= left + w - 1 {
+                break;
             }
-            let mark = if sel { "❯ " } else { "  " };
+            // 选中的药丸**整块填充**（不是只加一个符号）—— 这是 opencode 的选中态
+            if sel {
+                g.fill_bg(bar_row, bar_row + 1, x, x + tw, Bg::Selected);
+            } else {
+                g.fill_bg(bar_row, bar_row + 1, x, x + tw, Bg::Menu);
+            }
             let tone = if sel { Tone::Primary } else { Tone::Muted };
-            g.put(row, left + 2, mark, tone);
-            g.put(row, left + 4, c, tone);
-            g.put(row, left + w - 1, "│", bd);
-            row += 1;
+            g.put(bar_row, x, &text, tone);
+            x += tw + 1;
         }
-        g.put(row, left, "╰", bd);
-        g.put(row, left + 1, &bar, bd);
-        g.put(row, left + w - 1, "╯", bd);
+        // ⑤ 右侧键位提示（opencode 底部右侧常驻）
+        let hint = "⇆ 选择  enter 确认  esc 拒绝";
+        let hw = width::display_width(hint);
+        if left + w > hw + 4 && left + w > x + hw + 2 {
+            g.put(bar_row, left + w - hw - 1, hint, Tone::Muted);
+        }
     }
 
-    /// which-key 覆盖层：右下的键位提示卡片。
+    /// which-key 覆盖层：右下的键位提示卡片。    /// which-key 覆盖层：右下的键位提示卡片。
     ///
     /// 放在**右下**而不是居中：用户通常还在打字，居中会盖住刚看的内容。
     fn draw_whichkey(&self, g: &mut Grid, groups: &[whichkey::Group], chrome_top: usize) {
@@ -2768,24 +2793,36 @@ fn build_approval_prompt(events: &[EventMsg]) -> Option<ApprovalPrompt> {
         EventMsg::PatchProposed { path, diff } => Some((path.clone(), diff.clone())),
         _ => None,
     });
-    // 最后一个工具调用 = 待批的那个（参数摘要让用户知道在批什么）
-    let call = events
+    // 最后一个工具调用 = 待批的那个
+    let (name, args) = events
         .iter()
         .rev()
         .find_map(|e| match e {
             EventMsg::ToolCallBegin { name, arguments, .. } => {
-                let brief = arguments
-                    .get("cmd")
-                    .or_else(|| arguments.get("path"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Some(if brief.is_empty() { name.clone() } else { format!("{name} {brief}") })
+                Some((name.clone(), arguments.clone()))
             }
             _ => None,
         })
-        .unwrap_or_else(|| "(未知调用)".to_string());
-    Some(ApprovalPrompt { detail, call, diff, selected: 0 })
+        .unwrap_or_else(|| ("未知".to_string(), serde_json::Value::Null));
+    let s = |k: &str| {
+        args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+    // 类型化标题与图标 —— opencode 对每种权限给专属图标/标题（parity §3.1）。
+    // 显示"具体在做什么"比"写入类调用需确认"有用得多：前者能让人直接判断。
+    let (icon, title, summary) = match name.as_str() {
+        "apply_patch" => {
+            let p = s("path");
+            ("→".to_string(), format!("编辑 {p}"), "写入文件".to_string())
+        }
+        "bash" => {
+            let c = s("cmd");
+            ("#".to_string(), "Shell 命令".to_string(), format!("$ {c}"))
+        }
+        "todowrite" => ("◇".to_string(), "更新任务清单".to_string(), String::new()),
+        other => ("⚙".to_string(), format!("调用工具 {other}"), String::new()),
+    };
+    let _ = name;
+    Some(ApprovalPrompt { detail, title, icon, summary, diff, selected: 0 })
 }
 
 /// 就当前审批做出决定并提交给内核，若还有下一个审批则重建卡片。
@@ -5592,6 +5629,8 @@ custom_bg.is_some(),
                     // y / a / n **一次按键就生效**：选项文案里写着（y）/（a）/（n），
                     // 若只移动高亮就与文案不符 —— 用户按 y 以为批了、实际还要回车，
                     // 这正是"按了 y 像没反应"的来源。
+                    // 便捷键：y/a/n 直接选定并生效（与选项文案的 once/always/reject 对应；
+                    // 键位提示在底部右侧，不塞进标签里）
                     Key::Char('y') | Key::Char('Y') => {
                         ap.selected = 0;
                         decision = Some(ap.choice_at());
@@ -5604,11 +5643,23 @@ custom_bg.is_some(),
                         ap.selected = 2;
                         decision = Some(ap.choice_at());
                     }
+                    // ←/→ 在选项间移动（opencode 用左右键，不是上下）——
+                    // 选项是**横向药丸**，用上下键不符合空间直觉。
+                    Key::Left | Key::Char('h') => {
+                        ap.selected = ap.selected.saturating_sub(1);
+                    }
+                    Key::Right | Key::Char('l') => {
+                        if ap.selected + 1 < ApprovalPrompt::CHOICES.len() {
+                            ap.selected += 1;
+                        }
+                    }
                     Key::Enter | Key::Char(' ') => decision = Some(ap.choice_at()),
-                    // Esc：收起卡片但**不作答** —— 待审批仍在（outstanding 未清），
-                    // 用户可以先看正文/滚动，回头再答。
+                    // Esc = **拒绝**（opencode 的语义：esc 总等于最后一个选项，
+                    // 权限场景最后一项就是 reject）。之前是"收起但不作答"，
+                    // 用户按 esc 看不到任何结果，只会以为卡住了。
                     Key::Escape => {
-                        status = "审批仍待处理（y 批准 / a 总是 / n 拒绝）".to_string();
+                        ap.selected = ApprovalPrompt::CHOICES.len() - 1;
+                        decision = Some(ap.choice_at());
                     }
                     _ => {}
                 }
@@ -9585,7 +9636,9 @@ mod tests {
         let ed = editor::Editor::new();
         let ap = ApprovalPrompt {
             detail: "写入类调用需确认".into(),
-            call: "bash rm -rf /tmp/x".into(),
+            title: "Shell 命令".into(),
+            icon: "#".into(),
+            summary: "$ rm -rf /tmp/x".into(),
             diff: Some(("a.txt".into(), "@@ -1 +1 @@\n-old\n+new".into())),
             selected: 1,
         };
@@ -9604,12 +9657,13 @@ mod tests {
         let text = plain(&out).join("
 ");
         assert!(text.contains("需要审批"), "应有模态标题：{text}");
-        assert!(text.contains("bash rm -rf /tmp/x"), "应说明批的是什么");
+        assert!(text.contains("$ rm -rf /tmp/x"), "应说明在批什么（命令原文）");
+        assert!(text.contains("Shell 命令"), "应有类型化标题");
         for c in ApprovalPrompt::CHOICES {
             assert!(text.contains(c), "缺选项 {c}");
         }
         // 选中项要有 ❯ 标记
-        assert!(text.contains("❯ 总是允许这类"), "选中项应有标记");
+        assert!(text.contains("总是允许 always"), "应显示 always 选项（复刻 opencode 文案）");
     }
 
     #[test]
