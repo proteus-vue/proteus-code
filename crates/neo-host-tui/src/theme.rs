@@ -36,6 +36,12 @@ pub struct Theme {
     pub star_dim: (u8, u8, u8),
     /// 星场亮星
     pub star_bright: (u8, u8, u8),
+    /// 面板底色（侧栏、设置页底）。比终端底色略亮，才能看出"这是一块面"。
+    pub bg_panel: (u8, u8, u8),
+    /// 表面底色（模态卡片）。比面板再亮一档，卡片要能"浮起来"。
+    pub bg_surface: (u8, u8, u8),
+    /// 选中行底色（低饱和强调色，不抢前景可读性）。
+    pub bg_selected: (u8, u8, u8),
 }
 
 /// 主题名就是用户可见的标识，也是持久化的键。
@@ -131,6 +137,9 @@ pub fn get(name: ThemeName) -> Theme {
             border_active: (0x5c, 0x5c, 0x6e),
             star_dim: (0x2b, 0x2b, 0x33),
             star_bright: (0x3f, 0x3f, 0x4d),
+            bg_panel: (0x20, 0x1e, 0x2a),
+            bg_surface: (0x2a, 0x27, 0x38),
+            bg_selected: (0x33, 0x2f, 0x45),
         },
         // 参考主题：opencode 官方暗色（暖橙主色 #fab283 + 紫强调 #9d7cd8）。
         // 保留它是为了可对照 —— 但 NEO 的默认是自己的紫。
@@ -148,6 +157,9 @@ pub fn get(name: ThemeName) -> Theme {
             border_active: (0x60, 0x60, 0x60),
             star_dim: (0x2c, 0x2c, 0x2c),
             star_bright: (0x40, 0x40, 0x40),
+            bg_panel: (0x24, 0x22, 0x22),
+            bg_surface: (0x2e, 0x2b, 0x2a),
+            bg_selected: (0x3a, 0x35, 0x32),
         },
         ThemeName::Nord => Theme {
             name: "nord",
@@ -163,6 +175,9 @@ pub fn get(name: ThemeName) -> Theme {
             border_active: (0x4c, 0x56, 0x6a),
             star_dim: (0x28, 0x2e, 0x39),
             star_bright: (0x39, 0x41, 0x50),
+            bg_panel: (0x24, 0x2a, 0x33),
+            bg_surface: (0x2e, 0x34, 0x40),
+            bg_selected: (0x3b, 0x42, 0x52),
         },
         ThemeName::Gruvbox => Theme {
             name: "gruvbox",
@@ -178,6 +193,9 @@ pub fn get(name: ThemeName) -> Theme {
             border_active: (0x7c, 0x6f, 0x64),
             star_dim: (0x3b, 0x35, 0x30),
             star_bright: (0x55, 0x4d, 0x46),
+            bg_panel: (0x28, 0x24, 0x21),
+            bg_surface: (0x32, 0x2d, 0x29),
+            bg_selected: (0x3f, 0x38, 0x33),
         },
         ThemeName::RosePine => Theme {
             name: "rosepine",
@@ -193,6 +211,9 @@ pub fn get(name: ThemeName) -> Theme {
             border_active: (0x52, 0x4f, 0x67),
             star_dim: (0x25, 0x24, 0x31),
             star_bright: (0x35, 0x33, 0x45),
+            bg_panel: (0x1f, 0x1d, 0x28),
+            bg_surface: (0x28, 0x25, 0x35),
+            bg_selected: (0x31, 0x2e, 0x40),
         },
         ThemeName::Tokyonight => Theme {
             name: "tokyonight",
@@ -208,6 +229,9 @@ pub fn get(name: ThemeName) -> Theme {
             border_active: (0x54, 0x5c, 0x7e),
             star_dim: (0x22, 0x27, 0x3b),
             star_bright: (0x31, 0x37, 0x53),
+            bg_panel: (0x1b, 0x1f, 0x30),
+            bg_surface: (0x24, 0x28, 0x3b),
+            bg_selected: (0x2f, 0x33, 0x4a),
         },
         ThemeName::Catppuccin => Theme {
             name: "catppuccin",
@@ -223,6 +247,9 @@ pub fn get(name: ThemeName) -> Theme {
             border_active: (0x45, 0x47, 0x5a),
             star_dim: (0x1d, 0x1e, 0x28),
             star_bright: (0x29, 0x2a, 0x39),
+            bg_panel: (0x1e, 0x1e, 0x27),
+            bg_surface: (0x27, 0x27, 0x32),
+            bg_selected: (0x31, 0x31, 0x40),
         },
     }
 }

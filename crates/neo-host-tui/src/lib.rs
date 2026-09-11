@@ -524,6 +524,18 @@ pub enum Tone {
 }
 
 impl Pal {
+    /// 背景色的 SGR。主题里三档层次必须**可区分但都不抢戏**：
+    /// 面板最接近底色，表面稍亮（卡片要"浮起来"），选中是低饱和强调色。
+    fn bg(&self, b: Bg) -> String {
+        let t = &self.theme;
+        let (r, g, bl) = match b {
+            Bg::Panel => t.bg_panel,
+            Bg::Surface => t.bg_surface,
+            Bg::Selected => t.bg_selected,
+        };
+        Color::Rgb(r, g, bl).bg(self.mode, t)
+    }
+
     fn tone(&self, t: Tone) -> String {
         match t {
             Tone::Text => self.text.clone(),
@@ -629,8 +641,6 @@ pub struct ApprovalPrompt {
     /// 0 = 批准一次 · 1 = 总是允许这类 · 2 = 拒绝
     pub selected: usize,
 }
-
-fn ap_choices_len() -> usize { ApprovalPrompt::CHOICES.len() }
 
 impl ApprovalPrompt {
     /// 三个选项的文案（`selected` 是下标）。
@@ -774,6 +784,19 @@ impl Color {
             Color::Border => t.border,
             Color::BorderActive => t.border_active,
             Color::Rgb(r, g, b) => (r, g, b),
+        }
+    }
+
+    /// 背景色 SGR。与 `fg` 对称，只改参数项（48;2 / 48;5 / 40–47）。
+    /// `Ansi16` 下退到暗色系（40–47）—— 16 色档没有精确的"浅灰面板"，
+    /// 但深色背景块足以表达层级（比不画好）。
+    fn bg(self, mode: ColorMode, t: &theme::Theme) -> String {
+        let (r, g, b) = self.rgb(t);
+        match mode {
+            ColorMode::None => String::new(),
+            ColorMode::TrueColor => format!("{ESC}[48;2;{r};{g};{b}m"),
+            ColorMode::Ansi256 => format!("{ESC}[48;5;{}m", rgb_to_256(r, g, b)),
+            ColorMode::Ansi16 => format!("{ESC}[40m"),
         }
     }
 
@@ -928,11 +951,26 @@ const HINT_RIGHT: &str = "@ 引用  pgup/pgdn 滚动  ctrl+c 退出";
 /// 星场要能出现在**居中内容的左右两侧**。若按"内容 + 补星星"来做，
 /// 左侧空白已算进内容宽度，星星永远进不去左边。格子模型把
 /// "内容覆盖"与"背景填充"分开，两边都能正确落星。
+/// 一块背景色。用主题里的**三个层次**表达"面"：
+/// 面板（侧栏/设置页底）→ 表面（模态卡片）→ 选中（列表高亮条）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bg {
+    Panel,
+    Surface,
+    Selected,
+}
+
 struct Grid {
     cols: usize,
     rows: usize,
     ch: Vec<char>,
     tone: Vec<Tone>,
+    /// 每格的**背景**（`None` = 用终端默认底色）。
+    ///
+    /// 单独一层而不是塞进 `tone`：前景与背景是正交的两个概念
+    /// （同一个面板底色上可以放 Text/Warning/Muted 各种前景）。
+    /// 合进 tone 会让组合爆炸（每种前景 × 每种背景）。
+    bg: Vec<Option<Bg>>,
     /// 宽字符的续列：占位但不输出字符，否则整行会右移一列
     skip: Vec<bool>,
     /// 正文写入的右边界（不含）。用于给侧栏让位。
@@ -947,6 +985,7 @@ impl Grid {
             rows,
             ch: vec![' '; n],
             tone: vec![Tone::None; n],
+            bg: vec![None; n],
             skip: vec![false; n],
             put_limit: usize::MAX,
         }
@@ -956,6 +995,20 @@ impl Grid {
     /// 避免正文写到侧栏下面再被覆盖（那会在视觉上"截断"正文，很难解释）。
     fn clamp_put(&mut self, until: usize) {
         self.put_limit = until;
+    }
+
+    /// 给一块矩形铺**底色**（行区间 `r0..r1`、列区间 `c0..c1`，不含右端）。
+    ///
+    /// 这是"层级感"的来源：终端里只有底色能表达"这块是一个独立的面"。
+    /// 只设背景、不动字符 —— 所以可以在内容之前或之后调用
+    /// （之后调用不会盖掉字符，只补底色）。
+    fn fill_bg(&mut self, r0: usize, r1: usize, c0: usize, c1: usize, bg: Bg) {
+        for r in r0..r1.min(self.rows) {
+            for c in c0..c1.min(self.cols).min(self.put_limit) {
+                let i = r * self.cols + c;
+                self.bg[i] = Some(bg);
+            }
+        }
     }
 
     /// 写一段文本，返回结束列。宽字符按显示宽度占两列。
@@ -1087,6 +1140,7 @@ impl Grid {
             .map(|r| {
                 let mut out = String::new();
                 let mut cur = Tone::None;
+                let mut cur_bg: Option<Bg> = None;
                 let mut started = false;
                 for c in 0..self.cols {
                     let i = r * self.cols + c;
@@ -1094,12 +1148,18 @@ impl Grid {
                         continue;
                     }
                     let t = self.tone[i];
-                    if !started || t != cur {
+                    let b = self.bg[i];
+                    // 前景或背景任一变化都要重发 SGR（并先 reset）
+                    if !started || t != cur || b != cur_bg {
                         if started {
                             out.push_str(&p.reset);
                         }
+                        if let Some(bg) = b {
+                            out.push_str(&p.bg(bg));
+                        }
                         out.push_str(&p.tone(t));
                         cur = t;
+                        cur_bg = b;
                         started = true;
                     }
                     out.push(self.ch[i]);
@@ -1147,6 +1207,8 @@ impl Screen<'_> {
 
         // 设置视图：占满整屏
         if let Some(sections) = self.settings {
+            // 设置页是"另一个页面"，整屏铺面板底色，与对话页明确分开
+            g.fill_bg(0, self.rows, 0, self.cols.saturating_sub(1), Bg::Panel);
             // 先铺背景纹理，再画内容 —— **顺序是唯一正确的**。
             //
             // `fill_background` 只填 `Tone::None`（空）格、不覆盖已有内容，
@@ -1458,7 +1520,11 @@ impl Screen<'_> {
         let w = self.cols.saturating_sub(x0);
         let inner = w.saturating_sub(3);
 
-        // 左侧竖线把侧栏与正文分开（对标 opencode 的分栏观感）
+        // 整块铺**面板底色**：这才是"分栏"的层级感来源。
+        // 只画一条竖线只能表达边界，表达不了"这是一块独立的区域"——
+        // 用户说"没有层级边界感"主要指的就是这个。
+        g.fill_bg(0, self.rows, x0, self.cols, Bg::Panel);
+        // 左侧竖线保留：底色在浅色终端下可能不够明显，线是双保险
         for r in 0..self.rows {
             g.put(r, x0, "│", Tone::Border);
         }
@@ -1730,6 +1796,9 @@ impl Screen<'_> {
                 // 光标只停在可操作行上；只读行用弱色 + 说明
                 let mark = if selected { "▸ " } else { "  " };
                 if selected {
+                    // 选中行铺高亮底色条（与审批卡片一致）——
+                    // 光标位置只靠 ▸ 太弱，列表选中态应当"整行可见"
+                    g.fill_bg(row, row + 1, 1, self.cols.saturating_sub(1), Bg::Selected);
                     g.put(row, 1, mark, Tone::Primary);
                 }
                 let lt = if actionable { Tone::Text } else { Tone::Muted };
@@ -1877,71 +1946,91 @@ impl Screen<'_> {
     /// 2. **改动预览**（若有）—— 决定放不放行的关键信息；
     /// 3. 三个选项（↑↓ 选、回车确认，y/a/n 直接生效）。
     fn draw_approval(&self, g: &mut Grid, ap: &ApprovalPrompt, chrome_top: usize) {
-        let w = self.cols.saturating_sub(8).min(84).max(30);
-        // 预览最多占多少行：留出标题/调用/选项/边框的空间
-        let diff_budget = 10usize;
+        let w = self.cols.saturating_sub(8).min(78).max(30);
+        // 内容行先算出来，再据此定高 —— 之前用 `body.len()+choices+4` 多留了
+        // 4 行，卡片底部因此挂着一块**没有左右边框**的空白（用户截图的现象）。
+        // 高度必须由**实际要画的内容**决定。
         let mut body: Vec<(String, Tone)> = Vec::new();
-        body.push((format!("要执行：{}", ap.call), Tone::Text));
+        body.push((format!("要执行  {}", ap.call), Tone::Text));
+        if !ap.detail.is_empty() {
+            body.push((ap.detail.clone(), Tone::Warning));
+        }
         if let Some((path, diff)) = &ap.diff {
-            body.push((format!("改动：{path}"), Tone::Info));
-            for l in diff.lines().take(diff_budget) {
-                body.push((l.to_string(), Tone::Muted));
+            body.push((format!("改动  {path}"), Tone::Info));
+            let lines: Vec<&str> = diff.lines().collect();
+            const MAX_DIFF: usize = 8;
+            for l in lines.iter().take(MAX_DIFF) {
+                // 增删行用不同色调，扫一眼就知道改了什么
+                let tone = if l.starts_with('+') && !l.starts_with("+++") {
+                    Tone::Success
+                } else if l.starts_with('-') && !l.starts_with("---") {
+                    Tone::Error
+                } else {
+                    Tone::Muted
+                };
+                body.push((l.to_string(), tone));
             }
-            let shown = diff.lines().count();
-            if shown > diff_budget {
-                body.push((format!("… 共 {shown} 行（d 看完整 diff）"), Tone::Border));
+            if lines.len() > MAX_DIFF {
+                body.push((format!("… 还有 {} 行（d 看完整 diff）", lines.len() - MAX_DIFF), Tone::Border));
             }
         }
-        let h = (body.len() + ap_choices_len() + 4).min(chrome_top.saturating_sub(1));
-        if h < 5 || self.cols < 30 {
-            return;
+        let choices = ApprovalPrompt::CHOICES.len();
+        // 边框 2 + 内容 + 选项 + 标题下方一条分隔
+        let h = body.len() + choices + 3;
+        if h + 1 >= chrome_top || w < 30 {
+            return; // 放不下就不画，宁可退回输入框路径
         }
-        let top = (chrome_top.saturating_sub(h)) / 2;
+        let top = chrome_top.saturating_sub(h) / 2;
         let left = (self.cols.saturating_sub(w)) / 2;
         let inner = w.saturating_sub(4);
 
-        // 先清整块矩形：不清的话正文会从空隙里透出来（弹窗踩过同样的坑）
-        for r in top..(top + h).min(self.rows) {
+        // 表面底色：卡片是"浮在正文之上的一层"，靠底色区分而不是靠更多边框
+        g.fill_bg(top, top + h, left, left + w, Bg::Surface);
+        // 先清字符（底色之上再写内容）
+        for r in top..top + h {
             g.blank(r, left, (left + w).min(self.cols.saturating_sub(1)), Tone::Text);
         }
         let bar = "─".repeat(w.saturating_sub(2));
-        let bd = Tone::Warning; // 需要用户决定 —— 用警告色框住
+        // 圆角边框 + 醒目色：这是"需要你决定"的状态
+        let bd = Tone::Warning;
         g.put(top, left, "╭", bd);
         g.put(top, left + 1, &bar, bd);
         g.put(top, left + w - 1, "╮", bd);
-        let title = width::truncate_to_width("需要审批", inner).to_string();
-        g.put(top, left + 2, &title, Tone::Warning);
+        let title = " 需要审批 ";
+        g.put(top, left + 2, title, Tone::Warning);
 
         let mut row = top + 1;
         for (text, tone) in &body {
-            if row >= top + h - ap_choices_len() - 1 {
-                break;
-            }
             g.put(row, left, "│", bd);
             let shown = width::truncate_to_width(text, inner).to_string();
             g.put(row, left + 2, &shown, *tone);
+            // 右侧补边框：整行都要有左右边界，否则"面"不闭合
             g.put(row, left + w - 1, "│", bd);
             row += 1;
         }
-        // 选项
-        let choices = ApprovalPrompt::CHOICES;
-        for (i, c) in choices.iter().enumerate() {
-            if row >= top + h - 1 {
-                break;
-            }
+        // 分隔线：把"看什么"与"选什么"分开（层级感的另一半）
+        g.put(row, left, "│", bd);
+        g.put(row, left + 1, &"·".repeat(w.saturating_sub(2)), Tone::Border);
+        g.put(row, left + w - 1, "│", bd);
+        row += 1;
+        for (i, c) in ApprovalPrompt::CHOICES.iter().enumerate() {
             let sel = i == ap.selected;
+            g.put(row, left, "│", bd);
+            if sel {
+                // 选中行给**底色条**（不是只加一个符号）—— 列表选中态在
+                // opencode/mimo 里是一整条高亮，不是一个箭头
+                g.fill_bg(row, row + 1, left + 1, left + w - 1, Bg::Selected);
+            }
             let mark = if sel { "❯ " } else { "  " };
             let tone = if sel { Tone::Primary } else { Tone::Muted };
-            g.put(row, left, "│", bd);
             g.put(row, left + 2, mark, tone);
             g.put(row, left + 4, c, tone);
             g.put(row, left + w - 1, "│", bd);
             row += 1;
         }
-        let br = (top + h).min(self.rows.saturating_sub(1));
-        g.put(br, left, "╰", bd);
-        g.put(br, left + 1, &bar, bd);
-        g.put(br, left + w - 1, "╯", bd);
+        g.put(row, left, "╰", bd);
+        g.put(row, left + 1, &bar, bd);
+        g.put(row, left + w - 1, "╯", bd);
     }
 
     /// which-key 覆盖层：右下的键位提示卡片。
@@ -2366,7 +2455,12 @@ impl Screen<'_> {
         let left = body.saturating_sub(box_w) / 2;
         let inner_w = box_w.saturating_sub(4);
         // 待审批时边框转警告色：余光里也能看出"现在轮到你"
-        let border = if self.awaiting_input { Tone::Warning } else { Tone::BorderActive };
+        // 审批对话框（模态）在场时：输入框**不**抢焦点 —— 不变黄、不显示
+        // "y 批准/n 拒绝"前缀。之前三处同时喊审批（卡片 + 输入框 + 状态行），
+        // 用户看到的是一堆重复提示，反而不知道在哪答。
+        let modal = self.approval.is_some();
+        let awaiting = self.awaiting_input && !modal;
+        let border = if awaiting { Tone::Warning } else { Tone::BorderActive };
         let bar = "─".repeat(box_w.saturating_sub(2));
 
         g.put(top, left, "╭", border);
@@ -2388,13 +2482,13 @@ impl Screen<'_> {
         for (i, line) in self.input.lines().iter().enumerate().skip(first).take(shown) {
             let r = top + 1 + (i - first);
             g.put(r, left, "│", border);
-            if line.is_empty() && total == 1 && !self.awaiting_input {
+            if line.is_empty() && total == 1 && !awaiting {
                 // 空输入：给占位提示 + 示例（否则光标处一片空白，不知道能打什么）
                 let ex = match self.about {
                     Some(a) if !a.example.is_empty() => a.example.clone(),
                     _ => "输入任务".to_string(),
                 };
-                let hint = if self.awaiting_input {
+                let hint = if awaiting {
                     "y 批准 / a 总是 / n 拒绝 > ".to_string()
                 } else {
                     format!("输入任务… 例：{ex}")
@@ -2402,7 +2496,7 @@ impl Screen<'_> {
                 let hint = width::truncate_to_width(&hint, inner_w).to_string();
                 g.put(r, left + 2, &hint, Tone::Muted);
             } else {
-                let prefix = if self.awaiting_input && i == first {
+                let prefix = if awaiting && i == first {
                     "y 批准 / a 总是 / n 拒绝 > ".to_string()
                 } else {
                     String::new()
@@ -2479,15 +2573,19 @@ impl Screen<'_> {
                 g.put(status_row, 2, &ws_shown, Tone::Dim);
             } else {
                 g.put(status_row, 2, &ws_shown, Tone::Dim);
-                let tone = if self.awaiting_input { Tone::Warning } else { Tone::Muted };
-                g.put(status_row, body - stw - 2, self.status, tone);
+                let tone = if awaiting { Tone::Warning } else { Tone::Muted };
+                // 模态在场时状态行不再重复"待审批…"—— 卡片已经是唯一入口。
+                // 三处同时提示只会让人不知道在哪答。
+                if !modal || !self.status.contains("审批") {
+                    g.put(status_row, body - stw - 2, self.status, tone);
+                }
             }
         }
 
         if self.show_cursor {
             // 光标位置（1 基）：落在实际光标行列上，而不是"文本末尾"。
             let vis_row = crow.saturating_sub(first).min(shown.saturating_sub(1));
-            let prefix_w = if self.awaiting_input && crow == first {
+            let prefix_w = if awaiting && crow == first {
                 width::display_width("y 批准 / a 总是 / n 拒绝 > ")
             } else {
                 0
