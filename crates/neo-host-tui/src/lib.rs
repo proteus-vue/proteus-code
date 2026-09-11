@@ -20,6 +20,7 @@
 //! - 保存 `stty -g` 的确切状态并原样写回（不是猜一个"合理默认"）
 
 pub mod commands;
+pub mod editor;
 pub mod input;
 pub mod popup;
 pub mod markdown;
@@ -195,8 +196,24 @@ pub enum Key {
     ToggleSidebar,
     /// Ctrl+L 清屏
     ClearScreen,
-    /// Ctrl+U 清空输入行
+    /// Ctrl+U 删到行首
     ClearLine,
+    /// Ctrl+K 删到行尾
+    DeleteToLineEnd,
+    /// Ctrl+W 删前一个词
+    DeleteWordBackward,
+    /// Ctrl+Z 撤销
+    Undo,
+    /// Ctrl+Y 重做（readline 惯例）
+    Redo,
+    /// Delete 键（前向删除）
+    Delete,
+    /// Home / End
+    Home,
+    End,
+    /// Alt+B / Alt+F 按词移动
+    WordBackward,
+    WordForward,
     /// Ctrl+R 历史搜索
     SearchHistory,
     /// Ctrl+G 用 $EDITOR 编辑当前输入
@@ -229,6 +246,15 @@ pub fn decode_key(bytes: &[u8]) -> Key {
         [0x1b, b'[', b'B'] => Key::Down,
         [0x1b, b'[', b'C'] => Key::Right,
         [0x1b, b'[', b'D'] => Key::Left,
+        [0x0b] => Key::DeleteToLineEnd,
+        [0x17] => Key::DeleteWordBackward,
+        [0x1a] => Key::Undo,
+        [0x19] => Key::Redo,
+        [0x1b, b'[', b'3', b'~'] => Key::Delete,
+        [0x1b, b'[', b'H'] | [0x1b, b'[', b'1', b'~'] => Key::Home,
+        [0x1b, b'[', b'F'] | [0x1b, b'[', b'4', b'~'] => Key::End,
+        [0x1b, b'b'] => Key::WordBackward,
+        [0x1b, b'f'] => Key::WordForward,
         [0x10] => Key::CommandPalette,
         [0x14] => Key::NextTheme,
         [0x02] => Key::ToggleSidebar,
@@ -272,16 +298,21 @@ fn read_key_timeout(stdin: &mut impl Read, timeout_tenths: u8) -> Option<Key> {
 fn decode_first(first: &[u8; 1], stdin: &mut impl Read) -> Key {
     let b = first[0];
     if b == 0x1b {
-        // 转义序列：再读最多 2 字节。超时设置已由调用方就位，
-        // 因此单独按 Esc（后面没有字节）会立刻返回而不是卡住。
+        // 转义序列：最多再读 3 字节（总计 4）。
+        //
+        // 需要 4 字节是因为 `ESC [ 3 ~`（Delete）、`ESC [ 1 ~`（Home）
+        // 这类序列有 4 个字节 —— 之前只读 2 个额外字节，它们会被截断成
+        // 前缀而永远匹配不上。超时设置已由调用方就位，所以单独按 Esc
+        // （后面没有字节）仍会立刻返回，不会卡住。
         let mut seq = vec![0x1b];
-        for _ in 0..2 {
+        for _ in 0..3 {
             let mut c = [0u8; 1];
             if stdin.read(&mut c).unwrap_or(0) == 0 {
                 break;
             }
             seq.push(c[0]);
-            if seq.len() == 3 {
+            // 终止字节：`~` 或字母（A-Za-z）说明序列已完整
+            if c[0] == b'~' || c[0].is_ascii_alphabetic() {
                 break;
             }
         }
@@ -405,8 +436,8 @@ pub struct Screen<'a> {
     pub rows: usize,
     /// 已发生的用户可见事实（协议层 Fact，非宿主自造）
     pub facts: &'a [Fact],
-    /// 当前输入行（纯文本；左侧竖条由渲染加，便于单独着色）
-    pub input: &'a str,
+    /// 当前输入（多行编辑器；左边框由渲染加，便于单独着色）
+    pub input: &'a editor::Editor,
     /// 状态文本（底部状态行右侧；空 = 不显示）
     pub status: &'a str,
     /// 有未决审批：边框转警告色，提示"现在该你回答"
@@ -626,8 +657,22 @@ impl Pal {
     }
 }
 
-/// 底部固定区块行数：输入框(4) + 提示行(1) + 状态行(1)
+/// 输入区最多显示多少行（超出滚动到末尾）。
+/// 上限是必要的：输入框不能吃掉整个屏幕 —— 正文才是主体。
+const MAX_INPUT_ROWS: usize = 6;
+
+/// 底部固定区块行数（单行输入时）：输入框(3) + 提示行(1) + 状态行(1) + 边框(1)
 const CHROME_ROWS: usize = 6;
+
+/// 按输入行数算出 chrome 实际占用行数。
+///
+/// 输入框高度是**动态**的（单行 → 多行），因此不能用常量代替。
+/// 布局里凡是"正文可用行数"的地方都必须走这个函数。
+fn chrome_rows(input_rows: usize) -> usize {
+    let shown = input_rows.clamp(1, MAX_INPUT_ROWS);
+    // 上边框 + 输入行(shown) + 状态行 + 下边框 + 提示行 + 底部状态行
+    2 + shown + 1 + 1 + 1
+}
 
 /// 侧栏宽度（对齐 opencode 的 42 列；我们窄一些，因为终端普遍没它宽）。
 const SIDEBAR_COLS: usize = 34;
@@ -655,8 +700,11 @@ const EXAMPLES: [&str; 4] = [
     "解释 src/main.rs 的主流程",
 ];
 
-const HINT_LEFT: &str = "tab 补全   ctrl+r 历史";
-const HINT_RIGHT: &str = "@ 引用   ctrl+g 编辑器   ctrl+c 退出";
+// 提示行必须能同时塞下左右两栏（否则右栏会被丢弃，提示就白写了）。
+// 76 列的输入框里两栏合计要留得住空档，所以每栏只放最高频的几个键；
+// 完整键位在 `/keys` 里。
+const HINT_LEFT: &str = "tab 补全  ctrl+r 历史";
+const HINT_RIGHT: &str = "@ 引用  alt+enter 换行  ctrl+c 退出";
 
 /// 屏幕网格。
 ///
@@ -812,11 +860,12 @@ impl Screen<'_> {
             g.clamp_put(x0);
         }
 
+        let chrome = chrome_rows(self.input.line_count());
         let (chrome_top, cursor) = if let Some(lines) = self.preformatted {
             // 信息屏是**文档**：必须从第一行开始显示。
             // 曾用"显示末尾 N 行"（对话滚屏的逻辑），结果长帮助把标题裁掉、
             // 只留中间 —— 文档不能倒着读。
-            let avail = self.rows.saturating_sub(CHROME_ROWS);
+            let avail = self.rows.saturating_sub(chrome);
             let shown = lines.len().min(avail.saturating_sub(1)); // 留一行给截断提示
             for (i, segs) in lines.iter().enumerate().take(shown) {
                 for (col, text, tone) in segs {
@@ -833,7 +882,7 @@ impl Screen<'_> {
                     Tone::Border,
                 );
             }
-            let top = self.rows.saturating_sub(CHROME_ROWS);
+            let top = self.rows.saturating_sub(chrome);
             (top, self.draw_chrome(&mut g, top))
         } else if let Some(t) = self.trust {
             self.layout_trust(&mut g, t);
@@ -894,7 +943,7 @@ impl Screen<'_> {
     // ── 对话模式：正文在下、输入区钉在底部 ────────────────────────────
     fn layout_transcript(&self, g: &mut Grid) -> (usize, Option<(usize, usize)>) {
         let lines = self.fact_lines();
-        let body = self.rows.saturating_sub(CHROME_ROWS);
+        let body = self.rows.saturating_sub(chrome_rows(self.input.line_count()));
         // 只显示最后 body 行（自动滚到底），内容不足时贴着输入区
         let start = lines.len().saturating_sub(body);
         let shown = &lines[start..];
@@ -904,7 +953,7 @@ impl Screen<'_> {
                 g.put(top + i, *col, text, *tone);
             }
         }
-        let top = self.rows - CHROME_ROWS;
+        let top = self.rows - chrome_rows(self.input.line_count());
         (top, self.draw_chrome(g, top))
     }
 
@@ -924,7 +973,7 @@ impl Screen<'_> {
             let hero = self.hero_lines(a, logo, subtitle, meta, gaps);
             // 整组要放得下，否则会被"显示末尾 N 行"从**顶部**裁掉 ——
             // 用户看到的是"少了 logo 的半截首屏"，且不会有任何报错
-            if hero.len() + CHROME_ROWS <= self.rows {
+            if hero.len() + chrome_rows(1) <= self.rows {
                 chosen = hero;
                 break;
             }
@@ -933,7 +982,7 @@ impl Screen<'_> {
             chosen = self.hero_lines(a, false, false, false, false);
         }
 
-        let group = chosen.len() + CHROME_ROWS;
+        let group = chosen.len() + chrome_rows(self.input.line_count());
         let group_top = self.rows.saturating_sub(group) / 2;
         for (i, segs) in chosen.iter().enumerate() {
             g.put_centered_styled(group_top + i, std::slice::from_ref(segs));
@@ -1232,72 +1281,125 @@ impl Screen<'_> {
         g.put(top, left + 1, &bar, border);
         g.put(top, left + box_w - 1, "╮", border);
 
-        // 先把框内两行填实，避免星场渗入输入框
-        g.blank(top + 1, left + 1, left + box_w - 1, Tone::Text);
-        g.blank(top + 2, left + 1, left + box_w - 1, Tone::Text);
+        // ── 输入区：最多 MAX_INPUT_ROWS 行，超出则显示末尾并提示 ──
+        let total = self.input.line_count();
+        let shown = total.min(MAX_INPUT_ROWS);
+        let first = total - shown; // 显示最后 N 行（光标总在可见区内）
+        let (crow, ccol) = self.input.cursor();
 
-        // 提示行：空输入时给占位提示（否则光标处一片空白，不知道能打什么）
-        g.put(top + 1, left, "│", border);
-        let (text, tone) = if self.input.is_empty() && !self.awaiting_input {
-            let ex = match self.about {
-                Some(a) if !a.example.is_empty() => a.example.clone(),
-                _ => "输入任务".to_string(),
-            };
-            (format!("输入任务… 例：{ex}"), Tone::Muted)
-        } else {
-            let prefix = if self.awaiting_input { "y 批准 / n 拒绝 > " } else { "> " };
-            (format!("{prefix}{}", self.input), Tone::Text)
-        };
-        g.put(top + 1, left + 2, &text, tone);
-        g.put(top + 1, left + box_w - 1, "│", border);
+        // 先把输入区整片填空，避免星场渗进框里
+        let area_bottom = top + 1 + shown + 1;
+        for r in (top + 1)..area_bottom.min(self.rows) {
+            g.blank(r, left + 1, left + box_w - 1, Tone::Text);
+        }
+
+        for (i, line) in self.input.lines().iter().enumerate().skip(first).take(shown) {
+            let r = top + 1 + (i - first);
+            g.put(r, left, "│", border);
+            if line.is_empty() && total == 1 && !self.awaiting_input {
+                // 空输入：给占位提示 + 示例（否则光标处一片空白，不知道能打什么）
+                let ex = match self.about {
+                    Some(a) if !a.example.is_empty() => a.example.clone(),
+                    _ => "输入任务".to_string(),
+                };
+                let hint = if self.awaiting_input {
+                    "y 批准 / n 拒绝 > ".to_string()
+                } else {
+                    format!("输入任务… 例：{ex}")
+                };
+                let hint = width::truncate_to_width(&hint, inner_w).to_string();
+                g.put(r, left + 2, &hint, Tone::Muted);
+            } else {
+                let prefix = if self.awaiting_input && i == first {
+                    "y 批准 / n 拒绝 > ".to_string()
+                } else {
+                    String::new()
+                };
+                // 截断到框内宽度：不截的话长输入会盖掉右边框
+                // （网格的 put 只受 body/sidebar 边界约束，不知道"框"的右边界）
+                let text = format!("{prefix}{line}");
+                let text = width::truncate_to_width(&text, inner_w).to_string();
+                g.put(r, left + 2, &text, Tone::Text);
+            }
+            g.put(r, left + box_w - 1, "│", border);
+        }
+        // 行数超上限：在最后一行右侧标注（不静默）
+        if total > shown {
+            let more = format!("… 共 {total} 行 ");
+            let mw = width::display_width(&more);
+            let r = top + shown;
+            if left + box_w > mw + 4 {
+                g.put(r, left + box_w - mw - 2, &more, Tone::Muted);
+            }
+        }
 
         // 内层状态行（对标 MiMo 输入框内的 "Build ⏵ 模型"）
+        let stat_row = top + 1 + shown;
+        g.put(stat_row, left, "│", border);
         let inner = match self.about {
             Some(a) if !a.mode_short.is_empty() => format!("{} ⏵ {}", a.mode_short, a.model),
             Some(a) => a.model.clone(),
             None => String::new(),
         };
-        g.put(top + 2, left, "│", border);
-        g.put(top + 2, left + 2, &width::truncate_to_width(&inner, inner_w).to_string(), Tone::Muted);
-        g.put(top + 2, left + box_w - 1, "│", border);
+        g.put(
+            stat_row,
+            left + 2,
+            &width::truncate_to_width(&inner, inner_w).to_string(),
+            Tone::Muted,
+        );
+        g.put(stat_row, left + box_w - 1, "│", border);
 
-        g.put(top + 3, left, "╰", border);
-        g.put(top + 3, left + 1, &bar, border);
-        g.put(top + 3, left + box_w - 1, "╯", border);
+        let bottom = stat_row + 1;
+        g.put(bottom, left, "╰", border);
+        g.put(bottom, left + 1, &bar, border);
+        g.put(bottom, left + box_w - 1, "╯", border);
 
         // 提示行：与输入框左右对齐
-        g.put(top + 4, left + 2, HINT_LEFT, Tone::Border);
-        let hw = width::display_width(HINT_RIGHT);
-        let hx = (left + box_w).saturating_sub(2 + hw);
-        if hx > left + 2 + width::display_width(HINT_LEFT) {
-            g.put(top + 4, hx, HINT_RIGHT, Tone::Border);
+        let hint_row = bottom + 1;
+        if hint_row < self.rows {
+            g.put(hint_row, left + 2, HINT_LEFT, Tone::Border);
+            let hw = width::display_width(HINT_RIGHT);
+            let hx = (left + box_w).saturating_sub(2 + hw);
+            if hx > left + 2 + width::display_width(HINT_LEFT) {
+                g.put(hint_row, hx, HINT_RIGHT, Tone::Border);
+            }
         }
 
         // 状态行（最底）：左 = 工作区:分支，右 = 状态文本
-        let ws_line = match self.about {
-            Some(a) if !a.branch.is_empty() => format!("{}:{}", a.workspace, a.branch),
-            Some(a) => a.workspace.clone(),
-            None => String::new(),
-        };
-        let ws_shown = width::truncate_to_width(&ws_line, body.saturating_sub(6)).to_string();
-        let wsw = width::display_width(&ws_shown);
-        let stw = width::display_width(self.status);
-        // 放不下就不画右侧 —— 宁可少显示，也不折行把布局打乱
-        if self.status.is_empty() || wsw + stw + 4 > body {
-            g.put(top + 5, 2, &ws_shown, Tone::Dim);
-        } else {
-            g.put(top + 5, 2, &ws_shown, Tone::Dim);
-            let tone = if self.awaiting_input { Tone::Warning } else { Tone::Muted };
-            g.put(top + 5, body - stw - 2, self.status, tone);
+        let status_row = hint_row + 1;
+        if status_row < self.rows {
+            let ws_line = match self.about {
+                Some(a) if !a.branch.is_empty() => format!("{}:{}", a.workspace, a.branch),
+                Some(a) => a.workspace.clone(),
+                None => String::new(),
+            };
+            let ws_shown =
+                width::truncate_to_width(&ws_line, body.saturating_sub(6)).to_string();
+            let wsw = width::display_width(&ws_shown);
+            let stw = width::display_width(self.status);
+            if self.status.is_empty() || wsw + stw + 4 > body {
+                g.put(status_row, 2, &ws_shown, Tone::Dim);
+            } else {
+                g.put(status_row, 2, &ws_shown, Tone::Dim);
+                let tone = if self.awaiting_input { Tone::Warning } else { Tone::Muted };
+                g.put(status_row, body - stw - 2, self.status, tone);
+            }
         }
 
         if self.show_cursor {
-            // 光标列：1 基，落在已输入文本之后
-            Some((top + 2, left + 3 + width::display_width(&text)))
+            // 光标位置（1 基）：落在实际光标行列上，而不是"文本末尾"
+            let vis_row = crow.saturating_sub(first).min(shown.saturating_sub(1));
+            let prefix_w = if self.awaiting_input && crow == first {
+                width::display_width("y 批准 / n 拒绝 > ")
+            } else {
+                0
+            };
+            Some((top + 2 + vis_row, left + 3 + prefix_w + ccol))
         } else {
             None
         }
     }
+
 
     // ── 信任对话框 ────────────────────────────────────────────────────
     fn layout_trust(&self, g: &mut Grid, t: &TrustPrompt) {
@@ -1720,7 +1822,7 @@ enum Effect {
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
 fn apply_popup_item(
     item: &popup::Item,
-    input: &mut String,
+    input: &mut editor::Editor,
     status: &mut String,
     theme_name: &mut theme::ThemeName,
     info_screen: &mut Option<String>,
@@ -1728,7 +1830,8 @@ fn apply_popup_item(
     match &item.action {
         popup::ItemAction::Insert(text) => {
             // 用选中的引用替换掉 `@` 之后已输入的过滤词
-            *input = complete_at_token(input, text);
+            let done = complete_at_token(&input.text(), text);
+            input.set(&done);
             *status = format!("已引用 {text}");
             Effect::None
         }
@@ -1892,7 +1995,10 @@ where
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
-    let mut input = String::new();
+    let mut input = editor::Editor::new();
+    // 给"不需要输入框内容"的帧（信息屏/过渡帧/信任页）复用一个空编辑器，
+    // 避免每处都构造一份
+    let empty_input = editor::Editor::new();
     let mut events: Vec<EventMsg> = Vec::new();
     // 与后续状态统一用同一个构造函数，避免"首屏一种文案、之后另一种"
     let mut status = idle_or_approval(&None);
@@ -1955,7 +2061,7 @@ where
                 cols,
                 rows,
                 facts: &[],
-                input: "",
+                input: &empty_input,
                 status: "",
                 awaiting_input: false,
                 show_cursor: false,
@@ -2003,7 +2109,7 @@ where
                 cols,
                 rows,
                 facts: &[],
-                input: "",
+                input: &empty_input,
                 status: "按任意键返回",
                 awaiting_input: false,
                 show_cursor: false,
@@ -2085,8 +2191,8 @@ where
                 }
                 Key::Backspace => {
                     // 退格回到 `@`/`/` 之前 → 关闭弹窗；否则缩窄过滤词
-                    input.pop();
-                    let still = self_popup_context(&input);
+                    input.backspace();
+                    let still = self_popup_context(&input.text());
                     match still {
                         Some((kind, q)) => {
                             if let Some(p) = popup_state.as_mut() {
@@ -2098,8 +2204,8 @@ where
                     }
                 }
                 Key::Char(c) => {
-                    input.push(c);
-                    match self_popup_context(&input) {
+                    input.insert_char(c);
+                    match self_popup_context(&input.text()) {
                         Some((kind, q)) => {
                             if let Some(p) = popup_state.as_mut() {
                                 p.query = q;
@@ -2159,6 +2265,25 @@ where
                     browsing = false;
                 }
             }
+            Key::DeleteToLineEnd => input.delete_to_line_end(),
+            Key::DeleteWordBackward => input.delete_word_backward(),
+            Key::Undo => input.undo(),
+            Key::Redo => input.redo(),
+            Key::Delete => {
+                input.delete_forward();
+            }
+            Key::Home => input.move_home(),
+            Key::End => input.move_end(),
+            Key::WordBackward => input.word_backward(),
+            Key::WordForward => input.word_forward(),
+            Key::Left => {
+                browsing = false;
+                input.move_left();
+            }
+            Key::Right => {
+                browsing = false;
+                input.move_right();
+            }
             Key::CommandPalette => {
                 let mut p = popup::Popup::new(popup::Kind::Palette, "");
                 p.set_items(popup::palette_items(""), false);
@@ -2183,31 +2308,39 @@ where
                 browsing = false;
             }
             Key::Backspace => {
-                input.pop();
+                input.backspace();
                 browsing = false;
             }
             Key::Char(c) => {
-                input.push(c);
+                input.insert_char(c);
                 browsing = false;
                 history.reset_cursor();
                 // 输入 `@` 或 `/` 即弹出候选（对齐 opencode：输入即列表）
                 if c == '@' || c == '/' {
-                    open_popup_for(&input, &mut popup_state, &mut file_cache, &mut status);
+                    let t = input.text();
+                    open_popup_for(&t, &mut popup_state, &mut file_cache, &mut status);
                 }
             }
             Key::Up => {
-                // 输入为空或正在浏览历史时，Up 走历史
-                if input.is_empty() || browsing {
+                // 多行输入时先在本缓冲内上移；已在首行才走历史
+                let (row, _) = input.cursor();
+                if row > 0 {
+                    input.move_up();
+                } else if input.is_empty() || browsing || row == 0 {
                     if let Some(h) = history.prev() {
-                        input = h.to_string();
+                        input.set(h);
                         browsing = true;
                     }
                 }
             }
             Key::Down => {
-                if browsing {
+                // 同理：先在本缓冲内下移
+                let (row, _) = input.cursor();
+                if row + 1 < input.line_count() {
+                    input.move_down();
+                } else if browsing {
                     match history.next_entry() {
-                        Some(h) => input = h.to_string(),
+                        Some(h) => input.set(h),
                         None => {
                             input.clear();
                             browsing = false;
@@ -2217,14 +2350,14 @@ where
             }
             Key::SearchHistory => {
                 // Ctrl+R：用当前输入当查询，回填最近一条匹配（再按继续往回找）
-                let needle = input.clone();
+                let needle = input.text();
                 if let Some(found) = history.search(&needle) {
                     let found = found.to_string();
                     // 连续 Ctrl+R 时把游标往上挪一格，实现"继续找更早的"
-                    if found == input && !needle.is_empty() {
+                    if found == needle && !needle.is_empty() {
                         let _ = history.prev();
                     }
-                    input = found;
+                    input.set(&found);
                     status = format!("历史搜索：{needle}");
                 } else {
                     status = format!("历史中未找到：{needle}");
@@ -2232,10 +2365,10 @@ where
                 browsing = true;
             }
             Key::ExternalEditor => {
-                let initial = input.clone();
+                let initial = input.text();
                 if let Some(edited) = edit_externally(&initial, &raw) {
-                    // 编辑器返回的是一整段文本；取首行作为任务
-                    input = edited.trim().to_string();
+                    // 外部编辑器返回的可能是多行文本，整段取代输入（保留换行）
+                    input.set(edited.trim_end());
                     status = "已从外部编辑器取回内容".to_string();
                 } else {
                     status = "外部编辑器未返回内容".to_string();
@@ -2268,7 +2401,8 @@ where
                     }
                 }
                 // Tab：补全 `@` 引用（只在 @ 上下文中生效）
-                if let Some(q) = at_query(&input) {
+                let cur = input.text();
+                if let Some(q) = at_query(&cur) {
                     if file_cache.is_none() {
                         let (files, truncated) = input::list_files(&std::env::current_dir().unwrap_or_else(|_| ".".into()), 5000, 8);
                         // 截断提示与补全结果合并成一句，避免前一句被后一句覆盖而丢失
@@ -2280,7 +2414,8 @@ where
                     let ranked = input::fuzzy_rank(q, files, 1);
                     match ranked.first() {
                         Some(best) => {
-                            input = complete_at_token(&input, best);
+                            let done = complete_at_token(&cur, best);
+                            input.set(&done);
                             status = format!("补全：{best}{}", status);
                         }
                         None => status = format!("无匹配文件：{q}"),
@@ -2288,7 +2423,9 @@ where
                 }
             }
             Key::Enter => {
-                let line = std::mem::take(&mut input);
+                // 取文本并清空输入（提交后输入框应回到空）
+                let line = input.text();
+                input.clear();
 
                 // ── 有待审批：本行是审批应答 ──────────────────────────────
                 if let Some(id) = outstanding.clone() {
@@ -2380,7 +2517,7 @@ where
                             cols: c3,
                             rows: r3,
                             facts: &f3,
-                            input: "",
+                            input: &empty_input,
                             status: &running,
                             awaiting_input: false,
                             show_cursor: false,
@@ -2419,7 +2556,7 @@ where
                         cols: c2,
                         rows: r2,
                         facts: &facts0,
-                        input: "",
+                        input: &empty_input,
                         status: &status,
                         awaiting_input: false,
                         show_cursor: false,
@@ -2462,11 +2599,12 @@ mod tests {
     // 渲染产物含 ANSI 与光标定位序列，直接断言字符串很脆。这里统一
     // 剥成"纯文本行"，让测试断言**用户看到的内容**而不是转义细节。
     fn screen(cols: usize, rows: usize, facts: &[Fact], input: &str, status: &str) -> String {
+        let ed = editor::Editor::from_text(input);
         Screen {
             cols,
             rows,
             facts,
-            input,
+            input: &ed,
             status,
             awaiting_input: false,
             show_cursor: false,
@@ -2500,7 +2638,7 @@ mod tests {
             cols,
             rows,
             facts: &[],
-            input: "",
+            input: &editor::Editor::new(),
             status: "就绪",
             awaiting_input: false,
             show_cursor: false,
@@ -2598,7 +2736,7 @@ mod tests {
             cols: 100,
             rows: 30,
             facts: &[],
-            input: "/",
+            input: &editor::Editor::from_text("/"),
             status: "",
             awaiting_input: false,
             show_cursor: false,
@@ -2633,12 +2771,12 @@ mod tests {
             detail: String::new(),
             action: popup::ItemAction::Run(commands::Action::Help),
         };
-        let mut input = "/help".to_string();
+        let mut input = editor::Editor::from_text("/help");
         let mut status = String::new();
         let mut theme_name = theme::ThemeName::OpenCode;
         let mut info: Option<String> = None;
         let eff = apply_popup_item(&item, &mut input, &mut status, &mut theme_name, &mut info);
-        assert!(input.is_empty(), "执行命令后输入应清空，实际 {input:?}");
+        assert!(input.is_empty(), "执行命令后输入应清空，实际 {:?}", input.text());
         assert!(info.is_some(), "/help 应打开信息屏");
         assert_eq!(eff, Effect::None);
     }
@@ -2651,13 +2789,14 @@ mod tests {
             detail: String::new(),
             action: popup::ItemAction::Insert("@src/main.rs".into()),
         };
-        let mut input = "@src/ma".to_string();
+        let mut input = editor::Editor::from_text("@src/ma");
         let mut status = String::new();
         let mut theme_name = theme::ThemeName::OpenCode;
         let mut info: Option<String> = None;
         apply_popup_item(&item, &mut input, &mut status, &mut theme_name, &mut info);
-        assert!(input.contains("@src/main.rs"), "引用应留在输入里，实际 {input:?}");
-        assert!(!input.contains("ma@"), "不应重复叠加过滤词：{input:?}");
+        let t = input.text();
+        assert!(t.contains("@src/main.rs"), "引用应留在输入里，实际 {t:?}");
+        assert!(!t.contains("ma@"), "不应重复叠加过滤词：{t:?}");
     }
 
     #[test]
@@ -2691,7 +2830,7 @@ mod tests {
             cols: 100,
             rows: 30,
             facts: &[],
-            input: "",
+            input: &editor::Editor::new(),
             status: "按任意键返回",
             awaiting_input: false,
             show_cursor: false,
@@ -2716,7 +2855,7 @@ mod tests {
         let a = about();
         for rows in [20usize, 30, 44] {
             let out = Screen {
-                cols: 120, rows, facts: &[], input: "", status: "就绪",
+                cols: 120, rows, facts: &[], input: &editor::Editor::new(), status: "就绪",
                 awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
@@ -2758,7 +2897,7 @@ mod tests {
             for rows in [20usize, 40, 60] {
                 let a = About { context_limit: 64_000, ..about() };
                 let out = Screen {
-                    cols, rows, facts: &facts, input: "输入中文测试", status: "就绪",
+                    cols, rows, facts: &facts, input: &editor::Editor::from_text("输入中文测试"), status: "就绪",
                     awaiting_input: true, show_cursor: true,
                     about: Some(&a), trust: None,
                     theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
@@ -2784,7 +2923,7 @@ mod tests {
             let mut p = popup::Popup::new(popup::Kind::Slash, "");
             p.set_items(popup::slash_items(""), false);
             let out = Screen {
-                cols, rows: 40, facts: &[], input: "/", status: "",
+                cols, rows: 40, facts: &[], input: &editor::Editor::from_text("/"), status: "",
                 awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::OpenCode, popup: Some(&p), preformatted: None,
@@ -2805,7 +2944,7 @@ mod tests {
             cols,
             rows: 30,
             facts,
-            input: "",
+            input: &editor::Editor::new(),
             status: "就绪",
             awaiting_input: false,
             show_cursor: false,
@@ -2860,7 +2999,7 @@ mod tests {
         let a = About { context_limit: 0, ..about() };
         let facts = vec![Fact::TurnFinished { input_tokens: 100, output_tokens: 20 }];
         let out = Screen {
-            cols: 120, rows: 30, facts: &facts, input: "", status: "",
+            cols: 120, rows: 30, facts: &facts, input: &editor::Editor::new(), status: "",
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
@@ -2876,7 +3015,7 @@ mod tests {
         let a = About { context_limit: 1000, ..about() };
         let facts = vec![Fact::TurnFinished { input_tokens: 800, output_tokens: 100 }];
         let out = Screen {
-            cols: 120, rows: 30, facts: &facts, input: "", status: "",
+            cols: 120, rows: 30, facts: &facts, input: &editor::Editor::new(), status: "",
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
@@ -2934,7 +3073,7 @@ mod tests {
         let render = |t: theme::ThemeName| {
             with_env(&[("COLORTERM", "truecolor")], || {
                 Screen {
-                    cols: 80, rows: 20, facts: &[], input: "", status: "",
+                    cols: 80, rows: 20, facts: &[], input: &editor::Editor::new(), status: "",
                     awaiting_input: false, show_cursor: false,
                     about: Some(&a), trust: None,
                     theme: t, popup: None, preformatted: None, sidebar: false,
@@ -2948,6 +3087,111 @@ mod tests {
         // opencode 主色 #fab283；nord 主色 #88c0d0
         assert!(oc.contains("38;2;250;178;131"), "opencode 主色应为 #fab283");
         assert!(nord.contains("38;2;136;192;208"), "nord 主色应为 #88c0d0");
+    }
+
+    // ── 多行输入（行高动态）────────────────────────────────────────
+
+    #[test]
+    fn input_box_grows_with_multiline_content() {
+        // 贴多行内容时输入框必须长高，且每行都完整显示（不截断中间行）
+        let a = about();
+        let ed = editor::Editor::from_text("第一行\n第二行\n第三行");
+        let out = Screen {
+            cols: 120, rows: 30, facts: &[], input: &ed, status: "就绪",
+            awaiting_input: false, show_cursor: true,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false,
+        }
+        .render();
+        let text = plain(&out).join("\n");
+        for needle in ["第一行", "第二行", "第三行"] {
+            assert!(text.contains(needle), "多行内容应全部显示，缺 {needle}：{text}");
+        }
+    }
+
+    #[test]
+    fn chrome_height_is_dynamic_not_constant() {
+        // 布局必须按输入行数算高度：用固定常量会让多行输入盖住正文
+        assert_eq!(chrome_rows(1), 6, "单行时 chrome 应为 6 行");
+        assert!(chrome_rows(3) > chrome_rows(1), "多行时 chrome 必须更高");
+        // 上限：输入框不能吃掉整屏
+        assert_eq!(chrome_rows(100), chrome_rows(MAX_INPUT_ROWS));
+    }
+
+    #[test]
+    fn overlong_input_scrolls_to_the_cursor_line() {
+        // 超过上限时显示**末尾**（光标总在可见区），并如实标注总行数
+        let a = about();
+        let text: String = (0..20).map(|i| format!("line{i}\n")).collect();
+        let ed = editor::Editor::from_text(text.trim_end());
+        let out = Screen {
+            cols: 120, rows: 40, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: true,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false,
+        }
+        .render();
+        let t = plain(&out).join("\n");
+        assert!(t.contains("line19"), "应显示末尾（光标所在）行：{t}");
+        assert!(t.contains("共 20 行"), "应如实标注总行数：{t}");
+    }
+
+    #[test]
+    fn multiline_input_keeps_lines_within_width() {
+        // 行宽不变量在多行输入下同样成立（否则折行会滚屏）
+        let a = about();
+        let long = "很长的中文输入行".repeat(10);
+        let ed = editor::Editor::from_text(&format!("{long}\n{}", "x".repeat(300)));
+        for cols in [96usize, 120, 200] {
+            let out = Screen {
+                cols, rows: 30, facts: &[], input: &ed, status: "",
+                awaiting_input: false, show_cursor: true,
+                about: Some(&a), trust: None,
+                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                sidebar: true,
+            }
+            .render();
+            for (i, l) in plain(&out).iter().enumerate() {
+                let w = width::display_width(l);
+                assert!(w <= cols, "{cols} 第 {i} 行宽 {w} 超宽：{l:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_is_positioned_at_the_editors_cursor_not_the_end() {
+        // 光标必须落在编辑器的实际光标处。若仍按"文本末尾"算，
+        // 在中间编辑时光标会跑到别处，用户以为敲不进去。
+        let a = about();
+        let mut ed = editor::Editor::from_text("abcdef");
+        ed.move_home();
+        ed.move_right();
+        ed.move_right();
+        let out = Screen {
+            cols: 100, rows: 24, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: true,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false,
+        }
+        .render();
+        // 提取光标定位序列 ESC[<row>;<col>H（渲染尾部还有 ?25h 之类，需精确匹配）
+        let positions: Vec<usize> = out
+            .split("\u{1b}[")
+            .filter_map(|seg| {
+                let digits: String =
+                    seg.chars().take_while(|c| c.is_ascii_digit() || *c == ';').collect();
+                if !seg[digits.len()..].starts_with('H') || !digits.contains(';') {
+                    return None;
+                }
+                digits.split(';').nth(1).and_then(|s| s.parse::<usize>().ok())
+            })
+            .collect();
+        let col = *positions.last().expect("应有光标定位序列 ESC[<row>;<col>H");
+        // 光标应在第 3 个字符之后（col 2）→ 屏幕列 = 左边框位置 + 3
+        assert!(col > 3, "光标应随编辑器光标移动（实际列 {col}）");
     }
 
     // ── 带超时读键（resize 轮询的基础）──────────────────────────────────
@@ -3019,7 +3263,7 @@ mod tests {
                 Fact::ToolFinished { name: "bash".into(), exit_code: 0 },
             ];
             let out = Screen {
-                cols, rows, facts: &facts, input: "输入中文", status: "就绪",
+                cols, rows, facts: &facts, input: &editor::Editor::from_text("输入中文"), status: "就绪",
                 awaiting_input: false, show_cursor: false, about: Some(&a), trust: None,
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
             }
@@ -3154,7 +3398,7 @@ mod tests {
     fn trust_prompt_warns_about_workspace_risk() {
         let a = about();
         let out = Screen {
-            cols: 100, rows: 30, facts: &[], input: "", status: "",
+            cols: 100, rows: 30, facts: &[], input: &editor::Editor::new(), status: "",
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: Some(&TrustPrompt::default()),
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
@@ -3173,7 +3417,7 @@ mod tests {
         let a = about();
         let render_with = |sel: usize| {
             let out = Screen {
-                cols: 100, rows: 30, facts: &[], input: "", status: "",
+                cols: 100, rows: 30, facts: &[], input: &editor::Editor::new(), status: "",
                 awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: Some(&TrustPrompt { selected: sel }),
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
@@ -3351,7 +3595,7 @@ mod tests {
         let (idle, pending) = with_env(&[("COLORTERM", "truecolor")], || {
             let render_with = |awaiting: bool| {
                 Screen {
-                    cols: 80, rows: 20, facts: &[], input: "", status: "",
+                    cols: 80, rows: 20, facts: &[], input: &editor::Editor::new(), status: "",
                     awaiting_input: awaiting, show_cursor: false,
                     about: Some(&a), trust: None,
                     theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,

@@ -163,15 +163,24 @@ Neo —— 编程 Agent 内核
     /compact   压缩上下文（需 L4 编排，尚未实现）
     /exit      退出（别名 quit / q）
 
+多行输入
+  输入框支持多行（最多显示 6 行，超出滚到末尾）。
+  在多数终端里 shift+enter / alt+enter 会插入换行。
+
 按键
   tab          在 @ 上下文中补全
-  ↑ / ↓        历史导航；弹窗打开时用于选择
+  ↑ / ↓        本缓冲内移动；已在首/末行则走历史
+  ← / →        移动光标（可跨行）
+  home / end   行首 / 行尾
+  alt+b / alt+f  按词移动
+  ctrl+k       删到行尾      ctrl+u  删到行首
+  ctrl+w       删前一个词    delete  删除光标处字符
+  ctrl+z       撤销          ctrl+y  重做
   ctrl+r       搜索历史
   ctrl+g       用 $EDITOR 编辑当前输入
-  ctrl+p       命令面板
-  ctrl+t       切换到下一个主题
-  ctrl+l       清屏
-  esc          关闭弹窗
+  ctrl+p       命令面板      ctrl+t  切换主题
+  ctrl+b       侧栏开关      ctrl+l  清屏
+  esc          关闭弹窗 / 清空输入
   ctrl+c       退出"
 }
 
