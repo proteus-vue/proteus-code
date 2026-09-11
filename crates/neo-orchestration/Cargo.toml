@@ -1,0 +1,12 @@
+[package]
+name = "neo-orchestration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+neo-protocol = { path = "../neo-protocol" }
+neo-core = { path = "../neo-core" }
+neo-capability = { path = "../neo-capability" }
+neo-session = { path = "../neo-session" }
+serde = { workspace = true }

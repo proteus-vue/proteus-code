@@ -1,0 +1,25 @@
+[package]
+name = "neo-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# 产品名是 neo：CLI 入口就该叫 neo（用法/帮助里一直是 neo）
+autobins = false
+
+[[bin]]
+name = "neo"
+path = "src/main.rs"
+
+# `neo` multitool 入口。只做参数解析与装配 —— 业务在 L2/L3，渲染在 L5 宿主。
+[dependencies]
+neo-protocol = { path = "../neo-protocol" }
+neo-core = { path = "../neo-core" }
+neo-config = { path = "../neo-config" }
+neo-capability = { path = "../neo-capability" }
+neo-exec = { path = "../neo-exec" }
+neo-host-tui = { path = "../neo-host-tui" }
+neo-host-web = { path = "../neo-host-web" }
+neo-sandbox-local = { path = "../neo-sandbox-local" }
+neo-llm-deepseek = { path = "../neo-llm-deepseek" }
+neo-session-local = { path = "../neo-session-local" }
+serde_json = { workspace = true }

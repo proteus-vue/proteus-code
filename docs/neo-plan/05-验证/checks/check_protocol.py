@@ -11,7 +11,7 @@ import json, os, sys
 HERE = os.path.dirname(__file__)
 GOLDEN = os.path.join(HERE, "..", "golden", "protocol_replay.json")
 
-# ---- 状态机参照实现（对应 dsh-core::Session::transition） ----
+# ---- 状态机参照实现（对应 neo-core::Session::transition） ----
 IDLE, PLANNING, EXECUTING, AWAITING = "Idle", "Planning", "Executing", "AwaitingApproval"
 SEQ = [0]
 

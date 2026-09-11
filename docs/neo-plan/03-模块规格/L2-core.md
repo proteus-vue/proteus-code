@@ -1,7 +1,7 @@
 # L2 · 内核规格 ★
 
-**crate**：`dsh-core`
-**依赖**：`dsh-protocol`(L1)、`dsh-sandbox`/`dsh-platform`(L0)
+**crate**：`neo-core`
+**依赖**：`neo-protocol`(L1)、`neo-sandbox`/`neo-platform`(L0)
 **禁止依赖**：L3 capability、L4 orchestration、L5 host
 
 > **这一层不可替换**（ADR-0001）。这是与 DSH 最根本的分歧。
@@ -63,7 +63,7 @@ pub trait ModelProvider {
 后置覆盖前置。安全敏感键（`model_provider`、`profile`、`notify`）**只允许在用户级设置**，项目级忽略。
 
 ## 验收
-- [ ] `dsh-core` 不依赖 L3/L4/L5（架构守卫）
+- [ ] `neo-core` 不依赖 L3/L4/L5（架构守卫）
 - [ ] 同一 Op 序列 → 同一 EventMsg 序列（golden 回放）
 - [ ] 工具描述顺序在多次运行间字节一致（缓存命中前提）
 - [ ] 中断只在工具边界发生，无半写状态

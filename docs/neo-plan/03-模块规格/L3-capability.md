@@ -1,6 +1,6 @@
 # L3 · 能力层规格
 
-**crate**：`dsh-capability`
+**crate**：`neo-capability`
 **依赖**：L2、L1、L0
 **职责**：3 类扩展点的实现与注册（Tool / Skill / Subagent）+ MCP client
 

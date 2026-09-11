@@ -1,0 +1,19 @@
+[package]
+name = "neo-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# L2 CORE: 禁止依赖 L3(capability) / L4(orchestration) / L5(host*)
+[dependencies]
+neo-protocol = { path = "../neo-protocol" }
+neo-sandbox = { path = "../neo-sandbox" }
+neo-platform = { path = "../neo-platform" }
+neo-session = { path = "../neo-session" }
+neo-config = { path = "../neo-config" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+neo-mock = { path = "../neo-mock" }
+neo-capability = { path = "../neo-capability" }

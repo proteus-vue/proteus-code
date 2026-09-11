@@ -26,7 +26,7 @@
 | Shell 工具真实执行（经沙箱） | ✅ **已实现**（`bash` 真跑，输出受限） |
 | **真实模型完整推理** | ⚠️ **待验**：HTTP 链路已验证，但环境里的 `DEEPSEEK_API_KEY` 是占位符，未完成一次真实推理 |
 | `apply_patch` 落盘 | ✅ **已实现**（经 `ctx.write_file` 走沙箱，唯一匹配校验，真机验证落盘） |
-| Web 宿主（零依赖 HTTP + SSE） | ✅ **已实现**（`dsh-host-web`；`POST /api/turn` 提交、`GET /api/events` SSE、`/api/approve` 审批） |
+| Web 宿主（零依赖 HTTP + SSE） | ✅ **已实现**（`neo-host-web`；`POST /api/turn` 提交、`GET /api/events` SSE、`/api/approve` 审批） |
 | Desktop 宿主（系统 webview 壳） | 🟡 **契据就绪**：`DesktopHost` 的 `HostBackend` 实现与 T6 覆盖已完成；wry window 层未接（原型阶段不拉入平台图形栈） |
 | Goal 编排（L4） | ❌ **未实现** |
 | Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |
@@ -68,20 +68,20 @@ bash scripts/verify.sh     # 全套门禁：架构守卫 / 协议 / 会话 / 配
 proteus-code/                  ← 项目本体是 Rust 内核
 ├── Cargo.toml                 workspace（17 crates）
 ├── crates/                    ★ 内核与宿主
-│   ├── dsh-protocol/          L0 线协议（Op / EventMsg / 双轴枚举），零业务依赖
-│   ├── dsh-sandbox/           L1 平台（命令包裹：Seatbelt / Landlock+bwrap / ACL）
-│   ├── dsh-platform/          L1 平台（进程加固 / fs notify / git）
-│   ├── dsh-core/              ★ L2 内核：turn/step 主循环 + 三维闸门 + 4 个 SPI 契据
-│   ├── dsh-capability/        L3 能力（Shell-First 工具集：bash / apply_patch / 提问）
-│   ├── dsh-orchestration/     L4 目标编排（Goal 引擎）
-│   ├── dsh-host-tui/          L5 宿主：终端
-│   ├── dsh-host-desktop/      L5 宿主：系统 webview（替代 Electron）
-│   ├── dsh-host-web/          L5 宿主：浏览器（零依赖 HTTP + SSE，含内置页面）
-│   ├── dsh-exec/              L5 宿主：无头 / CI
-│   ├── dsh-cli/               `neo` 入口（multitool）
-│   ├── dsh-session/           会话真相源（append-only）
-│   ├── dsh-config/            四级配置 + 模式解析
-│   └── dsh-mock/              test-support：各 SPI 的 Mock 后端 + 反例后端
+│   ├── neo-protocol/          L0 线协议（Op / EventMsg / 双轴枚举），零业务依赖
+│   ├── neo-sandbox/           L1 平台（命令包裹：Seatbelt / Landlock+bwrap / ACL）
+│   ├── neo-platform/          L1 平台（进程加固 / fs notify / git）
+│   ├── neo-core/              ★ L2 内核：turn/step 主循环 + 三维闸门 + 4 个 SPI 契据
+│   ├── neo-capability/        L3 能力（Shell-First 工具集：bash / apply_patch / 提问）
+│   ├── neo-orchestration/     L4 目标编排（Goal 引擎）
+│   ├── neo-host-tui/          L5 宿主：终端
+│   ├── neo-host-desktop/      L5 宿主：系统 webview（替代 Electron）
+│   ├── neo-host-web/          L5 宿主：浏览器（零依赖 HTTP + SSE，含内置页面）
+│   ├── neo-exec/              L5 宿主：无头 / CI
+│   ├── neo-cli/               `neo` 入口（multitool）
+│   ├── neo-session/           会话真相源（append-only）
+│   ├── neo-config/            四级配置 + 模式解析
+│   └── neo-mock/              test-support：各 SPI 的 Mock 后端 + 反例后端
 ├── docs/
 │   ├── neo-plan/              ★ 设计方案：架构 / 模块规格 / 里程碑 / 验证套件
 │   │   ├── 02-架构设计/       ★ 方法论与 SPI 纲领（先读这个）

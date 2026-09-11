@@ -1,6 +1,6 @@
 # L4 · 目标编排层规格
 
-**crate**：`dsh-orchestration`
+**crate**：`neo-orchestration`
 **依赖**：L3、L2、L1、L0
 **职责**：ZCode Goal Mode 的落地 + 四阶段闭环
 

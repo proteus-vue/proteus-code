@@ -31,7 +31,7 @@
 
 ```
 src/tools.ts        src/commands.ts     src/skill.ts        src/index.ts
-src/policy-tool.ts  src/proteus-cli.ts  src/dsh-host.d.ts   (apps) desktop/src/profile.ts
+src/policy-tool.ts  src/proteus-cli.ts  src/neo-host.d.ts   (apps) desktop/src/profile.ts
 ```
 
 `ctx.tools` / `ctx.shell` / `ctx.llm` / `ctx.commands` / `ctx.skills` **都是 DSH 自己定义的 SPI**。我们是通过这些接口接入的，所以耦合面很小。
@@ -63,8 +63,8 @@ src/policy-tool.ts  src/proteus-cli.ts  src/dsh-host.d.ts   (apps) desktop/src/p
 - 做完**立刻能被 conformance 证明**（这是 skill 要求的「可证明」）。
 
 明确边界：
-- **新建**：`crates/dsh-mock`（Mock 后端 + conformance）、`crates/dsh-host-desktop`
-- **修改**：`dsh-core`（补 3 个语义接口）、`Cargo.toml`、`verify.sh`、`check_architecture.py`、`check_spi_conformance.py`
+- **新建**：`crates/neo-mock`（Mock 后端 + conformance）、`crates/neo-host-desktop`
+- **修改**：`neo-core`（补 3 个语义接口）、`Cargo.toml`、`verify.sh`、`check_architecture.py`、`check_spi_conformance.py`
 - **不动**：现有 Electron 实现、DSH bundle、ADR 既有结论
 
 ---
@@ -73,7 +73,7 @@ src/policy-tool.ts  src/proteus-cli.ts  src/dsh-host.d.ts   (apps) desktop/src/p
 
 ### Step 1｜语义接口（禁厂商/技术名词）
 
-新增 3 个接口到 `dsh-core`（其余 2 个已存在）：
+新增 3 个接口到 `neo-core`（其余 2 个已存在）：
 
 | 接口 | 命名纪律自检 |
 |---|---|
@@ -85,21 +85,21 @@ src/policy-tool.ts  src/proteus-cli.ts  src/dsh-host.d.ts   (apps) desktop/src/p
 
 ### Step 2｜≥2 后端（含 Mock，强制）
 
-新建 `crates/dsh-mock`。**Mock 不是可选项**（AP-01）：
+新建 `crates/neo-mock`。**Mock 不是可选项**（AP-01）：
 
 | SPI | 实现数 | 分布 |
 |---|---|---|
 | `ModelProvider` | **2** | `MockModelProvider`、`ScriptedModelProvider`（行为不同） |
-| `SandboxBackend` | **5** | `NoopSandbox`、`LeakySandbox`(坏) + dsh-sandbox 内 3 个 |
+| `SandboxBackend` | **5** | `NoopSandbox`、`LeakySandbox`(坏) + neo-sandbox 内 3 个 |
 | `SessionPersistence` | **2** | `InMemoryPersistence`、`TamperingPersistence`(坏) |
 | `HostBackend` | **3** | `DesktopHost` + `MockHost`、`BrittleHost`(坏) |
-| `Tool` | **5** | dsh-capability 3 个 + `MockTool`、`NamelessTool`(坏) |
+| `Tool` | **5** | neo-capability 3 个 + `MockTool`、`NamelessTool`(坏) |
 
 **每个 SPI 都配了一个"坏后端"** —— 这是 conformance 负向用例的被试。
 
 ### Step 3｜conformance 契约测试
 
-`crates/dsh-mock/tests/conformance.rs`，**10 个测试，同一份用例跑所有后端**：
+`crates/neo-mock/tests/conformance.rs`，**10 个测试，同一份用例跑所有后端**：
 
 | 契约 | 正向用例 | 负向用例（证明套件有牙齿） |
 |---|---|---|
@@ -180,7 +180,7 @@ verify.sh                                   ✅ 全部通过
 
 | 优先级 | 候选 | 计划 |
 |---|---|---|
-| **P1** | **Electron → `HostBackend` 后端** | 把 `main.ts` 里 21 处 Electron API 收进 `dsh-host-desktop` 的 Rust 实现；前端资源改由 webview 自定义协议注入。**这是 AP-04 的现存漏洞** |
+| **P1** | **Electron → `HostBackend` 后端** | 把 `main.ts` 里 21 处 Electron API 收进 `neo-host-desktop` 的 Rust 实现；前端资源改由 webview 自定义协议注入。**这是 AP-04 的现存漏洞** |
 | P1 | DSH → Rust 内核 | 按 `04-落地计划/` M0–M6 推进 |
 | P2 | Proteus CLI 调用 | 已单点适配（`proteus-cli.ts`），登记观察，暂不动 |
 

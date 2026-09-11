@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-配置层级与执行模式解析校验（对应 dsh-config）。
+配置层级与执行模式解析校验（对应 neo-config）。
 
   C1 四级配置：内置 -> /etc -> 用户 -> 项目 -> CLI flag，后置覆盖前置
   C2 安全敏感键（model_provider / profile / notify）项目级必须被忽略
@@ -29,7 +29,7 @@ def merge(*layers, scope=None):
             out[k] = v
     return out
 
-# 执行模式 -> (沙箱, 审批, 文件编辑策略)（对应 dsh_config::resolve）
+# 执行模式 -> (沙箱, 审批, 文件编辑策略)（对应 neo_config::resolve）
 # 第三维是必需的：ZCode 的 default 与 auto_edit 在"沙箱×审批"双轴上完全相同，
 # 二者的真实差异在工具类别粒度 —— 文件编辑是否自动放行、命令是否仍需批准。
 # 缺了这一维，两个模式在底层就不可区分（此前的映射曾被本校验判为歧义）。

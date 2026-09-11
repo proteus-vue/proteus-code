@@ -1,0 +1,9 @@
+[package]
+name = "neo-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+neo-protocol = { path = "../neo-protocol" }
+serde = { workspace = true }

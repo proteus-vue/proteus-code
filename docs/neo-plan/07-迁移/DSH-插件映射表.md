@@ -8,13 +8,13 @@
 | 工具注册表 | `ToolRegistry`（BTreeMap，顺序稳定） | L2 | ✅ 保留，**改为固定顺序以保证缓存命中** |
 | 文件编辑 / shell / 搜索 | `bash` + `apply_patch` | L3 | 🔶 **收敛为 Shell-First 最小集** |
 | 其余 90+ 官方工具 | Skill / MCP 显式注册 | L3 | ❌ **不再默认加载** |
-| 会话日志（append-only） | `dsh-session` JSONL | 旁挂 | ✅ 保留并强化为真相源 |
-| 沙箱（bwrap/Landlock、seatbelt、token） | `dsh-sandbox` | L1 | ✅ 保留，Rust 重写 |
+| 会话日志（append-only） | `neo-session` JSONL | 旁挂 | ✅ 保留并强化为真相源 |
+| 沙箱（bwrap/Landlock、seatbelt、token） | `neo-sandbox` | L1 | ✅ 保留，Rust 重写 |
 | fail-closed 拒绝执行 | `SandboxError::Unavailable` | L1 | ✅ 保留 |
 | 存储层 | 固定实现，格式版本化 | 旁挂 | ❌ **不再可替换**（ADR-0001） |
 | **Agent loop** | `run_turn`（固定） | L2 | ❌ **不再插件化**（ADR-0001） |
 | **UI** | L5 三宿主 | L5 | ❌ **不再插件化**（ADR-0001） |
-| 调度器 / 子 Agent | `dsh-orchestration` Goal 引擎 | L4 | 🔶 收敛为 Goal + 四阶段 |
+| 调度器 / 子 Agent | `neo-orchestration` Goal 引擎 | L4 | 🔶 收敛为 Goal + 四阶段 |
 | 4 种运行模式（Standard/PTC/Minimal/Creator） | — | — | ❌ **取消**，改为沙箱×审批×file_edit 正交组合 |
 | PTC（生成 TS 脚本编排） | — | — | ❌ **取消独立运行时**；多步编排改由 Subagent / shell 脚本承担 |
 | 插件框架 Cordis（vendor 9 包 + 18 patch） | — | — | ❌ **完全移除**，不引入任何插件元框架 |

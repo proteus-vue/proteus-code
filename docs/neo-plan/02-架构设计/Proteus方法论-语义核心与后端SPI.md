@@ -58,13 +58,13 @@ Proteus 明确：**单个角色不构成 seam**。一个可替换能力必须同
 
 | 语义对象 | 定义处 | 它固定了什么（platform-independent） |
 |---|---|---|
-| **Op / EventMsg** | `dsh-protocol` (L0) | 宿主→内核的意图、内核→宿主的事实。**唯一的跨层契约** |
-| **Turn / Step 状态机** | `dsh-core` (L2) | 一轮 = 0..N 步；步 = 一次模型请求 + 其工具调用 |
-| **SessionEvent** | `dsh-session` | append-only 真相源；模型可见即已落日志 |
-| **Tool 契约** | `dsh-capability` (L3) | 名 / 描述 / 参数 schema / 规范返回值 / 呈现投影 |
-| **Approval 决策** | `dsh-protocol` | `allow` / `ask` / `deny` + 理由（**不是**「怎么问」） |
-| **SandboxMode** | `dsh-protocol` | 三档语义：read-only / workspace-write / danger-full-access |
-| **Context 装配** | `dsh-core` | 哪些内容进请求、以什么顺序、（缓存友好）如何复用前缀 |
+| **Op / EventMsg** | `neo-protocol` (L0) | 宿主→内核的意图、内核→宿主的事实。**唯一的跨层契约** |
+| **Turn / Step 状态机** | `neo-core` (L2) | 一轮 = 0..N 步；步 = 一次模型请求 + 其工具调用 |
+| **SessionEvent** | `neo-session` | append-only 真相源；模型可见即已落日志 |
+| **Tool 契约** | `neo-capability` (L3) | 名 / 描述 / 参数 schema / 规范返回值 / 呈现投影 |
+| **Approval 决策** | `neo-protocol` | `allow` / `ask` / `deny` + 理由（**不是**「怎么问」） |
+| **SandboxMode** | `neo-protocol` | 三档语义：read-only / workspace-write / danger-full-access |
+| **Context 装配** | `neo-core` | 哪些内容进请求、以什么顺序、（缓存友好）如何复用前缀 |
 
 **约束挂在 IR 上，不挂在平台上。** 这与 Proteus 一致——也是 AI Agent 能安全介入的原因：它操作 IR，IR 上有铁律。
 
@@ -199,7 +199,7 @@ Proteus 明令声明「不适合的场景」与「规划未落地」的部分。
 - **不追求**成为通用 agent 框架。NEO 是**面向 Proteus 的编程 Agent**，差异化在 Proteus（见第七节）。
 - **OS 沙箱的三平台差异是真实成本**：macOS Seatbelt 与 Linux Landlock+bwrap 能力不同构；Windows restricted token+ACL 需要单独验证。**不得声称三平台等价**，只能声称「同一 `SandboxMode` 语义下各自尽最大努力，且越权必被拒」。
 - **MCP 是 SPI 后端，不是内核职责**。MCP 不可用不影响内核可用。
-- **`dsh-host-desktop` 的 webview 依赖 OS**：WKWebView/WebView2/WebKitGTK 行为有差异（尤其 `backdrop-filter`）。**不得声称三平台视觉一致**。
+- **`neo-host-desktop` 的 webview 依赖 OS**：WKWebView/WebView2/WebKitGTK 行为有差异（尤其 `backdrop-filter`）。**不得声称三平台视觉一致**。
 - 早期 Rust 原型**未跑过 `cargo test`**，只有 `cargo check` 与 Python 验证套件（`verify.sh`）。
 
 ---

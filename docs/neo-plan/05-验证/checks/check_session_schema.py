@@ -23,7 +23,7 @@ ALLOWED_KINDS = {
 }
 REQUIRED = {"v", "ts", "seq", "kind", "payload"}
 
-# 合法状态转移（对应 dsh-core::Session::transition）
+# 合法状态转移（对应 neo-core::Session::transition）
 IDLE, PLANNING, EXECUTING, AWAITING = "Idle", "Planning", "Executing", "AwaitingApproval"
 def step(state, kind):
     if kind == "shutdown_complete": return IDLE

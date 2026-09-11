@@ -3,182 +3,6 @@
 version = 4
 
 [[package]]
-name = "dsh-capability"
-version = "0.1.0"
-dependencies = [
- "dsh-config",
- "dsh-core",
- "dsh-protocol",
- "dsh-sandbox",
- "dsh-sandbox-local",
- "serde_json",
-]
-
-[[package]]
-name = "dsh-cli"
-version = "0.1.0"
-dependencies = [
- "dsh-capability",
- "dsh-config",
- "dsh-core",
- "dsh-exec",
- "dsh-host-tui",
- "dsh-host-web",
- "dsh-llm-deepseek",
- "dsh-protocol",
- "dsh-sandbox-local",
- "dsh-session-local",
- "serde_json",
-]
-
-[[package]]
-name = "dsh-config"
-version = "0.1.0"
-dependencies = [
- "dsh-protocol",
- "serde",
-]
-
-[[package]]
-name = "dsh-core"
-version = "0.1.0"
-dependencies = [
- "dsh-capability",
- "dsh-config",
- "dsh-mock",
- "dsh-platform",
- "dsh-protocol",
- "dsh-sandbox",
- "dsh-session",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dsh-exec"
-version = "0.1.0"
-dependencies = [
- "dsh-capability",
- "dsh-config",
- "dsh-core",
- "dsh-orchestration",
- "dsh-protocol",
- "serde_json",
-]
-
-[[package]]
-name = "dsh-host-desktop"
-version = "0.1.0"
-dependencies = [
- "dsh-core",
- "dsh-orchestration",
- "dsh-protocol",
-]
-
-[[package]]
-name = "dsh-host-tui"
-version = "0.1.0"
-dependencies = [
- "dsh-capability",
- "dsh-config",
- "dsh-core",
- "dsh-protocol",
-]
-
-[[package]]
-name = "dsh-host-web"
-version = "0.1.0"
-dependencies = [
- "dsh-capability",
- "dsh-config",
- "dsh-core",
- "dsh-orchestration",
- "dsh-protocol",
- "serde_json",
-]
-
-[[package]]
-name = "dsh-llm-deepseek"
-version = "0.1.0"
-dependencies = [
- "dsh-core",
- "dsh-protocol",
- "serde_json",
-]
-
-[[package]]
-name = "dsh-mock"
-version = "0.1.0"
-dependencies = [
- "dsh-core",
- "dsh-host-desktop",
- "dsh-host-tui",
- "dsh-host-web",
- "dsh-protocol",
- "serde_json",
-]
-
-[[package]]
-name = "dsh-orchestration"
-version = "0.1.0"
-dependencies = [
- "dsh-capability",
- "dsh-core",
- "dsh-protocol",
- "dsh-session",
- "serde",
-]
-
-[[package]]
-name = "dsh-platform"
-version = "0.1.0"
-dependencies = [
- "dsh-protocol",
-]
-
-[[package]]
-name = "dsh-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dsh-sandbox"
-version = "0.1.0"
-dependencies = [
- "dsh-protocol",
- "thiserror",
-]
-
-[[package]]
-name = "dsh-sandbox-local"
-version = "0.1.0"
-dependencies = [
- "dsh-core",
- "dsh-protocol",
-]
-
-[[package]]
-name = "dsh-session"
-version = "0.1.0"
-dependencies = [
- "dsh-protocol",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dsh-session-local"
-version = "0.1.0"
-dependencies = [
- "dsh-core",
- "dsh-protocol",
- "serde_json",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -189,6 +13,182 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "neo-capability"
+version = "0.1.0"
+dependencies = [
+ "neo-config",
+ "neo-core",
+ "neo-protocol",
+ "neo-sandbox",
+ "neo-sandbox-local",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-cli"
+version = "0.1.0"
+dependencies = [
+ "neo-capability",
+ "neo-config",
+ "neo-core",
+ "neo-exec",
+ "neo-host-tui",
+ "neo-host-web",
+ "neo-llm-deepseek",
+ "neo-protocol",
+ "neo-sandbox-local",
+ "neo-session-local",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-config"
+version = "0.1.0"
+dependencies = [
+ "neo-protocol",
+ "serde",
+]
+
+[[package]]
+name = "neo-core"
+version = "0.1.0"
+dependencies = [
+ "neo-capability",
+ "neo-config",
+ "neo-mock",
+ "neo-platform",
+ "neo-protocol",
+ "neo-sandbox",
+ "neo-session",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-exec"
+version = "0.1.0"
+dependencies = [
+ "neo-capability",
+ "neo-config",
+ "neo-core",
+ "neo-orchestration",
+ "neo-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-host-desktop"
+version = "0.1.0"
+dependencies = [
+ "neo-core",
+ "neo-orchestration",
+ "neo-protocol",
+]
+
+[[package]]
+name = "neo-host-tui"
+version = "0.1.0"
+dependencies = [
+ "neo-capability",
+ "neo-config",
+ "neo-core",
+ "neo-protocol",
+]
+
+[[package]]
+name = "neo-host-web"
+version = "0.1.0"
+dependencies = [
+ "neo-capability",
+ "neo-config",
+ "neo-core",
+ "neo-orchestration",
+ "neo-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-llm-deepseek"
+version = "0.1.0"
+dependencies = [
+ "neo-core",
+ "neo-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-mock"
+version = "0.1.0"
+dependencies = [
+ "neo-core",
+ "neo-host-desktop",
+ "neo-host-tui",
+ "neo-host-web",
+ "neo-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-orchestration"
+version = "0.1.0"
+dependencies = [
+ "neo-capability",
+ "neo-core",
+ "neo-protocol",
+ "neo-session",
+ "serde",
+]
+
+[[package]]
+name = "neo-platform"
+version = "0.1.0"
+dependencies = [
+ "neo-protocol",
+]
+
+[[package]]
+name = "neo-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-sandbox"
+version = "0.1.0"
+dependencies = [
+ "neo-protocol",
+ "thiserror",
+]
+
+[[package]]
+name = "neo-sandbox-local"
+version = "0.1.0"
+dependencies = [
+ "neo-core",
+ "neo-protocol",
+]
+
+[[package]]
+name = "neo-session"
+version = "0.1.0"
+dependencies = [
+ "neo-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-session-local"
+version = "0.1.0"
+dependencies = [
+ "neo-core",
+ "neo-protocol",
+ "serde_json",
+]
 
 [[package]]
 name = "proc-macro2"

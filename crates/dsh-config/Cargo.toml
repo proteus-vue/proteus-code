@@ -1,9 +1,0 @@
-[package]
-name = "dsh-config"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-dsh-protocol = { path = "../dsh-protocol" }
-serde = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "neo-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+neo-protocol = { path = "../neo-protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }

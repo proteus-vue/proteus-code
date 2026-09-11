@@ -1,6 +1,6 @@
 # L5 · 宿主层规格
 
-**crates**：`dsh-host-tui`、`dsh-host-desktop`、`dsh-host-web`、`dsh-exec`、`dsh-cli`
+**crates**：`neo-host-tui`、`neo-host-desktop`、`neo-host-web`、`neo-exec`、`neo-cli`
 **铁律**：**宿主不含任何业务逻辑，只做 渲染 + 输入解析 + 事件消费**
 
 ---
@@ -13,10 +13,10 @@
 
 | 宿主后端 | 技术 | 场景 | 二进制量级 |
 |---|---|---|---|
-| `dsh-host-tui` | ratatui + crossterm | 终端 / SSH / CI 旁路 | ~2–5 MB |
-| **`dsh-host-desktop`** | **wry（系统 webview）** | **桌面主入口** | **~5–10 MB** |
-| `dsh-host-web` | axum + WebSocket | 远程 / 多端浏览器 | ~5–10 MB |
-| `dsh-exec` | 无头，零交互 | CI / 脚本 / 管道 | ~2–5 MB |
+| `neo-host-tui` | ratatui + crossterm | 终端 / SSH / CI 旁路 | ~2–5 MB |
+| **`neo-host-desktop`** | **wry（系统 webview）** | **桌面主入口** | **~5–10 MB** |
+| `neo-host-web` | axum + WebSocket | 远程 / 多端浏览器 | ~5–10 MB |
+| `neo-exec` | 无头，零交互 | CI / 脚本 / 管道 | ~2–5 MB |
 
 对比 Electron 的 **~78 MB+**：系统 webview 既不捆绑 Chromium，也不捆绑 Node。
 
@@ -80,11 +80,11 @@ pub struct HostCapabilities {
 
 ---
 
-## 四、`dsh-host-desktop`（系统 webview）
+## 四、`neo-host-desktop`（系统 webview）
 
 - **技术**：`wry`（Tauri 的 webview 层，可单独使用，不必引 Tauri 全家桶）
 - **形态**：**单二进制**——Rust 内核 + 内嵌 web 资源。无 Node、无 pnpm、无 profile 安装
-- **与前端通信**：优先用 `wry` 自定义协议直接注入资源（**不开端口**，比回环服务更安全）；仅 `dsh-host-web` 才起 axum 回环服务
+- **与前端通信**：优先用 `wry` 自定义协议直接注入资源（**不开端口**，比回环服务更安全）；仅 `neo-host-web` 才起 axum 回环服务
 - **窗口 / 菜单 / Dock**：由 Rust 侧（`tao` / `winit`）负责
 - **视觉**：现有 React + 液态玻璃**直接复用**
 
@@ -100,7 +100,7 @@ pub struct HostCapabilities {
 
 ---
 
-## 五、`dsh-host-tui`（ratatui + crossterm）
+## 五、`neo-host-tui`（ratatui + crossterm）
 
 ### 快捷键（对齐 Codex）
 | 键 | 功能 |
@@ -122,7 +122,7 @@ TUI **无法显示图片、无法弹富交互**，因此是「内核是否真的
 
 ---
 
-## 六、`dsh-host-web`（axum + WebSocket）
+## 六、`neo-host-web`（axum + WebSocket）
 
 - 渲染层任意前端框架（React/Vue/Svelte），经 WS 消费事件流
 - **内核编译为单二进制后 `neo serve` 即本地服务**，浏览器直连；不需 Electron 也不需 webview
@@ -132,7 +132,7 @@ TUI **无法显示图片、无法弹富交互**，因此是「内核是否真的
 
 ---
 
-## 七、`dsh-exec`（无头 / CI）
+## 七、`neo-exec`（无头 / CI）
 
 ```
 neo exec "fix failing tests" --json --sandbox workspace-write
@@ -173,7 +173,7 @@ Proteus 明说：**单个角色不构成 seam**。宿主只有一种实现时，
 
 | | 现状 | 目标 |
 |---|---|---|
-| Electron 耦合 | **2 个文件**（`main.ts` 21 处 API、`probe.ts` 4 处） | 0（全部收进 `dsh-host-desktop`） |
+| Electron 耦合 | **2 个文件**（`main.ts` 21 处 API、`probe.ts` 4 处） | 0（全部收进 `neo-host-desktop`） |
 | `HostBackend` 实现 | **3 个**（`DesktopHost` 原型 + 2 个 Mock） | `tui` / `desktop` / `web` / `exec` 四个真实后端 |
 | conformance | 已有（10 用例，含 3 负向） | 保持 + 接 CI |
 

@@ -6,7 +6,7 @@
   A1 依赖只能向下，不得向上（如 L2 不得依赖 L3/L4/L5）
   A2 依赖图无环
   A3 三个宿主 crate 之间无相互依赖
-  A4 dsh-protocol 不得依赖任何业务 crate
+  A4 neo-protocol 不得依赖任何业务 crate
   A5 workspace 声明的 member 必须实际存在，且 package name == 目录名
 
 这是 ADR-0001（固定内核）与 ADR-0003（多宿主）的机器化保证。
@@ -17,24 +17,24 @@ from collections import defaultdict
 ROOT = os.environ.get("NEO_ROOT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
 
 LAYER = {
-    # 编号 = 真实依赖深度：dsh-protocol 零业务依赖，是整个依赖图的基石
-    "dsh-protocol":      0,  # L0 PROTOCOL（基石）
-    "dsh-sandbox":       1,  # L1 PLATFORM
-    "dsh-platform":      1,  # L1 PLATFORM
-    "dsh-core":          2,  # L2
-    "dsh-capability":    3,  # L3
-    "dsh-sandbox-local": 3,  # L3 PROVIDER（SandboxBackend 实现）
-    "dsh-llm-deepseek":  3,  # L3 PROVIDER（ModelProvider 实现）
-    "dsh-session-local": 3,  # L3 PROVIDER（SessionPersistence 实现）
-    "dsh-orchestration": 4,  # L4
-    "dsh-host-tui":      5,  # L5
-    "dsh-host-desktop":  5,  # L5
-    "dsh-host-web":      5,  # L5
-    "dsh-exec":          5,  # L5
-    "dsh-cli":           5,  # L5
+    # 编号 = 真实依赖深度：neo-protocol 零业务依赖，是整个依赖图的基石
+    "neo-protocol":      0,  # L0 PROTOCOL（基石）
+    "neo-sandbox":       1,  # L1 PLATFORM
+    "neo-platform":      1,  # L1 PLATFORM
+    "neo-core":          2,  # L2
+    "neo-capability":    3,  # L3
+    "neo-sandbox-local": 3,  # L3 PROVIDER（SandboxBackend 实现）
+    "neo-llm-deepseek":  3,  # L3 PROVIDER（ModelProvider 实现）
+    "neo-session-local": 3,  # L3 PROVIDER（SessionPersistence 实现）
+    "neo-orchestration": 4,  # L4
+    "neo-host-tui":      5,  # L5
+    "neo-host-desktop":  5,  # L5
+    "neo-host-web":      5,  # L5
+    "neo-exec":          5,  # L5
+    "neo-cli":           5,  # L5
 }
-SIDE = {"dsh-session", "dsh-config"}   # 旁挂，任何层可用
-HOSTS = {"dsh-host-tui", "dsh-host-desktop", "dsh-host-web", "dsh-exec"}
+SIDE = {"neo-session", "neo-config"}   # 旁挂，任何层可用
+HOSTS = {"neo-host-tui", "neo-host-desktop", "neo-host-web", "neo-exec"}
 LAYER_NAME = {0: "L0 protocol", 1: "L1 platform", 2: "L2 core",
               3: "L3 capability", 4: "L4 orchestration", 5: "L5 host"}
 
@@ -131,10 +131,10 @@ def main():
     checks.append(("A3", "宿主之间无相互依赖", not any(f.startswith("A3") for f in failures)))
 
     # A4 protocol 零业务依赖
-    pdeps = [d for d in graph.get("dsh-protocol", []) if d not in SIDE and d in LAYER]
+    pdeps = [d for d in graph.get("neo-protocol", []) if d not in SIDE and d in LAYER]
     for d in pdeps:
-        failures.append(f"A4 dsh-protocol 依赖业务 crate: {d}")
-    checks.append(("A4", "dsh-protocol 无业务依赖", not pdeps))
+        failures.append(f"A4 neo-protocol 依赖业务 crate: {d}")
+    checks.append(("A4", "neo-protocol 无业务依赖", not pdeps))
 
     print("=" * 62)
     print("架构守卫 · 依赖方向校验")

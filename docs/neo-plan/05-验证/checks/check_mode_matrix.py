@@ -31,7 +31,7 @@ def needs_ask(policy):
     return policy != "never"
 
 def gate(mode, policy, action):
-    """返回 ('allow'|'ask'|'deny') —— 对应 dsh_core::ApprovalGate::gate"""
+    """返回 ('allow'|'ask'|'deny') —— 对应 neo_core::ApprovalGate::gate"""
     if not sandbox_allows(mode, action):
         # 沙箱不允许：审批不能覆盖
         if policy == "never":

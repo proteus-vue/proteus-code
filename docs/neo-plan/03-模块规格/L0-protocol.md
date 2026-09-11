@@ -1,6 +1,6 @@
 # L0 · 协议层规格 ★ 基石
 
-**crate**：`dsh-protocol`
+**crate**：`neo-protocol`
 **依赖**：仅 `serde` / `serde_json`（**禁止依赖任何业务 crate**）
 **职责**：纯数据类型定义，无业务逻辑，无副作用
 
@@ -41,6 +41,6 @@ pub enum  ErrorSource { Model, Tool, Sandbox, Config, Internal }
 `seq` 必须严格递增 —— 这是"append-only 未破坏"的校验依据（见 `check_session_schema.py`）。
 
 ## 验收
-- [ ] `cargo build -p dsh-protocol` 不引入任何业务 crate
+- [ ] `cargo build -p neo-protocol` 不引入任何业务 crate
 - [ ] JSONL 每条事件通过 schema 校验
 - [ ] `seq` 严格递增，无重复、无空洞

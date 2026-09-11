@@ -24,6 +24,24 @@
 
 ---
 
+## 1.5 crate 命名：全部 `neo-`，以及两处**必须**保留 `dsh`
+
+17 个 crate 一律 `neo-`（`neo-protocol` / `neo-core` / `neo-host-web` …），
+不再用 `dsh-` 前缀 —— 内核对 DSH 的借鉴是**思想**，不是包名延续。
+
+两处**刻意不动**（动了反而是错的）：
+
+| 位置 | 为什么保留 `dsh` |
+|---|---|
+| `legacy/` | 那是真的 DSH 插件代码：它 `import '@deepseek-ai/dsh-*'`、写的是 `dsh-host.d.ts`。这里的 `dsh` 指向上游真实包名，改成 `neo` 会指向不存在的包 |
+| `docs/neo-plan/REVIEW-proteus-code.md` | 评审稿的论据是「DSH 现状已有 X」，引的是 DSH 自己的包（`dsh-goal` / `dsh-user-approval` / `dsh-sandbox-policy`…）。改名会篡改证据 |
+
+**判据**：`dsh-X` 出现在「我们自己的代码/规格/门禁」里 = 指我们的 crate，必须叫 `neo-X`；
+出现在「引用上游 DSH 的证据」里 = 指真实上游包，必须留 `dsh-X`。
+这个区分已由 `scripts/verify.sh` 兜住 —— 架构守卫按 crate 名匹配，改名后仍全绿。
+
+---
+
 ## 2. 方法论：为什么是「5 个有名 SPI」，不是「一切皆插件」也不是「写死内核」
 
 **DSH 的病不是插件太多，而是约 90 个 seam 没有名字、没有门禁。**
@@ -115,7 +133,7 @@ Rust 消除 UB，但**一条 `yes` 或 `find /` 能把进程撑爆**，完全安
 
 ### 4.5 同名 trait 会误导（已消除）
 
-`dsh-sandbox`（L1）与 `dsh-core`（L2）原本都定义了 `SandboxBackend`，
+`neo-sandbox`（L1）与 `neo-core`（L2）原本都定义了 `SandboxBackend`，
 但职责不同：前者「把命令包裹成受限形式」，后者「在某档语义下能否执行」。
 合并会迫使 L1 依赖 L2 的语义类型，破坏依赖方向。**前者改名 `CommandWrapper`。**
 
@@ -190,10 +208,10 @@ TUI 用 pty 驱动验证（**轮询就绪信号**再送按键，不用固定 sle
 要迎合前端就把事实抽取也搬进宿主，那会破坏 T6 的可比性。
 
 ### (d) 引用解析曾有两个副本，已收敛到 L0
-`dsh-host-web` 和 `dsh-host-desktop` 各写了一份 `parse_refs`，且返回类型不同
+`neo-host-web` 和 `neo-host-desktop` 各写了一份 `parse_refs`，且返回类型不同
 （一个 `(char, String)`、一个 `ContextRef`）。这是典型的**语义漂移**：
 同一个 `@` 在两个宿主里语义可能分叉。引用符号是界面约定，但"这是个文件引用"
-是协议语义，因此收敛到 `dsh-protocol::parse_refs`，宿主只 `pub use`。
+是协议语义，因此收敛到 `neo-protocol::parse_refs`，宿主只 `pub use`。
 判据很简单：**同一件事在两个宿主里各写一遍 = 它站错了层。**
 
 ---
@@ -240,7 +258,7 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 
 **写测试时的两条纪律**：
 1. **每个 SPI 都配一个「坏后端」**作为负向用例被试 —— 抓不住反例的套件没有牙齿。
-2. **性能与有界性要实测**，不能写形容词。`crates/dsh-core/tests/memory.rs`
+2. **性能与有界性要实测**，不能写形容词。`crates/neo-core/tests/memory.rs`
    用计数 `GlobalAlloc` 量化分配；上限类断言必须给出具体字节数。
 
 ---

@@ -1,10 +1,10 @@
 # L1 · 平台层规格
 
-**crates**：`dsh-sandbox`、`dsh-platform`
-**依赖**：`dsh-protocol`（L0，共享枚举如 SandboxMode）
+**crates**：`neo-sandbox`、`neo-platform`
+**依赖**：`neo-protocol`（L0，共享枚举如 SandboxMode）
 **职责**：OS 原语封装，无任何业务语义
 
-## dsh-sandbox
+## neo-sandbox
 
 ```rust
 pub enum SandboxMode { ReadOnly, WorkspaceWrite, DangerFullAccess }
@@ -43,7 +43,7 @@ writable_roots = ["/extra/path"]
 | Windows | restricted token + ACL | **读取、网络、进程可见性不受限**（诚实标注） |
 | WSL2 | 走 Linux 实现 | WSL1 不支持（bwrap 依赖） |
 
-## dsh-platform
+## neo-platform
 
 | 能力 | 说明 |
 |---|---|
@@ -55,4 +55,4 @@ writable_roots = ["/extra/path"]
 ## 验收
 - [ ] 三平台沙箱各自可阻止越界写入（用真实越权命令测试）
 - [ ] 无可用后端时返回 `SANDBOX_UNAVAILABLE` 而非裸奔
-- [ ] `dsh-platform` 不依赖 L2 及以上（架构守卫校验）
+- [ ] `neo-platform` 不依赖 L2 及以上（架构守卫校验）

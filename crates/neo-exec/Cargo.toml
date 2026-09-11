@@ -1,0 +1,14 @@
+[package]
+name = "neo-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# L5 HOST: 无头 / CI 宿主。不含业务逻辑，只做"事件 → 文本"渲染。
+[dependencies]
+neo-protocol = { path = "../neo-protocol" }
+neo-core = { path = "../neo-core" }
+neo-config = { path = "../neo-config" }
+neo-capability = { path = "../neo-capability" }
+neo-orchestration = { path = "../neo-orchestration" }
+serde_json = { workspace = true }

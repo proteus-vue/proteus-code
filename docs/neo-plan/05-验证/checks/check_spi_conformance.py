@@ -38,31 +38,31 @@ SPI_SPEC = {
     "ModelProvider": {
         "trait": "ModelProvider",
         "conformance": "T2",
-        "test": "crates/dsh-mock/tests/conformance.rs",
+        "test": "crates/neo-mock/tests/conformance.rs",
         "status": "landed",
     },
     "SandboxBackend": {
         "trait": "SandboxBackend",
         "conformance": "T4",
-        "test": "crates/dsh-mock/tests/conformance.rs",
+        "test": "crates/neo-mock/tests/conformance.rs",
         "status": "landed",
     },
     "SessionPersistence": {
         "trait": "SessionPersistence",
         "conformance": "T3",
-        "test": "crates/dsh-mock/tests/conformance.rs",
+        "test": "crates/neo-mock/tests/conformance.rs",
         "status": "landed",
     },
     "HostBackend": {
         "trait": "HostBackend",
         "conformance": "T6",
-        "test": "crates/dsh-mock/tests/conformance.rs",
+        "test": "crates/neo-mock/tests/conformance.rs",
         "status": "landed",
     },
     "ToolTransport": {
         "trait": "Tool",
         "conformance": "T5",
-        "test": "crates/dsh-mock/tests/conformance.rs",
+        "test": "crates/neo-mock/tests/conformance.rs",
         "status": "landed",
     },
 }
@@ -191,7 +191,7 @@ def run():
         summary.append(f"  ✓ SPI 总数 {n} <= {MAX_SPI}")
 
     # ---- S5 宿主后端 >= 2（T6 前提）------------------------------------
-    hosts = [c for c in srcs if c.startswith("dsh-host-")]
+    hosts = [c for c in srcs if c.startswith("neo-host-")]
     if len(hosts) < 2:
         problems.append(f"S5 宿主后端只有 {len(hosts)} 个（{hosts}）—— T6 语义等价无从验证")
     else:
