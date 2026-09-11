@@ -174,10 +174,29 @@ This will allow the following patterns until OpenCode is restarted
 | P9 | 拒绝带理由 | 支持 | ❌ 无（需协议加 message 字段） | ⬜ 待做 |
 | P10 | 键位提示 | 底部右侧常驻 | ✅ `⇆ 选择 enter 确认 esc 拒绝` | ✅ 已改 |
 | P11 | 左右键选择 | `←/→` 在选项间移动 | ✅ 已支持（含 h/l） | ✅ 已改 |
+| P12 | **ctrl+c 语义（分层）** | 权限框内 = **拒绝**（`app.exit` 被重绑为 Reject）；运行中 = 中断；空闲 = 退出 | ✅ 三段对齐 | ✅ 已改 |
+| P13 | 底纹（背景） | 无装饰性底纹；模态用平铺遮罩 | ✅ 模态时关掉星场、铺统一遮罩 | ✅ 已改 |
 | — | 侧栏 | panel 底 + element 悬停 | panel 底 + 竖线 | 🟡 部分 |
 | — | 输入框 | 见 `component/prompt/index.tsx` | 已有边框+模型行 | 🟡 部分 |
 
 ---
+
+## 4.1 ctrl+c 的分层语义（重要）
+
+opencode 的 `app.exit` 默认绑 `ctrl+c,ctrl+d,<leader>q`
+（`config/keybind.ts:48`），但在**权限对话框内被重绑定**为
+`Reject permission`（`routes/session/permission.tsx` 里 `name: "app.exit"`
+的 `run()` 调 `onSelect(escapeKey)`）。所以：
+
+| 场景 | ctrl+c 的含义 |
+|---|---|
+| 权限/对话框打开 | **拒绝**（不是退出） |
+| 正在运行（回合中） | 中断当前回合（回到空闲） |
+| 空闲 | 退出应用 |
+
+我们此前一律 `Key::Quit => break`（直接退出），于是用户在审批框上按
+ctrl+c 想取消，**整个会话消失**（用户报的"突然退出会话"）。
+现已按上表对齐。
 
 ## 5. 落地顺序（按"影响面 × 被复用度"排）
 

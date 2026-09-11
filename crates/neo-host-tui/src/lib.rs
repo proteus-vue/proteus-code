@@ -383,6 +383,33 @@ fn read_key_timeout(stdin: &mut impl Read, timeout_tenths: u8) -> Option<Key> {
     Some(decode_first(&b, stdin))
 }
 
+/// 推进一步期间监听输入：只认 **ctrl+c**（中断本轮），其余按键丢弃。
+///
+/// # 为什么必须专门做这件事
+///
+/// opencode 里 `ctrl+c` 在**运行中 = 中断当前回合**，空闲时才退出应用。
+/// 之前我们一律 `Key::Quit => break`（直接退出），于是"想停下这一轮"
+/// 会变成**退出整个会话** —— 用户看到的"突然退出会话"就是这个。
+///
+/// 而且此时**不能把按键缓存起来稍后处理**：用户情急之下会连按几下 ctrl+c，
+/// 若攒着，回合结束后会被逐个当成"退出"，表现为"退出后还继续退出/残留输入"。
+/// 所以这里**只取中断信号、其余一律丢弃**。
+///
+/// 返回 `true` = 用户要求中断本轮。
+fn poll_interrupt(stdin: &mut impl Read) -> bool {
+    let mut hit = false;
+    // 每步最多看 4 次（每次约 0.1s），既能及时响应又不会拖慢推进
+    for _ in 0..4 {
+        match read_key_timeout(stdin, 1) {
+            Some(Key::Quit) => hit = true,
+            // 非中断键：丢弃。**不缓存**（见上），只提示一次用法差异。
+            Some(_) => {}
+            None => break,
+        }
+    }
+    hit
+}
+
 /// 从已读到的首字节 + stdin 续读，解出一个按键。
 fn decode_first(first: &[u8; 1], stdin: &mut impl Read) -> Key {
     let b = first[0];
@@ -524,6 +551,21 @@ pub enum Tone {
 }
 
 impl Pal {
+    /// 只设前景的 SGR；`Tone::None` 返回**空串**而不是 reset。
+    ///
+    /// # 为什么必须区分 reset 与"不设前景"
+    ///
+    /// `tone(Tone::None)` 返回的是 reset 序列，而 reset 会**连同背景一起清掉**。
+    /// 背景层引入后这就成了 bug：空格的背景刚设上、下一句 reset 就把它抹掉，
+    /// 结果是"只有星场那些格子留着深色底"——整屏变成一格格的深色方块
+    /// （用户截图里那个"好吓人"的花纹）。reset 由 `lines()` 统一发，这里只负责前景。
+    fn fg_sgr(&self, t: Tone) -> String {
+        match t {
+            Tone::None => String::new(),
+            other => self.tone(other),
+        }
+    }
+
     /// 背景色的 SGR。主题里三档层次必须**可区分但都不抢戏**：
     /// 面板最接近底色，表面稍亮（卡片要"浮起来"），选中是低饱和强调色。
     fn bg(&self, b: Bg) -> String {
@@ -1021,7 +1063,9 @@ impl Grid {
     /// （之后调用不会盖掉字符，只补底色）。
     fn fill_bg(&mut self, r0: usize, r1: usize, c0: usize, c1: usize, bg: Bg) {
         for r in r0..r1.min(self.rows) {
-            for c in c0..c1.min(self.cols).min(self.put_limit) {
+            // 背景**不受 `put_limit` 限制**：那个限制是给"内容不越界到侧栏"用的，
+            // 背景（尤其遮罩）本就该铺满整屏 —— 受限制会让遮罩漏掉侧栏那一块。
+            for c in c0..c1.min(self.cols) {
                 let i = r * self.cols + c;
                 self.bg[i] = Some(bg);
             }
@@ -1166,7 +1210,10 @@ impl Grid {
                     }
                     let t = self.tone[i];
                     let b = self.bg[i];
-                    // 前景或背景任一变化都要重发 SGR（并先 reset）
+                    // 前景或背景任一变化都要重发 SGR。顺序固定：
+                    //   reset（清掉旧的前景/背景）→ 设背景 → 设前景。
+                    // 前景用 `fg_sgr`：`Tone::None` 表示"不设前景"，
+                    // **不能**发 reset —— 否则刚设的背景会被抹掉（见 fg_sgr 注释）。
                     if !started || t != cur || b != cur_bg {
                         if started {
                             out.push_str(&p.reset);
@@ -1174,7 +1221,7 @@ impl Grid {
                         if let Some(bg) = b {
                             out.push_str(&p.bg(bg));
                         }
-                        out.push_str(&p.tone(t));
+                        out.push_str(&p.fg_sgr(t));
                         cur = t;
                         cur_bg = b;
                         started = true;
@@ -1320,7 +1367,14 @@ impl Screen<'_> {
             regions.popup_items = self.popup_item_rows(chrome_top);
         }
 
-        g.fill_background(self.appearance.background, self.custom_background);
+        // 有模态（审批）在场时**不画装饰性背景**：铺一层统一的暗色遮罩，
+        // 与 opencode 的平铺压暗一致。星场留在底下会让遮罩变成"一格格的
+        // 深色方块"（每个星点都被深底衬成一个块）—— 既难看又分散注意力。
+        if self.approval.is_some() {
+            g.fill_bg(0, self.rows, 0, self.cols, Bg::Backdrop);
+        } else {
+            g.fill_background(self.appearance.background, self.custom_background);
+        }
         let mut out = format!("{ESC}[H{ESC}[2J");
         out.push_str(&g.lines(&p).join("\r\n"));
         match cursor {
@@ -3318,6 +3372,7 @@ fn pump_until_boundary<F>(
     appearance: appearance::Appearance,
     custom_bg: Option<&Vec<String>>,
     stdout: &mut impl Write,
+    stdin: &mut impl Read,
     cols: usize,
     rows: usize,
 ) -> std::io::Result<()>
@@ -3325,6 +3380,17 @@ where
     F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
 {
     loop {
+        // 推进一步之前先看有没有 ctrl+c：**运行中 ctrl+c = 中断本轮**，
+        // 不是退出应用（opencode 的语义）。清空缓冲区里的其它按键，
+        // 免得它们在回合结束后被当成"退出/提交"。
+        if poll_interrupt(stdin) {
+            match submit(neo_protocol::Op::Interrupt) {
+                Ok(produced) => events.extend(produced),
+                Err(e) => events.push(EventMsg::Error { message: e }),
+            }
+            *outstanding = None;
+            return Ok(());
+        }
         match submit(neo_protocol::Op::Pump) {
             Ok(produced) => {
                 *outstanding = latest_approval_id(&produced);
@@ -5617,7 +5683,17 @@ custom_bg.is_some(),
             {
                 let ap = approval.as_mut().expect("上面已判 is_some");
                 match key {
-                    Key::Quit => break,
+                    // **ctrl+c 在这里 = 拒绝，不是退出**。
+                    //
+                    // opencode 的权限对话框把 `app.exit`（默认 ctrl+c/ctrl+d）
+                    // **重绑定**为 "Reject permission"（permission.tsx 的
+                    // commands 里 `name: "app.exit"` → `onSelect(escapeKey)`）。
+                    // 我们之前是 `Key::Quit => break`（直接退出应用）—— 用户在
+                    // 审批框上按 ctrl+c 想取消，结果整个会话没了（"突然退出会话"）。
+                    Key::Quit => {
+                        ap.selected = ApprovalPrompt::CHOICES.len() - 1;
+                        decision = Some(ap.choice_at());
+                    }
                     Key::Up | Key::Char('k') => {
                         ap.selected = ap.selected.saturating_sub(1);
                     }
@@ -5691,6 +5767,7 @@ custom_bg.is_some(),
                         current_appearance,
                         custom_bg.as_ref(),
                         &mut stdout,
+                        &mut stdin,
                         cols,
                         rows,
                     )?;
@@ -6767,6 +6844,7 @@ sessions,
                     current_appearance,
                     custom_bg.as_ref(),
                     &mut stdout,
+                    &mut stdin,
                     cols,
                     rows,
                 )?;
@@ -9627,6 +9705,62 @@ mod tests {
             latest_approval_id(&[EventMsg::TurnComplete { input_tokens: 0, output_tokens: 0 }]),
             None
         );
+    }
+
+    #[test]
+    fn background_survives_tone_none_cells() {
+        // 真实 bug：背景层引入后，空格格子的 tone 是 Tone::None，
+        // 而 `tone(Tone::None)` 返回的是 **reset** —— 它会把刚设的背景一起清掉。
+        // 结果只有星场那些格子留着深色底，整屏变成"一格格的深色方块"
+        // （用户截图里那个吓人的花纹）。
+        let mut g = Grid::new(20, 3);
+        // 铺满遮罩底色，且**不写任何字符**（模拟"整屏只有背景"的情形）
+        g.fill_bg(0, 3, 0, 20, Bg::Backdrop);
+        let p = Pal::new(ColorMode::TrueColor, theme::ThemeName::Neo);
+        // 关掉 skip：默认全是空格
+        let lines = g.lines(&p);
+        for (i, l) in lines.iter().enumerate() {
+            assert!(
+                l.contains("48;2;10;10;12"),
+                "第 {i} 行必须保留遮罩背景（reset 不得抹掉它）：{l:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn modal_suppresses_the_decorative_starfield() {
+        // 模态在场时不该再铺星场：星点会被深底衬成一个个方块。
+        let ed = editor::Editor::new();
+        let ap = ApprovalPrompt {
+            detail: String::new(),
+            title: "Shell 命令".into(),
+            icon: "#".into(),
+            summary: "$ echo hi".into(),
+            diff: None,
+            selected: 0,
+        };
+        let mut ap_state = appearance::Appearance::default();
+        ap_state.background = appearance::Background::Stars;
+        let out = Screen {
+            cols: 100, rows: 30, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: false,
+            approval: Some(&ap),
+            about: Some(&about()), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            settings_picker: None, settings_form: None, settings_confirm: None,
+            appearance: ap_state, custom_background: None,
+        }
+        .render();
+        let text = plain(&out).join("\n");
+        // 星场字符不该出现在正文区（模态之外）
+        let star_count = text.matches('·').count() + text.matches('+').count();
+        assert!(
+            star_count < 20,
+            "模态在场时不该铺星场（发现 {star_count} 个星点）"
+        );
+        assert!(text.contains("需要审批"), "审批卡片本身仍要画出来");
     }
 
     #[test]
