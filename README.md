@@ -20,7 +20,7 @@
 | `SandboxBackend` 真实后端（macOS Seatbelt） | ✅ **已实现**，6 项**真机**越权拦截测试 |
 | `SessionPersistence` 真实后端（JSONL append-only） | ✅ **已实现**，重开续号已验证 |
 | `neo exec` 无头宿主（端到端闭环） | ✅ **已实现**，离线 + 真实 provider 双路径跑通 |
-| `neo tui` 终端宿主（NEO 紫主题 + @// 弹窗 + !shell + 审批 diff + 右侧面板 + Markdown 高亮 + 7 主题 + 信任门） | ✅ **已实现**，pty 逐项验证（含宽/窄终端、resize 重绘） |
+| `neo tui` 终端宿主（NEO 紫主题 + 多行输入 + @// 弹窗 + 鼠标 + 滚动搜索 + 审批 diff + 右侧面板 + Markdown 高亮 + 信任门） | ✅ **已实现**，pty 逐项验证（含宽/窄终端、resize 重绘） |
 | `neo serve` Web 宿主（浏览器界面 + SSE 事件流 + 审批） | ✅ **已实现**，端到端验证（订阅→提交→审批→真落盘） |
 | **T6 宿主语义等价**（同一事件流多宿主比对） | ✅ **铁律生效**：headless / TUI / desktop / **web** 四宿主事实完全等价 |
 | Shell 工具真实执行（经沙箱） | ✅ **已实现**（`bash` 真跑，输出受限） |
@@ -79,6 +79,7 @@ cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
 #     alt+enter 换行 · ctrl+k 删到行尾 · ctrl+u 删到行首 · ctrl+w 删词
 #     ctrl+z 撤销 · ctrl+y 重做 · home/end · alt+b/f 按词移动
 #   转录阅读：pageup/pagedown 半页滚动 · ctrl+e 回最新 · ctrl+f 搜索
+#   鼠标：滚轮滚动转录 · 点击选弹窗项 · 点侧栏切换（收起后点右下角 ‹ 展开）
 #   Tab 补全 / ctrl+r 历史 / ctrl+g 编辑器 / ctrl+l 清屏 / esc 关弹窗
 neo tui --provider selftest --mode default
 # 等价写法：neo --provider selftest --mode default（裸选项默认进 TUI）

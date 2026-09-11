@@ -24,6 +24,7 @@ pub mod editor;
 pub mod input;
 pub mod popup;
 pub mod markdown;
+pub mod mouse;
 pub mod stars;
 pub mod view;
 pub mod syntax;
@@ -102,6 +103,51 @@ fn set_stty(spec: &str) -> Option<()> {
         .status()
         .ok()?;
     status.success().then_some(())
+}
+
+/// 鼠标上报模式（RAII）。
+///
+/// 开启 SGR 扩展模式（`?1006h`）+ 按键事件上报（`?1002h`：按下/释放与拖拽）。
+/// 不用 `?1000h`（只报按下）是因为滚轮与拖拽在 1002 下才稳定。
+///
+/// **必须在退出时关闭**：否则 shell 会收到我们留下的鼠标序列，
+/// 表现为"终端里鼠标乱跳、选中文本失灵"——这比 TUI 本身出错更难排查，
+/// 因为用户已经退出到 shell 了。
+struct MouseMode {
+    active: bool,
+}
+
+impl MouseMode {
+    fn enter(enabled: bool) -> Self {
+        if !enabled {
+            return Self { active: false };
+        }
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{ESC}[?1002h{ESC}[?1006h");
+        let _ = out.flush();
+        Self { active: true }
+    }
+
+    fn leave(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        Self::leave_now();
+    }
+
+    /// 无需实例即可执行（panic 钩子用）。
+    fn leave_now() {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{ESC}[?1006l{ESC}[?1002l");
+        let _ = out.flush();
+    }
+}
+
+impl Drop for MouseMode {
+    fn drop(&mut self) {
+        self.leave();
+    }
 }
 
 /// 备用屏幕缓冲（alternate screen）。
@@ -225,6 +271,8 @@ pub enum Key {
     Search,
     SearchNext,
     SearchPrev,
+    /// 鼠标事件（SGR 扩展模式）
+    Mouse(mouse::MouseEvent),
     /// Ctrl+R 历史搜索
     SearchHistory,
     /// Ctrl+G 用 $EDITOR 编辑当前输入
@@ -331,6 +379,31 @@ fn decode_first(first: &[u8; 1], stdin: &mut impl Read) -> Key {
             if c[0] == b'~' || c[0].is_ascii_alphabetic() {
                 break;
             }
+        }
+
+        // 鼠标（SGR）：`ESC [ < b;x;y M|m` —— 比普通转义序列长得多
+        // （宽终端下可达十几个字节），所以单独一路读到终止符。
+        // 必须**有上限**：终端若送来畸形的半截序列，无上限读会把循环卡死。
+        // 注意：上面的循环已经读走了最多 3 个字节，所以这里可能已经是 4 字节
+        // （`ESC [ <` 加上第一个参数字节）。用 `>=` 而不是 `==` ——
+        // 写成 `== 3` 会让判断永远不成立，鼠标彻底失效。
+        if seq.len() >= 3 && seq[1] == b'[' && seq[2] == b'<' {
+            const MAX_MOUSE_BYTES: usize = 46; // 足够容纳 5 位数的宽坐标
+            while seq.len() < MAX_MOUSE_BYTES {
+                let mut c = [0u8; 1];
+                if stdin.read(&mut c).unwrap_or(0) == 0 {
+                    break;
+                }
+                seq.push(c[0]);
+                if c[0] == b'M' || c[0] == b'm' {
+                    break;
+                }
+            }
+            let body = String::from_utf8_lossy(&seq[3..]);
+            return match mouse::parse_sgr(&body) {
+                Some(ev) => Key::Mouse(ev),
+                None => Key::Unknown,
+            };
         }
         return decode_key(&seq);
     }
@@ -700,6 +773,28 @@ const SIDEBAR_MIN_COLS: usize = 96;
 
 /// 一行的事实片段：(起始列, 文本, 色调)
 pub type Seg = (usize, String, Tone);
+
+/// 渲染时记录的命中区域。
+///
+/// 为什么由渲染产出而不是输入时另算一遍：**只有渲染知道东西画在哪**。
+/// 另算一遍就等于把布局逻辑写两遍，两边一旦不一致，鼠标就会点错地方
+/// （而且这种错很难归因）。渲染顺手记下来是唯一不会漂移的做法。
+#[derive(Debug, Clone, Default)]
+pub struct Regions {
+    /// 转录正文区（用于滚轮）：(top, bottom_exclusive)
+    pub transcript: Option<(usize, usize)>,
+    /// 侧栏区域（用于点击）：(x0, x1_exclusive, y0, y1_exclusive)
+    pub sidebar: Option<(usize, usize, usize, usize)>,
+    /// 输入框区域：(left, right_exclusive, top, bottom_exclusive)
+    pub input_box: Option<(usize, usize, usize, usize)>,
+    /// 弹窗候选行：每项是 (y 行号, x0, x1) 与对应的选项下标
+    pub popup_items: Vec<((usize, usize, usize), usize)>,
+    /// 状态行上的"下方还有 N 行"提示（点击即到底）
+    pub scroll_hint_rows: Vec<usize>,
+    /// 侧栏收起时的"把手"格子（列, 行，1 基）—— 点它展开侧栏。
+    /// 没有它的话，鼠标用户一旦点收起就再也点不开了（陷阱）。
+    pub sidebar_grip: Option<(usize, usize)>,
+}
 /// 居中的首屏片段（列由居中逻辑算，不用自己给）
 type Styled = (String, Tone);
 
@@ -865,9 +960,15 @@ impl Grid {
 }
 
 impl Screen<'_> {
+    /// 兼容旧调用：只要渲染结果。
     pub fn render(&self) -> String {
+        self.render_with_regions().0
+    }
+
+    pub fn render_with_regions(&self) -> (String, Regions) {
         let p = Pal::new(detect_color_mode(), self.theme);
         let mut g = Grid::new(self.cols, self.rows);
+        let mut regions = Regions::default();
 
         // 侧栏：把正文的写入边界收到侧栏左侧，正文画完后再画侧栏。
         // 顺序是刻意的 —— 若先画侧栏再画正文，正文会把侧栏覆盖掉。
@@ -881,6 +982,7 @@ impl Screen<'_> {
         }
 
         let chrome = chrome_rows(self.input.line_count());
+        let body_rows = self.rows.saturating_sub(chrome);
         let (chrome_top, cursor) = if let Some(lines) = self.preformatted {
             // 信息屏是**文档**：必须从第一行开始显示。
             // 曾用"显示末尾 N 行"（对话滚屏的逻辑），结果长帮助把标题裁掉、
@@ -921,6 +1023,28 @@ impl Screen<'_> {
         if let Some(x0) = side_x0 {
             g.clamp_put(usize::MAX);
             self.draw_sidebar(&mut g, &p, x0);
+            regions.sidebar = Some((x0, self.cols, 0, self.rows));
+        }
+        // 侧栏收起：在最右一格画可点击的把手，避免"收起后无法用鼠标展开"
+        if side_x0.is_none() && self.cols > 8 && self.rows > 2 {
+            let gy = self.rows - 1; // 底行
+            let gx = self.cols - 1;
+            g.put(gy, gx, "‹", Tone::BorderActive);
+            regions.sidebar_grip = Some((gx + 1, gy + 1)); // 转 1 基
+        }
+
+        // 记录命中区域（鼠标用）。只在"对话/首页"这类有转录的界面记录；
+        // 信息屏与信任页不参与鼠标交互。
+        if self.trust.is_none() && self.preformatted.is_none() {
+            regions.transcript = Some((0, body_rows));
+        }
+        let body = self.body_cols();
+        let box_w = self.box_width();
+        let left = body.saturating_sub(box_w) / 2;
+        regions.input_box = Some((left, left + box_w, chrome_top, self.rows));
+        if let Some(pop) = self.popup {
+            let _ = pop;
+            regions.popup_items = self.popup_item_rows(chrome_top);
         }
 
         g.fill_stars();
@@ -931,7 +1055,7 @@ impl Screen<'_> {
             Some((r, c)) => out.push_str(&format!("{ESC}[{r};{c}H{ESC}[?25h")),
             None => out.push_str(&format!("{ESC}[?25l")),
         }
-        out
+        (out, regions)
     }
 
     /// 输入框宽度：受终端宽度约束，并封顶 76 列。
@@ -1247,6 +1371,38 @@ impl Screen<'_> {
         }
     }
 
+    /// 弹窗候选所在的行（供鼠标命中）。几何必须与 `draw_popup` 一致。
+    fn popup_item_rows(&self, chrome_top: usize) -> Vec<((usize, usize, usize), usize)> {
+        let Some(pop) = self.popup else {
+            return Vec::new();
+        };
+        let body = self.body_cols();
+        let box_w = self.box_width();
+        let left = body.saturating_sub(box_w) / 2;
+        let max_rows = pop.kind.max_rows();
+        let avail = chrome_top.saturating_sub(2);
+        let hint_rows = if pop.is_empty() { 1 } else { 0 };
+        let foot_rows = if pop.truncated { 1 } else { 0 };
+        let for_items = avail.saturating_sub(3 + hint_rows + foot_rows);
+        let visible = pop.items.len().min(max_rows).min(for_items);
+        let height = 2 + visible + hint_rows + foot_rows;
+        if visible == 0 || chrome_top < height + 1 {
+            return Vec::new();
+        }
+        let top = chrome_top - height - 1;
+        if pop.is_empty() {
+            return Vec::new();
+        }
+        let start = pop.scroll_top(visible);
+        pop.items
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(i, _)| ((top + 2 + (i - start), left, left + box_w), i))
+            .collect()
+    }
+
     /// 弹窗：标题 + 候选项 + （截断时）页脚。画在输入框上方。
     fn draw_popup(&self, g: &mut Grid, p: &Pal, pop: &popup::Popup, chrome_top: usize) {
         let _ = p;
@@ -1255,13 +1411,45 @@ impl Screen<'_> {
         let left = body.saturating_sub(box_w) / 2;
         let inner = box_w.saturating_sub(4);
         let max_rows = pop.kind.max_rows();
-        let visible = pop.items.len().min(max_rows);
-        // 标题(1) + 空目录提示(1) + 候选 + 页脚(截断时 1)
+        // 上方可用空间：chrome_top 上面还要留 2 行（边框 + 与输入框的间隔）。
+        // 装不下时**收缩可见行数**而不是不画 —— 不画的话用户按了 `/` 却
+        // 什么都没出现，看起来像功能坏了（矮终端下必然发生）。
+        let avail = chrome_top.saturating_sub(2);
         let hint_rows = if pop.is_empty() { 1 } else { 0 };
         let foot_rows = if pop.truncated { 1 } else { 0 };
+        // 需要：2(边框) + 标题(1) + 候选 + hint + foot
+        let for_items = avail.saturating_sub(3 + hint_rows + foot_rows);
+        let visible = pop.items.len().min(max_rows).min(for_items);
+        if available_rows(avail) == 0 || pop.items.len() > 0 && visible == 0 {
+            // 连一行候选都放不下：至少把标题画出来，让用户知道弹窗开了
+            let height = 3 + hint_rows;
+            if chrome_top < height + 1 {
+                return;
+            }
+            let top = chrome_top - height - 1;
+            let body = self.body_cols();
+            let box_w = self.box_width();
+            let left = body.saturating_sub(box_w) / 2;
+            for r in top..(top + height).min(self.rows) {
+                g.blank(r, left, left + box_w, Tone::Text);
+            }
+            let bar = "─".repeat(box_w.saturating_sub(2));
+            g.put(top, left, "╭", Tone::BorderActive);
+            g.put(top, left + 1, &bar, Tone::BorderActive);
+            g.put(top, left + box_w - 1, "╮", Tone::BorderActive);
+            g.put(top + 1, left, "│", Tone::BorderActive);
+            let title = format!("{} · {}", pop.kind.title(), pop.query);
+            let t = width::truncate_to_width(&title, box_w.saturating_sub(4)).to_string();
+            g.put(top + 1, left + 2, &t, Tone::Muted);
+            g.put(top + 1, left + box_w - 1, "│", Tone::BorderActive);
+            g.put(top + 2, left, "╰", Tone::BorderActive);
+            g.put(top + 2, left + 1, &bar, Tone::BorderActive);
+            g.put(top + 2, left + box_w - 1, "╯", Tone::BorderActive);
+            return;
+        }
         let height = 2 + visible + hint_rows + foot_rows; // 含上下边框这 2 行
         if chrome_top < height + 1 {
-            return; // 上方空间不够就不画（宁可没有弹窗，也不画残缺的）
+            return;
         }
         let top = chrome_top - height - 1; // 与输入框留一行间隔
 
@@ -2065,6 +2253,104 @@ fn truncate_left(s: &str, max_cols: usize) -> String {
     format!("…{}", tail.into_iter().collect::<String>())
 }
 
+/// 弹窗上方能容纳的总行数（含边框）。0 表示连边框都放不下。
+fn available_rows(avail: usize) -> usize {
+    if avail < 3 {
+        0
+    } else {
+        avail
+    }
+}
+
+/// 鼠标点中某个区域后要执行的动作。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MouseAction {
+    /// 在转录区滚动（true = 向上看更早的内容）
+    ScrollTranscript(bool),
+    /// 选中弹窗第 N 项
+    SelectPopup(usize),
+    /// 点到输入框
+    FocusInput,
+    /// 点到侧栏（切换显隐）
+    ToggleSidebar,
+}
+
+/// 正文可用列数（与 `Screen::body_cols` 同一判据）。
+fn self_body_cols(cols: usize, sidebar: bool) -> usize {
+    if sidebar && cols >= SIDEBAR_MIN_COLS {
+        cols.saturating_sub(SIDEBAR_COLS)
+    } else {
+        cols
+    }
+}
+
+/// 把鼠标事件映射成动作。
+///
+/// 命中优先级：**弹窗 > 输入框 > 侧栏 > 转录**。
+/// 弹窗在最上层（它盖住正文），所以优先；
+/// 侧栏在转录右侧、输入框之外，故排在输入框之后。
+///
+/// 只处理"按下"，忽略释放：终端会把一次点击拆成按下+释放两个事件，
+/// 两边都处理会导致动作执行两次。
+fn hit_test(
+    r: &Regions,
+    ev: &mouse::MouseEvent,
+    popup: Option<&popup::Popup>,
+    sidebar_open: bool,
+) -> Option<MouseAction> {
+    // 滚轮没有按下/释放之分，先处理（且不要求在某个区域内才生效 ——
+    // 用户在正文任意处滚轮都应滚动转录）
+    match ev.button {
+        mouse::Button::WheelUp => return Some(MouseAction::ScrollTranscript(true)),
+        mouse::Button::WheelDown => return Some(MouseAction::ScrollTranscript(false)),
+        _ => {}
+    }
+    if !ev.pressed {
+        return None;
+    }
+
+    // 侧栏把手（收起状态下唯一能展开的鼠标入口）
+    if let Some((gx, gy)) = r.sidebar_grip {
+        if ev.x == gx && ev.y == gy {
+            return Some(MouseAction::ToggleSidebar);
+        }
+    }
+
+    // 弹窗候选
+    if popup.is_some() {
+        for ((y, x0, x1), index) in &r.popup_items {
+            if ev.y == *y + 1 && ev.x > *x0 && ev.x <= *x1 {
+                return Some(MouseAction::SelectPopup(*index));
+            }
+        }
+        // 点在弹窗范围内但不在某一行上：不做事（避免误点关闭）
+        return None;
+    }
+
+    // 输入框（用 1 基坐标）
+    if let Some((l, rr, top, bottom)) = r.input_box {
+        if ev.x > l && ev.x <= rr && ev.y > top && ev.y <= bottom {
+            return Some(MouseAction::FocusInput);
+        }
+    }
+
+    // 侧栏
+    if let Some((x0, x1, y0, y1)) = r.sidebar {
+        if ev.x > x0 && ev.x <= x1 && ev.y > y0 && ev.y <= y1 {
+            return Some(MouseAction::ToggleSidebar);
+        }
+    }
+
+    // 转录区
+    if let Some((top, bottom)) = r.transcript {
+        if ev.y > top && ev.y <= bottom {
+            return Some(MouseAction::ScrollTranscript(false));
+        }
+    }
+    let _ = sidebar_open;
+    None
+}
+
 /// 状态栏文案：审批挂起时明确告诉用户该敲什么，否则是常规就绪提示。
 fn idle_or_approval(outstanding: &Option<String>) -> String {
     match outstanding {
@@ -2090,11 +2376,16 @@ where
     let raw = RawMode::enter().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     // 进备用屏：全程在第二块屏幕上画，退出时终端整块还原
     let mut alt = AltScreen::enter();
+    // 鼠标上报（NEO_TUI_NO_MOUSE=1 可关，给"只想用键盘"或终端不支持的用户）
+    let mouse_on = std::env::var_os("NEO_TUI_NO_MOUSE").is_none();
+    let mut mouse = MouseMode::enter(mouse_on);
 
     // panic 时也还原终端，否则用户的终端会被留在原始模式
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = set_stty("sane");
+        // 鼠标上报也必须关掉：否则 panic 后 shell 里鼠标会乱跳
+        MouseMode::leave_now();
         // 必须退出备用屏，否则 panic 后用户的终端会一直停在我们这里
         AltScreen::leave_now();
         println!("\r\n[tui] 发生 panic，终端已还原");
@@ -2128,6 +2419,10 @@ where
     let mut sidebar_open = true;
     // 转录滚动/搜索状态
     let mut view_state = view::View::new();
+    // 最近一次渲染记录的命中区域。**必须跨迭代保留** ——
+    // 只有 dirty 时才重绘，若把它声明在循环内，鼠标事件到达时
+    // 区域是空的，命中测试永远失败（点击/滚动全部无效）。
+    let mut last_regions = Regions::default();
     // 搜索输入模式：Some = 正在输入查询词（Enter 确认，Esc 取消）
     let mut searching = false;
 
@@ -2198,6 +2493,7 @@ where
                 TrustOutcome::Accepted => break,
                 TrustOutcome::Quit => {
                     raw.restore();
+                    mouse.leave();
                     alt.leave();
                     return Ok(());
                 }
@@ -2268,8 +2564,10 @@ where
                 sidebar: sidebar_open,
                 view: Some(&view_state),
             };
-            write!(stdout, "{}", screen.render())?;
+            let (out, regs) = screen.render_with_regions();
+            write!(stdout, "{out}")?;
             stdout.flush()?;
+            last_regions = regs;
             dirty = false;
         }
 
@@ -2385,6 +2683,71 @@ where
                     if !input.is_empty() {
                         input.clear();
                         browsing = false;
+                    }
+                }
+            }
+            Key::Mouse(ev) => {
+                if let Some(act) = hit_test(&last_regions, &ev, popup_state.as_ref(), sidebar_open) {
+                    match act {
+                        MouseAction::ScrollTranscript(up) => {
+                            let body = rows
+                                .saturating_sub(chrome_rows(input.line_count()));
+                            let total = transcript_line_count(&events, self_body_cols(cols, sidebar_open));
+                            if up {
+                                view_state.scroll_up(3, total, body);
+                            } else {
+                                view_state.scroll_down(3, total, body);
+                            }
+                        }
+                        MouseAction::SelectPopup(index) => {
+                            if let Some(p) = popup_state.as_mut() {
+                                p.select(index);
+                            }
+                            // 点选即确认（单击选中并执行的语义比"两次操作"更快）
+                            let chosen = popup_state
+                                .as_ref()
+                                .and_then(|p| p.selected_item().cloned());
+                            popup_state = None;
+                            if let Some(item) = chosen {
+                                let eff = apply_popup_item(
+                                    &item,
+                                    &mut input,
+                                    &mut status,
+                                    &mut theme_name,
+                                    &mut info_screen,
+                                );
+                                match eff {
+                                    Effect::Quit => break,
+                                    Effect::ClearTranscript => events.clear(),
+                                    Effect::ShowStatus => {
+                                        info_screen = Some(commands::status_text(
+                                            &about,
+                                            theme_name.as_str(),
+                                        ));
+                                    }
+                                    Effect::OpenThemePicker => {
+                                        let mut tp =
+                                            popup::Popup::new(popup::Kind::Theme, "");
+                                        tp.set_items(popup::theme_items(""), false);
+                                        popup_state = Some(tp);
+                                    }
+                                    Effect::None => {}
+                                }
+                            }
+                        }
+                        MouseAction::FocusInput => {
+                            // 点击输入框：把注意力交回输入（清掉弹窗）
+                            popup_state = None;
+                        }
+                        MouseAction::ToggleSidebar => {
+                            sidebar_open = !sidebar_open;
+                            status = if sidebar_open {
+                                "侧栏已展开"
+                            } else {
+                                "侧栏已收起"
+                            }
+                            .to_string();
+                        }
                     }
                 }
             }
@@ -2784,6 +3147,7 @@ where
     }
 
     raw.restore();
+    mouse.leave();
     alt.leave();
     Ok(())
 }
@@ -3296,6 +3660,158 @@ mod tests {
         // opencode 主色 #fab283；nord 主色 #88c0d0
         assert!(oc.contains("38;2;250;178;131"), "opencode 主色应为 #fab283");
         assert!(nord.contains("38;2;136;192;208"), "nord 主色应为 #88c0d0");
+    }
+
+    #[test]
+    fn popup_shrinks_to_fit_instead_of_disappearing() {
+        // 矮终端下弹窗装不下时，必须**收缩**而不是不画 ——
+        // 不画的话用户按了 `/` 什么都没出现，看起来像功能坏了。
+        let a = about();
+        let ed = editor::Editor::new();
+        let mut p = popup::Popup::new(popup::Kind::Slash, "");
+        p.set_items(popup::slash_items(""), false);
+        let (out, _) = Screen {
+            cols: 100, rows: 14, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
+            sidebar: false, view: None,
+        }
+        .render_with_regions();
+        let text = plain(&out).join("\n");
+        assert!(text.contains('╭'), "矮终端也必须画出弹窗：{text}");
+        assert!(text.contains("命令"), "至少应显示标题：{text}");
+    }
+
+    // ── 鼠标命中 ─────────────────────────────────────────────────────
+
+    fn regions_for(cols: usize, rows: usize, popup: Option<&popup::Popup>) -> Regions {
+        let a = about();
+        let ed = editor::Editor::new();
+        Screen {
+            cols, rows, facts: &[], input: &ed, status: "就绪",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup, preformatted: None,
+            sidebar: true, view: None,
+        }
+        .render_with_regions()
+        .1
+    }
+
+    fn ev(button: mouse::Button, x: usize, y: usize, pressed: bool) -> mouse::MouseEvent {
+        mouse::MouseEvent { button, pressed, x, y, modified: false }
+    }
+
+    #[test]
+    fn wheel_scrolls_the_transcript() {
+        let r = regions_for(140, 30, None);
+        assert_eq!(
+            hit_test(&r, &ev(mouse::Button::WheelUp, 20, 10, true), None, true),
+            Some(MouseAction::ScrollTranscript(true))
+        );
+        assert_eq!(
+            hit_test(&r, &ev(mouse::Button::WheelDown, 20, 10, true), None, true),
+            Some(MouseAction::ScrollTranscript(false))
+        );
+    }
+
+    #[test]
+    fn release_events_do_nothing() {
+        // 终端把一次点击拆成按下+释放；两边都处理会让动作执行两次
+        let r = regions_for(140, 30, None);
+        assert_eq!(hit_test(&r, &ev(mouse::Button::Left, 20, 10, false), None, true), None);
+    }
+
+    #[test]
+    fn clicking_inside_the_input_box_focuses_it() {
+        let cols = 140usize;
+        let r = regions_for(cols, 30, None);
+        let (l, rr, top, bottom) = r.input_box.expect("应有输入框区域");
+        // 取输入框正中
+        let x = (l + rr) / 2;
+        let y = (top + bottom) / 2;
+        assert_eq!(
+            hit_test(&r, &ev(mouse::Button::Left, x, y, true), None, true),
+            Some(MouseAction::FocusInput)
+        );
+    }
+
+    #[test]
+    fn clicking_the_sidebar_toggles_it() {
+        let r = regions_for(140, 30, None);
+        let (x0, x1, _, _) = r.sidebar.expect("宽终端应有侧栏");
+        let x = (x0 + x1) / 2;
+        assert_eq!(
+            hit_test(&r, &ev(mouse::Button::Left, x, 5, true), None, true),
+            Some(MouseAction::ToggleSidebar)
+        );
+    }
+
+    #[test]
+    fn a_hidden_sidebar_leaves_a_clickable_grip() {
+        // 没有把手的话，鼠标用户点收起后**再也点不开**（陷阱）
+        let a = about();
+        let ed = editor::Editor::new();
+        let (_, r) = Screen {
+            cols: 140, rows: 30, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None,
+        }
+        .render_with_regions();
+        let (gx, gy) = r.sidebar_grip.expect("侧栏收起时应留一个把手");
+        assert!(r.sidebar.is_none(), "收起时不该有侧栏区域");
+        assert_eq!(
+            hit_test(&r, &ev(mouse::Button::Left, gx, gy, true), None, false),
+            Some(MouseAction::ToggleSidebar),
+            "点把手应能展开侧栏"
+        );
+    }
+
+    #[test]
+    fn clicking_a_popup_row_selects_that_item() {
+        let mut p = popup::Popup::new(popup::Kind::Slash, "");
+        p.set_items(popup::slash_items(""), false);
+        let r = regions_for(140, 30, Some(&p));
+        assert!(!r.popup_items.is_empty(), "应记录弹窗候选行");
+        // 点第二项
+        let ((y, x0, x1), index) = r.popup_items[1];
+        let got = hit_test(
+            &r,
+            &ev(mouse::Button::Left, (x0 + x1) / 2, y + 1, true),
+            Some(&p),
+            true,
+        );
+        assert_eq!(got, Some(MouseAction::SelectPopup(index)));
+        assert_eq!(index, 1, "第二个候选的下标应为 1");
+    }
+
+    #[test]
+    fn popup_takes_priority_over_the_input_box() {
+        // 弹窗盖在正文与输入框上方，点击必须优先给弹窗
+        let mut p = popup::Popup::new(popup::Kind::Slash, "");
+        p.set_items(popup::slash_items(""), false);
+        let r = regions_for(140, 30, Some(&p));
+        let ((y, x0, x1), _) = r.popup_items[0];
+        let got = hit_test(
+            &r,
+            &ev(mouse::Button::Left, (x0 + x1) / 2, y + 1, true),
+            Some(&p),
+            true,
+        );
+        assert!(matches!(got, Some(MouseAction::SelectPopup(_))), "应选中弹窗项：{got:?}");
+    }
+
+    #[test]
+    fn narrow_terminals_have_no_sidebar_region() {
+        // 窄终端隐藏侧栏 → 不该有点击侧栏的区域（否则点在正文会切换侧栏）
+        let r = regions_for(80, 30, None);
+        assert!(r.sidebar.is_none(), "窄终端不该有侧栏区域");
+        // 点在右侧应是空白/转录，而不是 ToggleSidebar
+        let got = hit_test(&r, &ev(mouse::Button::Left, 75, 15, true), None, true);
+        assert_ne!(got, Some(MouseAction::ToggleSidebar));
     }
 
     // ── 转录滚动与搜索 ───────────────────────────────────────────────
