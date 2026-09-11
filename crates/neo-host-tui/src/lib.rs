@@ -1567,6 +1567,9 @@ impl Screen<'_> {
 
         let label_w = 14usize;
         let mut row = 2usize;
+        // 底部留两行：反馈行 + 图例行。内容必须停在这之前，
+        // 否则最后几项会压在被反馈行覆盖的位置上。
+        let content_max = self.rows.saturating_sub(2);
         // 高亮下标必须与 Enter 用**同一个坐标空间**：只数可操作行。
         //
         // 之前这里数的是**全部行**（含只读行），而 `settings_cursor` 只在
@@ -1575,14 +1578,14 @@ impl Screen<'_> {
         // 或"选中某一项按回车，动的是别的项 / 像没反应"。
         let mut act: usize = 0;
         for sec in sections {
-            if row + 1 >= self.rows {
+            if row + 1 >= content_max {
                 break;
             }
             row += 1; // 节前空行
             g.put(row, 2, sec.title, Tone::Accent);
             row += 1;
             for r in &sec.rows {
-                if row >= self.rows {
+                if row >= content_max {
                     break;
                 }
                 let actionable = r.action.is_some();
@@ -1626,6 +1629,16 @@ impl Screen<'_> {
                 }
                 row += 1;
             }
+        }
+        // 反馈行：动作做完必须让用户看见结果。
+        //
+        // 这是个真实踩过的坑：设置页原本把 Screen.status 硬编码成 ""，
+        // 而"提醒 / 提醒声音 / 主题"这类动作**只改状态栏文案**、不改任何可见的值
+        // —— 于是按回车后界面毫无变化，用户以为没反应。动作确实执行了，
+        // 但界面没有给出任何信号，等于没有反馈。
+        if self.rows > 3 && !self.status.is_empty() {
+            let txt = width::truncate_to_width(self.status, self.cols.saturating_sub(4)).to_string();
+            g.put(self.rows - 2, 2, &txt, Tone::Info);
         }
         // 底部：说明光标只能停在可操作行
         if self.rows > 2 {
@@ -3517,11 +3530,15 @@ fn apply_appearance(ap: &mut appearance::Appearance, eff: &Effect) -> Option<Str
     }
 }
 
-/// 组装并打开设置视图。
+/// 组装设置视图的内容（**不动光标位置**）。
+///
+/// 打开时与"动作后刷新"时都调它。光标不在这里复位是刻意的：
+/// 之前它在每次刷新时被清零，用户在第 9 行按回车、光标立刻跳回第 1 行，
+/// 画面像是"闪一下没反应"——实际动作执行了，只是选中位置被重置。
+/// 复位是"打开"这一动作的语义，交给打开方显式做。
 #[allow(clippy::too_many_arguments)]
 fn open_settings(
     slot: &mut Option<Vec<SettingSection>>,
-    cursor: &mut usize,
     about: &About,
     events: &[EventMsg],
     display: &ToolDisplay,
@@ -3573,7 +3590,33 @@ fn open_settings(
         files_changed,
     };
     *slot = Some(settings_sections(&info));
+}
+
+/// 打开设置视图（并把光标复位到第一项）。
+///
+/// "打开"才复位光标；"刷新"（动作执行后）调 [`open_settings`] 保留位置。
+fn open_settings_fresh(
+    slot: &mut Option<Vec<SettingSection>>,
+    cursor: &mut usize,
+    about: &About,
+    events: &[EventMsg],
+    display: &ToolDisplay,
+    sidebar: bool,
+    mouse: bool,
+    clipboard: &dyn neo_platform::Clipboard,
+    notify_backend: &dyn neo_platform::Notify,
+    notify_enabled: bool,
+    notify_sound: bool,
+    theme_name: theme::ThemeName,
+    appearance: appearance::Appearance,
+    has_custom_bg: bool,
+    sessions: &dyn SessionControl,
+) {
     *cursor = 0;
+    open_settings(
+        slot, about, events, display, sidebar, mouse, clipboard, notify_backend,
+        notify_enabled, notify_sound, theme_name, appearance, has_custom_bg, sessions,
+    );
 }
 
 /// 设置视图里"可操作行"的扁平序号 → (节, 行)。
@@ -3934,7 +3977,9 @@ where
                 rows,
                 facts: &[],
                 input: &empty_input,
-                status: "",
+                // 传真实状态：设置页的动作很多只改状态文案，
+                // 硬编码 "" 会让这些动作"做了但看不见"（见 draw_settings 注释）。
+                status: &status,
                 awaiting_input: false,
                 show_cursor: false,
                 about: Some(&about),
@@ -4066,10 +4111,10 @@ where
                                         settings_state = None;
                                     }
                                 }
-                                // 刷新设置页上的值（改完之后数字/状态要跟着变）
+                                // 刷新设置页上的值（改完之后数字/状态要跟着变）。
+                                // **不复位光标** —— 复位会让画面像"闪一下没反应"。
                                 open_settings(
                                     &mut settings_state,
-                                    &mut settings_cursor,
                                     &about,
                                     &events,
                                     &mut display,
@@ -4361,7 +4406,7 @@ custom_bg.is_some(),
                                 status = do_copy(&events, clipboard.as_ref())
                             }
                             Effect::Settings => {
-                                open_settings(
+                                open_settings_fresh(
                                     &mut settings_state,
                                     &mut settings_cursor,
                                     &about,
@@ -4592,7 +4637,7 @@ custom_bg.is_some(),
                                         status = do_copy(&events, clipboard.as_ref())
                                     }
                                     Effect::Settings => {
-                                        open_settings(
+                                        open_settings_fresh(
                                             &mut settings_state,
                                             &mut settings_cursor,
                                             &about,
@@ -4909,7 +4954,7 @@ sessions,
                                 status = do_copy(&events, clipboard.as_ref())
                             }
                             Effect::Settings => {
-                                open_settings(
+                                open_settings_fresh(
                                     &mut settings_state,
                                     &mut settings_cursor,
                                     &about,
@@ -5093,7 +5138,7 @@ custom_bg.is_some(),
                                     status = do_copy(&events, clipboard.as_ref())
                                 }
                                 Effect::Settings => {
-                                    open_settings(
+                                    open_settings_fresh(
                                         &mut settings_state,
                                         &mut settings_cursor,
                                         &about,
@@ -6521,6 +6566,81 @@ mod tests {
 
     fn ed_empty() -> editor::Editor {
         editor::Editor::new()
+    }
+
+    #[test]
+    fn settings_view_shows_action_feedback() {
+        // 设置页的部分动作（提醒开/关、提醒声音、主题）**只改状态文案**，
+        // 不改任何一行的值。若设置页不把 status 画出来，按回车后界面毫无变化
+        // ——用户以为没反应，其实动作已执行。这条测试守住"执行了就必须看得见"。
+        let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
+            background: "stars".into(), logo: "large".into(), custom_background: false,
+            model_count: 3, session_count: 2,
+            version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
+            workspace: "/w".into(), branch: "".into(), session: "s".into(),
+            context_limit: 0, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 0, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let ed = editor::Editor::new();
+        let out = Screen {
+            cols: 140, rows: 40, facts: &[], input: &ed,
+            status: "提醒：已开启", awaiting_input: false, show_cursor: false,
+            about: Some(&about()), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            appearance: appearance::Appearance::default(), custom_background: None,
+        }
+        .render();
+        assert!(
+            plain(&out).iter().any(|l| l.contains("提醒：已开启")),
+            "设置页必须画出动作反馈，否则'执行了但看不见'"
+        );
+    }
+
+    #[test]
+    fn settings_feedback_does_not_overlap_the_last_row() {
+        // 反馈行占 rows-2，图例占 rows-1；内容必须停在这之前。
+        // 若内容画到 rows-2，反馈文字会把最后一项盖住（或反之），
+        // 两者叠在一起就是"看起来乱/像没反应"。
+        let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
+            background: "stars".into(), logo: "large".into(), custom_background: false,
+            model_count: 3, session_count: 2,
+            version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
+            workspace: "/w".into(), branch: "".into(), session: "s".into(),
+            context_limit: 0, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 0, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let ed = editor::Editor::new();
+        // 行数刻意压小，逼出"内容撞上反馈行"的情形
+        for rows in [18usize, 20, 24] {
+            let out = Screen {
+                cols: 120, rows, facts: &[], input: &ed,
+                status: "状态反馈", awaiting_input: false, show_cursor: false,
+                about: Some(&about()), trust: None,
+                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                sidebar: false, view: None, diff_viewer: None, whichkey: None,
+                display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                appearance: appearance::Appearance::default(), custom_background: None,
+            }
+            .render();
+            let lines = plain(&out);
+            assert!(lines.len() >= rows - 1, "rows={rows} 应画出底部两行");
+            let fb = lines.get(rows - 2).cloned().unwrap_or_default();
+            assert!(
+                fb.contains("状态反馈"),
+                "rows={rows}: 反馈行应是第 {} 行，实得 {fb:?}",
+                rows - 2
+            );
+            let legend = lines.get(rows - 1).cloned().unwrap_or_default();
+            assert!(legend.contains("灰字为只读项"), "rows={rows}: 图例应固定在最后一行");
+        }
     }
 
     #[test]
