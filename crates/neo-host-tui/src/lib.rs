@@ -139,8 +139,14 @@ impl AltScreen {
     /// 无需实例即可执行的"退出备用屏"。panic 钩子里用（那里拿不到实例）。
     fn leave_now() {
         let mut out = std::io::stdout();
-        // 先恢复光标可见，再退出备用屏：顺序反了光标会在原屏幕上保持隐藏
-        let _ = write!(out, "{ESC}[?25h{ESC}[?1049l");
+        // 顺序：恢复光标 → 清屏 → 退出备用屏。
+        //
+        // - `?25h` 必须在 `?1049l` 之前：反了光标会在原屏幕上保持隐藏，
+        //   用户回到 shell 发现看不到光标。
+        // - `2J` 是给"把备用屏内容物化进 scrollback"的终端兜底（部分终端
+        //   模拟器/内嵌终端在切换缓冲时不是丢弃而是保留）。有它的话，
+        //   最坏情况也只是一块空白，而不是半截界面残留在提示符上方。
+        let _ = write!(out, "{ESC}[?25h{ESC}[2J{ESC}[H{ESC}[?1049l");
         let _ = out.flush();
     }
 }
@@ -240,21 +246,35 @@ pub fn decode_key(bytes: &[u8]) -> Key {
     }
 }
 
-/// 从 stdin 读一次按键（原始模式下逐字节到达；多字节 UTF-8 需要续读）。
-fn read_key(stdin: &mut impl Read) -> Key {
+/// 读一次按键；**最多等 `timeout_tenths` 个 0.1 秒**，无输入返回 `None`。
+///
+/// # 为什么需要超时
+///
+/// 阻塞读会把主循环钉死在 `read` 上，于是**窗口尺寸变化时无法重绘** ——
+/// 终端只在输入到达时才被唤醒，而 resize 不产生输入。真机上表现为
+/// "改窗口大小后画面错位、侧栏残留、大片空白"（用户实测截图）。
+///
+/// 这里用 `stty min 0 time N` 让 read 到点即返回。返回 0 字节表示**超时**
+/// 而不是 EOF：我们会据此轮询尺寸，尺寸变了就重绘。
+fn read_key_timeout(stdin: &mut impl Read, timeout_tenths: u8) -> Option<Key> {
+    let _ = set_stty(&format!("min 0 time {timeout_tenths}"));
     let mut b = [0u8; 1];
     if stdin.read(&mut b).unwrap_or(0) == 0 {
-        return Key::Quit; // EOF
+        // 超时（无输入）。真 EOF 在交互场景不会出现：退出走 Ctrl+C / Ctrl+D，
+        // 它们会送来 0x03 / 0x04 字节而不是 EOF。
+        return None;
     }
-    if b[0] == 0x1b {
-        // 转义序列：再读最多 2 字节。
-        //
-        // **必须带超时**：方向键会立刻送来完整序列，而用户单独按 Esc 时
-        // 后面没有任何字节 —— 阻塞读会一直卡住，Esc 就永远不生效。
-        // 把终端临时切成 `min 0 time 1`（10 分之 1 秒）做"立即返回"的读，
-        // 读完再切回 raw。Esc 是低频操作，这点开销可接受。
+    let _ = set_stty("raw -echo");
+    Some(decode_first(&b, stdin))
+}
+
+/// 从已读到的首字节 + stdin 续读，解出一个按键。
+fn decode_first(first: &[u8; 1], stdin: &mut impl Read) -> Key {
+    let b = first[0];
+    if b == 0x1b {
+        // 转义序列：再读最多 2 字节。超时设置已由调用方就位，
+        // 因此单独按 Esc（后面没有字节）会立刻返回而不是卡住。
         let mut seq = vec![0x1b];
-        let _ = set_stty("min 0 time 1");
         for _ in 0..2 {
             let mut c = [0u8; 1];
             if stdin.read(&mut c).unwrap_or(0) == 0 {
@@ -265,20 +285,19 @@ fn read_key(stdin: &mut impl Read) -> Key {
                 break;
             }
         }
-        let _ = set_stty("raw -echo");
         return decode_key(&seq);
     }
-    if b[0] < 0x80 {
-        return decode_key(&b);
+    if b < 0x80 {
+        return decode_key(&[b]);
     }
     // 多字节 UTF-8：按首字节判断续字节数
-    let need = match b[0] {
+    let need = match b {
         0xc0..=0xdf => 1,
         0xe0..=0xef => 2,
         0xf0..=0xf7 => 3,
         _ => 0,
     };
-    let mut buf = vec![b[0]];
+    let mut buf = vec![b];
     for _ in 0..need {
         let mut c = [0u8; 1];
         if stdin.read(&mut c).unwrap_or(0) == 0 {
@@ -1760,6 +1779,54 @@ fn apply_popup_item(
     }
 }
 
+/// 信任对话框的按键结果。
+enum TrustOutcome {
+    /// 还需继续（选中项变了，需要重绘）
+    Continue,
+    /// 用户同意，写入信任库
+    Accepted,
+    /// 用户拒绝 / 退出
+    Quit,
+}
+
+/// 处理信任对话框的一次按键。抽成函数是为了让"等待输入"与"渲染"两条路径
+/// 共用同一套语义，避免各写一遍导致行为不一致。
+fn handle_trust_key(k: Key, tp: &mut TrustPrompt, ws: &std::path::Path) -> TrustOutcome {
+    match k {
+        Key::Quit => TrustOutcome::Quit,
+        Key::Up | Key::Char('k') => {
+            tp.selected = 0;
+            TrustOutcome::Continue
+        }
+        Key::Down | Key::Char('j') => {
+            tp.selected = 1;
+            TrustOutcome::Continue
+        }
+        Key::Char('y') => {
+            accept_trust(ws);
+            TrustOutcome::Accepted
+        }
+        Key::Char('n') => TrustOutcome::Quit,
+        Key::Enter => {
+            if tp.selected == 0 {
+                accept_trust(ws);
+                TrustOutcome::Accepted
+            } else {
+                TrustOutcome::Quit
+            }
+        }
+        _ => TrustOutcome::Continue,
+    }
+}
+
+/// 记录信任。失败必须如实上报 —— 静默失败会表现为"每次都问"，
+/// 用户会以为是自己没点对。
+fn accept_trust(ws: &std::path::Path) {
+    if let Err(e) = trust::trust(ws) {
+        eprintln!("[neo] 无法记录信任（{e}）；本次继续，下次仍会询问");
+    }
+}
+
 /// 从**左侧**截断，保留尾部（文件名）。
 ///
 /// 用途：侧栏的"已修改文件"列表。文件名才是识别信息，
@@ -1851,8 +1918,39 @@ where
     // 二者互补：沙箱挡不住"信任错了目录"，信任挡不住"恶意代码越权"。
     if let Some(ws) = trust_workspace {
         let mut tp = TrustPrompt::default();
+        // 与主循环同样的 dirty 策略：带超时读键让循环每 0.1 秒醒一次，
+        // 若每次都重绘就是 10Hz 空转（终端持续刷屏 + 白耗 CPU）。
+        let mut trust_dirty = true;
         loop {
             let (cols, rows) = terminal_size();
+            if !trust_dirty {
+                // 没事可做：只等输入（超时后回到这里再检查尺寸）
+                match read_key_timeout(&mut stdin, 1) {
+                    None => {
+                        if terminal_size() == (cols, rows) {
+                            continue;
+                        }
+                        trust_dirty = true;
+                    }
+                    Some(k) => {
+                        match handle_trust_key(k, &mut tp, &ws) {
+                            TrustOutcome::Continue => {
+                                trust_dirty = true;
+                                continue;
+                            }
+                            TrustOutcome::Accepted => break,
+                            TrustOutcome::Quit => {
+                                raw.restore();
+                                alt.leave();
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+            if !trust_dirty {
+                continue;
+            }
             let screen = Screen {
                 cols,
                 rows,
@@ -1871,43 +1969,26 @@ where
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
 
-            let accept = |ws: &std::path::Path| {
-                if let Err(e) = trust::trust(ws) {
-                    // 记录失败不该拦住用户，但必须如实说 ——
-                    // 静默失败会表现为"每次都问"，用户会以为是自己没点对
-                    eprintln!("[neo] 无法记录信任（{e}）；本次继续，下次仍会询问");
-                }
+            trust_dirty = false;
+            let Some(k) = read_key_timeout(&mut stdin, 1) else {
+                continue; // 超时：回顶部重新检查尺寸
             };
-            match read_key(&mut stdin) {
-                Key::Quit => {
+            match handle_trust_key(k, &mut tp, &ws) {
+                TrustOutcome::Continue => trust_dirty = true,
+                TrustOutcome::Accepted => break,
+                TrustOutcome::Quit => {
                     raw.restore();
                     alt.leave();
                     return Ok(());
                 }
-                Key::Up | Key::Char('k') => tp.selected = 0,
-                Key::Down | Key::Char('j') => tp.selected = 1,
-                Key::Char('y') => {
-                    accept(&ws);
-                    break;
-                }
-                Key::Char('n') => {
-                    raw.restore();
-                    alt.leave();
-                    return Ok(());
-                }
-                Key::Enter => {
-                    if tp.selected == 0 {
-                        accept(&ws);
-                        break;
-                    }
-                    raw.restore();
-                    alt.leave();
-                    return Ok(());
-                }
-                _ => {}
             }
         }
     }
+
+    // 是否需要重绘。带超时的读键会让循环每 0.1 秒醒一次；若每次都重绘，
+    // 就是 10Hz 空转（终端抖屏 + 白耗 CPU）。只在"输入被处理"或
+    // "窗口尺寸变化"时置位。
+    let mut dirty = true;
 
     loop {
         let (cols, rows) = terminal_size();
@@ -1937,35 +2018,49 @@ where
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
-            match read_key(&mut stdin) {
-                Key::Quit => break,
-                _ => {
+            match read_key_timeout(&mut stdin, 1) {
+                // 超时：不重绘（避免 10Hz 刷屏），只在下轮顶部检查尺寸
+                None => continue,
+                Some(Key::Quit) => break,
+                Some(_) => {
                     info_screen = None;
                     continue;
                 }
             }
         }
 
-        let facts = facts_of(&events);
-        let screen = Screen {
-            cols,
-            rows,
-            facts: &facts,
-            input: &input,
-            status: &status,
-            awaiting_input: outstanding.is_some(),
-            show_cursor: true,
-            about: Some(&about),
-            trust: None,
-            theme: theme_name,
-            popup: popup_state.as_ref(),
-            preformatted: None,
-            sidebar: sidebar_open,
-        };
-        write!(stdout, "{}", screen.render())?;
-        stdout.flush()?;
+        if dirty {
+            let facts = facts_of(&events);
+            let screen = Screen {
+                cols,
+                rows,
+                facts: &facts,
+                input: &input,
+                status: &status,
+                awaiting_input: outstanding.is_some(),
+                show_cursor: true,
+                about: Some(&about),
+                trust: None,
+                theme: theme_name,
+                popup: popup_state.as_ref(),
+                preformatted: None,
+                sidebar: sidebar_open,
+            };
+            write!(stdout, "{}", screen.render())?;
+            stdout.flush()?;
+            dirty = false;
+        }
 
-        let key = read_key(&mut stdin);
+        // 带超时读键：无输入时返回 None，于是每 0.1 秒醒一次检查窗口尺寸。
+        // 这是"resize 后能重绘"的唯一途径 —— 终端不会为 resize 产生输入。
+        let Some(key) = read_key_timeout(&mut stdin, 1) else {
+            if terminal_size() != (cols, rows) {
+                dirty = true; // 尺寸变了才重绘（否则保持静止）
+            }
+            continue;
+        };
+        // 有任何按键进来都要重绘（状态可能已变）
+        dirty = true;
 
         // ── 弹窗打开时，按键先交给弹窗 ──────────────────────────────
         //
@@ -2613,7 +2708,96 @@ mod tests {
         assert!(text.contains("按任意键返回"), "应提示如何返回：{text}");
     }
 
+    #[test]
+    fn render_writes_exactly_one_screenful_of_lines() {
+        // 每帧只能写**一屏**的行数（rows 行）。若写完转录又打印整块网格，
+        // 就会写出约两倍的 rows 行 —— 多余的换行会把终端**逐帧上滚**，
+        // 表现为内容往上漂、退出后画面错位。
+        let a = about();
+        for rows in [20usize, 30, 44] {
+            let out = Screen {
+                cols: 120, rows, facts: &[], input: "", status: "就绪",
+                awaiting_input: false, show_cursor: false,
+                about: Some(&a), trust: None,
+                theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
+                sidebar: true,
+            }
+            .render();
+            let newlines = out.matches('\n').count();
+            assert!(
+                newlines <= rows,
+                "rows={rows} 却写了 {newlines} 个换行（>rows 会逐帧滚屏）"
+            );
+        }
+    }
+
     // ── 侧栏 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn no_line_exceeds_the_terminal_width_even_with_sidebar() {
+        // 行超宽会让终端**折行 → 滚屏**，在备用屏里表现为"退出后残留"。
+        // 这是网格模型的根本约束，必须覆盖侧栏 + 长内容 + 窄宽度的组合。
+        use neo_protocol::{FileChange, TodoEntry, TodoStatus};
+        let facts = vec![
+            Fact::UserSaid("看下 @src/main.rs 这个文件".into()),
+            Fact::AssistantSaid(
+                "# 标题\n\n很长的正文，包含中文与 emoji 🚀 以及 `inline code` 与\n\n```rust\nfn main() { println!(\"hi\"); }\n```".into(),
+            ),
+            Fact::TodoList(vec![
+                TodoEntry { content: "一项非常非常非常非常非常非常长的任务描述".into(), status: TodoStatus::InProgress },
+            ]),
+            Fact::FilesChanged(vec![
+                FileChange { path: "src/very/deeply/nested/module/with/long/name/file.rs".into(), additions: 123, deletions: 45 },
+            ]),
+            Fact::PatchPreview { path: "a.txt".into(), diff: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y".into() },
+            Fact::ApprovalNeeded { detail: "写入类调用需确认".into() },
+            Fact::Failed("一段很长的错误信息，用于测试右侧面板与正文的边界情况".into()),
+            Fact::TurnFinished { input_tokens: 123456, output_tokens: 7890 },
+        ];
+        for cols in [96usize, 100, 120, 150, 200, 260] {
+            for rows in [20usize, 40, 60] {
+                let a = About { context_limit: 64_000, ..about() };
+                let out = Screen {
+                    cols, rows, facts: &facts, input: "输入中文测试", status: "就绪",
+                    awaiting_input: true, show_cursor: true,
+                    about: Some(&a), trust: None,
+                    theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
+                    sidebar: true,
+                }
+                .render();
+                for (i, l) in plain(&out).iter().enumerate() {
+                    let w = width::display_width(l);
+                    assert!(
+                        w <= cols,
+                        "{cols}x{rows} 第 {i} 行宽 {w} 超过 {cols}（会折行→滚屏）：{l:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn popup_lines_also_stay_within_width() {
+        // 弹窗同理：它在窄终端里最容易超宽
+        let a = about();
+        for cols in [96usize, 110, 140] {
+            let mut p = popup::Popup::new(popup::Kind::Slash, "");
+            p.set_items(popup::slash_items(""), false);
+            let out = Screen {
+                cols, rows: 40, facts: &[], input: "/", status: "",
+                awaiting_input: false, show_cursor: false,
+                about: Some(&a), trust: None,
+                theme: theme::ThemeName::OpenCode, popup: Some(&p), preformatted: None,
+                sidebar: true,
+            }
+            .render();
+            for (i, l) in plain(&out).iter().enumerate() {
+                let w = width::display_width(l);
+                assert!(w <= cols, "{cols} 第 {i} 行宽 {w} 超宽：{l:?}");
+            }
+        }
+    }
+
 
     fn sidebar_screen(cols: usize, facts: &[Fact], sidebar: bool) -> String {
         let a = About { context_limit: 64_000, ..about() };
@@ -2764,6 +2948,44 @@ mod tests {
         // opencode 主色 #fab283；nord 主色 #88c0d0
         assert!(oc.contains("38;2;250;178;131"), "opencode 主色应为 #fab283");
         assert!(nord.contains("38;2;136;192;208"), "nord 主色应为 #88c0d0");
+    }
+
+    // ── 带超时读键（resize 轮询的基础）──────────────────────────────────
+
+    #[test]
+    fn timeout_read_returns_none_when_there_is_no_input() {
+        // 这是"窗口 resize 后能重绘"的基础：无输入时读必须**返回**而不是阻塞，
+        // 否则循环被钉死，resize 永远得不到处理（真机表现为画面错位/残留）。
+        let mut empty: &[u8] = &[];
+        assert_eq!(read_key_timeout(&mut empty, 1), None, "无输入应返回 None 而不是 Quit");
+    }
+
+    #[test]
+    fn timeout_read_decodes_bytes_normally() {
+        // 有输入时行为与阻塞读一致
+        let mut enter: &[u8] = b"\r";
+        assert_eq!(read_key_timeout(&mut enter, 1), Some(Key::Enter));
+        let mut ctrlc: &[u8] = &[0x03];
+        assert_eq!(read_key_timeout(&mut ctrlc, 1), Some(Key::Quit));
+        let mut multi: &[u8] = "你".as_bytes();
+        assert_eq!(read_key_timeout(&mut multi, 1), Some(Key::Char('你')));
+    }
+
+    #[test]
+    fn trust_keys_are_handled_consistently() {
+        // 抽出 handle_trust_key 的理由：让"等待输入"与"渲染"两条路径共用语义。
+        // 这里断言每个键都被映射到明确的结论，不留模糊分支。
+        let ws = std::path::Path::new("/tmp/does-not-matter");
+        let mut tp = TrustPrompt::default();
+        assert!(matches!(handle_trust_key(Key::Up, &mut tp, ws), TrustOutcome::Continue));
+        assert_eq!(tp.selected, 0);
+        assert!(matches!(handle_trust_key(Key::Down, &mut tp, ws), TrustOutcome::Continue));
+        assert_eq!(tp.selected, 1);
+        // Enter 跟随选中项：选中"否"时应退出而不是接受
+        assert!(matches!(handle_trust_key(Key::Enter, &mut tp, ws), TrustOutcome::Quit));
+        tp.selected = 0;
+        assert!(matches!(handle_trust_key(Key::Quit, &mut tp, ws), TrustOutcome::Quit));
+        assert!(matches!(handle_trust_key(Key::Char('n'), &mut tp, ws), TrustOutcome::Quit));
     }
 
     // ── 终端生命周期 ──────────────────────────────────────────────────
