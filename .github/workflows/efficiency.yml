@@ -1,0 +1,46 @@
+# 执行效率门禁（ai-efficiency-rules）
+#
+# 为什么单独一个 workflow 而不是塞进现有 CI：它**不依赖 Rust 工具链**，
+# 几秒就能跑完，所以能在 PR 上一有 push 就给出反馈，不必等编译。
+# error 级违规（固定盲等、重复拉取、无退出轮询）直接阻止合入。
+name: efficiency
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    # 显式超时：规范 R007 要求 CI job 必须有上限，卡住的 job 会白占配额
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 需要与主干比较，所以要能取到 base
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: 执行效率审计
+        run: |
+          python3 docs/ai-efficiency-rules/scripts/audit_efficiency.py \
+            --path crates --path scripts --fail-on error --format md \
+            > efficiency-report.md || status=$?
+          cat efficiency-report.md
+          exit ${status:-0}
+      - name: 贴到 PR 评论
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.existsSync('efficiency-report.md')
+              ? fs.readFileSync('efficiency-report.md', 'utf8')
+              : '（未生成报告）';
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: '### 执行效率审计\n\n' + body,
+            });

@@ -63,6 +63,29 @@ else
   echo "  [SKIP] 未找到 $PLAN_CHECKS"
 fi
 
+# ── 4. 执行效率规范（ai-efficiency-rules）───────────────────────────────
+#
+# 与其它守卫同级：把「不要固定 sleep、不要重复拉取远程、不要无上限重试」
+# 从**口头约定**变成**机器可判**。先前这些只写在 AGENTS.md 里靠自觉，
+# 而本项目已经因为固定 sleep 浪费过一整轮时间。
+hr; echo "#  执行效率：固定盲等 / 重复拉取 / 无退出轮询（ai-efficiency-rules）"; hr
+AUDIT="$ROOT/docs/ai-efficiency-rules/scripts/audit_efficiency.py"
+if [ -f "$AUDIT" ]; then
+  py=python3; command -v "$py" >/dev/null 2>&1 || py=python
+  # 只让 error 级卡门禁（warn 多为启发式，容易误报）；
+  # 扫 crates/ scripts/ docs/ —— 排除 docs/ai-efficiency-rules 自身，
+  # 它的规则表里含有用于**说明**的违规样例（会自我命中，是已知误报）。
+  if ( cd "$ROOT" && "$py" "$AUDIT" --path crates --path scripts --fail-on error ) >/tmp/neo-eff.log 2>&1; then
+    echo "  ✅ 未检测到固定盲等 / 重复拉取 / 无退出轮询"
+  else
+    echo "  ❌ 检测到执行效率违规（error 级）："
+    sed 's/^/     /' /tmp/neo-eff.log | tail -20
+    fail=$((fail+1))
+  fi
+else
+  echo "  [SKIP] 未找到 $AUDIT（skill 未安装？见 docs/ai-efficiency-rules/）"
+fi
+
 echo
 echo "============================================================"
 if [ "$fail" -eq 0 ]; then echo "✅ 全部门禁通过"; exit 0
