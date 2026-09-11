@@ -97,6 +97,55 @@ fn set_stty(spec: &str) -> Option<()> {
     status.success().then_some(())
 }
 
+/// 备用屏幕缓冲（alternate screen）。
+///
+/// # 为什么必须有它
+///
+/// 不用备用屏时，TUI 是直接在**正常屏幕**上画的。退出时我们只还原了 stty，
+/// 却把最后一帧（欢迎页）留在了用户的终端里 —— 用户看到 shell 提示符上方
+/// 还挂着我们的界面。这不是"没清屏"，而是**画错了地方**。
+///
+/// 备用屏是内核提供的第二块屏幕：进入时终端保存原屏幕，退出时整块还原。
+/// 于是我们的界面从不污染正常屏幕，退出后用户看到的就是启动前的内容
+/// （vim / less / htop / opencode 都是这个机制）。
+///
+/// 对应序列：`ESC[?1049h` 进入、`ESC[?1049l` 退出。
+struct AltScreen {
+    active: bool,
+}
+
+impl AltScreen {
+    fn enter() -> Self {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{ESC}[?1049h{ESC}[2J{ESC}[H");
+        let _ = out.flush();
+        Self { active: true }
+    }
+
+    /// 退出备用屏（幂等）。
+    fn leave(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        Self::leave_now();
+    }
+
+    /// 无需实例即可执行的"退出备用屏"。panic 钩子里用（那里拿不到实例）。
+    fn leave_now() {
+        let mut out = std::io::stdout();
+        // 先恢复光标可见，再退出备用屏：顺序反了光标会在原屏幕上保持隐藏
+        let _ = write!(out, "{ESC}[?25h{ESC}[?1049l");
+        let _ = out.flush();
+    }
+}
+
+impl Drop for AltScreen {
+    fn drop(&mut self) {
+        self.leave();
+    }
+}
+
 /// 终端尺寸（列, 行）。取自 `stty size`，失败时退到 80×24。
 pub fn terminal_size() -> (usize, usize) {
     if let Some(s) = stty_capture(&["size"]) {
@@ -233,6 +282,8 @@ pub struct About {
     pub workspace: String,
     /// git 分支（空 = 不在仓库里）。底部状态行显示 `工作区:分支`。
     pub branch: String,
+    /// 空输入时展示的示例任务（宿主不自选，避免"界面文案"散落在渲染逻辑里）
+    pub example: String,
     pub session: String,
 }
 
@@ -549,6 +600,17 @@ type Styled = (String, Tone);
 /// 否则用户按了没反应，比不提示更糟。
 // 提示行必须能塞进输入框宽度（76 列封顶）。太长会被判为"放不下"而整条丢弃，
 // 提示就白写了 —— 所以这里刻意精简，只留最高频的几个键。
+/// 空输入时的示例任务（对标 opencode 首页的 placeholder 列表）。
+///
+/// 作用不是装饰：新用户面对空输入框往往不知道**该怎么问**，
+/// 给一两个具体例子比写一句"输入任务"有用得多。
+const EXAMPLES: [&str; 4] = [
+    "修一下代码里的 TODO",
+    "这个项目的技术栈是什么？",
+    "跑一下测试并修掉失败的用例",
+    "解释 src/main.rs 的主流程",
+];
+
 const HINT_LEFT: &str = "tab 补全   ctrl+r 历史";
 const HINT_RIGHT: &str = "@ 引用   ctrl+g 编辑器   ctrl+c 退出";
 
@@ -815,7 +877,11 @@ impl Screen<'_> {
         // 提示行：空输入时给占位提示（否则光标处一片空白，不知道能打什么）
         g.put(top + 1, left, "│", border);
         let (text, tone) = if self.input.is_empty() && !self.awaiting_input {
-            ("输入任务…（Tab 补全 @文件引用）".to_string(), Tone::Muted)
+            let ex = match self.about {
+                Some(a) if !a.example.is_empty() => a.example.clone(),
+                _ => "输入任务".to_string(),
+            };
+            (format!("输入任务… 例：{ex}"), Tone::Muted)
         } else {
             let prefix = if self.awaiting_input { "批准该调用？[y/n] > " } else { "> " };
             (format!("{prefix}{}", self.input), Tone::Text)
@@ -1111,6 +1177,16 @@ impl HostBackend for TuiFacts {
 // 交互主循环
 // ══════════════════════════════════════════════════════════════════════
 
+/// 挑一个示例任务。用启动时刻做种子即可 —— 这里要的是"每次不一样"，
+/// 不是统计意义上的随机，没必要为此引入随机数依赖。
+pub fn pick_example() -> String {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    EXAMPLES[seed % EXAMPLES.len()].to_string()
+}
+
 /// 状态栏文案：审批挂起时明确告诉用户该敲什么，否则是常规就绪提示。
 fn idle_or_approval(outstanding: &Option<String>) -> String {
     match outstanding {
@@ -1133,11 +1209,15 @@ where
     F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
 {
     let raw = RawMode::enter().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    // 进备用屏：全程在第二块屏幕上画，退出时终端整块还原
+    let mut alt = AltScreen::enter();
 
     // panic 时也还原终端，否则用户的终端会被留在原始模式
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = set_stty("sane");
+        // 必须退出备用屏，否则 panic 后用户的终端会一直停在我们这里
+        AltScreen::leave_now();
         println!("\r\n[tui] 发生 panic，终端已还原");
         previous_hook(info);
     }));
@@ -1188,7 +1268,8 @@ where
             };
             match read_key(&mut stdin) {
                 Key::Quit => {
-                    let _ = raw.restore();
+                    raw.restore();
+                    alt.leave();
                     return Ok(());
                 }
                 Key::Up | Key::Char('k') => tp.selected = 0,
@@ -1198,7 +1279,8 @@ where
                     break;
                 }
                 Key::Char('n') => {
-                    let _ = raw.restore();
+                    raw.restore();
+                    alt.leave();
                     return Ok(());
                 }
                 Key::Enter => {
@@ -1206,7 +1288,8 @@ where
                         accept(&ws);
                         break;
                     }
-                    let _ = raw.restore();
+                    raw.restore();
+                    alt.leave();
                     return Ok(());
                 }
                 _ => {}
@@ -1390,7 +1473,8 @@ where
         }
     }
 
-    let _ = raw.restore();
+    raw.restore();
+    alt.leave();
     Ok(())
 }
 
@@ -1425,6 +1509,7 @@ mod tests {
             mode_short: "default".into(),
             workspace: "/tmp/ws".into(),
             branch: "main".into(),
+            example: "修一下代码里的 TODO".into(),
             session: "neo-tui".into(),
         }
     }
@@ -1510,6 +1595,22 @@ mod tests {
         assert_eq!(decode_key("🚀".as_bytes()), Key::Char('🚀'));
         assert_eq!(decode_key(&[0xe5, 0x86]), Key::Unknown, "不完整的 UTF-8 应为 Unknown");
         assert_eq!(decode_key(&[0xff, 0xfe]), Key::Unknown, "非法字节应为 Unknown");
+    }
+
+    // ── 终端生命周期 ──────────────────────────────────────────────────
+
+    #[test]
+    fn alt_screen_leave_is_idempotent() {
+        // leave() 会被 Drop、显式退出、panic 钩子多处调用；必须幂等，
+        // 否则会往终端写多次 ?1049l（部分终端会因此闪一下）。
+        let mut alt = AltScreen::enter();
+        assert!(alt.active, "enter 后应为活动状态");
+        alt.leave();
+        assert!(!alt.active, "leave 后应转为非活动");
+        alt.leave(); // 第二次不该 panic，也不该重复输出
+        assert!(!alt.active);
+        // Drop 再调用一次也必须安全
+        drop(alt);
     }
 
     // ── 布局：核心不变量 ──────────────────────────────────────────────
@@ -1601,6 +1702,7 @@ mod tests {
         let text = plain(&welcome(90, 30)).join("\n");
         assert!(text.contains('╭'), "应有输入框上边框：{text}");
         assert!(text.contains("输入任务"), "应有占位提示：{text}");
+        assert!(text.contains("修一下代码里的 TODO"), "占位应带一个具体示例：{text}");
         assert!(text.contains("default ⏵ mock"), "输入框内应有模式/模型状态行：{text}");
     }
 

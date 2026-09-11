@@ -357,6 +357,8 @@ fn cmd_tui(args: &[String]) -> i32 {
         mode_short: mode_short(mode).to_string(),
         workspace: workspace.display().to_string(),
         branch: detect_branch(&workspace),
+        // 每次启动换一个示例（不需要真随机：只要别每次都一样）
+        example: neo_host_tui::pick_example(),
         session: session_id.to_string(),
     };
 
