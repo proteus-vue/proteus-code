@@ -8,6 +8,14 @@
 > `.cache/ai-external/github/opencode-dev`，由
 > `docs/ai-efficiency-rules/scripts/cache_fetch.sh` 拉取）。
 > 引用处标注文件路径，便于复核。
+>
+> ⚠️ **`.cache/` 不入库**（外部资源缓存），所以**换一台电脑必须重拉**，
+> 否则本文所有路径都指不到东西。一条命令搞定：
+> ```bash
+> bash scripts/fetch-refs.sh
+> PROXY=http://127.0.0.1:7897 bash scripts/fetch-refs.sh   # github 直连不通时
+> ```
+> 细节与 MiMo 的特殊情况见 `PROJECT_MEMORY.md` §4.53。
 
 ---
 

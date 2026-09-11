@@ -1888,6 +1888,40 @@ reset 统一由 `lines()` 在切换时发。并补回归测试
 **规律**：只要有一段时间不读输入，就必须明确"这段时间的输入怎么处理"（丢弃？中断？），
 不能默认"攒着"—— 攒着的键会在状态变化后被误解释。
 
+## 4.53 参考源码不在仓库里：换机器必须重拉（`scripts/fetch-refs.sh`）
+
+`docs/opencode-parity.md` 是照着 **opencode 真实源码**写的，所有引用都指向
+`.cache/ai-external/github/opencode-dev/packages/tui/...`。而 `.cache/` 在
+`.gitignore` 里（外部资源缓存不入库）—— 于是**换一台电脑，那份规格就查不到出处了**：
+文档里的路径全指向不存在的东西。这不是小事，它会让"对齐"重新退化成
+凭印象猜（正是打地鼠的成因）。
+
+固化成一条命令：`scripts/fetch-refs.sh`
+- `bash scripts/fetch-refs.sh` 拉全部参考项目
+- `bash scripts/fetch-refs.sh --list` 只看缓存状态
+- 自动探代理：先看 `$PROXY` 与环境变量，再并发探测常见本地端口
+  （7897 打头，其次 7890/7891/1080/…），命中才用
+
+### 注意事项（新机器 / 新网络）
+
+1. **参考源码不入库**（`.cache/` 已被忽略），新电脑必须重跑本脚本；
+   不跑则 `docs/opencode-parity.md` 的路径全部失效。
+2. **GitHub 直连可能失败**（`Error in the HTTP2 framing layer` / 连接超时，
+   git 不读系统代理）。设代理再跑：
+   `PROXY=http://127.0.0.1:7897 bash scripts/fetch-refs.sh`
+   （本机实测 7897 可用；脚本也会自动探。）
+3. **MiMo Code 没有可用源码**：npm 包 `@mimo-ai/cli` 里是 99MB 编译产物
+   (`bin/.mimocode`)，**没有 `packages/` 目录**。要对照只能：
+   - `npm i -g @mimo-ai/cli`（本机已有 `/Users/kags/.npm-global/bin/mimo`）
+   - 然后用 pty 抓帧比对观感（做法见 4.51）
+   - **不要**去 clone `XiaomiMiMo/MiMo-Code` 找 TUI 源码 —— 那是另一个仓，
+     与 npm 包内容不对应，白费时间。
+4. **opencode 的分支是 `dev`**（不是 main）；只稀疏拉 `packages/tui`
+   （省时间与体积）。要看别处再加 `--subdir`。
+5. `cache_fetch.sh` 在 macOS/BSD `sed` 下会打印一行
+   `RE error: repetition-operator operand invalid` —— 那是它推导默认缓存名时
+   的报错，**不影响克隆**；`fetch-refs.sh` 已显式传 `--name` 规避。
+
 ## 5. 假通过：门禁与测试各抓到过一次自己
 
 这两次都值得记，因为它们说明"看起来有保护"有多危险：
