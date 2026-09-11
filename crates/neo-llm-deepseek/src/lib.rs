@@ -371,6 +371,35 @@ impl ScriptedProvider {
     }
 
     /// 按步给出响应；每一步用完后回落到 `tail`。
+    /// 演示用：产出 markdown 与任务清单，便于人眼验证渲染效果。
+    /// 它**不参与任何生产路径**，只让"高亮/清单到底长什么样"能被直接看到。
+    pub fn demo() -> Self {
+        Self::scripted(
+            vec![vec![
+                Self::tool_call_delta(
+                    "todo1",
+                    "todowrite",
+                    serde_json::json!({
+                        "items": [
+                            {"content": "读取配置", "status": "completed"},
+                            {"content": "实现高亮", "status": "in_progress"},
+                            {"content": "补测试", "status": "pending"},
+                        ]
+                    }),
+                ),
+            ]],
+            "# 完成情况\n\n这是一段**说明**，含 `cargo test` 行内代码。\n\n- 第一项\n- 第二项\n\n```rust\nfn main() {\n    let s = \"hi\"; // 注释\n    println!(\"{}\", s);\n}\n```\n\n> 引用：注意代码块已高亮。",
+        )
+    }
+
+    fn tool_call_delta(id: &str, name: &str, args: serde_json::Value) -> ModelDelta {
+        ModelDelta::ToolCall(neo_core::ToolInvocation {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: args,
+        })
+    }
+
     pub fn scripted(steps: Vec<Vec<ModelDelta>>, tail: &str) -> Self {
         Self { script: steps, tail: tail.to_string() }
     }

@@ -34,6 +34,23 @@ impl SandboxBackend for TestSandbox {
     }
 }
 
+/// 会**真的落盘**的沙箱：给需要验证文件内容的用例用。
+/// （`TestSandbox::write_file` 是桩，不写盘 —— 用它测"文件变了"会得到假失败。）
+struct DiskSandbox;
+
+impl SandboxBackend for DiskSandbox {
+    fn supports(&self, _mode: SandboxMode) -> bool { true }
+    fn write_file(&self, _m: SandboxMode, p: &std::path::Path, content: &str) -> neo_core::FileOutcome {
+        match std::fs::write(p, content) {
+            Ok(()) => neo_core::FileOutcome::Written { bytes: content.len() },
+            Err(e) => neo_core::FileOutcome::Failed { reason: e.to_string() },
+        }
+    }
+    fn execute(&self, _m: SandboxMode, command: &str, _limit: usize) -> SandboxOutcome {
+        SandboxOutcome::Ran { stdout: format!("ran:{command}"), truncated: false }
+    }
+}
+
 /// 记录被执行的命令，用于断言"经沙箱执行了"。
 struct RecordingTool { seen: Arc<std::sync::Mutex<Vec<String>>> }
 
@@ -442,6 +459,120 @@ impl Tool for PreviewTool {
     fn execute(&self, _a: &Value, _c: &ToolCtx) -> ToolOutput {
         ToolOutput { exit_code: 0, stdout: "ok".into(), stderr: String::new(), truncated: false }
     }
+}
+
+#[test]
+fn real_apply_patch_reports_its_change_after_writing() {
+    // 关键点：用**真实** ApplyPatchTool 而不是假工具。
+    //
+    // 这个用例是为了抓住一个只会在真实工具上出现的顺序错误：
+    // 若在内核里"执行后"才调 preview，读到的文件已等于目标 → diff 为空 →
+    // 统计恒为 0。假工具的 preview 无条件返回，所以假工具**测不出**这个 bug
+    // （我第一版正是被假工具骗过去的）。
+    let dir = std::env::temp_dir().join(format!("neo-diff-tally-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("note.txt");
+    std::fs::write(&target, "old line\n").unwrap();
+
+    let mut tools = ToolRegistry::new();
+    neo_capability::register_defaults(&mut tools);
+
+    let mut k = Kernel::new(
+        "s",
+        cfg(ExecMode::AutoEdit),
+        tools,
+        Box::new(ScriptedModelProvider::new(vec![
+            vec![tool_call(
+                "c1",
+                "apply_patch",
+                serde_json::json!({ "path": target.to_str().unwrap(), "old": "old line", "new": "new line" }),
+            )],
+            vec![ModelDelta::Text("done".into())],
+        ])),
+        Arc::new(DiskSandbox),
+        Box::new(InMemoryPersistence::new()),
+        dir.clone(),
+    );
+    let events = k.submit(Op::UserTurn { text: "改".into(), refs: vec![] }).unwrap();
+
+    // 文件确实变了
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "new line\n");
+    // 且改动被统计到
+    let files = events
+        .iter()
+        .find_map(|e| match e {
+            EventMsg::FilesChanged { files } => Some(files.clone()),
+            _ => None,
+        })
+        .expect("真实 apply_patch 写入后应广播文件改动");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].additions, 1);
+    assert_eq!(files[0].deletions, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn file_changes_are_tallied_after_a_successful_write() {
+    // 钉住一个真实 bug：曾让工具"事后"算 diff —— 执行完文件已等于目标，
+    // diff 为空，侧栏"已修改文件"永远为空。统计必须来自**执行前**的 preview。
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(PreviewTool));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(vec![
+            vec![tool_call("c1", "apply_patch", serde_json::json!({}))],
+            vec![ModelDelta::Text("done".into())],
+        ])),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        // AutoEdit：写自动放行，无需审批，直接走执行路径
+        ExecMode::AutoEdit,
+    );
+    let events = k.submit(Op::UserTurn { text: "改".into(), refs: vec![] }).unwrap();
+    let files = events
+        .iter()
+        .find_map(|e| match e {
+            EventMsg::FilesChanged { files } => Some(files.clone()),
+            _ => None,
+        })
+        .expect("成功写入后应广播文件改动列表");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, "a.txt");
+    assert_eq!(files[0].additions, 1, "应统计到 1 行新增");
+    assert_eq!(files[0].deletions, 1, "应统计到 1 行删除");
+}
+
+#[test]
+fn a_failed_write_records_no_file_change() {
+    // 失败的调用不该被计入"已修改文件"（否则侧栏会显示实际没发生的改动）
+    struct FailingTool;
+    impl Tool for FailingTool {
+        fn name(&self) -> &str { "apply_patch" }
+        fn describe(&self) -> String { "x".into() }
+        fn call_kind(&self, _a: &Value) -> CallKind { CallKind::Write }
+        fn preview(&self, _a: &Value) -> Option<(String, String)> {
+            Some(("b.txt".into(), "+new\n".into()))
+        }
+        fn execute(&self, _a: &Value, _c: &ToolCtx) -> ToolOutput {
+            ToolOutput { exit_code: -1, stdout: String::new(), stderr: "拒绝".into(), truncated: false }
+        }
+    }
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(FailingTool));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(vec![
+            vec![tool_call("c1", "apply_patch", serde_json::json!({}))],
+            vec![ModelDelta::Text("done".into())],
+        ])),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    let events = k.submit(Op::UserTurn { text: "改".into(), refs: vec![] }).unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(e, EventMsg::FilesChanged { .. })),
+        "失败的写不该计入改动"
+    );
 }
 
 #[test]

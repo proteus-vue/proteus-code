@@ -137,6 +137,14 @@ pub enum ApprovalPolicy {
     Never,
 }
 
+/// 一个文件的改动统计（供侧栏"已修改文件"面板）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
 /// 任务清单的一项（模型通过 `todowrite` 工具维护）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoEntry {
@@ -179,6 +187,14 @@ pub enum EventMsg {
     ApprovalRequest { id: ApprovalId, detail: String },
     PatchProposed { path: String, diff: String },
     CheckpointSaved { checkpoint_id: String },
+    /// 单个文件发生改动（**由工具上报**，内核据此累计）。
+    FileChanged { path: String, additions: usize, deletions: usize },
+    /// 已修改文件的**完整聚合列表**（内核广播，侧栏据此渲染）。
+    ///
+    /// 为什么发聚合而不是只发增量：侧栏需要的是"当前全部改动"，
+    /// 让每个宿主自己维护增量状态，一旦某条增量丢了就会显示错乱。
+    /// 内核已经持有累计状态，广播整表最省事也最不容易错。
+    FilesChanged { files: Vec<FileChange> },
     /// 任务清单被更新（整表替换，不是增量）。
     ///
     /// 整表替换而非增量：模型每次给出完整清单，宿主不必维护差量状态，
@@ -222,6 +238,8 @@ pub enum Fact {
     ApprovalNeeded { detail: String },
     /// 任务清单（模型自述的进度）。
     TodoList(Vec<TodoEntry>),
+    /// 本次会话已修改的文件（含增删行数）。
+    FilesChanged(Vec<FileChange>),
     /// 待审批改动的预览（路径 + unified diff）。
     ///
     /// 与 `ApprovalNeeded` 分开建模：一个是"需要你决定"，
@@ -278,6 +296,7 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
             }
             EventMsg::UserSubmitted { text } => out.push(Fact::UserSaid(text.clone())),
             EventMsg::TodoUpdated { items } => out.push(Fact::TodoList(items.clone())),
+            EventMsg::FilesChanged { files } => out.push(Fact::FilesChanged(files.clone())),
             EventMsg::Error { message } => out.push(Fact::Failed(message.clone())),
             EventMsg::TurnComplete { input_tokens, output_tokens } => {
                 out.push(Fact::TurnFinished {

@@ -22,7 +22,9 @@
 pub mod commands;
 pub mod input;
 pub mod popup;
+pub mod markdown;
 pub mod stars;
+pub mod syntax;
 pub mod theme;
 pub mod trust;
 pub mod width;
@@ -183,6 +185,8 @@ pub enum Key {
     CommandPalette,
     /// Ctrl+T：下一个主题
     NextTheme,
+    /// Ctrl+B：切换侧栏
+    ToggleSidebar,
     /// Ctrl+L 清屏
     ClearScreen,
     /// Ctrl+U 清空输入行
@@ -221,6 +225,7 @@ pub fn decode_key(bytes: &[u8]) -> Key {
         [0x1b, b'[', b'D'] => Key::Left,
         [0x10] => Key::CommandPalette,
         [0x14] => Key::NextTheme,
+        [0x02] => Key::ToggleSidebar,
         // 单独一个 ESC：关闭弹窗。必须排在 `[0x1b, ..]` 之前 ——
         // 后者也能匹配长度 1 的输入，会把 Esc 吞成 Unknown
         [0x1b] => Key::Escape,
@@ -305,6 +310,9 @@ pub struct About {
     pub branch: String,
     /// 空输入时展示的示例任务（宿主不自选，避免"界面文案"散落在渲染逻辑里）
     pub example: String,
+    /// 模型上下文窗口（token）。用于侧栏 Context 面板的占用率。
+    /// 0 = 未知 → 不显示百分比（宁可不显示，也不给假数字）。
+    pub context_limit: u64,
     pub session: String,
 }
 
@@ -397,6 +405,8 @@ pub struct Screen<'a> {
     /// 预排版正文（/help、/keys 这类只读信息屏）。
     /// 与 `facts` 分开是因为它不是会话事实，只是宿主自己的一页说明。
     pub preformatted: Option<&'a Vec<Vec<Seg>>>,
+    /// 侧栏是否展开（`ctrl+b` 切换）。窄终端下强制关闭。
+    pub sidebar: bool,
 }
 
 /// 信任对话框状态。
@@ -600,6 +610,12 @@ impl Pal {
 /// 底部固定区块行数：输入框(4) + 提示行(1) + 状态行(1)
 const CHROME_ROWS: usize = 6;
 
+/// 侧栏宽度（对齐 opencode 的 42 列；我们窄一些，因为终端普遍没它宽）。
+const SIDEBAR_COLS: usize = 34;
+/// 显示侧栏所需的最小终端宽度。低于此值强制隐藏 ——
+/// 正文被挤到 40 列以下时，侧栏带来的信息量抵不上阅读体验的损失。
+const SIDEBAR_MIN_COLS: usize = 96;
+
 /// 一行的事实片段：(起始列, 文本, 色调)
 pub type Seg = (usize, String, Tone);
 /// 居中的首屏片段（列由居中逻辑算，不用自己给）
@@ -636,12 +652,27 @@ struct Grid {
     tone: Vec<Tone>,
     /// 宽字符的续列：占位但不输出字符，否则整行会右移一列
     skip: Vec<bool>,
+    /// 正文写入的右边界（不含）。用于给侧栏让位。
+    put_limit: usize,
 }
 
 impl Grid {
     fn new(cols: usize, rows: usize) -> Self {
         let n = cols.saturating_mul(rows);
-        Self { cols, rows, ch: vec![' '; n], tone: vec![Tone::None; n], skip: vec![false; n] }
+        Self {
+            cols,
+            rows,
+            ch: vec![' '; n],
+            tone: vec![Tone::None; n],
+            skip: vec![false; n],
+            put_limit: usize::MAX,
+        }
+    }
+
+    /// 限制写入范围的列上限（`usize::MAX` = 不限制）。侧栏存在时设为侧栏左边界，
+    /// 避免正文写到侧栏下面再被覆盖（那会在视觉上"截断"正文，很难解释）。
+    fn clamp_put(&mut self, until: usize) {
+        self.put_limit = until;
     }
 
     /// 写一段文本，返回结束列。宽字符按显示宽度占两列。
@@ -655,7 +686,7 @@ impl Grid {
             if w == 0 {
                 continue; // 组合字符：叠在前一个上，不单独占列
             }
-            if c + w > self.cols {
+            if c + w > self.cols.min(self.put_limit) {
                 break;
             }
             let i = row * self.cols + c;
@@ -751,6 +782,17 @@ impl Screen<'_> {
         let p = Pal::new(detect_color_mode(), self.theme);
         let mut g = Grid::new(self.cols, self.rows);
 
+        // 侧栏：把正文的写入边界收到侧栏左侧，正文画完后再画侧栏。
+        // 顺序是刻意的 —— 若先画侧栏再画正文，正文会把侧栏覆盖掉。
+        // 最小宽度在这里**强制执行**：判断依赖 cols，就应放在知道 cols 的地方。
+        // 只在调用方判断的话，任何别的调用点（测试、未来宿主）都能绕过它，
+        // 得到"正文被挤到 30 列"的坏布局。
+        let show_sidebar = self.sidebar && self.cols >= SIDEBAR_MIN_COLS;
+        let side_x0 = if show_sidebar { Some(self.cols - SIDEBAR_COLS) } else { None };
+        if let Some(x0) = side_x0 {
+            g.clamp_put(x0);
+        }
+
         let (chrome_top, cursor) = if let Some(lines) = self.preformatted {
             // 信息屏：从顶部开始铺，超出部分从**尾部**标注（说明不是被静默吞掉）
             let avail = self.rows.saturating_sub(CHROME_ROWS);
@@ -775,6 +817,11 @@ impl Screen<'_> {
         if let Some(pop) = self.popup {
             self.draw_popup(&mut g, &p, pop, chrome_top);
         }
+        // 侧栏最后画：它占的是自己的列区，且要求不被正文侵入
+        if let Some(x0) = side_x0 {
+            g.clamp_put(usize::MAX);
+            self.draw_sidebar(&mut g, &p, x0);
+        }
 
         g.fill_stars();
         let mut out = format!("{ESC}[H{ESC}[2J");
@@ -792,10 +839,24 @@ impl Screen<'_> {
     /// 封顶是刻意的：超宽终端上让输入框铺满整屏，排版会散掉
     /// （一行 200 列的眼睛移动距离，比 76 列难读得多）。
     fn box_width(&self) -> usize {
-        if self.cols >= 28 {
-            (self.cols - 4).min(76)
+        let avail = self.body_cols();
+        if avail >= 28 {
+            (avail - 4).min(76)
         } else {
-            self.cols.saturating_sub(2).max(8)
+            avail.saturating_sub(2).max(8)
+        }
+    }
+
+    /// 正文可用列数（侧栏占用右侧时会收窄）。
+    ///
+    /// 输入框、弹窗、状态行都要在这个区域内居中 —— 用整屏宽度居中会让
+    /// 它们压到侧栏上（真机截图里输入框右边框就横穿了侧栏竖线）。
+    fn body_cols(&self) -> usize {
+        let show_sidebar = self.sidebar && self.cols >= SIDEBAR_MIN_COLS;
+        if show_sidebar {
+            self.cols.saturating_sub(SIDEBAR_COLS)
+        } else {
+            self.cols
         }
     }
 
@@ -882,11 +943,161 @@ impl Screen<'_> {
         hero
     }
 
+    /// 右侧面板：Context（用量）/ Todo（进度）/ Files（改动）。
+    ///
+    /// 对齐 opencode 的 sidebar 插件集，但**只放我们有数据的三块** ——
+    /// 它还有 MCP / LSP 面板，我们没有 MCP 与 LSP，做了只会是空面板。
+    fn draw_sidebar(&self, g: &mut Grid, p: &Pal, x0: usize) {
+        let _ = p;
+        let w = self.cols.saturating_sub(x0);
+        let inner = w.saturating_sub(3);
+
+        // 左侧竖线把侧栏与正文分开（对标 opencode 的分栏观感）
+        for r in 0..self.rows {
+            g.put(r, x0, "│", Tone::Border);
+        }
+
+        let mut row = 1usize;
+        let section = |g: &mut Grid, row: &mut usize, title: &str, tone: Tone| {
+            if *row >= self.rows {
+                return;
+            }
+            g.put(*row, x0 + 2, title, tone);
+            *row += 1;
+        };
+
+        // ── Context：token 用量 ──
+        let (tin, tout) = self
+            .facts
+            .iter()
+            .filter_map(|f| match f {
+                Fact::TurnFinished { input_tokens, output_tokens } => {
+                    Some((*input_tokens, *output_tokens))
+                }
+                _ => None,
+            })
+            .fold((0u64, 0u64), |a, b| (a.0.max(b.0), a.1.max(b.1)));
+        // 取最近一轮的用量（每轮都是独立统计，累加没有意义）
+        let (last_in, last_out) = self
+            .facts
+            .iter()
+            .rev()
+            .find_map(|f| match f {
+                Fact::TurnFinished { input_tokens, output_tokens } => {
+                    Some((*input_tokens, *output_tokens))
+                }
+                _ => None,
+            })
+            .unwrap_or((0, 0));
+        let _ = (tin, tout);
+        section(g, &mut row, "Context", Tone::Text);
+        g.put(row, x0 + 2, &format!("{last_in} in / {last_out} out"), Tone::Muted);
+        row += 1;
+        match self.about.map(|a| a.context_limit).unwrap_or(0) {
+            // 上限未知时**不显示百分比** —— 宁可不给，也不给假数字
+            0 => {
+                g.put(row, x0 + 2, "上限未知", Tone::Muted);
+                row += 1;
+            }
+            limit => {
+                let used = last_in + last_out;
+                let pct = if limit == 0 { 0 } else { (used * 100 / limit).min(999) };
+                let tone = if pct >= 90 {
+                    Tone::Error
+                } else if pct >= 70 {
+                    Tone::Warning
+                } else {
+                    Tone::Muted
+                };
+                g.put(row, x0 + 2, &format!("{pct}% of {limit}"), tone);
+                row += 1;
+            }
+        }
+
+        // ── Todo：任务清单（最近一次）──
+        if let Some(items) = self.facts.iter().rev().find_map(|f| match f {
+            Fact::TodoList(items) => Some(items),
+            _ => None,
+        }) {
+            let done = items
+                .iter()
+                .filter(|i| matches!(i.status, neo_protocol::TodoStatus::Completed))
+                .count();
+            row += 1;
+            section(g, &mut row, &format!("Todo {done}/{}", items.len()), Tone::Text);
+            for it in items.iter().take(12) {
+                if row >= self.rows {
+                    break;
+                }
+                let (mark, tone) = match it.status {
+                    neo_protocol::TodoStatus::Completed => ("✓", Tone::Success),
+                    neo_protocol::TodoStatus::InProgress => ("•", Tone::Warning),
+                    neo_protocol::TodoStatus::Pending => ("·", Tone::Muted),
+                };
+                g.put(row, x0 + 2, mark, tone);
+                let text = width::truncate_to_width(&it.content, inner.saturating_sub(3)).to_string();
+                g.put(row, x0 + 4, &text, tone);
+                row += 1;
+            }
+            if items.len() > 12 {
+                g.put(row, x0 + 2, &format!("… 另 {} 项", items.len() - 12), Tone::Muted);
+                row += 1;
+            }
+        }
+
+        // ── Files：已修改文件 ──
+        if let Some(files) = self.facts.iter().rev().find_map(|f| match f {
+            Fact::FilesChanged(files) => Some(files),
+            _ => None,
+        }) {
+            let adds: usize = files.iter().map(|f| f.additions).sum();
+            let dels: usize = files.iter().map(|f| f.deletions).sum();
+            let _ = (adds, dels);
+            row += 1;
+            // 标题只写名字：每个文件自带 +N -N，标题再写一次是冗余
+            section(g, &mut row, "Modified Files", Tone::Text);
+            for f in files.iter().take(10) {
+                if row >= self.rows {
+                    break;
+                }
+                // 路径从**左侧**截断（保留文件名，丢弃前面的目录）——
+                // 文件名才是识别信息，截尾会把最关键的部分吃掉
+                let counts = format!(" +{} -{}", f.additions, f.deletions);
+                let budget = inner.saturating_sub(counts.len());
+                let name = truncate_left(&f.path, budget);
+                g.put(row, x0 + 2, &name, Tone::Muted);
+                let cx = x0 + w - 2 - counts.len();
+                if cx > x0 + 2 + width::display_width(&name) {
+                    let tone = if f.deletions > 0 && f.additions == 0 {
+                        Tone::Error
+                    } else {
+                        Tone::Success
+                    };
+                    g.put(row, cx, counts.trim_start(), tone);
+                }
+                row += 1;
+            }
+            if files.len() > 10 && row < self.rows {
+                g.put(row, x0 + 2, &format!("… 另 {} 个", files.len() - 10), Tone::Muted);
+            }
+        }
+
+        // ── 底部：工作区分支（对标 opencode sidebar 的 footer）──
+        if let Some(a) = self.about {
+            if self.rows > 2 {
+                let label = if a.branch.is_empty() { a.model.clone() } else { a.branch.clone() };
+                let t = width::truncate_to_width(&label, inner).to_string();
+                g.put(self.rows - 2, x0 + 2, &t, Tone::Border);
+            }
+        }
+    }
+
     /// 弹窗：标题 + 候选项 + （截断时）页脚。画在输入框上方。
     fn draw_popup(&self, g: &mut Grid, p: &Pal, pop: &popup::Popup, chrome_top: usize) {
         let _ = p;
+        let body = self.body_cols();
         let box_w = self.box_width();
-        let left = self.cols.saturating_sub(box_w) / 2;
+        let left = body.saturating_sub(box_w) / 2;
         let inner = box_w.saturating_sub(4);
         let max_rows = pop.kind.max_rows();
         let visible = pop.items.len().min(max_rows);
@@ -978,8 +1189,9 @@ impl Screen<'_> {
         if top + CHROME_ROWS > self.rows {
             return None;
         }
+        let body = self.body_cols();
         let box_w = self.box_width();
-        let left = self.cols.saturating_sub(box_w) / 2;
+        let left = body.saturating_sub(box_w) / 2;
         let inner_w = box_w.saturating_sub(4);
         // 待审批时边框转警告色：余光里也能看出"现在轮到你"
         let border = if self.awaiting_input { Tone::Warning } else { Tone::BorderActive };
@@ -1036,16 +1248,16 @@ impl Screen<'_> {
             Some(a) => a.workspace.clone(),
             None => String::new(),
         };
-        let ws_shown = width::truncate_to_width(&ws_line, self.cols.saturating_sub(6)).to_string();
+        let ws_shown = width::truncate_to_width(&ws_line, body.saturating_sub(6)).to_string();
         let wsw = width::display_width(&ws_shown);
         let stw = width::display_width(self.status);
         // 放不下就不画右侧 —— 宁可少显示，也不折行把布局打乱
-        if self.status.is_empty() || wsw + stw + 4 > self.cols {
+        if self.status.is_empty() || wsw + stw + 4 > body {
             g.put(top + 5, 2, &ws_shown, Tone::Dim);
         } else {
             g.put(top + 5, 2, &ws_shown, Tone::Dim);
             let tone = if self.awaiting_input { Tone::Warning } else { Tone::Muted };
-            g.put(top + 5, self.cols - stw - 2, self.status, tone);
+            g.put(top + 5, body - stw - 2, self.status, tone);
         }
 
         if self.show_cursor {
@@ -1115,27 +1327,32 @@ impl Screen<'_> {
     ///   - 工具调用成功 ✓ / 失败 ✗，细节（exit code）压暗
     ///   - 元信息一律 muted，不抢正文
     fn fact_lines(&self) -> Vec<Vec<Seg>> {
-        let inner = self.cols.saturating_sub(4);
+        // 侧栏存在时正文可用宽度收窄（否则文字会被裁在侧栏左边界，看起来是"断行"）
+        let show_sidebar = self.sidebar && self.cols >= SIDEBAR_MIN_COLS;
+        let body_cols =
+            if show_sidebar { self.cols.saturating_sub(SIDEBAR_COLS) } else { self.cols };
+        let inner = body_cols.saturating_sub(4);
         let mut out: Vec<Vec<Seg>> = Vec::new();
         for f in self.facts {
             match f {
                 Fact::UserSaid(text) => {
-                    for l in text.lines() {
-                        for w in width::wrap_to_width(l, inner) {
-                            out.push(vec![
-                                (0, "┃".to_string(), Tone::Accent),
-                                (2, w, Tone::Text),
-                            ]);
+                    // 用户消息也按 Markdown 渲染（经常粘贴代码/清单），
+                    // 但整块保留左侧竖条，与助手正文区分
+                    let body = markdown::render(text, inner.saturating_sub(2));
+                    for mut l in body {
+                        let mut seg = vec![(0, "┃".to_string(), Tone::Accent)];
+                        seg.push((2, " ".to_string(), Tone::Text));
+                        for (col, t, tone) in l.drain(..) {
+                            seg.push((col + 2, t, tone));
                         }
+                        out.push(seg);
                     }
                     out.push(Vec::new());
                 }
                 Fact::AssistantSaid(text) => {
-                    for l in text.lines() {
-                        for w in width::wrap_to_width(l, inner) {
-                            out.push(vec![(0, w, Tone::Text)]);
-                        }
-                    }
+                    // 助手回复按 Markdown 渲染：代码块高亮、行内代码、标题、列表。
+                    // inner 已扣掉侧栏占用（render 把正文写入裁到侧栏左侧）。
+                    out.extend(markdown::render(text, inner));
                     out.push(Vec::new());
                 }
                 Fact::ToolFinished { name, exit_code } => {
@@ -1200,6 +1417,16 @@ impl Screen<'_> {
                             out.push(vec![(4, w, tone)]);
                         }
                     }
+                }
+                Fact::FilesChanged(files) => {
+                    // 正文里只给一行汇总；明细在右侧面板（避免刷屏）
+                    let adds: usize = files.iter().map(|f| f.additions).sum();
+                    let dels: usize = files.iter().map(|f| f.deletions).sum();
+                    out.push(vec![(
+                        2,
+                        format!("◆ 已修改 {} 个文件（+{adds} -{dels}）", files.len()),
+                        Tone::Info,
+                    )]);
                 }
                 Fact::ApprovalNeeded { detail } => {
                     out.push(vec![(2, format!("△ 需要审批：{detail}"), Tone::Warning)]);
@@ -1521,6 +1748,32 @@ fn apply_popup_item(
     }
 }
 
+/// 从**左侧**截断，保留尾部（文件名）。
+///
+/// 用途：侧栏的"已修改文件"列表。文件名才是识别信息，
+/// 截尾（`src/very/long/pa…`）会把最关键的部分吃掉。
+fn truncate_left(s: &str, max_cols: usize) -> String {
+    if width::display_width(s) <= max_cols {
+        return s.to_string();
+    }
+    if max_cols <= 1 {
+        return String::new();
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut used = 0;
+    // 预算是 max_cols-1，给省略号留一列
+    for ch in s.chars().rev() {
+        let w = width::char_width(ch);
+        if used + w > max_cols - 1 {
+            break;
+        }
+        tail.push(ch);
+        used += w;
+    }
+    tail.reverse();
+    format!("…{}", tail.into_iter().collect::<String>())
+}
+
 /// 状态栏文案：审批挂起时明确告诉用户该敲什么，否则是常规就绪提示。
 fn idle_or_approval(outstanding: &Option<String>) -> String {
     match outstanding {
@@ -1577,6 +1830,8 @@ where
     let mut info_screen: Option<String> = None;
     // 由命令/弹窗设置：请求退出主循环
     let mut should_quit = false;
+    // 侧栏开关（`ctrl+b`）。窄终端下渲染时会强制隐藏。
+    let mut sidebar_open = true;
 
     // ── 首次进入某工作区：先要一次知情同意 ──────────────────────────
     //
@@ -1599,6 +1854,7 @@ where
                 theme: theme_name,
                 popup: None,
                 preformatted: None,
+                sidebar: false,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -1665,6 +1921,7 @@ where
                 // 借 info 屏这段：直接用 facts 通道塞不进去（Fact 无原文类型），
                 // 改用 preformatted 字段承载
                 preformatted: Some(&body),
+                sidebar: false,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -1691,6 +1948,7 @@ where
             theme: theme_name,
             popup: popup_state.as_ref(),
             preformatted: None,
+            sidebar: sidebar_open,
         };
         write!(stdout, "{}", screen.render())?;
         stdout.flush()?;
@@ -1799,6 +2057,10 @@ where
                 p.set_items(popup::palette_items(""), false);
                 popup_state = Some(p);
                 status = "命令面板".to_string();
+            }
+            Key::ToggleSidebar => {
+                sidebar_open = !sidebar_open;
+                status = if sidebar_open { "侧栏已展开" } else { "侧栏已收起" }.to_string();
             }
             Key::NextTheme => {
                 theme_name = theme_name.next();
@@ -2020,6 +2282,7 @@ where
                             theme: theme_name,
                             popup: None,
                             preformatted: None,
+                            sidebar: sidebar_open,
                         }
                         .render()
                     )?;
@@ -2059,6 +2322,7 @@ where
                         theme: theme_name,
                         popup: None,
                         preformatted: None,
+                        sidebar: sidebar_open,
                     }
                     .render()
                 )?;
@@ -2104,6 +2368,7 @@ mod tests {
             theme: theme::ThemeName::OpenCode,
             popup: None,
             preformatted: None,
+            sidebar: false,
         }
         .render()
     }
@@ -2117,6 +2382,7 @@ mod tests {
             workspace: "/tmp/ws".into(),
             branch: "main".into(),
             example: "修一下代码里的 TODO".into(),
+            context_limit: 64_000,
             session: "neo-tui".into(),
         }
     }
@@ -2136,6 +2402,7 @@ mod tests {
             theme: theme::ThemeName::OpenCode,
             popup: None,
             preformatted: None,
+            sidebar: false,
         }
         .render()
     }
@@ -2233,6 +2500,7 @@ mod tests {
             theme: theme::ThemeName::OpenCode,
             popup: Some(&p),
             preformatted: None,
+            sidebar: false,
         }
         .render();
         // 找出弹窗所在的行区间（含边框），断言这些行里没有 logo 的半块字符
@@ -2325,11 +2593,140 @@ mod tests {
             theme: theme::ThemeName::OpenCode,
             popup: None,
             preformatted: Some(&lines),
+            sidebar: false,
         }
         .render();
         let text = plain(&out).join("\n");
         assert!(text.contains("编程 Agent 内核"), "应显示帮助正文：{text}");
         assert!(text.contains("按任意键返回"), "应提示如何返回：{text}");
+    }
+
+    // ── 侧栏 ──────────────────────────────────────────────────────────
+
+    fn sidebar_screen(cols: usize, facts: &[Fact], sidebar: bool) -> String {
+        let a = About { context_limit: 64_000, ..about() };
+        Screen {
+            cols,
+            rows: 30,
+            facts,
+            input: "",
+            status: "就绪",
+            awaiting_input: false,
+            show_cursor: false,
+            about: Some(&a),
+            trust: None,
+            theme: theme::ThemeName::OpenCode,
+            popup: None,
+            preformatted: None,
+            sidebar,
+        }
+        .render()
+    }
+
+    #[test]
+    fn sidebar_shows_todo_and_modified_files() {
+        use neo_protocol::{FileChange, TodoEntry, TodoStatus};
+        let facts = vec![
+            Fact::TodoList(vec![
+                TodoEntry { content: "写测试".into(), status: TodoStatus::Completed },
+                TodoEntry { content: "改文档".into(), status: TodoStatus::InProgress },
+                TodoEntry { content: "发版".into(), status: TodoStatus::Pending },
+            ]),
+            Fact::FilesChanged(vec![
+                FileChange { path: "src/main.rs".into(), additions: 12, deletions: 3 },
+            ]),
+        ];
+        let text = plain(&sidebar_screen(120, &facts, true)).join("\n");
+        assert!(text.contains("Todo 1/3"), "应有清单进度：{text}");
+        assert!(text.contains("写测试"), "应列出清单项：{text}");
+        assert!(text.contains("Modified Files"), "应有已修改文件面板：{text}");
+        assert!(text.contains("src/main.rs"), "应列出文件名：{text}");
+        assert!(text.contains("+12"), "应显示新增行数：{text}");
+    }
+
+    #[test]
+    fn sidebar_can_be_turned_off_and_hides_on_narrow_terminals() {
+        use neo_protocol::{FileChange};
+        let facts = vec![Fact::FilesChanged(vec![
+            FileChange { path: "a.rs".into(), additions: 1, deletions: 0 },
+        ])];
+        let off = plain(&sidebar_screen(120, &facts, false)).join("\n");
+        assert!(!off.contains("Modified Files"), "关闭后不该有侧栏：{off}");
+
+        // 窄终端：即使 sidebar=true 也必须隐藏（否则正文被挤到不可读）
+        let narrow = plain(&sidebar_screen(60, &facts, true)).join("\n");
+        assert!(!narrow.contains("Modified Files"), "窄终端不该显示侧栏：{narrow}");
+    }
+
+    #[test]
+    fn sidebar_omits_the_context_percentage_when_limit_is_unknown() {
+        // 上限未知时给百分比等于编数字；宁可不显示
+        let a = About { context_limit: 0, ..about() };
+        let facts = vec![Fact::TurnFinished { input_tokens: 100, output_tokens: 20 }];
+        let out = Screen {
+            cols: 120, rows: 30, facts: &facts, input: "", status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
+            sidebar: true,
+        }.render();
+        let text = plain(&out).join("\n");
+        assert!(text.contains("上限未知"), "应说明上限未知：{text}");
+        assert!(!text.contains("% of"), "不得编造百分比：{text}");
+    }
+
+    #[test]
+    fn sidebar_context_percentage_reflects_usage() {
+        let a = About { context_limit: 1000, ..about() };
+        let facts = vec![Fact::TurnFinished { input_tokens: 800, output_tokens: 100 }];
+        let out = Screen {
+            cols: 120, rows: 30, facts: &facts, input: "", status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
+            sidebar: true,
+        }.render();
+        assert!(plain(&out).join("\n").contains("90% of 1000"), "占用率应为 90%");
+    }
+
+    #[test]
+    fn long_paths_keep_their_filename() {
+        // 侧栏路径从左侧截断：文件名是识别信息，不能被截掉
+        let long = "src/very/deeply/nested/directory/structure/module.rs";
+        let t = truncate_left(long, 20);
+        assert!(t.ends_with("module.rs"), "应保留文件名：{t}");
+        assert!(width::display_width(&t) <= 20, "不应超预算：{t}");
+        // 短路径原样返回
+        assert_eq!(truncate_left("a.rs", 20), "a.rs");
+    }
+
+    // ── Markdown 接入正文 ─────────────────────────────────────────────
+
+    #[test]
+    fn assistant_markdown_is_rendered_not_dumped() {
+        let facts = vec![Fact::AssistantSaid(
+            "## 标题\n\n- 一件\n- 两件\n\n```rust\nlet x = 1;\n```".into(),
+        )];
+        let text = plain(&screen(90, 30, &facts, "", "")).join("\n");
+        assert!(text.contains("标题") && !text.contains("## 标题"), "标题标记应剥掉：{text}");
+        assert!(text.contains("• 一件"), "列表应换成圆点：{text}");
+        assert!(text.contains("let x = 1;"), "代码块内容应保留：{text}");
+    }
+
+    #[test]
+    fn user_message_keeps_its_bar_after_markdown() {
+        let facts = vec![Fact::UserSaid("看下 `src/main.rs`".into())];
+        let text = plain(&screen(80, 20, &facts, "", "")).join("\n");
+        assert!(text.contains('┃'), "用户消息应保留竖条：{text}");
+        assert!(text.contains("src/main.rs"), "内容应保留：{text}");
+    }
+
+    #[test]
+    fn sidebar_does_not_swallow_body_text() {
+        // 侧栏 + 长正文：正文必须完整可见（不能被裁掉或与侧栏重叠）
+        let facts = vec![Fact::AssistantSaid("正文内容在这里".repeat(3))];
+        let text = plain(&sidebar_screen(120, &facts, true)).join("\n");
+        assert!(text.contains("正文内容在这里"), "正文必须可见：{text}");
     }
 
     // ── 主题 ──────────────────────────────────────────────────────────
@@ -2344,7 +2741,7 @@ mod tests {
                     cols: 80, rows: 20, facts: &[], input: "", status: "",
                     awaiting_input: false, show_cursor: false,
                     about: Some(&a), trust: None,
-                    theme: t, popup: None, preformatted: None,
+                    theme: t, popup: None, preformatted: None, sidebar: false,
                 }
                 .render()
             })
@@ -2390,7 +2787,7 @@ mod tests {
             let out = Screen {
                 cols, rows, facts: &facts, input: "输入中文", status: "就绪",
                 awaiting_input: false, show_cursor: false, about: Some(&a), trust: None,
-                theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
+                theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
             }
             .render();
             for (i, line) in plain(&out).iter().enumerate() {
@@ -2526,7 +2923,7 @@ mod tests {
             cols: 100, rows: 30, facts: &[], input: "", status: "",
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: Some(&TrustPrompt::default()),
-            theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
+            theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -2545,7 +2942,7 @@ mod tests {
                 cols: 100, rows: 30, facts: &[], input: "", status: "",
                 awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: Some(&TrustPrompt { selected: sel }),
-                theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
+                theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
             }
             .render();
             plain(&out).join("\n")
@@ -2724,6 +3121,7 @@ mod tests {
                     awaiting_input: awaiting, show_cursor: false,
                     about: Some(&a), trust: None,
                     theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
+                    sidebar: false,
                 }
                 .render()
             };

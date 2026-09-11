@@ -473,6 +473,8 @@ pub struct Kernel {
     max_output_bytes: usize,
     /// 上下文消息上限；超出即报错要求压缩，而非静默无限增长
     max_context_messages: usize,
+    /// 累计的文件改动（path -> (additions, deletions)）。BTreeMap 保证遍历顺序稳定。
+    file_changes: std::collections::BTreeMap<String, (usize, usize)>,
     /// 系统提示词：构造时算一次。**必须字节稳定**（提示词缓存命中的前提），
     /// 且避免每步重新拼接。
     system_prompt: String,
@@ -520,6 +522,7 @@ impl Kernel {
             max_steps: DEFAULT_MAX_STEPS,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_context_messages: DEFAULT_MAX_CONTEXT_MESSAGES,
+            file_changes: std::collections::BTreeMap::new(),
             system_prompt,
             tool_schemas,
             session_id: session_id.into(),
@@ -840,6 +843,14 @@ impl Kernel {
 
     /// 真正执行一个调用：经沙箱、落日志、进历史。
     fn execute_one(&mut self, call: &ToolInvocation) -> Result<(), KernelError> {
+        // 改动预览必须在**执行前**取。执行后文件内容已等于目标，
+        // `preview` 会返回 None（"没有改动"），统计就永远为空 ——
+        // 这个顺序错误只会在真实工具上暴露：假工具的 preview 是无条件返回的。
+        let change_before = self
+            .tools
+            .get(&call.name)
+            .and_then(|t| t.preview(&call.arguments));
+
         let output = match self.tools.get(&call.name) {
             Some(tool) => {
                 let ctx = ToolCtx {
@@ -864,6 +875,37 @@ impl Kernel {
                 self.emit_and_log(&ev)?;
             }
         }
+
+        // 文件改动统计：用**执行前**取到的预览（见上方 change_before）
+        if output.exit_code == 0 {
+            if let Some((path, diff)) = change_before {
+                let additions = diff
+                    .lines()
+                    .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+                    .count();
+                let deletions = diff
+                    .lines()
+                    .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+                    .count();
+                if additions > 0 || deletions > 0 {
+                    let e = self.file_changes.entry(path).or_insert((0, 0));
+                    e.0 += additions;
+                    e.1 += deletions;
+                    let files: Vec<FileChange> = self
+                        .file_changes
+                        .iter()
+                        .map(|(p, (a, d))| FileChange {
+                            path: p.clone(),
+                            additions: *a,
+                            deletions: *d,
+                        })
+                        .collect();
+                    let ev = EventMsg::FilesChanged { files };
+                    self.emit_and_log(&ev)?;
+                }
+            }
+        }
+
         let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: output.exit_code };
         self.emit_and_log(&ev)?;
         self.messages.push(Message::ToolResult {

@@ -29,7 +29,7 @@ exec 选项：
   --max-steps <n>              步数上限（默认 16）
   --allow-writes               无人值守时自动批准写操作（默认拒绝）
   --json                       输出 JSON（便于脚本消费）
-  --provider <deepseek|mock|selftest>   模型后端（默认 deepseek）
+  --provider <deepseek|mock|selftest|demo>   模型后端（默认 deepseek）
                                 selftest = 按脚本调用一次工具，验证完整链路（无需 key）
 
 serve 选项：
@@ -359,6 +359,8 @@ fn cmd_tui(args: &[String]) -> i32 {
         branch: detect_branch(&workspace),
         // 每次启动换一个示例（不需要真随机：只要别每次都一样）
         example: neo_host_tui::pick_example(),
+        // deepseek-chat 的上下文窗口。写错不如不写：侧栏在 0 时显示"上限未知"。
+        context_limit: 64_000,
         session: session_id.to_string(),
     };
 
@@ -447,6 +449,8 @@ fn build_model(provider: &str) -> Option<Box<dyn neo_core::ModelProvider>> {
         "mock" => Some(Box::new(neo_llm_deepseek::ScriptedProvider::text_only(
             "（mock provider）本回答由确定性桩产生，未调用真实模型。",
         ))),
+        // 演示渲染（markdown + 任务清单），供人眼核对界面
+        "demo" => Some(Box::new(neo_llm_deepseek::ScriptedProvider::demo())),
         "selftest" => Some(Box::new(neo_llm_deepseek::ScriptedProvider::scripted(
             vec![vec![neo_llm_deepseek::tool_call(
                 "apply_patch",

@@ -123,6 +123,13 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
         let line = match e {
             // 用户消息也进转录：无头输出应能看出"当时问的是什么"
             EventMsg::UserSubmitted { text } => Some(format!("> {text}")),
+            EventMsg::FilesChanged { files } => {
+                let adds: usize = files.iter().map(|f| f.additions).sum();
+                let dels: usize = files.iter().map(|f| f.deletions).sum();
+                Some(format!("[files] {} 个文件已改（+{adds} -{dels}）", files.len()))
+            }
+            // 未聚合前的单文件改动不单独输出（否则同一文件会刷屏）；由 FilesChanged 汇总
+            EventMsg::FileChanged { .. } => None,
             EventMsg::TodoUpdated { items } => {
                 let done = items.iter().filter(|i| matches!(i.status, neo_protocol::TodoStatus::Completed)).count();
                 Some(format!("[todo] {done}/{} 完成", items.len()))
