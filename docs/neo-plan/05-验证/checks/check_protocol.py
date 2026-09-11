@@ -25,6 +25,8 @@ def transition(state, op):
         return IDLE
     if kind == "interrupt":
         return IDLE          # 中断在安全点生效
+    if kind == "shell":
+        return state          # 用户直输命令不影响会话状态机
     if state == IDLE:
         if kind in ("user_turn", "goal_set"):
             return AWAITING if op.get("needs_approval") else PLANNING
@@ -62,6 +64,10 @@ def emits(state_before, op, state_after):
         out.append({"kind": "turn_complete", "input_tokens": 10, "output_tokens": 5})
     elif kind == "interrupt":
         out.append({"kind": "turn_complete", "input_tokens": 0, "output_tokens": 0})
+    elif kind == "shell":
+        # 用户直输的 shell：不经模型，只产生一对工具事件
+        out.append({"kind": "tool_call_begin", "id": next_event_id("tc"), "name": "bash"})
+        out.append({"kind": "tool_call_end", "id": next_event_id("tc"), "exit_code": 0})
     elif kind == "goal_set":
         out.append({"kind": "turn_started", "turn_id": next_event_id("t")})
         out.append({"kind": "goal_progress", "done": 0, "total": op.get("total", 1)})

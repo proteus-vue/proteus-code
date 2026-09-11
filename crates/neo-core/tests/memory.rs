@@ -12,7 +12,11 @@
 // Rust 无 per-test 串行属性，故用全局 mutex 包住会读计数的测试。
 use std::sync::Mutex;
 
-/// 串行化「读全局计数」的测试。
+/// 串行化本文件**全部**测试。
+///
+/// 只在"读计数"的那个用例上加锁是不够的：全局分配器记录的是**整个进程**的
+/// 分配量，其它用例并行跑时照样在计数。结果是同一个用例时过时不过，
+/// 表现为"疑似深拷贝历史"的假失败 —— 而这正是它要防的问题，很容易误判。
 static COUNTER_LOCK: Mutex<()> = Mutex::new(());
 
 use neo_config::Config;
@@ -111,6 +115,7 @@ fn registry() -> ToolRegistry {
 
 #[test]
 fn tool_output_is_capped_and_reports_truncation() {
+    let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut k = Kernel::new(
         "s", Config { exec_mode: ExecMode::AutoEdit, ..Config::default() },
         registry(),
@@ -145,6 +150,7 @@ fn tool_output_is_capped_and_reports_truncation() {
 
 #[test]
 fn truncation_never_splits_a_utf8_codepoint() {
+    let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // 直接 &s[..n] 在非字符边界会 panic。这里断言截断结果仍是合法 UTF-8
     // 且长度不超过上限。
     let s = "好".repeat(1000);
@@ -161,6 +167,7 @@ fn truncation_never_splits_a_utf8_codepoint() {
 
 #[test]
 fn sandbox_level_truncation_is_propagated() {
+    let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // 沙箱自己声明了 truncated（真实执行器按流读时就已截断）→ 内核必须保留该事实，
     // 不能因为本地没再截断就把 truncated 抹成 false。
     let mut k = Kernel::new(
@@ -187,6 +194,7 @@ fn sandbox_level_truncation_is_propagated() {
 
 #[test]
 fn multibyte_output_through_the_kernel_stays_valid() {
+    let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut k = Kernel::new(
         "s", Config { exec_mode: ExecMode::AutoEdit, ..Config::default() },
         registry(),
@@ -215,6 +223,7 @@ fn multibyte_output_through_the_kernel_stays_valid() {
 
 #[test]
 fn context_cap_errors_instead_of_growing_without_bound() {
+    let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut k = Kernel::new(
         "s", Config { exec_mode: ExecMode::AutoEdit, ..Config::default() },
         ToolRegistry::new(),

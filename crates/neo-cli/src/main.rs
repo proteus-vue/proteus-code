@@ -372,8 +372,11 @@ fn cmd_tui(args: &[String]) -> i32 {
         Some(workspace.clone())
     };
 
+    // 主题偏好从用户目录读（首次用默认）；由 CLI 注入，宿主不自己读配置
+    let theme_name = neo_host_tui::theme::load_preference();
+
     // 注入 submit：TUI 只认契据，业务在 kernel
-    let result = neo_host_tui::run(about, gate, move |op| {
+    let result = neo_host_tui::run(about, gate, theme_name, move |op| {
         kernel.submit(op).map_err(|e| e.to_string())
     });
     match result {

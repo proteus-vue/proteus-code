@@ -13,6 +13,50 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub struct ContextRef {
     pub kind: RefKind,
     pub target: String,
+    /// 行范围（1 基，闭区间）。`None` = 整个文件。
+    ///
+    /// 单独建模而不是塞进 `target` 字符串：`src/a.rs#12-40` 里的
+    /// "#12-40" 是**结构化信息**（起止行），下游（提示词拼装、UI 高亮）
+    /// 需要数值而不是再解析一遍字符串。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<(usize, usize)>,
+}
+
+impl ContextRef {
+    /// 带行范围的引用是否合法：起止都 >= 1 且 start <= end。
+    pub fn valid_range(&self) -> bool {
+        match self.lines {
+            None => true,
+            Some((a, b)) => a >= 1 && a <= b,
+        }
+    }
+}
+
+/// 解析 `path#12-40` / `path#12` 形式的文件引用，返回 (路径, 可选行范围)。
+///
+/// 只认**末尾**的 `#数字[-数字]`：路径本身可能含 `#`（少见于源码，
+/// 但存在），从末尾解析能避免把它误当行号。
+pub fn parse_file_ref(raw: &str) -> (String, Option<(usize, usize)>) {
+    let Some(hash) = raw.rfind('#') else {
+        return (raw.to_string(), None);
+    };
+    let (path, tail) = (&raw[..hash], &raw[hash + 1..]);
+    let spec = tail.trim();
+    let parsed = if let Some((a, b)) = spec.split_once('-') {
+        match (a.trim().parse::<usize>(), b.trim().parse::<usize>()) {
+            (Ok(a), Ok(b)) if a >= 1 && a <= b => Some((a, b)),
+            _ => None,
+        }
+    } else {
+        match spec.parse::<usize>() {
+            Ok(a) if a >= 1 => Some((a, a)),
+            _ => None,
+        }
+    };
+    match parsed {
+        Some(r) => (path.to_string(), Some(r)),
+        None => (raw.to_string(), None), // `#` 不是行号规格 → 整体当路径
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,6 +74,12 @@ pub enum RefKind {
 #[serde(rename_all = "snake_case")]
 pub enum Op {
     UserTurn { text: String, refs: Vec<ContextRef> },
+    /// 用户直接执行一条 shell 命令（TUI 的 `!cmd`，opencode 同款）。
+    ///
+    /// 与 UserTurn 的区别：**不经过模型**。命令仍走沙箱（结构性约束），
+    /// 结果作为 ToolResult 进入历史，供下一轮模型参考。
+    /// 由用户显式输入的命令不再问审批 —— 等价于用户自己在 shell 里敲它。
+    Shell { command: String },
     Interrupt,
     Approve { id: ApprovalId, decision: Decision },
     ConfigureSession { patch: SessionPatch },
@@ -241,8 +291,18 @@ pub fn parse_refs(input: &str) -> Vec<ContextRef> {
             _ => continue,
         };
         let target = &token[first.len_utf8()..];
-        if !target.is_empty() {
-            out.push(ContextRef { kind, target: target.to_string() });
+        if target.is_empty() {
+            continue;
+        }
+        // 只有文件引用支持 `#行号`；会话/命令/技能名里的 `#` 是名字的一部分
+        if kind == RefKind::File {
+            let (path, lines) = parse_file_ref(target);
+            let r = ContextRef { kind, target: path, lines };
+            if r.valid_range() {
+                out.push(r);
+            }
+        } else {
+            out.push(ContextRef { kind, target: target.to_string(), lines: None });
         }
     }
     out
@@ -258,10 +318,10 @@ mod tests {
         assert_eq!(
             refs,
             vec![
-                ContextRef { kind: RefKind::File, target: "src/main.rs".into() },
-                ContextRef { kind: RefKind::Session, target: "session-1".into() },
-                ContextRef { kind: RefKind::Command, target: "compact".into() },
-                ContextRef { kind: RefKind::Skill, target: "skill-x".into() },
+                ContextRef { kind: RefKind::File, target: "src/main.rs".into(), lines: None },
+                ContextRef { kind: RefKind::Session, target: "session-1".into(), lines: None },
+                ContextRef { kind: RefKind::Command, target: "compact".into(), lines: None },
+                ContextRef { kind: RefKind::Skill, target: "skill-x".into(), lines: None },
             ]
         );
     }
@@ -270,6 +330,35 @@ mod tests {
     fn parse_refs_ignores_lone_sigils_and_plain_words() {
         assert!(parse_refs("hello @ world").is_empty(), "单独的 @ 不算引用");
         assert!(parse_refs("plain text").is_empty());
+    }
+
+    #[test]
+    fn parses_line_ranges_out_of_file_refs() {
+        let (p, l) = parse_file_ref("src/a.rs#12-40");
+        assert_eq!(p, "src/a.rs");
+        assert_eq!(l, Some((12, 40)));
+        let (p, l) = parse_file_ref("src/a.rs#7");
+        assert_eq!(p, "src/a.rs");
+        assert_eq!(l, Some((7, 7)), "单行应成为 [7,7] 闭区间");
+    }
+
+    #[test]
+    fn non_range_hash_stays_part_of_the_path() {
+        // `#` 后面不是合法行号规格时，整体当路径 —— 不能把文件名切坏
+        for raw in ["src/a#b.rs", "weird#name", "a#0", "a#5-2", "a#x-y"] {
+            let (p, l) = parse_file_ref(raw);
+            assert_eq!(p, raw, "{raw} 应整体作为路径");
+            assert_eq!(l, None, "{raw} 不应解析出行范围");
+        }
+    }
+
+    #[test]
+    fn refs_carry_their_line_range() {
+        let refs = parse_refs("看下 @src/main.rs#10-20 和 @README.md");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].lines, Some((10, 20)));
+        assert_eq!(refs[0].target, "src/main.rs");
+        assert_eq!(refs[1].lines, None);
     }
 
     #[test]

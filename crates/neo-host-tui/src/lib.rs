@@ -19,8 +19,11 @@
 //! - 另装 `panic` hook，在 panic 前先还原
 //! - 保存 `stty -g` 的确切状态并原样写回（不是猜一个"合理默认"）
 
+pub mod commands;
 pub mod input;
+pub mod popup;
 pub mod stars;
+pub mod theme;
 pub mod trust;
 pub mod width;
 
@@ -174,6 +177,12 @@ pub enum Key {
     Backspace,
     /// Ctrl+C / Ctrl+D
     Quit,
+    /// Esc：关闭弹窗
+    Escape,
+    /// Ctrl+P：命令面板
+    CommandPalette,
+    /// Ctrl+T：下一个主题
+    NextTheme,
     /// Ctrl+L 清屏
     ClearScreen,
     /// Ctrl+U 清空输入行
@@ -210,6 +219,11 @@ pub fn decode_key(bytes: &[u8]) -> Key {
         [0x1b, b'[', b'B'] => Key::Down,
         [0x1b, b'[', b'C'] => Key::Right,
         [0x1b, b'[', b'D'] => Key::Left,
+        [0x10] => Key::CommandPalette,
+        [0x14] => Key::NextTheme,
+        // 单独一个 ESC：关闭弹窗。必须排在 `[0x1b, ..]` 之前 ——
+        // 后者也能匹配长度 1 的输入，会把 Esc 吞成 Unknown
+        [0x1b] => Key::Escape,
         [0x1b, ..] => Key::Unknown,
         _ => {
             // UTF-8：可能多字节，交给 from_utf8
@@ -228,8 +242,14 @@ fn read_key(stdin: &mut impl Read) -> Key {
         return Key::Quit; // EOF
     }
     if b[0] == 0x1b {
-        // 转义序列：再读最多 2 字节
+        // 转义序列：再读最多 2 字节。
+        //
+        // **必须带超时**：方向键会立刻送来完整序列，而用户单独按 Esc 时
+        // 后面没有任何字节 —— 阻塞读会一直卡住，Esc 就永远不生效。
+        // 把终端临时切成 `min 0 time 1`（10 分之 1 秒）做"立即返回"的读，
+        // 读完再切回 raw。Esc 是低频操作，这点开销可接受。
         let mut seq = vec![0x1b];
+        let _ = set_stty("min 0 time 1");
         for _ in 0..2 {
             let mut c = [0u8; 1];
             if stdin.read(&mut c).unwrap_or(0) == 0 {
@@ -240,6 +260,7 @@ fn read_key(stdin: &mut impl Read) -> Key {
                 break;
             }
         }
+        let _ = set_stty("raw -echo");
         return decode_key(&seq);
     }
     if b[0] < 0x80 {
@@ -302,7 +323,7 @@ const WORDMARK_MIN_COLS: usize = 32;
 /// 语义色调。网格只存色调，具体转义由 `Pal::tone` 在输出时展开 ——
 /// 这样"能力降级"只需改一处，不必在每个渲染点判断。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tone {
+pub enum Tone {
     /// 未写入 → 交给星场填充
     None,
     Text,
@@ -337,9 +358,15 @@ impl Pal {
             Tone::Border => self.border.clone(),
             Tone::BorderActive => self.border_active.clone(),
             Tone::Dim => self.dim.clone(),
-            Tone::StarDim => self.border.clone(),
-            Tone::StarBright => self.muted.clone(),
-            Tone::Rgb(r, g, b) => Color::Rgb(r, g, b).fg(self.mode),
+            Tone::StarDim => Color::Rgb(self.theme.star_dim.0, self.theme.star_dim.1, self.theme.star_dim.2)
+                .fg(self.mode, &self.theme),
+            Tone::StarBright => Color::Rgb(
+                self.theme.star_bright.0,
+                self.theme.star_bright.1,
+                self.theme.star_bright.2,
+            )
+            .fg(self.mode, &self.theme),
+            Tone::Rgb(r, g, b) => Color::Rgb(r, g, b).fg(self.mode, &self.theme),
             Tone::None => self.reset.clone(),
         }
     }
@@ -363,6 +390,13 @@ pub struct Screen<'a> {
     pub about: Option<&'a About>,
     /// `Some` = 显示工作区信任对话框（首次进入某目录）
     pub trust: Option<&'a TrustPrompt>,
+    /// 当前主题（持久化的用户偏好，由调用方注入）
+    pub theme: theme::ThemeName,
+    /// 弹窗（`@` 文件 / `/` 命令 / 主题 / 面板）。`None` = 不显示。
+    pub popup: Option<&'a popup::Popup>,
+    /// 预排版正文（/help、/keys 这类只读信息屏）。
+    /// 与 `facts` 分开是因为它不是会话事实，只是宿主自己的一页说明。
+    pub preformatted: Option<&'a Vec<Vec<Seg>>>,
 }
 
 /// 信任对话框状态。
@@ -478,61 +512,32 @@ fn detect_color_mode() -> ColorMode {
 }
 
 impl Color {
-    /// (R,G,B) —— 与 opencode 默认暗色主题同源
-    fn rgb(self) -> (u8, u8, u8) {
+    /// (R,G,B)。语义色取自**当前主题**（见 `theme.rs`），
+    /// 所以换主题只需换一个名字，不必改任何渲染代码。
+    fn rgb(self, t: &theme::Theme) -> (u8, u8, u8) {
         match self {
-            Color::Primary => (0xfa, 0xb2, 0x83),
-            Color::Accent => (0x9d, 0x7c, 0xd8),
-            Color::Success => (0x7f, 0xd8, 0x8f),
-            Color::Error => (0xe0, 0x6c, 0x75),
-            Color::Warning => (0xf5, 0xa7, 0x42),
-            Color::Info => (0x56, 0xb6, 0xc2),
-            Color::Text => (0xee, 0xee, 0xee),
-            Color::Muted => (0x80, 0x80, 0x80),
-            Color::Border => (0x48, 0x48, 0x48),
-            Color::BorderActive => (0x60, 0x60, 0x60),
+            Color::Primary => t.primary,
+            Color::Accent => t.accent,
+            Color::Success => t.success,
+            Color::Error => t.error,
+            Color::Warning => t.warning,
+            Color::Info => t.info,
+            Color::Text => t.text,
+            Color::Muted => t.muted,
+            Color::Border => t.border,
+            Color::BorderActive => t.border_active,
             Color::Rgb(r, g, b) => (r, g, b),
         }
     }
 
-    /// 256 色近似（16 色无法表达时用；数值取 xterm 256 色板最接近项）
-    fn ansi256(self) -> u8 {
-        match self {
-            Color::Primary => 216, // #ffafaf
-            Color::Accent => 140,  // #af87d7
-            Color::Success => 114, // #87d787
-            Color::Error => 168,   // #d75f87
-            Color::Warning => 215, // #ffaf5f
-            Color::Info => 73,     // #5fafaf
-            Color::Text => 255,    // #eeeeee
-            Color::Muted => 244,   // #808080
-            Color::Border => 238,  // #444444
-            Color::BorderActive => 241, // #626262
-            Color::Rgb(r, g, b) => rgb_to_256(r, g, b),
-        }
-    }
-
-    /// 16 色兜底（老终端）
-    fn ansi16(self) -> u8 {
-        match self {
-            Color::Primary | Color::Warning => 33,
-            Color::Accent => 35,
-            Color::Success => 32,
-            Color::Error => 31,
-            Color::Info => 36,
-            Color::Text => 37,
-            Color::Muted | Color::Border | Color::BorderActive => 90,
-            Color::Rgb(r, g, b) => rgb_to_16(r, g, b),
-        }
-    }
-
-    fn fg(self, mode: ColorMode) -> String {
-        let (r, g, b) = self.rgb();
+    fn fg(self, mode: ColorMode, t: &theme::Theme) -> String {
+        let (r, g, b) = self.rgb(t);
         match mode {
             ColorMode::None => String::new(),
+            // 都从主题的 RGB 现场降级：这样加主题不必手工维护色号映射表
             ColorMode::TrueColor => format!("{ESC}[38;2;{r};{g};{b}m"),
-            ColorMode::Ansi256 => format!("{ESC}[38;5;{}m", self.ansi256()),
-            ColorMode::Ansi16 => format!("{ESC}[{}m", self.ansi16()),
+            ColorMode::Ansi256 => format!("{ESC}[38;5;{}m", rgb_to_256(r, g, b)),
+            ColorMode::Ansi16 => format!("{ESC}[{}m", rgb_to_16(r, g, b)),
         }
     }
 }
@@ -566,21 +571,25 @@ struct Pal {
     reset: String,
     /// 保留能力档位：`Tone::Rgb` 需要在渲染时现场算色
     mode: ColorMode,
+    /// 当前主题（星场两档色与 logo 渐变从这里取）
+    theme: theme::Theme,
 }
 
 impl Pal {
-    fn new(mode: ColorMode) -> Self {
+    fn new(mode: ColorMode, theme_name: theme::ThemeName) -> Self {
+        let t = theme::get(theme_name);
         Self {
-            primary: Color::Primary.fg(mode),
-            accent: Color::Accent.fg(mode),
-            success: Color::Success.fg(mode),
-            error: Color::Error.fg(mode),
-            warning: Color::Warning.fg(mode),
-            info: Color::Info.fg(mode),
-            text: Color::Text.fg(mode),
-            muted: Color::Muted.fg(mode),
-            border: Color::Border.fg(mode),
-            border_active: Color::BorderActive.fg(mode),
+            theme: t,
+            primary: Color::Primary.fg(mode, &t),
+            accent: Color::Accent.fg(mode, &t),
+            success: Color::Success.fg(mode, &t),
+            error: Color::Error.fg(mode, &t),
+            warning: Color::Warning.fg(mode, &t),
+            info: Color::Info.fg(mode, &t),
+            text: Color::Text.fg(mode, &t),
+            muted: Color::Muted.fg(mode, &t),
+            border: Color::Border.fg(mode, &t),
+            border_active: Color::BorderActive.fg(mode, &t),
             dim: faint(mode),
             reset: if mode == ColorMode::None { String::new() } else { RESET.to_string() },
             mode,
@@ -592,7 +601,7 @@ impl Pal {
 const CHROME_ROWS: usize = 6;
 
 /// 一行的事实片段：(起始列, 文本, 色调)
-type Seg = (usize, String, Tone);
+pub type Seg = (usize, String, Tone);
 /// 居中的首屏片段（列由居中逻辑算，不用自己给）
 type Styled = (String, Tone);
 
@@ -739,17 +748,33 @@ impl Grid {
 
 impl Screen<'_> {
     pub fn render(&self) -> String {
-        let p = Pal::new(detect_color_mode());
+        let p = Pal::new(detect_color_mode(), self.theme);
         let mut g = Grid::new(self.cols, self.rows);
 
-        let cursor = if let Some(t) = self.trust {
+        let (chrome_top, cursor) = if let Some(lines) = self.preformatted {
+            // 信息屏：从顶部开始铺，超出部分从**尾部**标注（说明不是被静默吞掉）
+            let avail = self.rows.saturating_sub(CHROME_ROWS);
+            let start = lines.len().saturating_sub(avail);
+            for (i, segs) in lines.iter().enumerate().skip(start).take(avail) {
+                for (col, text, tone) in segs {
+                    g.put(i - start + 1, *col, text, *tone);
+                }
+            }
+            let top = self.rows.saturating_sub(CHROME_ROWS);
+            (top, self.draw_chrome(&mut g, top))
+        } else if let Some(t) = self.trust {
             self.layout_trust(&mut g, t);
-            None
+            (0, None)
         } else if self.facts.is_empty() && self.about.is_some() {
             self.layout_welcome(&mut g, &p, self.about.unwrap())
         } else {
             self.layout_transcript(&mut g)
         };
+        // 弹窗画在内容之上、输入框之上（紧贴输入框顶边）——
+        // 覆盖部分正文是下拉菜单的正常行为，比把正文挤走更不打扰
+        if let Some(pop) = self.popup {
+            self.draw_popup(&mut g, &p, pop, chrome_top);
+        }
 
         g.fill_stars();
         let mut out = format!("{ESC}[H{ESC}[2J");
@@ -775,7 +800,7 @@ impl Screen<'_> {
     }
 
     // ── 对话模式：正文在下、输入区钉在底部 ────────────────────────────
-    fn layout_transcript(&self, g: &mut Grid) -> Option<(usize, usize)> {
+    fn layout_transcript(&self, g: &mut Grid) -> (usize, Option<(usize, usize)>) {
         let lines = self.fact_lines();
         let body = self.rows.saturating_sub(CHROME_ROWS);
         // 只显示最后 body 行（自动滚到底），内容不足时贴着输入区
@@ -787,11 +812,12 @@ impl Screen<'_> {
                 g.put(top + i, *col, text, *tone);
             }
         }
-        self.draw_chrome(g, self.rows - CHROME_ROWS)
+        let top = self.rows - CHROME_ROWS;
+        (top, self.draw_chrome(g, top))
     }
 
     // ── 首屏：整组（logo + 输入区）垂直居中 ───────────────────────────
-    fn layout_welcome(&self, g: &mut Grid, p: &Pal, a: &About) -> Option<(usize, usize)> {
+    fn layout_welcome(&self, g: &mut Grid, p: &Pal, a: &About) -> (usize, Option<(usize, usize)>) {
         let _ = p;
         let tiers: [(bool, bool, bool, bool); 5] = [
             (true, true, true, true),
@@ -820,14 +846,16 @@ impl Screen<'_> {
         for (i, segs) in chosen.iter().enumerate() {
             g.put_centered_styled(group_top + i, std::slice::from_ref(segs));
         }
-        self.draw_chrome(g, group_top + chosen.len())
+        let top = group_top + chosen.len();
+        (top, self.draw_chrome(g, top))
     }
 
     fn hero_lines(&self, a: &About, logo: bool, subtitle: bool, meta: bool, gaps: bool) -> Vec<Styled> {
         let mut hero: Vec<Styled> = Vec::new();
         if logo && self.cols >= WORDMARK_MIN_COLS {
             // 竖向渐变：主色 → 强调色。单色 logo 太平，渐变让它"有光"
-            let (pr, ac) = (Color::Primary.rgb(), Color::Accent.rgb());
+            let t = theme::get(self.theme);
+            let (pr, ac) = (t.primary, t.accent);
             let n = (WORDMARK.len() - 1) as f32;
             for (i, row) in WORDMARK.iter().enumerate() {
                 let (r, gg, b) = lerp_rgb(pr, ac, i as f32 / n);
@@ -852,6 +880,97 @@ impl Screen<'_> {
             hero.push((format!("v{} · 会话 {}", a.version, a.session), Tone::Muted));
         }
         hero
+    }
+
+    /// 弹窗：标题 + 候选项 + （截断时）页脚。画在输入框上方。
+    fn draw_popup(&self, g: &mut Grid, p: &Pal, pop: &popup::Popup, chrome_top: usize) {
+        let _ = p;
+        let box_w = self.box_width();
+        let left = self.cols.saturating_sub(box_w) / 2;
+        let inner = box_w.saturating_sub(4);
+        let max_rows = pop.kind.max_rows();
+        let visible = pop.items.len().min(max_rows);
+        // 标题(1) + 空目录提示(1) + 候选 + 页脚(截断时 1)
+        let hint_rows = if pop.is_empty() { 1 } else { 0 };
+        let foot_rows = if pop.truncated { 1 } else { 0 };
+        let height = 2 + visible + hint_rows + foot_rows; // 含上下边框这 2 行
+        if chrome_top < height + 1 {
+            return; // 上方空间不够就不画（宁可没有弹窗，也不画残缺的）
+        }
+        let top = chrome_top - height - 1; // 与输入框留一行间隔
+
+        // 关键：先把弹窗占据的**整个矩形**填成空格并标记已写入。
+        // 不填的话，只有我们写到字符的位置被覆盖，其余格子会保留底下的
+        // logo/正文/星场 —— 看起来像弹窗"半透明"，非常脏。
+        for r in top..(top + height).min(self.rows) {
+            g.blank(r, left, left + box_w, Tone::Text);
+        }
+
+        let bar = "─".repeat(box_w.saturating_sub(2));
+        g.put(top, left, "╭", Tone::BorderActive);
+        g.put(top, left + 1, &bar, Tone::BorderActive);
+        g.put(top, left + box_w - 1, "╮", Tone::BorderActive);
+
+        // 标题行：类型 + 当前过滤词（让用户知道"我在过滤什么"）
+        let title = if pop.query.is_empty() {
+            pop.kind.title().to_string()
+        } else {
+            format!("{} · {}", pop.kind.title(), pop.query)
+        };
+        g.put(top + 1, left, "│", Tone::BorderActive);
+        g.put(top + 1, left + 2, &width::truncate_to_width(&title, inner).to_string(), Tone::Muted);
+        g.put(top + 1, left + box_w - 1, "│", Tone::BorderActive);
+
+        let mut row = 2;
+        if pop.is_empty() {
+            g.put(top + row, left, "│", Tone::BorderActive);
+            let msg = if pop.query.is_empty() { "（无候选）" } else { "无匹配" };
+            g.put(top + row, left + 2, msg, Tone::Muted);
+            g.put(top + row, left + box_w - 1, "│", Tone::BorderActive);
+            row += 1;
+        } else {
+            let start = pop.scroll_top(visible);
+            for (i, item) in pop.items.iter().enumerate().skip(start).take(visible) {
+                let selected = i == pop.selected;
+                let (mark, label_tone) = if selected {
+                    ("▸ ", Tone::Primary)
+                } else {
+                    ("  ", Tone::Text)
+                };
+                g.put(top + row, left, "│", Tone::BorderActive);
+                g.put(top + row, left + 2, mark, Tone::Primary);
+                let label = width::truncate_to_width(&item.label, inner.saturating_sub(2)).to_string();
+                let used = g.put(top + row, left + 4, &label, label_tone);
+                // 右侧说明：空间够才写（不挤掉主标签）
+                if !item.detail.is_empty() {
+                    let d = width::truncate_to_width(&item.detail, 34).to_string();
+                    let dw = width::display_width(&d);
+                    let dx = (left + box_w - 2).saturating_sub(dw);
+                    if dx > used + 2 {
+                        g.put(top + row, dx, &d, Tone::Muted);
+                    }
+                }
+                g.put(top + row, left + box_w - 1, "│", Tone::BorderActive);
+                row += 1;
+            }
+        }
+
+        if pop.truncated && !pop.is_empty() {
+            g.put(top + row, left, "│", Tone::BorderActive);
+            let more = pop.items.len().saturating_sub(visible);
+            g.put(top + row, left + 2, &format!("↑↓ 还有 {more} 项…"), Tone::Muted);
+            g.put(top + row, left + box_w - 1, "│", Tone::BorderActive);
+            row += 1;
+        }
+
+        g.put(top + row, left, "╰", Tone::BorderActive);
+        g.put(top + row, left + 1, &bar, Tone::BorderActive);
+        g.put(top + row, left + box_w - 1, "╯", Tone::BorderActive);
+
+        // 提示行：这一行告诉用户怎么操作（否则新用户不知道 Enter 会怎样）
+        if top + row + 1 < chrome_top {
+            g.put(top + row + 1, left + 2, "↑↓ 选择   Enter 确认   Esc 取消", Tone::Border);
+        }
     }
 
     /// 输入框 + 提示行 + 状态行。返回光标的 (行, 列)（1 基）。
@@ -1187,6 +1306,165 @@ pub fn pick_example() -> String {
     EXAMPLES[seed % EXAMPLES.len()].to_string()
 }
 
+/// 当前输入是否处于"弹窗上下文"：返回 (弹窗类型, 过滤词)。
+///
+/// 判据是**光标前最后一个 `@` 或 `/`**，且它必须是词的起点
+/// （前面是空白或行首）——否则 `a/b` 这种路径会被误判成命令。
+fn self_popup_context(input: &str) -> Option<(popup::Kind, String)> {
+    let bytes: Vec<char> = input.chars().collect();
+    // 从后往前找最近的 @ 或 /
+    for (i, c) in bytes.iter().enumerate().rev() {
+        if *c != '@' && *c != '/' {
+            continue;
+        }
+        let at_word_start = i == 0 || bytes[i - 1].is_whitespace();
+        if !at_word_start {
+            return None;
+        }
+        let query: String = bytes[i + 1..].iter().collect();
+        // 过滤词里不应再出现空白（那说明用户已经在写正文了）
+        if query.contains(char::is_whitespace) {
+            return None;
+        }
+        let kind = if *c == '@' { popup::Kind::File } else { popup::Kind::Slash };
+        return Some((kind, query));
+    }
+    None
+}
+
+/// 按类型刷新候选。
+fn refresh_popup(p: &mut popup::Popup, kind: popup::Kind, files: &mut Option<Vec<String>>) {
+    match kind {
+        popup::Kind::File => {
+            if files.is_none() {
+                let (list, _) = input::list_files(
+                    &std::env::current_dir().unwrap_or_else(|_| ".".into()),
+                    5000,
+                    8,
+                );
+                *files = Some(list);
+            }
+            let all = files.as_deref().unwrap_or(&[]);
+            let (items, truncated) = popup::file_items(&p.query, all, p.kind.max_rows());
+            p.set_items(items, truncated);
+        }
+        popup::Kind::Slash => {
+            let n = p.query.clone();
+            p.set_items(popup::slash_items(&n), false);
+        }
+        popup::Kind::Palette => {
+            let n = p.query.clone();
+            p.set_items(popup::palette_items(&n), false);
+        }
+        popup::Kind::Theme => {
+            let n = p.query.clone();
+            p.set_items(popup::theme_items(&n), false);
+        }
+    }
+}
+
+/// 刚输入 `@` 或 `/` 时打开弹窗。
+fn open_popup_for(
+    input: &str,
+    slot: &mut Option<popup::Popup>,
+    files: &mut Option<Vec<String>>,
+    status: &mut String,
+) {
+    let Some((kind, q)) = self_popup_context(input) else {
+        // 已经不在 @ / 上下文（例如用户在中间插了空格）→ 关掉
+        *slot = None;
+        return;
+    };
+    let mut p = popup::Popup::new(kind, q);
+    refresh_popup(&mut p, kind, files);
+    if p.is_empty() {
+        *status = match kind {
+            popup::Kind::File => "没有匹配的文件".to_string(),
+            popup::Kind::Slash => "没有匹配的命令".to_string(),
+            _ => String::new(),
+        };
+    } else {
+        *status = format!("{} · {} 项", kind.title(), p.items.len());
+    }
+    *slot = Some(p);
+}
+
+/// 执行弹窗项时**只能由主循环完成**的副作用。
+///
+/// 拆出来的原因：`apply_popup_item` 不该拿到 `events`/`popup_state`
+/// 这些主循环状态。让它返回一个"请求"，由循环统一执行 ——
+/// 这样清转录、开面板这类动作只有一条实现路径，不会两处各写一遍。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Effect {
+    None,
+    Quit,
+    /// 清空转录（`/new`）
+    ClearTranscript,
+    /// 打开主题选择弹窗（`/theme`）
+    OpenThemePicker,
+}
+
+/// 执行弹窗里选中的项。返回需要主循环落实的副作用。
+fn apply_popup_item(
+    item: &popup::Item,
+    input: &mut String,
+    status: &mut String,
+    theme_name: &mut theme::ThemeName,
+    info_screen: &mut Option<&'static str>,
+) -> Effect {
+    match &item.action {
+        popup::ItemAction::Insert(text) => {
+            // 用选中的引用替换掉 `@` 之后已输入的过滤词
+            *input = complete_at_token(input, text);
+            *status = format!("已引用 {text}");
+            Effect::None
+        }
+        popup::ItemAction::SetTheme(t) => {
+            input.clear();
+            *theme_name = *t;
+            theme::save_preference(*t);
+            *status = format!("主题：{}", t.as_str());
+            Effect::None
+        }
+        popup::ItemAction::Run(action) => {
+            // 执行命令后必须清空输入框：`/help` 已经"用掉"了，
+            // 留在框里会让用户以为还没执行，且盖住占位提示。
+            // （文件引用项相反 —— 那是要保留在输入里发给模型的。）
+            input.clear();
+            match action {
+            commands::Action::Quit => Effect::Quit,
+            commands::Action::NewSession => Effect::ClearTranscript,
+            commands::Action::Compact => {
+                // 如实说明未实现，而不是假装压缩了
+                *status = "压缩上下文需要 L4 编排，尚未实现".to_string();
+                Effect::None
+            }
+            commands::Action::ThemePicker => Effect::OpenThemePicker,
+            commands::Action::NextTheme => {
+                *theme_name = theme_name.next();
+                theme::save_preference(*theme_name);
+                *status = format!("主题：{}", theme_name.as_str());
+                Effect::None
+            }
+            commands::Action::SetTheme(t) => {
+                *theme_name = *t;
+                theme::save_preference(*t);
+                *status = format!("主题：{}", t.as_str());
+                Effect::None
+            }
+            commands::Action::Help => {
+                *info_screen = Some(commands::help_text());
+                Effect::None
+            }
+            commands::Action::Keys => {
+                *info_screen = Some(commands::keys_text());
+                Effect::None
+            }
+            }
+        }
+    }
+}
+
 /// 状态栏文案：审批挂起时明确告诉用户该敲什么，否则是常规就绪提示。
 fn idle_or_approval(outstanding: &Option<String>) -> String {
     match outstanding {
@@ -1203,6 +1481,7 @@ fn idle_or_approval(outstanding: &Option<String>) -> String {
 pub fn run<F>(
     about: About,
     trust_workspace: Option<std::path::PathBuf>,
+    mut theme_name: theme::ThemeName,
     mut submit: F,
 ) -> std::io::Result<()>
 where
@@ -1236,6 +1515,12 @@ where
     let mut file_cache: Option<Vec<String>> = None;
     // 未决审批：内核挂起后必须由用户应答，否则界面只是"显示"而无法推进。
     let mut outstanding: Option<String> = None;
+    // 弹窗（@ / / / 主题 / 面板）
+    let mut popup_state: Option<popup::Popup> = None;
+    // 只读信息屏（/help、/keys）：显示到用户按任意键
+    let mut info_screen: Option<&'static str> = None;
+    // 由命令/弹窗设置：请求退出主循环
+    let mut should_quit = false;
 
     // ── 首次进入某工作区：先要一次知情同意 ──────────────────────────
     //
@@ -1255,6 +1540,9 @@ where
                 show_cursor: false,
                 about: Some(&about),
                 trust: Some(&tp),
+                theme: theme_name,
+                popup: None,
+                preformatted: None,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -1299,6 +1587,40 @@ where
 
     loop {
         let (cols, rows) = terminal_size();
+
+        // 信息屏（/help、/keys）：占据正文区，按任意键返回
+        if let Some(text) = info_screen {
+            let body: Vec<Vec<Seg>> = text
+                .lines()
+                .map(|l| vec![(2usize, l.to_string(), Tone::Text)])
+                .collect();
+            let screen = Screen {
+                cols,
+                rows,
+                facts: &[],
+                input: "",
+                status: "按任意键返回",
+                awaiting_input: false,
+                show_cursor: false,
+                about: None,
+                trust: None,
+                theme: theme_name,
+                popup: None,
+                // 借 info 屏这段：直接用 facts 通道塞不进去（Fact 无原文类型），
+                // 改用 preformatted 字段承载
+                preformatted: Some(&body),
+            };
+            write!(stdout, "{}", screen.render())?;
+            stdout.flush()?;
+            match read_key(&mut stdin) {
+                Key::Quit => break,
+                _ => {
+                    info_screen = None;
+                    continue;
+                }
+            }
+        }
+
         let facts = facts_of(&events);
         let screen = Screen {
             cols,
@@ -1310,13 +1632,117 @@ where
             show_cursor: true,
             about: Some(&about),
             trust: None,
+            theme: theme_name,
+            popup: popup_state.as_ref(),
+            preformatted: None,
         };
         write!(stdout, "{}", screen.render())?;
         stdout.flush()?;
 
         let key = read_key(&mut stdin);
+
+        // ── 弹窗打开时，按键先交给弹窗 ──────────────────────────────
+        //
+        // 这是"下拉菜单"的常规行为：方向键在候选间移动、Enter 确认、
+        // Esc 取消，而不是直接落到输入框。
+        if popup_state.is_some() {
+            match key {
+                Key::Quit => break,
+                Key::Escape => {
+                    popup_state = None;
+                    status = "已取消".to_string();
+                }
+                Key::Up => {
+                    if let Some(p) = popup_state.as_mut() {
+                        p.move_selection(-1);
+                    }
+                }
+                Key::Down => {
+                    if let Some(p) = popup_state.as_mut() {
+                        p.move_selection(1);
+                    }
+                }
+                Key::Backspace => {
+                    // 退格回到 `@`/`/` 之前 → 关闭弹窗；否则缩窄过滤词
+                    input.pop();
+                    let still = self_popup_context(&input);
+                    match still {
+                        Some((kind, q)) => {
+                            if let Some(p) = popup_state.as_mut() {
+                                p.query = q;
+                                refresh_popup(p, kind, &mut file_cache);
+                            }
+                        }
+                        None => popup_state = None,
+                    }
+                }
+                Key::Char(c) => {
+                    input.push(c);
+                    match self_popup_context(&input) {
+                        Some((kind, q)) => {
+                            if let Some(p) = popup_state.as_mut() {
+                                p.query = q;
+                                refresh_popup(p, kind, &mut file_cache);
+                            }
+                        }
+                        None => popup_state = None,
+                    }
+                }
+                Key::Enter => {
+                    let chosen = popup_state.as_ref().and_then(|p| p.selected_item().cloned());
+                    popup_state = None;
+                    if let Some(item) = chosen {
+                        match apply_popup_item(
+                            &item,
+                            &mut input,
+                            &mut status,
+                            &mut theme_name,
+                            &mut info_screen,
+                        ) {
+                            Effect::Quit => should_quit = true,
+                            Effect::ClearTranscript => {
+                                events.clear();
+                                status = "新对话（已清空转录；文件改动不受影响）".to_string();
+                            }
+                            Effect::OpenThemePicker => {
+                                let mut tp = popup::Popup::new(popup::Kind::Theme, "");
+                                tp.set_items(popup::theme_items(""), false);
+                                status = "主题 · ↑↓ 选择，回车应用".to_string();
+                                popup_state = Some(tp);
+                            }
+                            Effect::None => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if should_quit {
+                break;
+            }
+            continue;
+        }
+
         match key {
             Key::Quit => break,
+            Key::Escape => {
+                // 无弹窗时 Esc 清空当前输入（与多数 shell 的 Ctrl+U 语义接近，
+                // 但不抢 ctrl+u 的键位）
+                if !input.is_empty() {
+                    input.clear();
+                    browsing = false;
+                }
+            }
+            Key::CommandPalette => {
+                let mut p = popup::Popup::new(popup::Kind::Palette, "");
+                p.set_items(popup::palette_items(""), false);
+                popup_state = Some(p);
+                status = "命令面板".to_string();
+            }
+            Key::NextTheme => {
+                theme_name = theme_name.next();
+                theme::save_preference(theme_name);
+                status = format!("主题：{}", theme_name.as_str());
+            }
             Key::ClearScreen => {
                 write!(stdout, "{ESC}[2J{ESC}[H")?;
                 stdout.flush()?;
@@ -1333,6 +1759,10 @@ where
                 input.push(c);
                 browsing = false;
                 history.reset_cursor();
+                // 输入 `@` 或 `/` 即弹出候选（对齐 opencode：输入即列表）
+                if c == '@' || c == '/' {
+                    open_popup_for(&input, &mut popup_state, &mut file_cache, &mut status);
+                }
             }
             Key::Up => {
                 // 输入为空或正在浏览历史时，Up 走历史
@@ -1382,6 +1812,24 @@ where
                 browsing = false;
             }
             Key::Tab => {
+                // 弹窗开着时 Tab 等价于"接受当前选中项"
+                if let Some(p) = popup_state.as_ref() {
+                    if let Some(item) = p.selected_item().cloned() {
+                        let mut st = status.clone();
+                        let eff = apply_popup_item(
+                            &item, &mut input, &mut st, &mut theme_name, &mut info_screen,
+                        );
+                        status = st;
+                        popup_state = None;
+                        match eff {
+                            Effect::Quit => break,
+                            Effect::ClearTranscript => events.clear(),
+                            // Tab 接受主题选择后不开新弹窗，直接生效即可
+                            Effect::OpenThemePicker | Effect::None => {}
+                        }
+                        continue;
+                    }
+                }
                 // Tab：补全 `@` 引用（只在 @ 上下文中生效）
                 if let Some(q) = at_query(&input) {
                     if file_cache.is_none() {
@@ -1431,6 +1879,85 @@ where
                     continue;
                 }
 
+                // ── `/命令`：直接执行，不进模型 ──────────────────────
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix('/') {
+                    // 只取命令名（后面可带参数，当前命令都不需要参数）
+                    let name = rest.split_whitespace().next().unwrap_or("");
+                    match commands::resolve(name) {
+                        Some(cmd) => {
+                            let eff = apply_popup_item(
+                                &popup::Item {
+                                    label: format!("/{}", cmd.name),
+                                    detail: String::new(),
+                                    action: popup::ItemAction::Run(cmd.action),
+                                },
+                                &mut input,
+                                &mut status,
+                                &mut theme_name,
+                                &mut info_screen,
+                            );
+                            match eff {
+                                // 直接 break 出主循环；不需要再走一遍 should_quit
+                                Effect::Quit => break,
+                                Effect::ClearTranscript => {
+                                    events.clear();
+                                    status =
+                                        "新对话（已清空转录；文件改动不受影响）".to_string();
+                                }
+                                Effect::OpenThemePicker => {
+                                    let mut tp = popup::Popup::new(popup::Kind::Theme, "");
+                                    tp.set_items(popup::theme_items(""), false);
+                                    status = "主题 · ↑↓ 选择，回车应用".to_string();
+                                    popup_state = Some(tp);
+                                }
+                                Effect::None => {}
+                            }
+                        }
+                        None => status = format!("未知命令：/{name}（输入 / 查看列表）"),
+                    }
+                    continue;
+                }
+
+                // ── `!cmd`：直接执行 shell（沙箱内），输出进会话 ─────
+                if let Some(cmd) = trimmed.strip_prefix('!') {
+                    let cmd = cmd.trim().to_string();
+                    if cmd.is_empty() {
+                        continue;
+                    }
+                    history.push(&line);
+                    let running = format!("执行：{cmd}");
+                    // 先画一帧"运行中"，让用户看到命令已提交（shell 可能跑一会儿）
+                    let (c3, r3) = terminal_size();
+                    let f3 = facts_of(&events);
+                    write!(
+                        stdout,
+                        "{}",
+                        Screen {
+                            cols: c3,
+                            rows: r3,
+                            facts: &f3,
+                            input: "",
+                            status: &running,
+                            awaiting_input: false,
+                            show_cursor: false,
+                            about: Some(&about),
+                            trust: None,
+                            theme: theme_name,
+                            popup: None,
+                            preformatted: None,
+                        }
+                        .render()
+                    )?;
+                    stdout.flush()?;
+                    match submit(neo_protocol::Op::Shell { command: cmd }) {
+                        Ok(produced) => events.extend(produced),
+                        Err(e) => events.push(EventMsg::Error { message: e }),
+                    }
+                    status = idle_or_approval(&outstanding);
+                    continue;
+                }
+
                 // ── 普通任务提交 ────────────────────────────────────────
                 if line.trim().is_empty() {
                     continue;
@@ -1455,6 +1982,9 @@ where
                         // 这一帧是"运行中"过渡态：facts 通常已非空，不展示首屏
                         about: Some(&about),
                         trust: None,
+                        theme: theme_name,
+                        popup: None,
+                        preformatted: None,
                     }
                     .render()
                 )?;
@@ -1497,6 +2027,9 @@ mod tests {
             show_cursor: false,
             about: None,
             trust: None,
+            theme: theme::ThemeName::OpenCode,
+            popup: None,
+            preformatted: None,
         }
         .render()
     }
@@ -1526,6 +2059,9 @@ mod tests {
             show_cursor: false,
             about: Some(&a),
             trust: None,
+            theme: theme::ThemeName::OpenCode,
+            popup: None,
+            preformatted: None,
         }
         .render()
     }
@@ -1586,7 +2122,11 @@ mod tests {
         assert_eq!(decode_key(b"a"), Key::Char('a'));
         assert_eq!(decode_key(&[0x1b, b'[', b'A']), Key::Up);
         assert_eq!(decode_key(&[0x1b, b'[', b'B']), Key::Down);
-        assert_eq!(decode_key(&[0x1b]), Key::Unknown, "单独 ESC 不应被当方向键");
+        // 单独 ESC 现在是"关弹窗"，必须是 Escape 而非 Unknown
+        assert_eq!(decode_key(&[0x1b]), Key::Escape, "单独 ESC 应为 Escape");
+        assert_eq!(decode_key(&[0x10]), Key::CommandPalette);
+        assert_eq!(decode_key(&[0x14]), Key::NextTheme);
+        assert_eq!(decode_key(&[0x1b, b'[', b'Z']), Key::Unknown, "未支持的序列应为 Unknown");
     }
 
     #[test]
@@ -1595,6 +2135,151 @@ mod tests {
         assert_eq!(decode_key("🚀".as_bytes()), Key::Char('🚀'));
         assert_eq!(decode_key(&[0xe5, 0x86]), Key::Unknown, "不完整的 UTF-8 应为 Unknown");
         assert_eq!(decode_key(&[0xff, 0xfe]), Key::Unknown, "非法字节应为 Unknown");
+    }
+
+    // ── 弹窗 / 命令 ───────────────────────────────────────────────────
+
+    #[test]
+    fn popup_is_opaque_over_content() {
+        // 弹窗必须把底下的内容盖住。若不逐格填空，logo/正文会从字符缝隙里
+        // 露出来（真机截图里能看到 logo 碎片嵌在弹窗行中）。
+        let a = about();
+        let mut p = popup::Popup::new(popup::Kind::Slash, "");
+        p.set_items(popup::slash_items(""), false);
+        let out = Screen {
+            cols: 100,
+            rows: 30,
+            facts: &[],
+            input: "/",
+            status: "",
+            awaiting_input: false,
+            show_cursor: false,
+            about: Some(&a),
+            trust: None,
+            theme: theme::ThemeName::OpenCode,
+            popup: Some(&p),
+            preformatted: None,
+        }
+        .render();
+        // 找出弹窗所在的行区间（含边框），断言这些行里没有 logo 的半块字符
+        let lines = plain(&out);
+        let idxs: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains('╭') || l.contains('│') || l.contains('╰'))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!idxs.is_empty(), "应画出弹窗：{out}");
+        let (top, bottom) = (*idxs.first().unwrap(), *idxs.last().unwrap());
+        for l in &lines[top..=bottom] {
+            assert!(!l.contains('█'), "弹窗行里漏进了 logo：{l:?}");
+        }
+    }
+
+    #[test]
+    fn accepting_a_command_clears_the_input() {
+        // 执行命令后输入框必须清空：留着会让用户以为没执行，且盖住占位提示
+        let item = popup::Item {
+            label: "/help".into(),
+            detail: String::new(),
+            action: popup::ItemAction::Run(commands::Action::Help),
+        };
+        let mut input = "/help".to_string();
+        let mut status = String::new();
+        let mut theme_name = theme::ThemeName::OpenCode;
+        let mut info: Option<&'static str> = None;
+        let eff = apply_popup_item(&item, &mut input, &mut status, &mut theme_name, &mut info);
+        assert!(input.is_empty(), "执行命令后输入应清空，实际 {input:?}");
+        assert!(info.is_some(), "/help 应打开信息屏");
+        assert_eq!(eff, Effect::None);
+    }
+
+    #[test]
+    fn accepting_a_file_ref_keeps_it_in_the_input() {
+        // 与命令相反：文件引用要**保留**在输入里，因为它是发给模型的内容
+        let item = popup::Item {
+            label: "src/main.rs".into(),
+            detail: String::new(),
+            action: popup::ItemAction::Insert("@src/main.rs".into()),
+        };
+        let mut input = "@src/ma".to_string();
+        let mut status = String::new();
+        let mut theme_name = theme::ThemeName::OpenCode;
+        let mut info: Option<&'static str> = None;
+        apply_popup_item(&item, &mut input, &mut status, &mut theme_name, &mut info);
+        assert!(input.contains("@src/main.rs"), "引用应留在输入里，实际 {input:?}");
+        assert!(!input.contains("ma@"), "不应重复叠加过滤词：{input:?}");
+    }
+
+    #[test]
+    fn popup_enter_takes_the_selected_item() {
+        let mut p = popup::Popup::new(popup::Kind::Slash, "");
+        p.set_items(popup::slash_items(""), false);
+        p.move_selection(2);
+        let it = p.selected_item().expect("应有选中项");
+        assert!(it.label.starts_with('/'), "选中项应是命令：{it:?}");
+    }
+
+    #[test]
+    fn command_context_detection_is_conservative() {
+        // 只有"词首的 @ /"才算弹窗上下文；`a/b` 这样的路径不能误判成命令
+        assert!(matches!(self_popup_context("@"), Some((popup::Kind::File, _))));
+        assert!(matches!(self_popup_context("看下 @src"), Some((popup::Kind::File, _))));
+        assert!(matches!(self_popup_context("/th"), Some((popup::Kind::Slash, _))));
+        assert!(self_popup_context("a/b").is_none(), "路径中的 / 不是命令");
+        assert!(self_popup_context("@a b").is_none(), "已进入正文就不再是过滤词");
+        assert!(self_popup_context("普通文本").is_none());
+    }
+
+    #[test]
+    fn info_screen_renders_the_help_text() {
+        let lines: Vec<Vec<Seg>> = commands::help_text()
+            .lines()
+            .map(|l| vec![(2usize, l.to_string(), Tone::Text)])
+            .collect();
+        let out = Screen {
+            cols: 100,
+            rows: 30,
+            facts: &[],
+            input: "",
+            status: "按任意键返回",
+            awaiting_input: false,
+            show_cursor: false,
+            about: None,
+            trust: None,
+            theme: theme::ThemeName::OpenCode,
+            popup: None,
+            preformatted: Some(&lines),
+        }
+        .render();
+        let text = plain(&out).join("\n");
+        assert!(text.contains("编程 Agent 内核"), "应显示帮助正文：{text}");
+        assert!(text.contains("按任意键返回"), "应提示如何返回：{text}");
+    }
+
+    // ── 主题 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn switching_theme_changes_rendered_colors() {
+        // 换主题必须真的改变输出色值，而不是只改了个名字
+        let a = about();
+        let render = |t: theme::ThemeName| {
+            with_env(&[("COLORTERM", "truecolor")], || {
+                Screen {
+                    cols: 80, rows: 20, facts: &[], input: "", status: "",
+                    awaiting_input: false, show_cursor: false,
+                    about: Some(&a), trust: None,
+                    theme: t, popup: None, preformatted: None,
+                }
+                .render()
+            })
+        };
+        let oc = render(theme::ThemeName::OpenCode);
+        let nord = render(theme::ThemeName::Nord);
+        assert_ne!(oc, nord, "换主题后渲染色值应不同");
+        // opencode 主色 #fab283；nord 主色 #88c0d0
+        assert!(oc.contains("38;2;250;178;131"), "opencode 主色应为 #fab283");
+        assert!(nord.contains("38;2;136;192;208"), "nord 主色应为 #88c0d0");
     }
 
     // ── 终端生命周期 ──────────────────────────────────────────────────
@@ -1630,6 +2315,7 @@ mod tests {
             let out = Screen {
                 cols, rows, facts: &facts, input: "输入中文", status: "就绪",
                 awaiting_input: false, show_cursor: false, about: Some(&a), trust: None,
+                theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
             }
             .render();
             for (i, line) in plain(&out).iter().enumerate() {
@@ -1765,6 +2451,7 @@ mod tests {
             cols: 100, rows: 30, facts: &[], input: "", status: "",
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: Some(&TrustPrompt::default()),
+            theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -1783,6 +2470,7 @@ mod tests {
                 cols: 100, rows: 30, facts: &[], input: "", status: "",
                 awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: Some(&TrustPrompt { selected: sel }),
+                theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
             }
             .render();
             plain(&out).join("\n")
@@ -1960,6 +2648,7 @@ mod tests {
                     cols: 80, rows: 20, facts: &[], input: "", status: "",
                     awaiting_input: awaiting, show_cursor: false,
                     about: Some(&a), trust: None,
+                    theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
                 }
                 .render()
             };

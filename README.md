@@ -20,7 +20,7 @@
 | `SandboxBackend` 真实后端（macOS Seatbelt） | ✅ **已实现**，6 项**真机**越权拦截测试 |
 | `SessionPersistence` 真实后端（JSONL append-only） | ✅ **已实现**，重开续号已验证 |
 | `neo exec` 无头宿主（端到端闭环） | ✅ **已实现**，离线 + 真实 provider 双路径跑通 |
-| `neo tui` 终端宿主（MiMo Code 风格：星场首页 + 居中构图 + 带边框输入框 + 信任门 + 备用屏退出还原） | ✅ **已实现**，pty 验证（信任/首页/对话三态 + 干净退出；256/truecolor + NO_COLOR 降级） |
+| `neo tui` 终端宿主（MiMo Code 风格 + @// 弹窗 + !shell + 6 套主题 + 信任门 + 备用屏退出还原） | ✅ **已实现**，pty 逐项验证 12/12（弹窗/命令/主题/shell/信任/退出） |
 | `neo serve` Web 宿主（浏览器界面 + SSE 事件流 + 审批） | ✅ **已实现**，端到端验证（订阅→提交→审批→真落盘） |
 | **T6 宿主语义等价**（同一事件流多宿主比对） | ✅ **铁律生效**：headless / TUI / desktop / **web** 四宿主事实完全等价 |
 | Shell 工具真实执行（经沙箱） | ✅ **已实现**（`bash` 真跑，输出受限） |
@@ -46,8 +46,12 @@ cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
 ```bash
 # 交互式（TUI）：首次进入某目录会先问"是否信任"（落盘 ~/.neo/trusted.json）
 # 首页：星场 + 居中 logo + 带边框输入框（内含 模式 ⏵ 模型）
-# 对话：用户消息带竖条、工具 ✓/✗、底部 工作区:分支
-# Tab 补全 @ 引用、Ctrl+R 历史、Ctrl+G 编辑器、Ctrl+L 清屏
+#   @          文件弹窗（↑↓ 选择 / 实时过滤 / Enter 确认）
+#   /          命令弹窗（help / keys / theme / new / compact / exit）
+#   !cmd       直接执行 shell（走同一沙箱），输出进会话
+#   ctrl+p     命令面板    ctrl+t 切换主题（6 套，落盘记忆）
+#   @file#12-40 引用文件的行范围
+#   Tab 补全 / ctrl+r 历史 / ctrl+g 编辑器 / ctrl+l 清屏 / esc 关弹窗
 neo tui --provider selftest --mode default
 # 等价写法：neo --provider selftest --mode default（裸选项默认进 TUI）
 
@@ -69,7 +73,7 @@ neo exec "用一句话回答 1+1" --mode plan
 cargo run -p neo-cli -- tui --provider mock    # 不装 PATH，直接用 cargo 跑 TUI
 cargo install --path crates/neo-cli --locked   # 或装成全局命令 neo
 
-cargo test --workspace     # 135 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo test --workspace     # 165 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
 cargo check --workspace    # 17 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构守卫 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 测试

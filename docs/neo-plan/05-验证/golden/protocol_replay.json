@@ -95,6 +95,19 @@
    "expected_event_kinds": [
     "shutdown_complete"
    ]
+  },
+  {
+   "name": "Shell：用户直接执行命令（不经模型）",
+   "ops": [
+    {
+     "op": "shell",
+     "command": "git status"
+    }
+   ],
+   "expected_event_kinds": [
+    "tool_call_begin",
+    "tool_call_end"
+   ]
   }
  ]
 }

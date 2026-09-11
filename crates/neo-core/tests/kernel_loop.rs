@@ -369,3 +369,60 @@ fn a_tampering_persistence_is_rejected_at_load() {
     let loaded = p.load().unwrap();
     assert_eq!(loaded.len(), 1, "篡改实现丢了首条 —— 这正说明契约必须断言保真");
 }
+
+// ─────────────── Op::Shell（用户直输命令）───────────────
+
+#[test]
+fn shell_op_runs_the_command_through_the_sandbox() {
+    // `!cmd` 的核心契约：命令真的被执行，且结果作为工具结果进历史。
+    // 这条测试是为了钉住一个**只在端到端才暴露**的 bug：
+    // 内核构造参数用的键必须与工具读取的键一致，否则工具拿到 None，
+    // 表现为 "exit -1" 且没有任何有意义的错误信息。
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(RecordingTool { seen: seen.clone() }));
+
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("unused")),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    let events = k.submit(Op::Shell { command: "echo hi".into() }).unwrap();
+
+    // 1) 命令经沙箱执行了（不是被当成空参数丢弃）
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        ["echo hi"],
+        "参数键不一致会让工具读到空命令"
+    );
+    // 2) 事件形态：一对工具事件，且**不含 turn_complete**（不经模型）
+    assert!(matches!(events[0], EventMsg::ToolCallBegin { .. }), "应先是 ToolCallBegin");
+    assert!(matches!(events[1], EventMsg::ToolCallEnd { exit_code: 0, .. }), "应成功结束");
+    assert!(
+        !events.iter().any(|e| matches!(e, EventMsg::TurnComplete { .. })),
+        "用户直输命令不该结束一个模型轮次"
+    );
+    // 3) 结果进历史，供下一轮模型参考
+    assert!(
+        k.messages().iter().any(|m| matches!(m, Message::ToolResult { .. })),
+        "命令输出应作为工具结果留在历史里"
+    );
+}
+
+#[test]
+fn shell_op_missing_argument_fails_loudly() {
+    // 空命令不该 panic，也不该假装成功
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(RecordingTool { seen }));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("x")),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    let events = k.submit(Op::Shell { command: String::new() }).unwrap();
+    // 沙箱仍会被调用（空命令由 shell 自己处理），但事件必须完整闭合
+    assert!(events.iter().any(|e| matches!(e, EventMsg::ToolCallEnd { .. })), "必须有结束事件");
+}

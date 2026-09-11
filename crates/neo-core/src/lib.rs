@@ -589,6 +589,28 @@ impl Kernel {
                 self.drive_steps()?;
             }
 
+            Op::Shell { command } => {
+                // 与模型请求的工具调用走**同一条**执行路径（execute_one），
+                // 因此沙箱、输出上限、截断标记、落盘全部自动一致 ——
+                // 不为"用户直输的命令"另开一条旁路。
+                let call = ToolInvocation {
+                    id: format!("shell-{}", self.turn_counter),
+                    name: "bash".to_string(),
+                    // 参数名必须与 BashTool 读取的键一致（`cmd`）。
+                    // 曾经这里写成 "command"，工具拿不到参数直接失败 ——
+                    // 编译期无法发现，只有端到端跑 `!ls` 才暴露。
+                    arguments: serde_json::json!({ "cmd": command }),
+                };
+                let begin = EventMsg::ToolCallBegin {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                };
+                self.emit_and_log(&begin)?;
+                self.execute_one(&call)?;
+                // 注意：不发 turn_complete、也不驱动模型。
+                // opencode 的 `!` 只把输出附到会话里，模型下一轮才看到它。
+            }
+
             Op::Approve { id, decision } => {
                 let Some(pending) = self.pending.take() else {
                     return Err(KernelError::NoPendingApproval(id));
