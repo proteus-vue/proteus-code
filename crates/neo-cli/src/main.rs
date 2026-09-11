@@ -356,11 +356,22 @@ fn cmd_tui(args: &[String]) -> i32 {
         mode: describe_mode(mode),
         mode_short: mode_short(mode).to_string(),
         workspace: workspace.display().to_string(),
+        branch: detect_branch(&workspace),
         session: session_id.to_string(),
     };
 
+    // 信任门：已信任过的工作区不重复打扰（记录在 ~/.neo/trusted.json）
+    let gate = if mode == ExecMode::FullAccess {
+        // 全权档位本身就是"我承担风险"的显式选择，再问一次没有增量信息
+        None
+    } else if neo_host_tui::trust::is_trusted(&workspace) {
+        None
+    } else {
+        Some(workspace.clone())
+    };
+
     // 注入 submit：TUI 只认契据，业务在 kernel
-    let result = neo_host_tui::run(about, move |op| {
+    let result = neo_host_tui::run(about, gate, move |op| {
         kernel.submit(op).map_err(|e| e.to_string())
     });
     match result {
@@ -370,6 +381,45 @@ fn cmd_tui(args: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// 探测 git 分支（零依赖：读 `.git/HEAD`）。
+///
+/// 用文件读而不是 `git` 子进程：启动 TUI 时不该为一个装饰性信息
+/// 去 fork 一个进程，也不该假设用户装了 git。
+/// 探测不到就返回空串，界面按"不在仓库里"处理（不显示冒号）。
+fn detect_branch(ws: &std::path::Path) -> String {
+    // 工作区可能在仓库的子目录里，逐级向上找 .git
+    let mut cur = Some(ws);
+    while let Some(dir) = cur {
+        let head = dir.join(".git").join("HEAD");
+        if let Ok(raw) = std::fs::read_to_string(&head) {
+            let raw = raw.trim();
+            if let Some(r) = raw.strip_prefix("ref: refs/heads/") {
+                return r.to_string();
+            }
+            // detached HEAD：给短哈希，总比空着强
+            if let Some(sha) = raw.strip_prefix("ref: ") {
+                return sha.rsplit('/').next().unwrap_or(sha).to_string();
+            }
+            return raw.chars().take(7).collect();
+        }
+        // .git 也可能是文件（worktree / submodule）：内容是 "gitdir: <path>"
+        if let Ok(raw) = std::fs::read_to_string(dir.join(".git")) {
+            if let Some(p) = raw.strip_prefix("gitdir: ") {
+                let gd = std::path::Path::new(p.trim());
+                let gd = if gd.is_absolute() { gd.to_path_buf() } else { dir.join(gd) };
+                if let Ok(h) = std::fs::read_to_string(gd.join("HEAD")) {
+                    let h = h.trim();
+                    if let Some(r) = h.strip_prefix("ref: refs/heads/") {
+                        return r.to_string();
+                    }
+                }
+            }
+        }
+        cur = dir.parent();
+    }
+    String::new()
 }
 
 /// 构造模型后端。`None` 表示参数错误或环境不满足（已打印原因）。

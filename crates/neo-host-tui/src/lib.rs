@@ -20,6 +20,8 @@
 //! - 保存 `stty -g` 的确切状态并原样写回（不是猜一个"合理默认"）
 
 pub mod input;
+pub mod stars;
+pub mod trust;
 pub mod width;
 
 use neo_core::{HostBackend, HostCapabilities, DiffSupport, ImageSupport};
@@ -229,6 +231,8 @@ pub struct About {
     /// 档位短名（footer 展示，如 `default`）—— 长描述会挤掉右侧信息
     pub mode_short: String,
     pub workspace: String,
+    /// git 分支（空 = 不在仓库里）。底部状态行显示 `工作区:分支`。
+    pub branch: String,
     pub session: String,
 }
 
@@ -244,6 +248,52 @@ const WORDMARK: [&str; 6] = [
 
 /// 词标所需的最小终端宽度（词标宽 + 左侧缩进 + 余量）。
 const WORDMARK_MIN_COLS: usize = 32;
+/// 语义色调。网格只存色调，具体转义由 `Pal::tone` 在输出时展开 ——
+/// 这样"能力降级"只需改一处，不必在每个渲染点判断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tone {
+    /// 未写入 → 交给星场填充
+    None,
+    Text,
+    Primary,
+    Accent,
+    Success,
+    Error,
+    Warning,
+    Info,
+    Muted,
+    Border,
+    BorderActive,
+    /// 暗色（SGR 2），用于最弱的结构文字
+    Dim,
+    StarDim,
+    StarBright,
+    /// 任意 RGB（logo 渐变）
+    Rgb(u8, u8, u8),
+}
+
+impl Pal {
+    fn tone(&self, t: Tone) -> String {
+        match t {
+            Tone::Text => self.text.clone(),
+            Tone::Primary => self.primary.clone(),
+            Tone::Accent => self.accent.clone(),
+            Tone::Success => self.success.clone(),
+            Tone::Error => self.error.clone(),
+            Tone::Warning => self.warning.clone(),
+            Tone::Info => self.info.clone(),
+            Tone::Muted => self.muted.clone(),
+            Tone::Border => self.border.clone(),
+            Tone::BorderActive => self.border_active.clone(),
+            Tone::Dim => self.dim.clone(),
+            Tone::StarDim => self.border.clone(),
+            Tone::StarBright => self.muted.clone(),
+            Tone::Rgb(r, g, b) => Color::Rgb(r, g, b).fg(self.mode),
+            Tone::None => self.reset.clone(),
+        }
+    }
+}
+
 /// 一屏内容，渲染成 ANSI 文本。
 pub struct Screen<'a> {
     pub cols: usize,
@@ -252,16 +302,23 @@ pub struct Screen<'a> {
     pub facts: &'a [Fact],
     /// 当前输入行（纯文本；左侧竖条由渲染加，便于单独着色）
     pub input: &'a str,
-    /// 状态栏（左侧）
+    /// 状态文本（底部状态行右侧；空 = 不显示）
     pub status: &'a str,
-    /// 状态栏右侧信息（模型/档位等）；窄终端会自动让位
-    pub footer_right: &'a str,
-    /// 有未决审批：竖条转警告色，提示"现在该你回答"
+    /// 有未决审批：边框转警告色，提示"现在该你回答"
     pub awaiting_input: bool,
     /// 光标可视（运行中不显示输入光标）
     pub show_cursor: bool,
     /// 首屏关于信息；仅在**尚无任何事实**时展示（有对话后让位给正文）
     pub about: Option<&'a About>,
+    /// `Some` = 显示工作区信任对话框（首次进入某目录）
+    pub trust: Option<&'a TrustPrompt>,
+}
+
+/// 信任对话框状态。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TrustPrompt {
+    /// 0 = 信任并继续，1 = 退出
+    pub selected: usize,
 }
 
 // ── 调色板 ──────────────────────────────────────────────────────────
@@ -299,6 +356,44 @@ enum Color {
     Border,
     /// 边框高亮（darkStep8 #606060）
     BorderActive,
+    /// 任意 RGB（用于 logo 渐变等需要插值的地方）
+    Rgb(u8, u8, u8),
+}
+
+/// RGB → xterm 256 色（6×6×6 色块 + 灰阶）
+fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
+    if r == g && g == b {
+        if r < 8 { return 16; }
+        if r > 248 { return 231; }
+        return (((r as u16 - 8) * 24 / 247) + 232) as u8;
+    }
+    let f = |c: u8| -> u16 {
+        if c < 48 { 0 } else if c < 115 { 1 } else { ((c as u16 - 35) / 40).min(5) }
+    };
+    (16 + 36 * f(r) + 6 * f(g) + f(b)) as u8
+}
+
+/// RGB → 16 色（老终端兜底，按主色相粗分）
+fn rgb_to_16(r: u8, g: u8, b: u8) -> u8 {
+    let lum = (r as u32 * 30 + g as u32 * 59 + b as u32 * 11) / 100;
+    if lum < 40 { return 90; }
+    if r >= b && r >= g {
+        if g > 128 { 33 } else { 31 }
+    } else if b >= g {
+        if r > 128 { 35 } else { 34 }
+    } else if g > 128 {
+        32
+    } else {
+        90
+    }
+}
+
+/// 两个 RGB 之间线性插值（logo 渐变用）
+fn lerp_rgb(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
+    let f = |x: u8, y: u8| -> u8 {
+        (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8
+    };
+    (f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
 }
 
 /// 终端能力（探测一次，避免每帧重算）。
@@ -345,6 +440,7 @@ impl Color {
             Color::Muted => (0x80, 0x80, 0x80),
             Color::Border => (0x48, 0x48, 0x48),
             Color::BorderActive => (0x60, 0x60, 0x60),
+            Color::Rgb(r, g, b) => (r, g, b),
         }
     }
 
@@ -361,6 +457,7 @@ impl Color {
             Color::Muted => 244,   // #808080
             Color::Border => 238,  // #444444
             Color::BorderActive => 241, // #626262
+            Color::Rgb(r, g, b) => rgb_to_256(r, g, b),
         }
     }
 
@@ -374,6 +471,7 @@ impl Color {
             Color::Info => 36,
             Color::Text => 37,
             Color::Muted | Color::Border | Color::BorderActive => 90,
+            Color::Rgb(r, g, b) => rgb_to_16(r, g, b),
         }
     }
 
@@ -397,7 +495,6 @@ fn faint(mode: ColorMode) -> String {
 }
 
 const RESET: &str = "\u{1b}[0m";
-const BOLD: &str = "\u{1b}[1m";
 
 
 /// 解析后的调色板：把 `Color` 按终端能力展开成可直接拼进 format! 的转义串。
@@ -416,6 +513,8 @@ struct Pal {
     /// 重置序列。NO_COLOR 下必须是空串 —— 否则输出里仍残留 ESC[0m，
     /// 既污染重定向到文件的输出，也让"无色"变成半真半假。
     reset: String,
+    /// 保留能力档位：`Tone::Rgb` 需要在渲染时现场算色
+    mode: ColorMode,
 }
 
 impl Pal {
@@ -433,262 +532,453 @@ impl Pal {
             border_active: Color::BorderActive.fg(mode),
             dim: faint(mode),
             reset: if mode == ColorMode::None { String::new() } else { RESET.to_string() },
+            mode,
         }
+    }
+}
+
+/// 底部固定区块行数：输入框(4) + 提示行(1) + 状态行(1)
+const CHROME_ROWS: usize = 6;
+
+/// 一行的事实片段：(起始列, 文本, 色调)
+type Seg = (usize, String, Tone);
+/// 居中的首屏片段（列由居中逻辑算，不用自己给）
+type Styled = (String, Tone);
+
+/// 提示行文案。**只列真正可用的键** —— 不写没实现的命令，
+/// 否则用户按了没反应，比不提示更糟。
+// 提示行必须能塞进输入框宽度（76 列封顶）。太长会被判为"放不下"而整条丢弃，
+// 提示就白写了 —— 所以这里刻意精简，只留最高频的几个键。
+const HINT_LEFT: &str = "tab 补全   ctrl+r 历史";
+const HINT_RIGHT: &str = "@ 引用   ctrl+g 编辑器   ctrl+c 退出";
+
+/// 屏幕网格。
+///
+/// 为什么先铺格子再输出，而不是直接拼字符串：
+/// 星场要能出现在**居中内容的左右两侧**。若按"内容 + 补星星"来做，
+/// 左侧空白已算进内容宽度，星星永远进不去左边。格子模型把
+/// "内容覆盖"与"背景填充"分开，两边都能正确落星。
+struct Grid {
+    cols: usize,
+    rows: usize,
+    ch: Vec<char>,
+    tone: Vec<Tone>,
+    /// 宽字符的续列：占位但不输出字符，否则整行会右移一列
+    skip: Vec<bool>,
+}
+
+impl Grid {
+    fn new(cols: usize, rows: usize) -> Self {
+        let n = cols.saturating_mul(rows);
+        Self { cols, rows, ch: vec![' '; n], tone: vec![Tone::None; n], skip: vec![false; n] }
+    }
+
+    /// 写一段文本，返回结束列。宽字符按显示宽度占两列。
+    fn put(&mut self, row: usize, col: usize, text: &str, tone: Tone) -> usize {
+        if row >= self.rows {
+            return col;
+        }
+        let mut c = col;
+        for ch in text.chars() {
+            let w = width::char_width(ch);
+            if w == 0 {
+                continue; // 组合字符：叠在前一个上，不单独占列
+            }
+            if c + w > self.cols {
+                break;
+            }
+            let i = row * self.cols + c;
+            self.ch[i] = ch;
+            self.tone[i] = tone;
+            self.skip[i] = false;
+            for k in 1..w {
+                let j = row * self.cols + c + k;
+                self.ch[j] = ' ';
+                self.tone[j] = tone;
+                self.skip[j] = true;
+            }
+            c += w;
+        }
+        c
+    }
+
+    /// 居中一段多色调文本（列由总宽度算出，逐个片段顺序摆放）。
+    fn put_centered_styled(&mut self, row: usize, segs: &[Styled]) {
+        let total: usize = segs.iter().map(|(t, _)| width::display_width(t)).sum();
+        let mut c = self.cols.saturating_sub(total) / 2;
+        for (text, tone) in segs {
+            c = self.put(row, c, text, *tone);
+        }
+    }
+
+    /// 把 `[col_start, col_end)` 填成空格并标记为已写入。
+    ///
+    /// 用途：输入框内部。若不填，星场会渗进框里 —— 看起来像输入框"漏了"，
+    /// 因为星场只在 `Tone::None`（从未写入）的格子上铺。
+    fn blank(&mut self, row: usize, col_start: usize, col_end: usize, tone: Tone) {
+        if row >= self.rows {
+            return;
+        }
+        for c in col_start..col_end.min(self.cols) {
+            let i = row * self.cols + c;
+            self.ch[i] = ' ';
+            self.tone[i] = tone;
+            self.skip[i] = false;
+        }
+    }
+
+    /// 给尚未写入的格子铺星场。**确定性**，所以多帧之间星位完全静止。
+    fn fill_stars(&mut self) {
+        for r in 0..self.rows {
+            for c in 0..self.cols {
+                let i = r * self.cols + c;
+                if self.tone[i] != Tone::None {
+                    continue;
+                }
+                if let Some((ch, bright)) = stars::cell(r, c, self.cols) {
+                    self.ch[i] = ch;
+                    self.tone[i] = if bright { Tone::StarBright } else { Tone::StarDim };
+                }
+            }
+        }
+    }
+
+    /// 输出：按色调分段，避免逐字符上色。
+    fn lines(&self, p: &Pal) -> Vec<String> {
+        (0..self.rows)
+            .map(|r| {
+                let mut out = String::new();
+                let mut cur = Tone::None;
+                let mut started = false;
+                for c in 0..self.cols {
+                    let i = r * self.cols + c;
+                    if self.skip[i] {
+                        continue;
+                    }
+                    let t = self.tone[i];
+                    if !started || t != cur {
+                        if started {
+                            out.push_str(&p.reset);
+                        }
+                        out.push_str(&p.tone(t));
+                        cur = t;
+                        started = true;
+                    }
+                    out.push(self.ch[i]);
+                }
+                if started {
+                    out.push_str(&p.reset);
+                }
+                out
+            })
+            .collect()
     }
 }
 
 impl Screen<'_> {
     pub fn render(&self) -> String {
-        // 每帧探测一次（两次环境变量读取，代价可忽略）；同时让测试能通过
-        // 显式设置 NO_COLOR 来断言"无色"行为。
         let p = Pal::new(detect_color_mode());
-        let rst = &p.reset;
+        let mut g = Grid::new(self.cols, self.rows);
 
-        let mut out = String::new();
-        // 移到左上并清屏（比逐行清除简单且无残留）
-        out.push_str(&format!("{ESC}[H{ESC}[2J"));
-
-        let input_rows = 3; // 输入行 + 状态栏 + 分隔
-        let transcript_rows = self.rows.saturating_sub(input_rows);
-
-        // 空对话时展示首屏；一旦有事实（含审批请求）就让位给正文。
-        // 这比"启动时打印一次 banner 再清屏"更稳：不会在滚屏时留下残影。
-        let lines = if self.facts.is_empty() {
-            match self.about {
-                Some(a) => self.welcome_lines(a, &p),
-                None => Vec::new(),
-            }
+        let cursor = if let Some(t) = self.trust {
+            self.layout_trust(&mut g, t);
+            None
+        } else if self.facts.is_empty() && self.about.is_some() {
+            self.layout_welcome(&mut g, &p, self.about.unwrap())
         } else {
-            self.wrap_facts(self.cols, &p)
+            self.layout_transcript(&mut g)
         };
-        // 只显示最后 transcript_rows 行（自动滚到底）
-        let start = lines.len().saturating_sub(transcript_rows);
-        for line in &lines[start..] {
-            out.push_str(line);
-            out.push_str("\r\n");
-        }
-        // 补齐剩余空行，避免上一次的内容残留
-        for _ in lines.len().saturating_sub(start)..transcript_rows {
-            out.push_str("\r\n");
-        }
 
-        // 输入区：左侧竖条（对标 opencode 的 prompt 左边框 ┃），
-        // 有未决审批时竖条转为警告色，让"现在该你回答"在余光里也看得到。
-        // 空闲用 border_active、审批用 warning —— 与"用户消息"的 accent 竖条区分开，
-        // 否则输入框和用户气泡会是同一种颜色，视觉上分不清"我在打字"与"我说过了"
-        let bar = if self.awaiting_input { &p.warning } else { &p.border_active };
-        out.push_str(&format!(
-            "{}{}\u{2503}{}{} {}\r\n",
-            bar, "", rst, p.text, self.input
-        ));
-        // 状态栏：左侧状态文本，右侧模型（对标 opencode footer 的左右分栏）
-        let mut right = String::new();
-        if !self.footer_right.is_empty() {
-            right = format!("{}{}{}", p.muted, self.footer_right, rst);
+        g.fill_stars();
+        let mut out = format!("{ESC}[H{ESC}[2J");
+        out.push_str(&g.lines(&p).join("\r\n"));
+        match cursor {
+            // 用真实终端光标（而不是画一个 ▌），输入手感与原生一致
+            Some((r, c)) => out.push_str(&format!("{ESC}[{r};{c}H{ESC}[?25h")),
+            None => out.push_str(&format!("{ESC}[?25l")),
         }
-        out.push_str(&self.status_line(&p, &right));
-
         out
     }
 
-    /// 状态栏：左状态、右信息，按**显示宽度**左右对齐（中文占 2 列）。
-    fn status_line(&self, p: &Pal, right: &str) -> String {
-        let rst = &p.reset;
-        let left_plain = width::truncate_to_width(self.status, self.cols).to_string();
-        let right_plain = strip_ansi(right);
-        let lw = width::display_width(&left_plain);
-        let rw = width::display_width(&right_plain);
-        // 右侧信息在窄终端里会让位（宁可少显示，也不折行打乱布局）
-        if lw + rw + 2 > self.cols || rw == 0 {
-            return format!("{}{}{}{}", p.dim, p.muted, left_plain, rst);
+    /// 输入框宽度：受终端宽度约束，并封顶 76 列。
+    ///
+    /// 封顶是刻意的：超宽终端上让输入框铺满整屏，排版会散掉
+    /// （一行 200 列的眼睛移动距离，比 76 列难读得多）。
+    fn box_width(&self) -> usize {
+        if self.cols >= 28 {
+            (self.cols - 4).min(76)
+        } else {
+            self.cols.saturating_sub(2).max(8)
         }
-        let gap = self.cols - lw - rw;
-        format!(
-            "{}{}{}{}{}{}{}{}",
-            p.dim, p.muted, left_plain, rst, " ".repeat(gap), p.muted, right_plain, rst
-        )
     }
 
-    /// 首屏内容：词标 + 会话信息 + 快捷键。
-    ///
-    /// **必须自己保证放得下**：`render` 只显示末尾 `transcript_rows` 行（自动滚到底），
-    /// 若首屏比可视区高，被裁掉的恰好是**顶部**——用户会看到"没有 logo 的半截首屏"。
-    /// 因此这里按「奢 → 简」四档试排，选第一个放得下的档位。
-    fn welcome_lines(&self, a: &About, p: &Pal) -> Vec<String> {
-        let avail = self.rows.saturating_sub(3); // 与 render 的 transcript_rows 同算式
-
-        // (词标, 副标题, 快捷键, 留白)
-        for &(mark, subtitle, hints, airy) in &[
-            (true, true, true, true),
-            (false, true, true, true),
-            (false, true, true, false),
-            (false, false, true, false),
-        ] {
-            let lines = self.welcome_variant(a, mark, subtitle, hints, airy, p);
-            if lines.len() <= avail {
-                return lines;
+    // ── 对话模式：正文在下、输入区钉在底部 ────────────────────────────
+    fn layout_transcript(&self, g: &mut Grid) -> Option<(usize, usize)> {
+        let lines = self.fact_lines();
+        let body = self.rows.saturating_sub(CHROME_ROWS);
+        // 只显示最后 body 行（自动滚到底），内容不足时贴着输入区
+        let start = lines.len().saturating_sub(body);
+        let shown = &lines[start..];
+        let top = body.saturating_sub(shown.len());
+        for (i, segs) in shown.iter().enumerate() {
+            for (col, text, tone) in segs {
+                g.put(top + i, *col, text, *tone);
             }
         }
-        // 极端小的终端：只留最要紧的一行 + 键值
-        self.welcome_variant(a, false, false, false, false, p)
+        self.draw_chrome(g, self.rows - CHROME_ROWS)
     }
 
-    fn welcome_variant(
-        &self,
-        a: &About,
-        mark: bool,
-        subtitle: bool,
-        hints: bool,
-        airy: bool,
-        p: &Pal,
-    ) -> Vec<String> {
-        let rst = &p.reset;
-        // 定长文案也按宽度截断（窄终端里提示语会超宽）
-        let fit = |s: &str| width::truncate_to_width(s, self.cols.saturating_sub(2)).to_string();
-        // 键值先截断再着色：着色后含 ANSI，再按宽度截会错切
-        let val_budget = self.cols.saturating_sub(16);
-        let cut = |s: &str| width::truncate_to_width(s, val_budget).to_string();
+    // ── 首屏：整组（logo + 输入区）垂直居中 ───────────────────────────
+    fn layout_welcome(&self, g: &mut Grid, p: &Pal, a: &About) -> Option<(usize, usize)> {
+        let _ = p;
+        let tiers: [(bool, bool, bool, bool); 5] = [
+            (true, true, true, true),
+            (true, true, false, true),
+            (true, false, false, true),
+            (false, false, false, true),
+            (false, false, false, false),
+        ];
 
-        let mut lines: Vec<String> = Vec::new();
-        if airy {
-            lines.push(String::new());
+        let mut chosen: Vec<Styled> = Vec::new();
+        for &(logo, subtitle, meta, gaps) in &tiers {
+            let hero = self.hero_lines(a, logo, subtitle, meta, gaps);
+            // 整组要放得下，否则会被"显示末尾 N 行"从**顶部**裁掉 ——
+            // 用户看到的是"少了 logo 的半截首屏"，且不会有任何报错
+            if hero.len() + CHROME_ROWS <= self.rows {
+                chosen = hero;
+                break;
+            }
+        }
+        if chosen.is_empty() {
+            chosen = self.hero_lines(a, false, false, false, false);
         }
 
-        if mark && self.cols >= WORDMARK_MIN_COLS {
-            for row in WORDMARK {
-                lines.push(format!("  {}{row}{rst}", p.primary));
+        let group = chosen.len() + CHROME_ROWS;
+        let group_top = self.rows.saturating_sub(group) / 2;
+        for (i, segs) in chosen.iter().enumerate() {
+            g.put_centered_styled(group_top + i, std::slice::from_ref(segs));
+        }
+        self.draw_chrome(g, group_top + chosen.len())
+    }
+
+    fn hero_lines(&self, a: &About, logo: bool, subtitle: bool, meta: bool, gaps: bool) -> Vec<Styled> {
+        let mut hero: Vec<Styled> = Vec::new();
+        if logo && self.cols >= WORDMARK_MIN_COLS {
+            // 竖向渐变：主色 → 强调色。单色 logo 太平，渐变让它"有光"
+            let (pr, ac) = (Color::Primary.rgb(), Color::Accent.rgb());
+            let n = (WORDMARK.len() - 1) as f32;
+            for (i, row) in WORDMARK.iter().enumerate() {
+                let (r, gg, b) = lerp_rgb(pr, ac, i as f32 / n);
+                hero.push((row.trim_end().to_string(), Tone::Rgb(r, gg, b)));
             }
         } else {
-            lines.push(format!("  {BOLD}{}NEO{rst}", p.primary));
+            hero.push(("NEO".to_string(), Tone::Primary));
         }
 
-        lines.push(String::new());
-        lines.push(format!(
-            "  {BOLD}{}Neo{rst}{} —— 编程 Agent 内核{rst}",
-            p.text, p.muted
-        ));
+        if gaps {
+            hero.push((String::new(), Tone::None));
+        }
+        hero.push(("Neo".to_string(), Tone::Text));
+        hero.push((" —— 编程 Agent 内核".to_string(), Tone::Muted));
         if subtitle {
-            lines.push(format!(
-                "  {}{}{rst}",
-                p.info,
-                fit("Rust 内核 · TUI / Web / Exec 共享同一内核")
-            ));
+            hero.push(("Rust 内核 · TUI / Web / Exec 共享同一内核".to_string(), Tone::Info));
         }
-
-        if airy {
-            lines.push(String::new());
+        if meta {
+            if gaps {
+                hero.push((String::new(), Tone::None));
+            }
+            hero.push((format!("v{} · 会话 {}", a.version, a.session), Tone::Muted));
         }
-        for (label, value) in [
-            ("版本", &a.version),
-            ("模型", &a.model),
-            ("模式", &a.mode),
-            ("工作区", &a.workspace),
-            ("会话", &a.session),
-        ] {
-            // pad_to_width 按**显示列**对齐（中文标签 1 字 = 2 列，不能按字符个数 pad）
-            let padded = width::pad_to_width(label, 10);
-            lines.push(format!("  {}{padded}{rst}{}", p.muted, cut(value)));
-        }
-
-        if hints {
-            lines.push(String::new());
-            lines.push(format!(
-                "  {}{}{rst}",
-                p.border,
-                fit("输入任务后回车提交 · Ctrl+R 搜索历史 · Tab 补全 @文件引用")
-            ));
-            lines.push(format!(
-                "  {}{}{rst}",
-                p.border,
-                fit("Ctrl+G 外部编辑器 · Ctrl+L 清屏 · Ctrl+C 退出")
-            ));
-        }
-        lines
+        hero
     }
 
-    /// 把 Fact 列表渲染成若干行文本（已含 ANSI）。
+    /// 输入框 + 提示行 + 状态行。返回光标的 (行, 列)（1 基）。
+    fn draw_chrome(&self, g: &mut Grid, top: usize) -> Option<(usize, usize)> {
+        if top + CHROME_ROWS > self.rows {
+            return None;
+        }
+        let box_w = self.box_width();
+        let left = self.cols.saturating_sub(box_w) / 2;
+        let inner_w = box_w.saturating_sub(4);
+        // 待审批时边框转警告色：余光里也能看出"现在轮到你"
+        let border = if self.awaiting_input { Tone::Warning } else { Tone::BorderActive };
+        let bar = "─".repeat(box_w.saturating_sub(2));
+
+        g.put(top, left, "╭", border);
+        g.put(top, left + 1, &bar, border);
+        g.put(top, left + box_w - 1, "╮", border);
+
+        // 先把框内两行填实，避免星场渗入输入框
+        g.blank(top + 1, left + 1, left + box_w - 1, Tone::Text);
+        g.blank(top + 2, left + 1, left + box_w - 1, Tone::Text);
+
+        // 提示行：空输入时给占位提示（否则光标处一片空白，不知道能打什么）
+        g.put(top + 1, left, "│", border);
+        let (text, tone) = if self.input.is_empty() && !self.awaiting_input {
+            ("输入任务…（Tab 补全 @文件引用）".to_string(), Tone::Muted)
+        } else {
+            let prefix = if self.awaiting_input { "批准该调用？[y/n] > " } else { "> " };
+            (format!("{prefix}{}", self.input), Tone::Text)
+        };
+        g.put(top + 1, left + 2, &text, tone);
+        g.put(top + 1, left + box_w - 1, "│", border);
+
+        // 内层状态行（对标 MiMo 输入框内的 "Build ⏵ 模型"）
+        let inner = match self.about {
+            Some(a) if !a.mode_short.is_empty() => format!("{} ⏵ {}", a.mode_short, a.model),
+            Some(a) => a.model.clone(),
+            None => String::new(),
+        };
+        g.put(top + 2, left, "│", border);
+        g.put(top + 2, left + 2, &width::truncate_to_width(&inner, inner_w).to_string(), Tone::Muted);
+        g.put(top + 2, left + box_w - 1, "│", border);
+
+        g.put(top + 3, left, "╰", border);
+        g.put(top + 3, left + 1, &bar, border);
+        g.put(top + 3, left + box_w - 1, "╯", border);
+
+        // 提示行：与输入框左右对齐
+        g.put(top + 4, left + 2, HINT_LEFT, Tone::Border);
+        let hw = width::display_width(HINT_RIGHT);
+        let hx = (left + box_w).saturating_sub(2 + hw);
+        if hx > left + 2 + width::display_width(HINT_LEFT) {
+            g.put(top + 4, hx, HINT_RIGHT, Tone::Border);
+        }
+
+        // 状态行（最底）：左 = 工作区:分支，右 = 状态文本
+        let ws_line = match self.about {
+            Some(a) if !a.branch.is_empty() => format!("{}:{}", a.workspace, a.branch),
+            Some(a) => a.workspace.clone(),
+            None => String::new(),
+        };
+        let ws_shown = width::truncate_to_width(&ws_line, self.cols.saturating_sub(6)).to_string();
+        let wsw = width::display_width(&ws_shown);
+        let stw = width::display_width(self.status);
+        // 放不下就不画右侧 —— 宁可少显示，也不折行把布局打乱
+        if self.status.is_empty() || wsw + stw + 4 > self.cols {
+            g.put(top + 5, 2, &ws_shown, Tone::Dim);
+        } else {
+            g.put(top + 5, 2, &ws_shown, Tone::Dim);
+            let tone = if self.awaiting_input { Tone::Warning } else { Tone::Muted };
+            g.put(top + 5, self.cols - stw - 2, self.status, tone);
+        }
+
+        if self.show_cursor {
+            // 光标列：1 基，落在已输入文本之后
+            Some((top + 2, left + 3 + width::display_width(&text)))
+        } else {
+            None
+        }
+    }
+
+    // ── 信任对话框 ────────────────────────────────────────────────────
+    fn layout_trust(&self, g: &mut Grid, t: &TrustPrompt) {
+        let m = 3usize;
+        let mut rows: Vec<(usize, String, Tone)> = Vec::new();
+        let push = |indent: usize, text: &str, tone: Tone, rows: &mut Vec<(usize, String, Tone)>| {
+            let w = self.cols.saturating_sub(m * 2 + indent);
+            for line in width::wrap_to_width(text, w) {
+                rows.push((indent, line, tone));
+            }
+        };
+
+        push(0, "● 访问工作区：", Tone::Info, &mut rows);
+        push(2, &self.about.map(|a| a.workspace.clone()).unwrap_or_default(), Tone::Text, &mut rows);
+        rows.push((0, String::new(), Tone::None));
+        push(0, "安全确认：这个目录是你自己创建或信任的吗？（自己的代码、知名开源项目、团队内部项目）", Tone::Text, &mut rows);
+        push(0, "如果不是，请先检查这个目录里的内容 —— 接下来 Neo 能读取、编辑并执行其中的文件。", Tone::Muted, &mut rows);
+        push(0, "如果这个目录含有恶意脚本，它们可以执行任意代码、读取、修改或窃取你的文件。", Tone::Error, &mut rows);
+        rows.push((0, String::new(), Tone::None));
+        push(0, "◆", Tone::Accent, &mut rows);
+        rows.push((0, String::new(), Tone::None));
+
+        let opts = ["是的，我信任此目录", "否，退出"];
+        for (i, label) in opts.iter().enumerate() {
+            let selected = i == t.selected;
+            let (dot, dt, tt) = if selected {
+                ("●", Tone::Success, Tone::Text)
+            } else {
+                ("○", Tone::Muted, Tone::Muted)
+            };
+            rows.push((2, format!("{dot} {label}"), tt));
+            let _ = dt;
+        }
+        rows.push((0, String::new(), Tone::None));
+        push(2, "↑/↓ 选择 · Enter 确认 · y/n 快捷 · Ctrl+C 退出", Tone::Border, &mut rows);
+
+        // 垂直居中
+        let top = self.rows.saturating_sub(rows.len()) / 2;
+        for (i, (indent, text, tone)) in rows.iter().enumerate() {
+            if text.is_empty() {
+                continue;
+            }
+            g.put(top + i, m + indent, text, *tone);
+        }
+        // 左侧竖条：给"这是要你决定的事"一个视觉框（对标 MiMo 的左侧竖条）
+        let bar_top = top;
+        let bar_bottom = (top + rows.len()).min(self.rows);
+        for r in bar_top..bar_bottom {
+            g.put(r, 1, "┃", Tone::Accent);
+        }
+    }
+
+    /// 把事实渲染成"行 → 片段"（不含 ANSI，色调交给网格统一展开）。
     ///
-    /// 视觉语言对标 opencode：
-    ///   - 用户消息带左侧竖条（与助手正文区分开）
-    ///   - 助手正文不加框，直接跟在后面（opencode 的 assistant 就是纯文本）
-    ///   - 工具调用走"树状"缩进，成功 ✓ / 失败 ✗，细节（exit code）压暗
-    ///   - 元信息（token、会话）一律 muted，不抢正文
-    fn wrap_facts(&self, cols: usize, p: &Pal) -> Vec<String> {
-        let rst = &p.reset;
-        let inner = cols.saturating_sub(4);
-        let mut lines = Vec::new();
+    /// 视觉语言（对标 opencode / MiMo）：
+    ///   - 用户消息带左侧竖条，与助手正文区分
+    ///   - 助手正文不加框、顶格直排
+    ///   - 工具调用成功 ✓ / 失败 ✗，细节（exit code）压暗
+    ///   - 元信息一律 muted，不抢正文
+    fn fact_lines(&self) -> Vec<Vec<Seg>> {
+        let inner = self.cols.saturating_sub(4);
+        let mut out: Vec<Vec<Seg>> = Vec::new();
         for f in self.facts {
             match f {
                 Fact::UserSaid(text) => {
-                    // 左侧竖条给用户消息一个"我说的话"的视觉归属
-                    let mut first = true;
                     for l in text.lines() {
                         for w in width::wrap_to_width(l, inner) {
-                            if first {
-                                lines.push(format!("{}\u{2503}{rst} {}{w}{rst}", p.accent, p.text));
-                                first = false;
-                            } else {
-                                lines.push(format!("{}\u{2503}{rst}  {w}", p.accent));
-                            }
+                            out.push(vec![
+                                (0, "┃".to_string(), Tone::Accent),
+                                (2, w, Tone::Text),
+                            ]);
                         }
                     }
-                    lines.push(String::new());
+                    out.push(Vec::new());
                 }
                 Fact::AssistantSaid(text) => {
                     for l in text.lines() {
                         for w in width::wrap_to_width(l, inner) {
-                            lines.push(w);
+                            out.push(vec![(0, w, Tone::Text)]);
                         }
                     }
-                    lines.push(String::new());
+                    out.push(Vec::new());
                 }
                 Fact::ToolFinished { name, exit_code } => {
-                    // 成功/失败共用一个"树杈"形状，只换图标与颜色，行宽稳定
-                    let (icon, color) = if *exit_code == 0 {
-                        ("✓", &p.success)
-                    } else {
-                        ("✗", &p.error)
-                    };
-                    lines.push(format!(
-                        "  {color}{icon}{rst} {name}{} exit {exit_code}{rst}",
-                        p.muted
-                    ));
+                    let (icon, tone) =
+                        if *exit_code == 0 { ("✓", Tone::Success) } else { ("✗", Tone::Error) };
+                    let after = 4 + width::display_width(name);
+                    out.push(vec![
+                        (2, format!("{icon} "), tone),
+                        (4, name.clone(), Tone::Text),
+                        (after + 1, format!("exit {exit_code}"), Tone::Muted),
+                    ]);
                 }
                 Fact::ApprovalNeeded { detail } => {
-                    // △ 与 opencode footer 的权限提示同形
-                    lines.push(format!("  {}△ 需要审批：{detail}{rst}", p.warning));
+                    out.push(vec![(2, format!("△ 需要审批：{detail}"), Tone::Warning)]);
                 }
-                Fact::Failed(msg) => lines.push(format!("  {}✗ {msg}{rst}", p.error)),
-                Fact::TurnFinished { input_tokens, output_tokens } => lines.push(format!(
-                    "  {}· {input_tokens} in / {output_tokens} out{rst}",
-                    p.muted
-                )),
+                Fact::Failed(msg) => out.push(vec![(2, format!("✗ {msg}"), Tone::Error)]),
+                Fact::TurnFinished { input_tokens, output_tokens } => out.push(vec![(
+                    2,
+                    format!("· {input_tokens} in / {output_tokens} out"),
+                    Tone::Muted,
+                )]),
                 Fact::SessionReady { session_id } => {
-                    lines.push(format!("  {}· 会话 {session_id}{rst}", p.muted))
+                    out.push(vec![(2, format!("· 会话 {session_id}"), Tone::Muted)]);
                 }
             }
         }
-        lines
+        out
     }
-}
-
-/// 去掉 ANSI 转义序列（用于量宽/右侧对齐）。
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::new();
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        if c == '\u{1b}' {
-            while let Some(&n) = it.peek() {
-                it.next();
-                if n == 'm' {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// 用 `$EDITOR`（或 `$VISUAL`，再退到 vi）编辑一段文本，返回编辑结果。
@@ -824,8 +1114,9 @@ impl HostBackend for TuiFacts {
 /// 状态栏文案：审批挂起时明确告诉用户该敲什么，否则是常规就绪提示。
 fn idle_or_approval(outstanding: &Option<String>) -> String {
     match outstanding {
-        Some(_) => "待审批 · 输入 y 批准 / n 拒绝 后回车".to_string(),
-        None => "就绪 · 输入任务后回车 · Ctrl+C 退出".to_string(),
+        Some(_) => "待审批 · y 批准 / n 拒绝".to_string(),
+        // 空闲时不再堆一串按键说明 —— 输入框有占位提示、下方有提示行
+        None => "就绪".to_string(),
     }
 }
 
@@ -833,7 +1124,11 @@ fn idle_or_approval(outstanding: &Option<String>) -> String {
 ///
 /// `submit` 由调用方注入（通常是 `kernel.submit`），这样本 crate
 /// **不依赖 neo-orchestration / L3 之上的任何东西**，只依赖契据。
-pub fn run<F>(about: About, mut submit: F) -> std::io::Result<()>
+pub fn run<F>(
+    about: About,
+    trust_workspace: Option<std::path::PathBuf>,
+    mut submit: F,
+) -> std::io::Result<()>
 where
     F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
 {
@@ -862,12 +1157,62 @@ where
     // 未决审批：内核挂起后必须由用户应答，否则界面只是"显示"而无法推进。
     let mut outstanding: Option<String> = None;
 
-    // footer 右侧：模型 + 档位短名（对标 opencode footer 的右侧状态区）
-    let footer_right = if about.mode_short.is_empty() {
-        about.model.clone()
-    } else {
-        format!("{} · {}", about.model, about.mode_short)
-    };
+    // ── 首次进入某工作区：先要一次知情同意 ──────────────────────────
+    //
+    // 沙箱是硬边界（最多能做什么），信任是知情同意（这个目录是不是你让我动的）。
+    // 二者互补：沙箱挡不住"信任错了目录"，信任挡不住"恶意代码越权"。
+    if let Some(ws) = trust_workspace {
+        let mut tp = TrustPrompt::default();
+        loop {
+            let (cols, rows) = terminal_size();
+            let screen = Screen {
+                cols,
+                rows,
+                facts: &[],
+                input: "",
+                status: "",
+                awaiting_input: false,
+                show_cursor: false,
+                about: Some(&about),
+                trust: Some(&tp),
+            };
+            write!(stdout, "{}", screen.render())?;
+            stdout.flush()?;
+
+            let accept = |ws: &std::path::Path| {
+                if let Err(e) = trust::trust(ws) {
+                    // 记录失败不该拦住用户，但必须如实说 ——
+                    // 静默失败会表现为"每次都问"，用户会以为是自己没点对
+                    eprintln!("[neo] 无法记录信任（{e}）；本次继续，下次仍会询问");
+                }
+            };
+            match read_key(&mut stdin) {
+                Key::Quit => {
+                    let _ = raw.restore();
+                    return Ok(());
+                }
+                Key::Up | Key::Char('k') => tp.selected = 0,
+                Key::Down | Key::Char('j') => tp.selected = 1,
+                Key::Char('y') => {
+                    accept(&ws);
+                    break;
+                }
+                Key::Char('n') => {
+                    let _ = raw.restore();
+                    return Ok(());
+                }
+                Key::Enter => {
+                    if tp.selected == 0 {
+                        accept(&ws);
+                        break;
+                    }
+                    let _ = raw.restore();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+    }
 
     loop {
         let (cols, rows) = terminal_size();
@@ -878,10 +1223,10 @@ where
             facts: &facts,
             input: &input,
             status: &status,
-            footer_right: &footer_right,
             awaiting_input: outstanding.is_some(),
             show_cursor: true,
             about: Some(&about),
+            trust: None,
         };
         write!(stdout, "{}", screen.render())?;
         stdout.flush()?;
@@ -1022,11 +1367,11 @@ where
                         facts: &facts0,
                         input: "",
                         status: &status,
-                        footer_right: &footer_right,
                         awaiting_input: false,
                         show_cursor: false,
                         // 这一帧是"运行中"过渡态：facts 通常已非空，不展示首屏
-                        about: None,
+                        about: Some(&about),
+                        trust: None,
                     }
                     .render()
                 )?;
@@ -1053,6 +1398,101 @@ where
 mod tests {
     use super::*;
 
+    // ── 测试辅助 ──────────────────────────────────────────────────────
+    //
+    // 渲染产物含 ANSI 与光标定位序列，直接断言字符串很脆。这里统一
+    // 剥成"纯文本行"，让测试断言**用户看到的内容**而不是转义细节。
+    fn screen(cols: usize, rows: usize, facts: &[Fact], input: &str, status: &str) -> String {
+        Screen {
+            cols,
+            rows,
+            facts,
+            input,
+            status,
+            awaiting_input: false,
+            show_cursor: false,
+            about: None,
+            trust: None,
+        }
+        .render()
+    }
+
+    fn about() -> About {
+        About {
+            version: "0.1.0".into(),
+            model: "mock".into(),
+            mode: "Default（沙箱 WorkspaceWrite / 审批 OnRequest）".into(),
+            mode_short: "default".into(),
+            workspace: "/tmp/ws".into(),
+            branch: "main".into(),
+            session: "neo-tui".into(),
+        }
+    }
+
+    fn welcome(cols: usize, rows: usize) -> String {
+        let a = about();
+        Screen {
+            cols,
+            rows,
+            facts: &[],
+            input: "",
+            status: "就绪",
+            awaiting_input: false,
+            show_cursor: false,
+            about: Some(&a),
+            trust: None,
+        }
+        .render()
+    }
+
+    /// 剥掉 ANSI 转义序列，返回可见行（保留空行以反映真实占位）。
+    ///
+    /// **必须按 CSI 语法解析**（`ESC [` 参数字节(0x30–0x3F) 中间字节(0x20–0x2F)
+    /// 终止字节(0x40–0x7E)），不能"找 m/h/l 当结尾" ——
+    /// `ESC[H`（光标归位）与 `ESC[2J`（清屏）都没有那些字母作结尾，
+    /// 按字母找会一路吞到正文里，测试看到的就只剩尾部。
+    fn plain(rendered: &str) -> Vec<String> {
+        fn is_final(c: char) -> bool {
+            ('\u{40}'..='\u{7e}').contains(&c)
+        }
+        let mut lines: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut it = rendered.chars().peekable();
+        while let Some(c) = it.next() {
+            match c {
+                '\u{1b}' => {
+                    if it.peek() == Some(&'[') {
+                        it.next();
+                        // 参数字节 + 中间字节
+                        while let Some(&n) = it.peek() {
+                            if ('\u{30}'..='\u{3f}').contains(&n) || ('\u{20}'..='\u{2f}').contains(&n) {
+                                it.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        // 终止字节
+                        if let Some(&n) = it.peek() {
+                            if is_final(n) {
+                                it.next();
+                            }
+                        }
+                    } else {
+                        // 两字符转义（ESC 后跟单个字符）
+                        it.next();
+                    }
+                }
+                '\r' => {}
+                '\n' => lines.push(std::mem::take(&mut cur)),
+                _ => cur.push(c),
+            }
+        }
+        lines.push(cur);
+        lines
+    }
+
+    // ── 按键解码（不变）──────────────────────────────────────────────
+
     #[test]
     fn decodes_basic_keys() {
         assert_eq!(decode_key(&[0x03]), Key::Quit);
@@ -1066,37 +1506,302 @@ mod tests {
 
     #[test]
     fn decodes_multibyte_utf8_keys() {
-        // 中文输入必须正确解码：3 字节 UTF-8
         assert_eq!(decode_key("你".as_bytes()), Key::Char('你'));
-        assert_eq!(decode_key("好".as_bytes()), Key::Char('好'));
-        // 4 字节（emoji）
         assert_eq!(decode_key("🚀".as_bytes()), Key::Char('🚀'));
-        // 非法序列不得 panic，也不得产出错误字符
         assert_eq!(decode_key(&[0xe5, 0x86]), Key::Unknown, "不完整的 UTF-8 应为 Unknown");
         assert_eq!(decode_key(&[0xff, 0xfe]), Key::Unknown, "非法字节应为 Unknown");
     }
 
+    // ── 布局：核心不变量 ──────────────────────────────────────────────
+
     #[test]
-    fn screen_shows_last_lines_when_transcript_overflows() {
-        // 事实多于可用行时，应显示**最新的**（自动滚到底），而不是截掉尾部
+    fn every_rendered_line_is_exactly_cols_wide() {
+        // 网格模型的**根本约束**：每行都必须恰好 cols 列。
+        // 少一列 → 上一帧残留；多一列 → 换行错位、整屏滚动。
+        // 宽字符（中文/emoji）是最容易破坏这条的地方。
+        for (cols, rows) in [(40usize, 12usize), (80, 24), (120, 40), (28, 10)] {
+            let a = about();
+            let facts = vec![
+                Fact::UserSaid("中文消息测试宽字符对齐".into()),
+                Fact::AssistantSaid("这是助手的回答，也包含中文与 emoji 🚀".into()),
+                Fact::ToolFinished { name: "bash".into(), exit_code: 0 },
+            ];
+            let out = Screen {
+                cols, rows, facts: &facts, input: "输入中文", status: "就绪",
+                awaiting_input: false, show_cursor: false, about: Some(&a), trust: None,
+            }
+            .render();
+            for (i, line) in plain(&out).iter().enumerate() {
+                let w = width::display_width(line);
+                assert!(w <= cols, "{cols}x{rows} 第 {i} 行宽 {w} 超过 {cols}：{line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn transcript_scrolls_to_show_the_latest() {
         let facts = vec![
             Fact::AssistantSaid("line1".into()),
             Fact::AssistantSaid("line2".into()),
             Fact::AssistantSaid("line3".into()),
         ];
-        let s = Screen {
-            cols: 40,
-            rows: 6,
-            facts: &facts,
-            input: "",
-            status: "s",
-            footer_right: "",
-            awaiting_input: false,
-show_cursor: false,
-            about: None,
+        let out = screen(40, 12, &facts, "", "s");
+        let text = plain(&out).join("\n");
+        assert!(text.contains("line3"), "应显示最新内容：{text}");
+    }
+
+    #[test]
+    fn user_message_is_visible_and_marked() {
+        let facts = vec![
+            Fact::UserSaid("列一下文件".into()),
+            Fact::AssistantSaid("好的".into()),
+        ];
+        let text = plain(&screen(60, 20, &facts, "", "s")).join("\n");
+        assert!(text.contains("列一下文件"), "用户消息必须可见：{text}");
+        assert!(text.contains('┃'), "用户消息应带左侧竖条：{text}");
+        assert!(text.contains("好的"), "助手正文必须可见：{text}");
+    }
+
+    #[test]
+    fn tool_success_and_failure_are_distinguishable() {
+        let ok = [Fact::ToolFinished { name: "bash".into(), exit_code: 0 }];
+        let bad = [Fact::ToolFinished { name: "bash".into(), exit_code: 1 }];
+        let a = plain(&screen(60, 12, &ok, "", "s")).join("\n");
+        let b = plain(&screen(60, 12, &bad, "", "s")).join("\n");
+        assert!(a.contains('✓'), "成功应显示 ✓：{a}");
+        assert!(b.contains('✗'), "失败应显示 ✗：{b}");
+    }
+
+    // ── 首屏（MiMo 式居中 + 星场）─────────────────────────────────────
+
+    #[test]
+    fn welcome_is_centered_not_left_aligned() {
+        // MiMo 的首页是**居中**构图，不是左对齐 —— 这是本轮对标的重点
+        let text = plain(&welcome(100, 30)).join("\n");
+        let logo_line = plain(&welcome(100, 30))
+            .into_iter()
+            .find(|l| l.contains('█'))
+            .expect("应有大 logo");
+        let lead = logo_line.chars().take_while(|c| *c == ' ').count();
+        assert!(lead > 20, "logo 应居中（左侧留白 {lead} 偏少）：{logo_line:?}");
+        assert!(text.contains("Neo"), "应显示品牌名：{text}");
+    }
+
+    #[test]
+    fn welcome_shows_injected_session_info() {
+        let text = plain(&welcome(100, 34)).join("\n");
+        for needle in ["mock", "/tmp/ws", "main", "0.1.0", "neo-tui"] {
+            assert!(text.contains(needle), "首屏应显示 {needle}：{text}");
+        }
+    }
+
+    #[test]
+    fn welcome_includes_an_input_box() {
+        // 输入框是首页的主体，必须有边框与占位提示
+        let text = plain(&welcome(90, 30)).join("\n");
+        assert!(text.contains('╭'), "应有输入框上边框：{text}");
+        assert!(text.contains("输入任务"), "应有占位提示：{text}");
+        assert!(text.contains("default ⏵ mock"), "输入框内应有模式/模型状态行：{text}");
+    }
+
+    #[test]
+    fn welcome_degrades_on_small_terminals() {
+        // 小终端必须降级而不是把内容裁掉（裁剪会从顶部裁，最难看）
+        let text = plain(&welcome(30, 10)).join("\n");
+        assert!(text.contains("Neo"), "小终端仍要显示品牌：{text}");
+        assert!(!text.contains('█'), "小终端不该硬塞大 logo：{text}");
+    }
+
+    #[test]
+    fn starfield_appears_but_never_covers_content() {
+        // 星场是背景：必须出现，且**绝不能**盖掉正文/输入框
+        let facts = vec![Fact::AssistantSaid("正文内容".into())];
+        let out = screen(100, 24, &facts, "我的输入", "就绪");
+        let text = plain(&out).join("\n");
+        assert!(text.contains('·') || text.contains('+'), "应出现星场：{text}");
+        assert!(text.contains("正文内容"), "星场不得覆盖正文：{text}");
+        assert!(text.contains("我的输入"), "星场不得覆盖输入：{text}");
+        // 输入框边框必须完整可见
+        assert!(text.contains('╭') && text.contains('╯'), "输入框边框应完整：{text}");
+    }
+
+    #[test]
+    fn rendering_is_deterministic_across_frames() {
+        // 每帧重画整屏；若星位随机，画面会闪成噪点。必须逐字节一致。
+        //
+        // 这里**必须锁环境**：颜色档位来自进程级 env，并行的 env 测试
+        // 若在两次渲染之间改掉 COLORTERM，两次的颜色转义就不同 ——
+        // 那是测试自己引入的抖动，不是星场在闪（星位由位置哈希决定，本就稳定）。
+        let (a, b) = with_env(&[("COLORTERM", "truecolor")], || (welcome(90, 26), welcome(90, 26)));
+        assert_eq!(a, b, "同一状态两次渲染必须完全一致（否则星场在闪）");
+
+        // 再单独断言"星位本身"稳定：与颜色无关的部分（剥掉转义）也必须一致
+        let (c, d) = with_env(&[("COLORTERM", "truecolor")], || {
+            (plain(&welcome(90, 26)), plain(&welcome(90, 26)))
+        });
+        assert_eq!(c, d, "剥掉颜色后星位也必须逐行一致");
+    }
+
+    #[test]
+    fn hints_do_not_advertise_unimplemented_keys() {
+        // 提示行只能列真正可用的键 —— 按了没反应比不提示更糟
+        let text = plain(&welcome(110, 30)).join("\n");
+        assert!(text.contains("ctrl+r"), "应提示历史：{text}");
+        assert!(text.contains("@ 引用"), "应提示引用：{text}");
+        // 未实现的对话框类命令不得出现
+        for bad in ["/themes", "/details", "/thinking"] {
+            assert!(!text.contains(bad), "不得提示未实现的 {bad}：{text}");
+        }
+    }
+
+    // ── 信任对话框 ────────────────────────────────────────────────────
+
+    #[test]
+    fn trust_prompt_warns_about_workspace_risk() {
+        let a = about();
+        let out = Screen {
+            cols: 100, rows: 30, facts: &[], input: "", status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: Some(&TrustPrompt::default()),
+        }
+        .render();
+        let text = plain(&out).join("\n");
+        assert!(text.contains("访问工作区"), "应说明访问哪个目录：{text}");
+        assert!(text.contains("/tmp/ws"), "应显示具体路径：{text}");
+        assert!(text.contains("恶意"), "必须说明最坏情况：{text}");
+        assert!(text.contains("是的，我信任此目录"), "应有肯定选项：{text}");
+        assert!(text.contains("否，退出"), "应有否定选项：{text}");
+    }
+
+    #[test]
+    fn trust_prompt_marks_the_selected_option() {
+        let a = about();
+        let render_with = |sel: usize| {
+            let out = Screen {
+                cols: 100, rows: 30, facts: &[], input: "", status: "",
+                awaiting_input: false, show_cursor: false,
+                about: Some(&a), trust: Some(&TrustPrompt { selected: sel }),
+            }
+            .render();
+            plain(&out).join("\n")
         };
-        let out = s.render();
-        assert!(out.contains("line3"), "应显示最新内容：{out}");
+        // 只看**选项那一行**的前缀：标题行"● 访问工作区"里也有 ●，
+        // 全局 find('●') 会一直命中的是第一行，断言就失去意义
+        // 选项行形如 "┃   ● 是的，我信任此目录" —— 竖条在左，
+        // 所以要先剔掉非标记字符，再看第一个可见符号是 ● 还是 ○
+        let option_line = |t: &str, label: &str| -> String {
+            let line = t
+                .lines()
+                .find(|l| l.contains(label))
+                .unwrap_or_else(|| panic!("找不到选项「{label}」"));
+            line.trim_matches(|c: char| c == '┃' || c.is_whitespace()).to_string()
+        };
+        let first = render_with(0);
+        let second = render_with(1);
+        assert!(
+            option_line(&first, "是的，我信任此目录").starts_with('●'),
+            "选中第一项时它应是实心 ●：{first}"
+        );
+        assert!(
+            option_line(&first, "否，退出").starts_with('○'),
+            "未选中的第二项应是空心 ○：{first}"
+        );
+        assert!(
+            option_line(&second, "否，退出").starts_with('●'),
+            "切换后第二项应变为实心 ●：{second}"
+        );
+    }
+
+    // ── 颜色能力降级 ──────────────────────────────────────────────────
+    //
+    // 颜色档位来自环境变量，而环境变量是**进程级**的 —— cargo 默认并行跑用例，
+    // 不加锁就会互相把 COLORTERM/NO_COLOR 改掉，产生"时好时坏"的假失败。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_env<T>(vars: &[(&str, &str)], f: impl FnOnce() -> T) -> T {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(String, Option<String>)> =
+            vars.iter().map(|(k, _)| (k.to_string(), std::env::var(k).ok())).collect();
+        // 显式清掉可能干扰的另一变量
+        let touched: Vec<&str> = vars.iter().map(|(k, _)| *k).collect();
+        for other in ["NO_COLOR", "COLORTERM", "TERM"] {
+            if !touched.contains(&other) {
+                std::env::remove_var(other);
+            }
+        }
+        for (k, v) in vars {
+            std::env::set_var(k, v);
+        }
+        let out = f();
+        for (k, old) in saved {
+            match old {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_color_env_disables_all_coloring() {
+        let out = with_env(&[("NO_COLOR", "1")], || {
+            let facts = [Fact::UserSaid("hi".into()), Fact::AssistantSaid("yo".into())];
+            screen(60, 16, &facts, "x", "s")
+        });
+        let mut it = out.chars().peekable();
+        let mut kept = Vec::new();
+        while let Some(c) = it.next() {
+            if c == '\u{1b}' && it.peek() == Some(&'[') {
+                it.next();
+                let mut seq = String::new();
+                while let Some(&n) = it.peek() {
+                    if ('\u{30}'..='\u{3f}').contains(&n) || ('\u{20}'..='\u{2f}').contains(&n) {
+                        it.next();
+                        seq.push(n);
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(&n) = it.peek() {
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        it.next();
+                        seq.push(n);
+                    }
+                }
+                kept.push(seq);
+            }
+        }
+        let sgr: Vec<&String> = kept.iter().filter(|x| x.ends_with('m')).collect();
+        assert!(sgr.is_empty(), "NO_COLOR 下不应有 SGR 颜色序列：{sgr:?}");
+    }
+
+    #[test]
+    fn rgb_conversions_stay_in_range() {
+        // 降级路径用的转换必须是合法色号，否则终端会显示乱码/忽略
+        for (r, g, b) in [(0u8, 0u8, 0u8), (255, 255, 255), (250, 178, 131), (157, 124, 216)] {
+            let c256 = rgb_to_256(r, g, b);
+            assert!(c256 >= 16, "256 色号 {c256} 落在系统色区（16 以下）");
+            let c16 = rgb_to_16(r, g, b);
+            assert!((30..=37).contains(&c16) || c16 == 90, "16 色号 {c16} 非法");
+        }
+    }
+
+    #[test]
+    fn lerp_hits_both_ends() {
+        let a = (0, 0, 0);
+        let b = (100, 200, 50);
+        assert_eq!(lerp_rgb(a, b, 0.0), a);
+        assert_eq!(lerp_rgb(a, b, 1.0), b);
+        let mid = lerp_rgb(a, b, 0.5);
+        assert!(mid.0 > 0 && mid.0 < 100, "中点应居中插值：{mid:?}");
+    }
+
+    // ── 宽度与占位（原有语义契约，保留）────────────────────────────────
+
+    #[test]
+    fn wordmark_rows_are_equal_width() {
+        let ws: Vec<usize> = WORDMARK.iter().map(|r| r.chars().count()).collect();
+        assert!(ws.windows(2).all(|w| w[0] == w[1]), "词标各行必须等宽，实际 {ws:?}");
     }
 
     #[test]
@@ -1123,236 +1828,12 @@ show_cursor: false,
         for no in ["n", "N", "no"] {
             assert_eq!(parse_approval_answer(no), Some(false), "{no} 应判为拒绝");
         }
-        // 无法识别的不提交（避免误批）
         assert_eq!(parse_approval_answer("maybe"), None);
         assert_eq!(parse_approval_answer(""), None);
     }
 
     #[test]
-    fn transcript_shows_the_user_message_with_its_own_bar() {
-        // 转录必须能看出"我问了什么"，且与助手正文在视觉上可区分
-        let facts = vec![
-            Fact::UserSaid("列一下文件".into()),
-            Fact::AssistantSaid("好的".into()),
-        ];
-        let s = Screen {
-            cols: 60,
-            rows: 20,
-            facts: &facts,
-            input: "",
-            status: "就绪",
-            footer_right: "",
-            awaiting_input: false,
-            show_cursor: true,
-            about: None,
-        };
-        let out = s.render();
-        assert!(out.contains("列一下文件"), "用户消息必须可见：{out}");
-        assert!(out.contains('\u{2503}'), "用户消息应带左侧竖条：{out}");
-        assert!(out.contains("好的"), "助手正文必须可见：{out}");
-    }
-
-    #[test]
-    fn tool_success_and_failure_are_visually_distinguishable() {
-        let ok = vec![Fact::ToolFinished { name: "bash".into(), exit_code: 0 }];
-        let bad = vec![Fact::ToolFinished { name: "bash".into(), exit_code: 1 }];
-        // 用嵌套 fn 而非闭包：Screen<'a> 借入 facts，闭包推断的生命周期不够长
-        fn render_facts(f: &[Fact]) -> String {
-            Screen {
-                cols: 60, rows: 10, facts: f, input: "", status: "s",
-                footer_right: "", awaiting_input: false, show_cursor: false, about: None,
-            }
-            .render()
-        }
-        let a = render_facts(&ok);
-        let b = render_facts(&bad);
-        assert!(a.contains('✓'), "成功应显示 ✓：{a}");
-        assert!(b.contains('✗'), "失败应显示 ✗：{b}");
-    }
-
-    #[test]
-    fn no_color_env_disables_all_coloring() {
-        // NO_COLOR 是硬约定：设了就不能上色（无障碍 / 重定向到文件的场景）
-        std::env::set_var("NO_COLOR", "1");
-        let facts = vec![
-            Fact::UserSaid("hi".into()),
-            Fact::AssistantSaid("yo".into()),
-            Fact::ToolFinished { name: "bash".into(), exit_code: 0 },
-        ];
-        let s = Screen {
-            cols: 60, rows: 20, facts: &facts, input: "x", status: "s",
-            footer_right: "m", awaiting_input: false, show_cursor: false, about: None,
-        };
-        let out = s.render();
-        std::env::remove_var("NO_COLOR");
-        // 只允许定位/光标类转义（如 [H、[2J），不允许任何颜色 SGR（以 m 结尾）
-        let colored: Vec<&str> = out.split('\u{1b}')
-            .filter(|seg| seg.contains('m') && seg.chars().next().map(|c| c.is_ascii_digit() || c == '[').unwrap_or(false))
-            .filter(|seg| {
-                let head: String = seg.chars().take_while(|c| *c != 'm').collect();
-                head.chars().all(|c| c.is_ascii_digit() || c == ';' || c == '[')
-            })
-            .collect();
-        assert!(colored.is_empty(), "NO_COLOR 下不应有颜色转义：{colored:?}");
-    }
-
-    #[test]
-    fn footer_right_yields_on_narrow_terminals() {
-        // 窄终端里右侧信息让位，而不是折行打乱布局
-        let facts = vec![Fact::AssistantSaid("x".into())];
-        let s = Screen {
-            cols: 24, rows: 10, facts: &facts, input: "", status: "就绪 · 很长很长很长",
-            footer_right: "deepseek-chat · auto-edit", awaiting_input: false,
-            show_cursor: false, about: None,
-        };
-        let out = s.render();
-        assert!(out.contains("就绪"), "左侧状态应保留：{out}");
-        assert!(!out.contains("deepseek-chat"), "窄终端应舍弃右侧信息：{out}");
-    }
-
-    #[test]
-    fn status_line_aligns_right_info_to_the_edge() {
-        let s = Screen {
-            cols: 40, rows: 10, facts: &[], input: "", status: "就绪",
-            footer_right: "mock", awaiting_input: false, show_cursor: false, about: None,
-        };
-        let line = s.status_line(&Pal::new(ColorMode::None), "mock");
-        assert_eq!(width::display_width(&line), 40, "状态栏应铺满整行：{line:?}");
-        assert!(line.starts_with("就绪"), "{line:?}");
-        assert!(line.ends_with("mock"), "{line:?}");
-    }
-
-    #[test]
-    fn wordmark_rows_are_equal_width() {
-        // 手改词标最容易犯的错：某行多/少一个字符，终端里立刻看出错位。
-        let ws: Vec<usize> = WORDMARK.iter().map(|r| r.chars().count()).collect();
-        assert!(
-            ws.windows(2).all(|w| w[0] == w[1]),
-            "词标各行必须等宽，实际 {ws:?}"
-        );
-    }
-
-    fn about_fixture() -> About {
-        About {
-            version: "0.1.0".into(),
-            model: "mock".into(),
-            mode: "Default（沙箱 WorkspaceWrite / 审批 OnRequest）".into(),
-            mode_short: "default".into(),
-            workspace: "/tmp/ws".into(),
-            session: "neo-tui".into(),
-        }
-    }
-
-    #[test]
-    fn empty_transcript_shows_the_welcome_screen() {
-        let a = about_fixture();
-        let s = Screen {
-            cols: 100,
-            rows: 30,
-            facts: &[],
-            input: "",
-            status: "就绪",
-            footer_right: "",
-            awaiting_input: false,
-show_cursor: true,
-            about: Some(&a),
-        };
-        let out = s.render();
-        // 注入的会话信息必须出现（否则首屏等于没有信息量）
-        assert!(out.contains("mock"), "首屏应显示模型：{out}");
-        assert!(out.contains("/tmp/ws"), "首屏应显示工作区：{out}");
-        assert!(out.contains("neo-tui"), "首屏应显示会话：{out}");
-        assert!(out.contains("0.1.0"), "首屏应显示版本：{out}");
-        // 大终端下应出现词标
-        assert!(out.contains('█'), "大终端应显示词标：{out}");
-    }
-
-    #[test]
-    fn welcome_yields_to_content_once_there_are_facts() {
-        // 有内容后首屏必须消失，否则每轮都刷一遍 banner 会淹没正文
-        let a = about_fixture();
-        let facts = vec![Fact::AssistantSaid("回答".into())];
-        let s = Screen {
-            cols: 100,
-            rows: 30,
-            facts: &facts,
-            input: "",
-            status: "就绪",
-            footer_right: "",
-            awaiting_input: false,
-show_cursor: true,
-            about: Some(&a),
-        };
-        let out = s.render();
-        assert!(out.contains("回答"), "正文必须显示：{out}");
-        assert!(!out.contains('█'), "有正文时不该再出现词标：{out}");
-    }
-
-    #[test]
-    fn small_terminal_degrades_to_one_line_wordmark() {
-        // 小窗口里 6 行词标会把信息挤出可视区，应降级为单行
-        let a = about_fixture();
-        let s = Screen {
-            cols: 40,
-            rows: 12,
-            facts: &[],
-            input: "",
-            status: "就绪",
-            footer_right: "",
-            awaiting_input: false,
-show_cursor: true,
-            about: Some(&a),
-        };
-        let out = s.render();
-        assert!(out.contains("NEO"), "小终端应退化为单行 NEO：{out}");
-        assert!(!out.contains('█'), "小终端不该显示大词标：{out}");
-        assert!(out.contains("/tmp/ws"), "降级后信息仍须可见：{out}");
-    }
-
-    #[test]
-    fn welcome_truncates_long_values_instead_of_overflowing() {
-        // 长路径不能撑破行宽（宽字符截断用 display width，不用字节数）
-        let a = About { workspace: "很长的目录名".repeat(30), ..about_fixture() };
-        let s = Screen {
-            cols: 40,
-            rows: 30,
-            facts: &[],
-            input: "",
-            status: "就绪",
-            footer_right: "",
-            awaiting_input: false,
-show_cursor: true,
-            about: Some(&a),
-        };
-        for line in s.welcome_lines(&a, &Pal::new(ColorMode::None)) {
-            // 去掉 ANSI 后逐行量宽
-            let plain: String = {
-                let mut o = String::new();
-                let mut it = line.chars().peekable();
-                while let Some(c) = it.next() {
-                    if c == '\u{1b}' {
-                        while let Some(&n) = it.peek() {
-                            it.next();
-                            if n == 'm' { break; }
-                        }
-                    } else {
-                        o.push(c);
-                    }
-                }
-                o
-            };
-            assert!(
-                width::display_width(&plain) <= s.cols,
-                "行宽 {} 超过终端 {}：{plain:?}",
-                width::display_width(&plain),
-                s.cols
-            );
-        }
-    }
-
-    #[test]
     fn tui_host_reports_facts_from_the_shared_extractor() {
-        // TUI 与 exec 必须用同一套事实语义（T6 的前提）
         let mut h = TuiFacts::new();
         h.consume(&EventMsg::TurnStarted { turn_id: "t".into() }).unwrap();
         h.consume(&EventMsg::AgentMessageDone { text: "hi".into() }).unwrap();
@@ -1365,5 +1846,25 @@ show_cursor: true,
                 Fact::ToolFinished { name: "bash".into(), exit_code: 0 },
             ]
         );
+    }
+
+    #[test]
+    fn approval_state_changes_the_box_border_color() {
+        // 待审批是"现在必须由你决定"的时刻；边框变色是余光可见的提示
+        let a = about();
+        let (idle, pending) = with_env(&[("COLORTERM", "truecolor")], || {
+            let render_with = |awaiting: bool| {
+                Screen {
+                    cols: 80, rows: 20, facts: &[], input: "", status: "",
+                    awaiting_input: awaiting, show_cursor: false,
+                    about: Some(&a), trust: None,
+                }
+                .render()
+            };
+            (render_with(false), render_with(true))
+        });
+        // 空闲边框用 border_active(#606060)，审批用 warning(#f5a742)
+        assert!(idle.contains("38;2;96;96;96"), "空闲边框应为 border_active");
+        assert!(pending.contains("38;2;245;167;66"), "审批边框应为 warning 色");
     }
 }

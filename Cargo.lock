@@ -95,6 +95,7 @@ dependencies = [
  "neo-config",
  "neo-core",
  "neo-protocol",
+ "serde_json",
 ]
 
 [[package]]

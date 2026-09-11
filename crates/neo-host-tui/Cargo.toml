@@ -14,3 +14,4 @@ neo-protocol = { path = "../neo-protocol" }
 neo-core = { path = "../neo-core" }
 neo-config = { path = "../neo-config" }
 neo-capability = { path = "../neo-capability" }
+serde_json = { workspace = true }
