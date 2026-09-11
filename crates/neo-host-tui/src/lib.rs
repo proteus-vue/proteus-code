@@ -794,13 +794,25 @@ impl Screen<'_> {
         }
 
         let (chrome_top, cursor) = if let Some(lines) = self.preformatted {
-            // 信息屏：从顶部开始铺，超出部分从**尾部**标注（说明不是被静默吞掉）
+            // 信息屏是**文档**：必须从第一行开始显示。
+            // 曾用"显示末尾 N 行"（对话滚屏的逻辑），结果长帮助把标题裁掉、
+            // 只留中间 —— 文档不能倒着读。
             let avail = self.rows.saturating_sub(CHROME_ROWS);
-            let start = lines.len().saturating_sub(avail);
-            for (i, segs) in lines.iter().enumerate().skip(start).take(avail) {
+            let shown = lines.len().min(avail.saturating_sub(1)); // 留一行给截断提示
+            for (i, segs) in lines.iter().enumerate().take(shown) {
                 for (col, text, tone) in segs {
-                    g.put(i - start + 1, *col, text, *tone);
+                    g.put(i + 1, *col, text, *tone);
                 }
+            }
+            // 没显示完就**如实标注**（静默截断会让用户以为后面没了）
+            if lines.len() > shown {
+                let more = lines.len() - shown;
+                g.put(
+                    shown + 1,
+                    2,
+                    &format!("… 还有 {more} 行（终端太小，请放大窗口查看）"),
+                    Tone::Border,
+                );
             }
             let top = self.rows.saturating_sub(CHROME_ROWS);
             (top, self.draw_chrome(&mut g, top))

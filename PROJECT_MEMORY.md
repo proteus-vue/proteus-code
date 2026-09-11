@@ -494,6 +494,45 @@ opencode 用 tree-sitter WASM（每语言一个 .wasm + 在线拉 query）。
 
 ---
 
+## 4.18 离线可验证性：三个桩 provider 的分工，以及又一次"可达性"疏漏
+
+### (a) 没有 API key 也要能把功能走一遍
+问"mock 能验证各个功能吗"时我做了一次逐项实测，结论是**分三个桩 provider**，
+因为它们覆盖的链路不同：
+
+| provider | 产出 | 覆盖 |
+|---|---|---|
+| `mock` | 一句固定文本 | 界面与交互全览（弹窗/命令/面板/主题/历史/侧栏/信任） |
+| `selftest` | 调一次 `apply_patch` | 审批拦截 → **审批前 diff** → 批准 → 真实落盘 → 侧栏改动统计 |
+| `demo` | Markdown + `todowrite` | Markdown 高亮、正文与侧栏的任务清单 |
+
+27 项 pty 逐项核对全过。**离线验不到**的是：真实推理质量、模型是否真的会
+自己调 `todowrite`、`/compact`（未实现）。这三项必须真实模型。
+
+### (b) 又一次"定义了却不可达"
+`Action::Status` 定义了、`status_text()` 也写了，但**忘记把它注册成命令** ——
+`/status` 永远"无匹配"。之前 `PatchProposed` 也是同类问题（定义了从没发出）。
+两次都是"契约/枚举建好了，接线漏了"，而编译器**不会**提醒。
+
+修法是把可达性做成**库内不变量**而不是测试：
+- `COMMANDS` 抽成 const 表（数据与取用分离）；
+- `audit_action_reachability()` 读它；
+- `registry()` 里 `debug_assert!` —— 于是**任何 debug 构建**（含开发时直接
+  跑起来）都会检查，而不只是 `cargo test` 时。
+- `Action` 分成 `COMMAND_ACTIONS`（必须有命令）与 `INTERNAL_ONLY_ACTIONS`
+  （只由界面产生，如 `SetTheme` 只能从主题列表选，不该有 `/settheme`）。
+
+实现这个审计时踩了一个小坑：审计函数最初调 `registry()`，而 `registry()`
+又调审计 → **无限递归**，测试里表现为 stack overflow。表格必须是数据
+（const），取用才是函数。
+
+### (c) 信息屏的滚屏方向错了
+`/help` 变长后，它沿用了对话的"显示末尾 N 行"逻辑 —— 结果把标题裁掉、
+只留中间。**对话要从最新看起，文档要从第一行看起**，两者方向相反。
+改为从头显示 + 如实标注"还有 N 行"。
+
+---
+
 ## 5. 假通过：门禁与测试各抓到过一次自己
 
 这两次都值得记，因为它们说明"看起来有保护"有多危险：
@@ -527,7 +566,7 @@ opencode 用 tree-sitter WASM（每语言一个 .wasm + 在线拉 query）。
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 212 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo test --workspace      # 214 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫）
 ```
 

@@ -35,6 +35,26 @@
 已闭环并跑通，T6 宿主等价铁律在四宿主上生效；剩 Desktop 的系统 webview 窗口层与
 真实模型推理待验（后者卡在环境里的 key 是占位符）。
 
+### 离线自验（不需要 API key）
+
+三个内置桩 provider，各自覆盖不同链路。**没有 key 也能把界面与内核交互全走一遍**：
+
+| provider | 它产出什么 | 能验证到哪些功能 |
+|---|---|---|
+| `mock` | 一句固定文本 | 信任门 · 首页 · `@` 文件弹窗（过滤/选择）· `/` 命令弹窗 · `/help` `/keys` `/status` · `ctrl+p` 面板 · `ctrl+t` 主题 · `ctrl+b` 侧栏 · `ctrl+r` 历史 · `!shell` 执行 · 普通对话 |
+| `selftest` | 调一次 `apply_patch` 写文件 | 审批拦截 → **审批前 unified diff 预览** → `y` 批准 → 真实落盘 → 侧栏 Modified Files（+N -N） |
+| `demo` | Markdown 正文 + `todowrite` | Markdown 渲染（标题/列表/行内代码/代码块**语法高亮**/引用）· 正文与侧栏的**任务清单**进度 |
+
+```bash
+neo tui --provider mock        # 界面与交互全览
+neo tui --provider selftest    # 审批 / diff 预览 / 落盘（批准后会写 ./selftest.txt）
+neo tui --provider demo        # Markdown 高亮 + 任务清单
+```
+
+**离线验不到的**（必须真实模型）：真实推理质量、多轮工具编排、
+模型是否真的会调 `todowrite` 维护清单、`/compact`（未实现）。
+界面本身与 provider 无关，所以这些以外的交互都能离线确认。
+
 ### 亲测可用
 
 **先装到 PATH**（否则 `neo` 提示 command not found —— 它只在 `target/` 里）：

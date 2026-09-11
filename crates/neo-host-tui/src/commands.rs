@@ -51,16 +51,70 @@ pub enum Action {
     Status,
 }
 
+/// **必须由命令触发**的动作。新增变体时要加进这里 ——
+/// 编译器不会提醒"去注册一条命令"，很容易出现"动作写好了但没有命令能触发"。
+const COMMAND_ACTIONS: &[Action] = &[
+    Action::Quit,
+    Action::NewSession,
+    Action::Compact,
+    Action::ThemePicker,
+    Action::NextTheme,
+    Action::Help,
+    Action::Keys,
+    Action::Status,
+];
+
+/// **只在界面内部产生**的动作（不经过命令表）。
+///
+/// `SetTheme` 只由主题选择弹窗产生 —— 让用户敲 `/settheme nord`
+/// 不如让他从列表里选（名字要记，也没法预览）。这类动作刻意不注册命令。
+const INTERNAL_ONLY_ACTIONS: &[Action] = &[Action::SetTheme(crate::theme::ThemeName::Nord)];
+
+/// 命令表本体（单一事实源）。
+///
+/// 单独成 const 而不是写进 `registry()` 的函数体：审计函数要读它，
+/// 若审计走 `registry()` 会**无限递归**（registry → audit → registry），
+/// 表现为测试里的 stack overflow。表格是数据，取用方式是函数。
+const COMMANDS: &[Command] = &[
+    Command { name: "help", aliases: &[], desc: "显示帮助", action: Action::Help },
+    Command { name: "keys", aliases: &["keybindings"], desc: "键盘快捷键", action: Action::Keys },
+    Command { name: "status", aliases: &["info"], desc: "运行状态与环境", action: Action::Status },
+    Command { name: "theme", aliases: &["themes"], desc: "切换配色主题", action: Action::ThemePicker },
+    Command { name: "next", aliases: &["next-theme"], desc: "切到下一个主题", action: Action::NextTheme },
+    Command { name: "new", aliases: &["clear"], desc: "开始新对话（清空当前转录）", action: Action::NewSession },
+    Command { name: "compact", aliases: &["summarize"], desc: "压缩上下文以腾出预算", action: Action::Compact },
+    Command { name: "exit", aliases: &["quit", "q"], desc: "退出 Neo", action: Action::Quit },
+];
+
+/// 检查"动作 ↔ 命令"的可达性，返回问题列表（空 = 一致）。
+///
+/// 读 `COMMANDS` 而不是 `registry()` —— 后者在 debug 下会调本函数，
+/// 走 registry 会无限递归。开发中任何 debug 构建都会通过 `registry()`
+/// 的 `debug_assert` 触发它，从而在运行时而非仅测试时发现"动作没注册命令"。
+pub fn audit_action_reachability() -> Vec<String> {
+    let actions: Vec<Action> = COMMANDS.iter().map(|c| c.action).collect();
+    let mut problems = Vec::new();
+    for a in COMMAND_ACTIONS {
+        if !actions.contains(a) {
+            problems.push(format!("{a:?} 没有任何命令可达 —— 忘注册了？"));
+        }
+    }
+    for a in INTERNAL_ONLY_ACTIONS {
+        if actions.contains(a) {
+            problems.push(format!("{a:?} 只应由界面内部产生，不该注册成命令"));
+        }
+    }
+    problems
+}
+
 /// 全部可用命令。顺序即 `/` 列表的展示顺序（高频在前）。
 pub fn registry() -> &'static [Command] {
-    &[
-        Command { name: "help", aliases: &[], desc: "显示帮助", action: Action::Help },
-        Command { name: "keys", aliases: &["keybinds"], desc: "键盘快捷键", action: Action::Keys },
-        Command { name: "theme", aliases: &["themes"], desc: "切换配色主题", action: Action::ThemePicker },
-        Command { name: "new", aliases: &["clear"], desc: "开始新对话（清空当前转录）", action: Action::NewSession },
-        Command { name: "compact", aliases: &["summarize"], desc: "压缩上下文以腾出预算", action: Action::Compact },
-        Command { name: "exit", aliases: &["quit", "q"], desc: "退出 Neo", action: Action::Quit },
-    ]
+    debug_assert!(
+        audit_action_reachability().is_empty(),
+        "命令表与动作不一致：{:?}",
+        audit_action_reachability()
+    );
+    COMMANDS
 }
 
 /// 按查询前缀/子串过滤（不区分大小写）。空查询返回全部。
@@ -99,7 +153,15 @@ Neo —— 编程 Agent 内核
   @file#12-40  引用该文件的第 12–40 行
 
 命令
-  / 唤起命令列表；常用命令见下表（也可 ctrl+p 打开命令面板）
+  打 / 唤起命令列表（也可 ctrl+p 打开命令面板）。可用命令：
+    /help      显示帮助
+    /keys      键盘快捷键
+    /status    运行状态与环境
+    /theme     选择配色主题（6 套）
+    /next      直接切到下一个主题
+    /new       开始新对话（清空转录）
+    /compact   压缩上下文（需 L4 编排，尚未实现）
+    /exit      退出（别名 quit / q）
 
 按键
   tab          在 @ 上下文中补全
@@ -209,6 +271,24 @@ mod tests {
         let th = matches("them");
         assert!(th.iter().any(|c| c.name == "theme"), "子串应命中 theme");
         assert!(matches("zzz").is_empty(), "无匹配应为空");
+    }
+
+    #[test]
+    fn every_action_variant_is_reachable_from_the_registry() {
+        // 钉住一个真实 bug：`Action::Status` 定义了、`status_text` 也写了，
+        // 却**忘记注册命令** —— 于是 /status 永远"无匹配"。
+        //
+        let problems = audit_action_reachability();
+        assert!(problems.is_empty(), "命令表与动作不一致：{problems:?}");
+    }
+
+    #[test]
+    fn help_lists_exactly_the_registered_commands() {
+        // 帮助文案与实际命令表不能各说一套
+        let h = help_text();
+        for c in registry() {
+            assert!(h.contains(c.name), "帮助里缺少命令 {}：{h}", c.name);
+        }
     }
 
     #[test]
