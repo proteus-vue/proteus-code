@@ -35,7 +35,9 @@ impl Default for ExecOptions {
         Self {
             task: String::new(),
             mode: ExecMode::Default,
-            max_steps: 16,
+            // 安全阀而非工作限额：16 太小（一次"了解项目"就能用完），
+            // 真实任务常在 20–50 步。见 neo_core::DEFAULT_MAX_STEPS 的说明。
+            max_steps: 64,
             // 默认拒绝未预授权的写：无人值守时安全边界该收紧
             on_approval: Decision::Deny,
             json: false,

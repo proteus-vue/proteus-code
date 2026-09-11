@@ -419,3 +419,60 @@ mod tests {
         assert!(load_custom_background(p, 10, 10).is_none());
     }
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// 显示偏好（工具输出展开 / 推理显隐）
+// ══════════════════════════════════════════════════════════════════════
+//
+// 与外观分开存一个文件：两者的语义不同（一个管"长什么样"，
+// 一个管"显示多少信息"），混在一个文件里将来加字段容易互相覆盖。
+//
+// **为什么必须持久化**：用户明确反馈"我选了显示思考过程，怎么又要重新设置"——
+// 之前这两个开关只在内存里，重启 TUI 就回到默认（都隐藏）。
+// 主题与背景都持久化了，这两个没有，是不一致。
+
+fn display_store_path() -> std::path::PathBuf {
+    let home = std::env::var_os("NEO_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.join(".neo").join("display")
+}
+
+/// 读取显示偏好。失败一律退回默认 —— 偏好不该拦住启动。
+pub fn load_display_pref() -> DisplayPref {
+    let Ok(raw) = std::fs::read_to_string(display_store_path()) else {
+        return DisplayPref::default();
+    };
+    let mut d = DisplayPref::default();
+    for line in raw.lines() {
+        match line.split_once('=') {
+            Some(("details", v)) => d.details = v.trim() == "on",
+            Some(("thinking", v)) => d.thinking = v.trim() == "on",
+            _ => {}
+        }
+    }
+    d
+}
+
+pub fn save_display_pref(d: DisplayPref) {
+    let path = display_store_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(
+        path,
+        format!(
+            "details={}\nthinking={}\n",
+            if d.details { "on" } else { "off" },
+            if d.thinking { "on" } else { "off" },
+        ),
+    );
+}
+
+/// 显示偏好（对应 TUI 的 `ToolDisplay`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DisplayPref {
+    pub details: bool,
+    pub thinking: bool,
+}

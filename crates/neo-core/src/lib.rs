@@ -31,7 +31,12 @@ use std::sync::Arc;
 /// 一步内允许的最大工具调用数（防御失控模型）。
 pub const MAX_TOOL_CALLS_PER_STEP: usize = 32;
 /// 一轮内允许的最大步数。超出即报错结束该轮，不无限循环。
-pub const DEFAULT_MAX_STEPS: usize = 8;
+/// 单轮最大步数（一步 = 一次模型请求 + 它要求的工具执行）。
+///
+/// 这是**安全阀**（防死循环），不是"工作限额"。曾经默认 16 —— 真实任务
+/// 里一次"了解下这个项目"就能把预算用完（用户实际撞到"超出步数预算（16 步）"），
+/// 表现为干到一半被硬停。调到 64：仍能阻止失控循环，但不至于拦下正常任务。
+pub const DEFAULT_MAX_STEPS: usize = 64;
 
 /// 上下文消息上限。
 ///
@@ -268,6 +273,31 @@ pub fn truncate_lines(s: &str, lines: Option<(usize, usize)>, max_bytes: usize) 
     };
     let (text, cut) = truncate_utf8(&selected, max_bytes);
     (text.to_string(), cut)
+}
+
+/// 基础系统提示词（不含工具清单与项目指令）。
+///
+/// # 那句"简单问题直接回答"为什么必须存在
+///
+/// 之前只有"优先用工具核验事实，不要凭记忆断言"。对**需要核验仓库事实**的
+/// 任务这是对的；但模型会把它推广到一切问题 —— 于是问"你是谁"它也先去跑
+/// 工具探查，**弹出工具审批**、还要用户授权（真实反馈），既慢又莫名其妙。
+///
+/// 提示词要同时说清**什么时候该用工具**和**什么时候不该**，只写一半
+/// 会让模型过度使用（这也是把行为写成"单向偏好"的通病）。
+pub fn base_system_prompt() -> String {
+    String::from(
+        "你是 NEO 的编码 agent。\n\
+\n\
+关于是否使用工具：\n\
+- 需要核验仓库事实（读代码、找文件、跑命令、改文件）时，**必须用工具**，\
+不要凭记忆断言。\n\
+- 问候、身份、自我介绍、概念解释这类**不依赖仓库现状**的问题，\
+**直接用已有信息回答，不要为它们调用工具**。用户问「你是谁」时\
+直接说清自己的定位即可。\n\
+- 不确定要不要用工具时，先判断「答案是否取决于当前仓库的内容」。\n\
+\n可用工具：\n",
+    )
 }
 
 /// 按字节上限截断，且**不切开 UTF-8 码点**。
@@ -586,6 +616,10 @@ pub struct Kernel {
     file_changes: std::collections::BTreeMap<String, (usize, usize)>,
     /// 系统提示词：构造时算一次。**必须字节稳定**（提示词缓存命中的前提），
     /// 且避免每步重新拼接。
+    ///
+    /// 见 `base_system_prompt()` —— 里面那句"简单问题直接回答"不是客套：
+    /// 缺了它，模型会对"你是谁"这类问题也先跑工具探查，然后弹出工具审批
+    /// （真实反馈），用户莫名其妙。
     system_prompt: String,
     /// 工具 schema：构造时算一次，同样避免每步分配。
     tool_schemas: Vec<ToolSchema>,
@@ -634,8 +668,7 @@ impl Kernel {
     ) -> Self {
         let tools = tools;
         let tool_schemas = tools.schemas();
-        let mut system_prompt =
-            String::from("你是 NEO 的编码 agent。优先用工具核验事实，不要凭记忆断言。\n\n可用工具：\n");
+        let mut system_prompt = base_system_prompt();
         system_prompt.push_str(&tools.render_prompt());
 
         Self {
@@ -688,7 +721,7 @@ impl Kernel {
     /// 按当前指令重新拼系统提示词。**必须字节稳定**（提示词缓存命中的前提）：
     /// 拼接顺序固定，不做任何基于内容的排序或格式化。
     fn refresh_system_prompt(&mut self) {
-        let mut p = String::from("你是 NEO 的编码 agent。优先用工具核验事实，不要凭记忆断言。\n\n可用工具：\n");
+        let mut p = base_system_prompt();
         p.push_str(&self.tools.render_prompt());
         if !self.instructions.is_empty() {
             p.push_str("\n\n");
@@ -960,7 +993,14 @@ impl Kernel {
     /// 整轮可能包含多次网络往返，期间界面完全冻结（真实反馈："像卡死"）。
     fn step_once(&mut self) -> Result<StepOutcome, KernelError> {
         if self.steps_this_turn >= self.max_steps {
-            let msg = EventMsg::Error { message: format!("超出步数预算（{} 步）", self.max_steps) };
+            let msg = EventMsg::Error {
+                message: format!(
+                    "本轮已达步数上限（{} 步），已停止以免失控。\
+                     已完成的工作都在上面；继续的话再发一条消息接着做，\
+                     或用 --max-steps 提高上限。",
+                    self.max_steps
+                ),
+            };
             self.emit_and_log(&msg)?;
             return Ok(StepOutcome::Done);
         }

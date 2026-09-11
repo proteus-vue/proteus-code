@@ -3295,11 +3295,16 @@ where
                     .iter()
                     .any(|e| matches!(e, EventMsg::TurnComplete { .. }));
                 events.extend(produced);
-                // 重绘：这是"不冻结"的关键
+                // 重绘：这是"不冻结"的关键。
+                //
+                // `facts` 必须是**真实转录**（从 events 抽取），不能传空数组 ——
+                // 传空会让渲染器认为"还没有任何事实"，于是弹出**欢迎首屏**：
+                // 用户看到自己的对话凭空消失、只剩一个 "运行中…"（真实反馈）。
+                let facts = facts_of(events);
                 let screen = Screen {
                     cols,
                     rows,
-                    facts: &[],
+                    facts: &facts,
                     input: empty_input,
                     status: "运行中…",
                     awaiting_input: false,
@@ -4698,7 +4703,13 @@ where
     // which-key 提示（`ctrl+/`）：任意键关闭
     let mut whichkey_groups: Option<Vec<whichkey::Group>> = None;
     // 工具输出 / 推理的显示方式（`/details` `/thinking` 切换）
-    let mut display = ToolDisplay::default();
+    // 从持久化偏好初始化。之前它只在内存里，重启就回到默认（都隐藏）——
+    // 用户"选了显示思考过程却又要重设"就是这个原因。
+    let pref = appearance::load_display_pref();
+    let mut display = ToolDisplay { expanded: pref.details, thinking: pref.thinking };
+    // 已保存的快照：在循环顶部比对，任何地方改了 display 都会被存下 ——
+    // 比在每个切换点各写一次 save 可靠（5 个切换点，漏一个就是同类 bug）。
+    let mut display_saved = display;
     // 外观：背景纹理 + Logo 样式（`/background` `/logo` 切换，落盘记忆）
     let mut current_appearance = appearance::load_preference();
     // 自定义背景字符画（`NEO_TUI_BG_FILE` 指到文件时优先）
@@ -4841,6 +4852,16 @@ where
 
     loop {
         let (cols, rows) = terminal_size();
+
+        // 显示偏好变了就落盘。放在循环顶部：无论上面走了哪条 continue
+        // 路径，下一轮都会经过这里，所以不可能漏存。
+        if display != display_saved {
+            appearance::save_display_pref(appearance::DisplayPref {
+                details: display.expanded,
+                thinking: display.thinking,
+            });
+            display_saved = display;
+        }
 
         // ── 设置视图：独占输入 ──────────────────────────────────────
         if settings_state.is_some() {
