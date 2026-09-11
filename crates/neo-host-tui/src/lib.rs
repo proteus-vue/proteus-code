@@ -1567,7 +1567,13 @@ impl Screen<'_> {
 
         let label_w = 14usize;
         let mut row = 2usize;
-        let mut flat: usize = 0; // 扁平序号（与 settings_cursor 对齐）
+        // 高亮下标必须与 Enter 用**同一个坐标空间**：只数可操作行。
+        //
+        // 之前这里数的是**全部行**（含只读行），而 `settings_cursor` 只在
+        // 可操作行间移动 —— 于是高亮停在第 k 行、Enter 却作用在 `slots[k]`
+        // （因只读行插在中间，通常更靠后）。表现就是：高亮停在只读行上，
+        // 或"选中某一项按回车，动的是别的项 / 像没反应"。
+        let mut act: usize = 0;
         for sec in sections {
             if row + 1 >= self.rows {
                 break;
@@ -1579,8 +1585,11 @@ impl Screen<'_> {
                 if row >= self.rows {
                     break;
                 }
-                let selected = flat == self.settings_cursor;
                 let actionable = r.action.is_some();
+                let selected = actionable && act == self.settings_cursor;
+                if actionable {
+                    act += 1;
+                }
                 // 光标只停在可操作行上；只读行用弱色 + 说明
                 let mark = if selected { "▸ " } else { "  " };
                 if selected {
@@ -1616,7 +1625,6 @@ impl Screen<'_> {
                     }
                 }
                 row += 1;
-                flat += 1;
             }
         }
         // 底部：说明光标只能停在可操作行
@@ -6461,6 +6469,58 @@ mod tests {
                 assert!(w <= cols, "cols={cols} 第 {i} 行宽 {w} 超宽");
             }
         }
+    }
+
+    #[test]
+    fn settings_cursor_index_space_matches_render_highlight() {
+        // 渲染高亮与 Enter 必须落在**同一行**。只读行插在中间时，若一边数全部行、
+        // 另一边只数可操作行，就会出现"高亮在这一项、回车却动了那一项"。
+        // 逐个光标位置渲染，断言 ▸ 所在行正是 Enter 会作用的行。
+        let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
+            background: "stars".into(), logo: "large".into(), custom_background: false,
+            model_count: 3,
+            session_count: 2,
+            version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
+            workspace: "/w".into(), branch: "".into(), session: "s".into(),
+            context_limit: 0, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 0, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let slots = settings_actionable(&secs);
+        assert!(slots.len() > 3, "需要足够多的可操作项才能暴露错位");
+
+        for cursor in 0..slots.len() {
+            let out = Screen {
+                cols: 140, rows: 60, facts: &[], input: &ed_empty(), status: "",
+                awaiting_input: false, show_cursor: false,
+                about: None, trust: None,
+                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                sidebar: false, view: None, diff_viewer: None, whichkey: None,
+                display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: cursor,
+                appearance: appearance::Appearance::default(), custom_background: None,
+            }
+            .render();
+            let lines = plain(&out);
+            // 底部提示行里也有一个 ▸（说明文字），排除它只数真正的行高亮
+            let marked: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains('▸') && !l.contains("灰字为只读项"))
+                .collect();
+            assert_eq!(marked.len(), 1, "cursor={cursor} 应恰有一行高亮：{marked:?}");
+            let (si, ri) = slots[cursor];
+            let want = &secs[si].rows[ri].label;
+            assert!(
+                marked[0].contains(want.as_str()),
+                "cursor={cursor}: 高亮行是 {:?}，但 Enter 会作用在 {want:?}",
+                marked[0]
+            );
+        }
+    }
+
+    fn ed_empty() -> editor::Editor {
+        editor::Editor::new()
     }
 
     #[test]
