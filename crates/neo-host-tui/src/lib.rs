@@ -2255,14 +2255,27 @@ impl Screen<'_> {
         }
 
         if self.show_cursor {
-            // 光标位置（1 基）：落在实际光标行列上，而不是"文本末尾"
+            // 光标位置（1 基）：落在实际光标行列上，而不是"文本末尾"。
             let vis_row = crow.saturating_sub(first).min(shown.saturating_sub(1));
             let prefix_w = if self.awaiting_input && crow == first {
                 width::display_width("y 批准 / n 拒绝 > ")
             } else {
                 0
             };
-            Some((top + 2 + vis_row, left + 3 + prefix_w + ccol))
+            // 光标前的列偏移必须按**显示宽度**算，不能用字符个数。
+            //
+            // `editor.cursor()` 的列是**字符下标**（这样编辑逻辑与字节/宽度解耦，
+            // 中文按 1 个字符算）。但终端里一个汉字占 **2 列**，直接把字符下标
+            // 当列偏移会偏小：输入「你是谁」后光标列=3，实际应落在第 6 列，
+            // 按 3 算就落在了第二个字「是」的中间 —— 正是用户截图里的现象。
+            let cur_line = self.input.lines().get(crow).map(String::as_str).unwrap_or("");
+            let before: String = cur_line.chars().take(ccol).collect();
+            let ccol_w = width::display_width(&before);
+            // 再夹到输入框内宽：行被截断时字符偏移可能超出可视区，
+            // 不夹的话光标会跑到右边框外面（比位置偏一点更糟）。
+            let max_w = inner_w.saturating_sub(prefix_w);
+            let ccol_w = ccol_w.min(max_w);
+            Some((top + 2 + vis_row, left + 3 + prefix_w + ccol_w))
         } else {
             None
         }
@@ -6842,6 +6855,57 @@ mod tests {
                 assert!(w <= cols, "cols={cols} 第 {i} 行宽 {w} 超宽");
             }
         }
+    }
+
+    #[test]
+    fn cursor_column_uses_display_width_for_wide_chars() {
+        // 中文一个字占**2 列**，而 editor.cursor() 的列是**字符下标**。
+        // 直接用字符下标当列偏移，输入「你是谁」三个字后光标列=3，
+        // 实际应落在第 6 列 —— 会停在第二个字「是」的中间（用户截图的现象）。
+        // 这条测试从渲染输出里解析硬件光标位置（ESC[r;cH）来验。
+        let a = about();
+        let render_with = |text: &str| {
+            let mut ed = editor::Editor::new();
+            ed.set(text);
+            let out = Screen {
+                cols: 120, rows: 30, facts: &[], input: &ed, status: "就绪",
+                awaiting_input: false, show_cursor: true,
+                about: Some(&a), trust: None,
+                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                sidebar: false, view: None, diff_viewer: None, whichkey: None,
+                display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+                settings_picker: None,
+                appearance: appearance::Appearance::default(), custom_background: None,
+            }
+            .render();
+            // 取**最后一个**光标定位序列：它是渲染末尾的 `ESC[r;cH`。
+            // 从后往前扫，并按"数字;数字H"的形态严格匹配 —— 先前扫的写法
+            // 会把正文里任意一个 'H' 当成终止符、跨过多个转义序列，解析必失败。
+            let mut last = None;
+            for chunk in out.rsplit("\x1b[") {
+                let digits: String = chunk
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == ';')
+                    .collect();
+                if !digits.contains(';') || !chunk[digits.len()..].starts_with('H') {
+                    continue;
+                }
+                if let Some((r, c)) = digits.split_once(';') {
+                    if let (Ok(r), Ok(c)) = (r.parse::<usize>(), c.parse::<usize>()) {
+                        last = Some((r, c));
+                        break;
+                    }
+                }
+            }
+            last.expect("show_cursor=true 应输出光标定位序列")
+        };
+        let (_, c_ascii) = render_with("abc");   // 3 个半角 → 3 列
+        let (_, c_cjk) = render_with("你是谁");   // 3 个全角 → 6 列
+        assert_eq!(c_cjk - c_ascii, 3, "全角应比同字数半角多占 3 列（每字 +1）");
+        // 再直接钉死绝对值：文本从框内第 2 列（0基）开始 ⇒ 1 基 col = left+3+6。
+        // 用两串的长度差反推 left，避免依赖居中算式。
+        let (_, c_two) = render_with("你好");     // 4 列
+        assert_eq!(c_cjk - c_two, 2, "每多一个全角字应 +2 列");
     }
 
     #[test]
