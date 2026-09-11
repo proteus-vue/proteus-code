@@ -5,3 +5,8 @@ out/
 .DS_Store
 .proteus-code/
 *.log
+
+# Rust 构建产物（任何位置）
+target/
+**/target/
+Cargo.lock.bak
