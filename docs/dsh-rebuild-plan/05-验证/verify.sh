@@ -16,6 +16,7 @@ declare -a CHECKS=(
   "check_session_schema.py|会话 JSONL：append-only / 可重建 / schema"
   "check_config_layers.py|配置层级与模式解析：四级合并 / 敏感键拦截"
   "check_mode_matrix.py|沙箱 × 审批 正交双轴矩阵自洽"
+  "check_spi_conformance.py|SPI 合规：每个 seam 有契约 / >=2 后端 / conformance（Proteus 方法论）"
 )
 
 echo

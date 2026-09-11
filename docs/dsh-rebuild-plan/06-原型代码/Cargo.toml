@@ -11,6 +11,7 @@ members = [
   "crates/dsh-orchestration",
   "crates/dsh-host-tui",
   "crates/dsh-host-web",
+  "crates/dsh-host-desktop",
   "crates/dsh-exec",
   "crates/dsh-cli",
 ]

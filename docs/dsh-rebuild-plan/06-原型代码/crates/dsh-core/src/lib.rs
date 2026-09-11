@@ -104,3 +104,57 @@ impl Session {
         }
     }
 }
+
+// ---------- 宿主 SPI：契据在 L2，实现在 L5 ----------
+//
+// 方法论依据（见 02-架构设计/Proteus方法论-语义核心与后端SPI.md）：
+// 宿主是"后端实现细节"。只给一种实现时，"换 UI 不动内核"是未经证实的宣称，
+// 故要求 >=2 个真实后端（tui + desktop）并由 T6 铁律机器校验。
+
+/// 宿主能力自描述。存在的意义：**让降级变成数据驱动**。
+/// 没有它，工具就得写 `if is_tui {..} else {..}` —— 那正是 Proteus 反对的
+/// "业务代码里出现平台分支"。有了它，工具只输出规范值 + 能力，
+/// 由宿主自行挑选最合适的呈现方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostCapabilities {
+    pub images: ImageSupport,
+    pub rich_text: bool,
+    pub interactive_prompt: bool,
+    pub diffs: DiffSupport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageSupport { None, Inline, External }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffSupport { None, Text, Hunk }
+
+/// 宿主后端契据。实现在 L5；宿主之间不得互相依赖（check_architecture 强制）。
+pub trait HostBackend: Send {
+    /// 宿主标识（用于 T6 等价性断言定位）。
+    fn id(&self) -> &'static str;
+
+    /// 能力自描述。
+    fn capabilities(&self) -> HostCapabilities;
+
+    /// 消费一条事件（JSON）。返回 Err 表示该事件不被本宿主支持 —— 这是
+    /// T6 断言 (a) "都能消费完" 的判据。
+    fn consume(&mut self, event_json: &str) -> Result<(), String>;
+
+    /// 宿主已渲染的"用户可见事实"集合，用于 T6 断言 (b) 语义等价。
+    fn rendered_facts(&self) -> Vec<String>;
+}
+
+/// 宿主注册表：内核只认契据，不认具体后端。
+pub struct HostRegistry { hosts: Vec<Box<dyn HostBackend>> }
+
+impl HostRegistry {
+    pub fn new() -> Self { Self { hosts: Vec::new() } }
+    pub fn register(&mut self, h: Box<dyn HostBackend>) { self.hosts.push(h); }
+    pub fn ids(&self) -> Vec<&'static str> { self.hosts.iter().map(|h| h.id()).collect() }
+
+    /// 把同一事件流喂给所有宿主。T6 的运行时形态。
+    pub fn broadcast(&mut self, event_json: &str) -> Vec<(&'static str, Result<(), String>)> {
+        self.hosts.iter_mut().map(|h| (h.id(), h.consume(event_json))).collect()
+    }
+}

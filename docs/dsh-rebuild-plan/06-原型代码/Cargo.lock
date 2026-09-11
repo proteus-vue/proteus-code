@@ -53,6 +53,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsh-host-desktop"
+version = "0.1.0"
+dependencies = [
+ "dsh-core",
+ "dsh-orchestration",
+ "dsh-protocol",
+]
+
+[[package]]
 name = "dsh-host-tui"
 version = "0.1.0"
 dependencies = [

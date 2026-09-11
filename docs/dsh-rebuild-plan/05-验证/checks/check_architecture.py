@@ -25,12 +25,13 @@ LAYER = {
     "dsh-capability":    3,  # L3
     "dsh-orchestration": 4,  # L4
     "dsh-host-tui":      5,  # L5
+    "dsh-host-desktop":  5,  # L5
     "dsh-host-web":      5,  # L5
     "dsh-exec":          5,  # L5
     "dsh-cli":           5,  # L5
 }
 SIDE = {"dsh-session", "dsh-config"}   # 旁挂，任何层可用
-HOSTS = {"dsh-host-tui", "dsh-host-web", "dsh-exec"}
+HOSTS = {"dsh-host-tui", "dsh-host-desktop", "dsh-host-web", "dsh-exec"}
 LAYER_NAME = {0: "L0 protocol", 1: "L1 platform", 2: "L2 core",
               3: "L3 capability", 4: "L4 orchestration", 5: "L5 host"}
 
