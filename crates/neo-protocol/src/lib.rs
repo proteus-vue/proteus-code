@@ -188,7 +188,19 @@ pub enum EventMsg {
     AgentMessageDone { text: String },
     ReasoningDelta { delta: String },
     ToolCallBegin { id: ToolCallId, name: String },
-    ToolCallEnd { id: ToolCallId, exit_code: i32 },
+    ToolCallEnd {
+        id: ToolCallId,
+        exit_code: i32,
+        /// 工具输出。**必须进事件流** —— 否则用户只看到 `✓ bash exit 0`
+        /// 而看不到命令打印了什么，等于无法判断这步到底做了什么。
+        /// 内核已按上限截断，`truncated` 如实标注。
+        #[serde(default)]
+        stdout: String,
+        #[serde(default)]
+        stderr: String,
+        #[serde(default)]
+        truncated: bool,
+    },
     ApprovalRequest { id: ApprovalId, detail: String },
     PatchProposed { path: String, diff: String },
     CheckpointSaved { checkpoint_id: String },
@@ -243,8 +255,22 @@ pub enum Fact {
     UserSaid(String),
     /// 助手说了这段话（流式增量已合并为完整消息）。
     AssistantSaid(String),
-    /// 某次工具调用结束。
-    ToolFinished { name: String, exit_code: i32 },
+    /// 模型的推理过程（`ReasoningDelta` 合并而成）。
+    ///
+    /// 与 `AssistantSaid` **分开**：推理是"模型怎么想的"，答复是"模型说了什么"。
+    /// 混在一起会让宿主无法独立控制显隐（`/thinking` 就做不到）。
+    AssistantThought(String),
+    /// 某次工具调用结束（含输出）。
+    ///
+    /// 输出是**用户必须知道的**：没有它，工具调用只是一行"成功"，
+    /// 用户无法判断这次执行到底做了什么。
+    ToolFinished {
+        name: String,
+        exit_code: i32,
+        stdout: String,
+        stderr: String,
+        truncated: bool,
+    },
     /// 需要用户审批。
     ApprovalNeeded { detail: String },
     /// 任务清单（模型自述的进度）。
@@ -277,15 +303,24 @@ pub enum Fact {
 pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
     let mut out = Vec::new();
     let mut pending_text = String::new();
+    let mut pending_thought = String::new();
     // ToolCallEnd 只带 id，名字来自对应的 ToolCallBegin —— 需逐个关联。
     let mut tool_names: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
 
     for e in events {
         match e {
             EventMsg::AgentMessageDelta { delta } => pending_text.push_str(delta),
+            EventMsg::ReasoningDelta { delta } => {
+                // 与文本增量同构：先累积，Done 时（或流结束时）落成一条事实
+                pending_thought.push_str(delta);
+            }
             EventMsg::AgentMessageDone { text } => {
                 // 以 Done 的完整文本为准（权威），清掉增量累积
                 pending_text.clear();
+                // 推理在答复落定时一并交出（顺序：先想后说）
+                if !pending_thought.is_empty() {
+                    out.push(Fact::AssistantThought(std::mem::take(&mut pending_thought)));
+                }
                 if !text.is_empty() {
                     out.push(Fact::AssistantSaid(text.clone()));
                 }
@@ -293,13 +328,19 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
             EventMsg::ToolCallBegin { id, name } => {
                 tool_names.insert(id.as_str(), name.as_str());
             }
-            EventMsg::ToolCallEnd { id, exit_code } => {
+            EventMsg::ToolCallEnd { id, exit_code, stdout, stderr, truncated } => {
                 let name = tool_names
                     .get(id.as_str())
                     .map(|n| n.to_string())
                     // 没有 begin 的 end（截断的事件流）也要成事实，名字诚实留空
                     .unwrap_or_default();
-                out.push(Fact::ToolFinished { name, exit_code: *exit_code })
+                out.push(Fact::ToolFinished {
+                    name,
+                    exit_code: *exit_code,
+                    stdout: stdout.clone(),
+                    stderr: stderr.clone(),
+                    truncated: *truncated,
+                })
             }
             EventMsg::PatchProposed { path, diff } => {
                 out.push(Fact::PatchPreview { path: path.clone(), diff: diff.clone() })
@@ -334,6 +375,9 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
     }
 
     // 收尾：中断导致只有增量没有 Done 时，也要把用户看过的文字落成事实
+    if !pending_thought.is_empty() {
+        out.push(Fact::AssistantThought(pending_thought));
+    }
     if !pending_text.is_empty() {
         out.push(Fact::AssistantSaid(pending_text));
     }

@@ -267,12 +267,12 @@ mod tests {
         let mut h = WebFacts::new();
         h.consume(&EventMsg::AgentMessageDone { text: "hi".into() }).unwrap();
         h.consume(&EventMsg::ToolCallBegin { id: "c".into(), name: "bash".into() }).unwrap();
-        h.consume(&EventMsg::ToolCallEnd { id: "c".into(), exit_code: 0 }).unwrap();
+        h.consume(&EventMsg::ToolCallEnd { id: "c".into(), exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false }).unwrap();
         assert_eq!(
             h.facts(),
             vec![
                 Fact::AssistantSaid("hi".into()),
-                Fact::ToolFinished { name: "bash".into(), exit_code: 0 },
+                Fact::ToolFinished { name: "bash".into(), exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false },
             ]
         );
     }

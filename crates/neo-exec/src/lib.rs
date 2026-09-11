@@ -142,8 +142,19 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
             EventMsg::AgentMessageDelta { delta } => Some(delta.clone()),
             EventMsg::AgentMessageDone { .. } => None, // 增量已输出，避免重复
             EventMsg::ToolCallBegin { name, id } => Some(format!("[tool] {name} ({id})")),
-            EventMsg::ToolCallEnd { id, exit_code } => {
-                Some(format!("[tool] {id} → exit {exit_code}"))
+            EventMsg::ToolCallEnd { id, exit_code, stdout, stderr, truncated } => {
+                // 无头宿主也把输出打出来：否则日志里只有退出码，
+                // 出问题时无法从日志复盘"命令到底打印了什么"。
+                let mut s = format!("[tool] {id} → exit {exit_code}");
+                let out = if stdout.is_empty() { stderr } else { stdout };
+                if !out.trim().is_empty() {
+                    s.push('\n');
+                    s.push_str(out.trim_end());
+                }
+                if *truncated {
+                    s.push_str("\n… 输出已截断");
+                }
+                Some(s)
             }
             EventMsg::ApprovalRequest { detail, .. } => Some(format!("[审批] {detail}")),
             EventMsg::Error { message } => Some(format!("[错误] {message}")),
@@ -154,7 +165,9 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
             EventMsg::SessionConfigured { session_id } => {
                 Some(format!("[session] {session_id} 配置已更新"))
             }
-            EventMsg::ReasoningDelta { delta } => Some(format!("[思考] {delta}")),
+            // 推理默认不单独打（噪声大）；`--json` 时它在事件流里，
+            // 需要时按需取。这里只给一个极简标记，避免刷屏。
+            EventMsg::ReasoningDelta { .. } => None,
             EventMsg::PatchProposed { path, .. } => Some(format!("[patch] {path}")),
             EventMsg::CheckpointSaved { checkpoint_id } => {
                 Some(format!("[checkpoint] {checkpoint_id}"))

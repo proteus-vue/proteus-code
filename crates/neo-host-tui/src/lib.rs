@@ -559,6 +559,8 @@ pub struct Screen<'a> {
     pub diff_viewer: Option<&'a diffview::Viewer>,
     /// which-key 提示分组（`Some` = 覆盖层，任意键关闭）
     pub whichkey: Option<&'a [whichkey::Group]>,
+    /// 工具输出与推理的显示方式
+    pub display: ToolDisplay,
 }
 
 /// 信任对话框状态。
@@ -1986,7 +1988,7 @@ impl Screen<'_> {
     /// 把事实渲染成"行 → 片段"。实现见同名的自由函数 ——
     /// **渲染与搜索必须共用同一份行生成**，否则命中行号会与实际渲染错位。
     fn fact_lines(&self) -> Vec<Vec<Seg>> {
-        fact_lines(self.facts, self.body_cols())
+        fact_lines_with(self.facts, self.body_cols(), self.display)
     }
 }
 
@@ -2232,6 +2234,10 @@ enum Effect {
     ShowDiff,
     /// 回退对话一轮（需要向内核提交 Op，故交给主循环执行）
     Rewind,
+    /// 切换工具输出展开 / 折叠
+    ToggleDetails,
+    /// 切换推理显隐
+    ToggleThinking,
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -2291,6 +2297,8 @@ fn apply_popup_item(
             commands::Action::DiffViewer => Effect::ShowDiff,
             // 回退要提交 Op 给内核，因此交给主循环执行
             commands::Action::Rewind => Effect::Rewind,
+            commands::Action::ToggleDetails => Effect::ToggleDetails,
+            commands::Action::ToggleThinking => Effect::ToggleThinking,
             commands::Action::Keys => {
                 *info_screen = Some(commands::keys_text().to_string());
                 Effect::None
@@ -2359,6 +2367,32 @@ fn accept_trust(ws: &std::path::Path) {
 /// **这是行生成的唯一事实源**：渲染、搜索、行数估算都走它。
 /// 各算一次的话行号必然对不上（搜索高亮会标在无关的行上）。
 fn fact_lines(facts: &[Fact], body_cols: usize) -> Vec<Vec<Seg>> {
+    fact_lines_with(facts, body_cols, ToolDisplay::default())
+}
+
+/// 工具输出的展示方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolDisplay {
+    /// 是否展开工具输出（`/details` 切换；对齐 opencode 的 tools_details）
+    pub expanded: bool,
+    /// 是否显示推理过程（`/thinking` 切换）
+    pub thinking: bool,
+}
+
+impl Default for ToolDisplay {
+    fn default() -> Self {
+        // 默认折叠：输出常常很长，默认铺开会淹没对话。
+        // 但失败时**强制展开**（见渲染处）—— 出错还藏着等于让用户没法自查。
+        Self { expanded: false, thinking: false }
+    }
+}
+
+/// 工具输出的展示上限（行）。超出如实标注，不静默截断。
+const TOOL_OUT_LINES: usize = 40;
+/// 推理过程的展示上限（行）。
+const THINKING_LINES: usize = 12;
+
+fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<Vec<Seg>> {
     let inner = body_cols.saturating_sub(4);
     let mut out: Vec<Vec<Seg>> = Vec::new();
     for f in facts {
@@ -2377,21 +2411,85 @@ fn fact_lines(facts: &[Fact], body_cols: usize) -> Vec<Vec<Seg>> {
                 }
                 out.push(Vec::new());
             }
+            Fact::AssistantThought(text) => {
+                // 推理默认**不显示**（`/thinking` 打开）：它常常很长且是过程性
+                // 内容，默认铺开会把答复挤下去。但必须可选可见 —— 排查模型
+                // 为什么做错时，看推理往往比看答复有用。
+                if !disp.thinking {
+                    continue;
+                }
+                out.push(vec![(2, "⋯ 思考".to_string(), Tone::Border)]);
+                let all: Vec<&str> = text.lines().collect();
+                for l in all.iter().take(THINKING_LINES) {
+                    for w in width::wrap_to_width(l, inner.saturating_sub(6)) {
+                        out.push(vec![(4, "│ ".to_string(), Tone::Border), (6, w, Tone::Muted)]);
+                    }
+                }
+                if all.len() > THINKING_LINES {
+                    out.push(vec![(
+                        6,
+                        format!("… 另有 {} 行思考未显示", all.len() - THINKING_LINES),
+                        Tone::Border,
+                    )]);
+                }
+            }
+
             Fact::AssistantSaid(text) => {
                 // 助手回复按 Markdown 渲染：代码块高亮、行内代码、标题、列表。
                 // inner 已扣掉侧栏占用（render 把正文写入裁到侧栏左侧）。
                 out.extend(markdown::render(text, inner));
                 out.push(Vec::new());
             }
-            Fact::ToolFinished { name, exit_code } => {
+            Fact::ToolFinished { name, exit_code, stdout, stderr, truncated } => {
+                let ok = *exit_code == 0;
                 let (icon, tone) =
-                    if *exit_code == 0 { ("✓", Tone::Success) } else { ("✗", Tone::Error) };
+                    if ok { ("✓", Tone::Success) } else { ("✗", Tone::Error) };
                 let after = 4 + width::display_width(name);
+                // 折叠时给出"有多少输出"的提示，否则用户不知道藏了东西
+                let lines = stdout.lines().count() + stderr.lines().count();
+                let suffix = if ok && !disp.expanded {
+                    if lines > 0 {
+                        format!("exit {exit_code} · {lines} 行输出（/details 展开）")
+                    } else {
+                        format!("exit {exit_code}")
+                    }
+                } else {
+                    format!("exit {exit_code}")
+                };
                 out.push(vec![
                     (2, format!("{icon} "), tone),
                     (4, name.clone(), Tone::Text),
-                    (after + 1, format!("exit {exit_code}"), Tone::Muted),
+                    (after + 1, suffix, Tone::Muted),
                 ]);
+                // 展示输出：展开时全给，未展开时**失败也强制给** ——
+                // 出错还把原因藏起来，用户只能靠猜。
+                let show = disp.expanded || !ok;
+                if show {
+                    let mut shown = 0usize;
+                    for (text, t) in [(stdout.as_str(), Tone::Muted), (stderr.as_str(), Tone::Error)] {
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        for l in text.lines() {
+                            if shown >= TOOL_OUT_LINES {
+                                break;
+                            }
+                            for w in width::wrap_to_width(l, inner.saturating_sub(6)) {
+                                out.push(vec![(4, "│ ".to_string(), Tone::Border), (6, w, t)]);
+                                shown += 1;
+                            }
+                        }
+                    }
+                    let total = stdout.lines().count() + stderr.lines().count();
+                    if total > shown || *truncated {
+                        let note = if *truncated {
+                            format!("… 输出已被截断，仅显示前 {shown} 行")
+                        } else {
+                            format!("… 另有 {} 行未显示（/details 展开）", total - shown)
+                        };
+                        out.push(vec![(6, note, Tone::Border)]);
+                    }
+                }
             }
             Fact::PatchPreview { path, diff } => {
                 out.push(vec![(2, format!("◆ {path}"), Tone::Info)]);
@@ -2746,6 +2844,8 @@ where
     let mut diff_viewer: Option<diffview::Viewer> = None;
     // which-key 提示（`ctrl+/`）：任意键关闭
     let mut whichkey_groups: Option<Vec<whichkey::Group>> = None;
+    // 工具输出 / 推理的显示方式（`/details` `/thinking` 切换）
+    let mut display = ToolDisplay::default();
     // 最近一次渲染记录的命中区域。**必须跨迭代保留** ——
     // 只有 dirty 时才重绘，若把它声明在循环内，鼠标事件到达时
     // 区域是空的，命中测试永远失败（点击/滚动全部无效）。
@@ -2809,6 +2909,7 @@ where
                 view: None,
                 diff_viewer: None,
                 whichkey: None,
+                display: ToolDisplay::default(),
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2857,6 +2958,7 @@ where
                 view: None,
                 diff_viewer: Some(v),
                 whichkey: None,
+                display: ToolDisplay::default(),
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2935,6 +3037,7 @@ where
                 view: None,
                 diff_viewer: None,
                 whichkey: None,
+                display: ToolDisplay::default(),
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2968,6 +3071,7 @@ where
                 view: Some(&view_state),
                 diff_viewer: diff_viewer.as_ref(),
                 whichkey: whichkey_groups.as_deref(),
+                display,
             };
             let (out, regs) = screen.render_with_regions();
             write!(stdout, "{out}")?;
@@ -3053,6 +3157,22 @@ where
                             Effect::Quit => should_quit = true,
                             Effect::Rewind => {
                                 do_rewind(&mut submit, &mut events, &mut status)
+                            }
+                            Effect::ToggleDetails => {
+                                display.expanded = !display.expanded;
+                                status = if display.expanded {
+                                    "工具输出：展开".into()
+                                } else {
+                                    "工具输出：折叠（失败时仍会展示）".into()
+                                };
+                            }
+                            Effect::ToggleThinking => {
+                                display.thinking = !display.thinking;
+                                status = if display.thinking {
+                                    "推理过程：显示".into()
+                                } else {
+                                    "推理过程：隐藏".into()
+                                };
                             }
                             Effect::ClearTranscript => {
                                 events.clear();
@@ -3157,6 +3277,22 @@ where
                                     Effect::Quit => break,
                                     Effect::Rewind => {
                                         do_rewind(&mut submit, &mut events, &mut status)
+                                    }
+                                    Effect::ToggleDetails => {
+                                        display.expanded = !display.expanded;
+                                        status = if display.expanded {
+                                            "工具输出：展开".into()
+                                        } else {
+                                            "工具输出：折叠".into()
+                                        };
+                                    }
+                                    Effect::ToggleThinking => {
+                                        display.thinking = !display.thinking;
+                                        status = if display.thinking {
+                                            "推理过程：显示".into()
+                                        } else {
+                                            "推理过程：隐藏".into()
+                                        };
                                     }
                                     Effect::ClearTranscript => events.clear(),
                                     Effect::ShowStatus => {
@@ -3382,6 +3518,22 @@ where
                             Effect::Rewind => {
                                 do_rewind(&mut submit, &mut events, &mut status)
                             }
+                            Effect::ToggleDetails => {
+                                display.expanded = !display.expanded;
+                                status = if display.expanded {
+                                    "工具输出：展开".into()
+                                } else {
+                                    "工具输出：折叠".into()
+                                };
+                            }
+                            Effect::ToggleThinking => {
+                                display.thinking = !display.thinking;
+                                status = if display.thinking {
+                                    "推理过程：显示".into()
+                                } else {
+                                    "推理过程：隐藏".into()
+                                };
+                            }
                             Effect::ClearTranscript => events.clear(),
                             Effect::ShowStatus => {
                                 info_screen = Some(commands::status_text(
@@ -3488,6 +3640,22 @@ where
                                 Effect::Rewind => {
                                     do_rewind(&mut submit, &mut events, &mut status)
                                 }
+                                Effect::ToggleDetails => {
+                                    display.expanded = !display.expanded;
+                                    status = if display.expanded {
+                                        "工具输出：展开".into()
+                                    } else {
+                                        "工具输出：折叠".into()
+                                    };
+                                }
+                                Effect::ToggleThinking => {
+                                    display.thinking = !display.thinking;
+                                    status = if display.thinking {
+                                        "推理过程：显示".into()
+                                    } else {
+                                        "推理过程：隐藏".into()
+                                    };
+                                }
                                 Effect::ClearTranscript => {
                                     events.clear();
                                     status =
@@ -3545,6 +3713,7 @@ where
                             view: Some(&view_state),
                             diff_viewer: None,
                             whichkey: None,
+                            display,
                         }
                         .render()
                     )?;
@@ -3588,6 +3757,7 @@ where
                         view: Some(&view_state),
                         diff_viewer: None,
                         whichkey: None,
+                        display,
                     }
                     .render()
                 )?;
@@ -3639,6 +3809,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }
         .render()
     }
@@ -3676,6 +3847,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }
         .render()
     }
@@ -3780,6 +3952,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }
         .render();
         // 找出弹窗所在的行区间（含边框），断言这些行里没有 logo 的半块字符
@@ -3877,6 +4050,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }
         .render();
         let text = plain(&out).join("\n");
@@ -3900,6 +4074,7 @@ mod tests {
                 view: None,
                 diff_viewer: None,
                 whichkey: None,
+                display: ToolDisplay::default(),
             }
             .render();
             let newlines = out.matches('\n').count();
@@ -3945,6 +4120,7 @@ mod tests {
                     view: None,
                     diff_viewer: None,
                     whichkey: None,
+                    display: ToolDisplay::default(),
                 }
                 .render();
                 for (i, l) in plain(&out).iter().enumerate() {
@@ -3974,6 +4150,7 @@ mod tests {
                 view: None,
                 diff_viewer: None,
                 whichkey: None,
+                display: ToolDisplay::default(),
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -4003,6 +4180,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }
         .render()
     }
@@ -4056,6 +4234,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }.render();
         let text = plain(&out).join("\n");
         assert!(text.contains("上限未知"), "应说明上限未知：{text}");
@@ -4075,6 +4254,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }.render();
         assert!(plain(&out).join("\n").contains("90% of 1000"), "占用率应为 90%");
     }
@@ -4135,6 +4315,7 @@ mod tests {
                     view: None,
                     diff_viewer: None,
                     whichkey: None,
+                    display: ToolDisplay::default(),
                 }
                 .render()
             })
@@ -4160,12 +4341,125 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
         }
         .render_with_regions();
         let text = plain(&out).join("\n");
         assert!(text.contains('╭'), "矮终端也必须画出弹窗：{text}");
         assert!(text.contains("命令"), "至少应显示标题：{text}");
+    }
+
+    // ── 工具输出 / 推理的显隐 ─────────────────────────────────────────
+
+    fn tool_fact(ok: bool, out: &str) -> Vec<Fact> {
+        vec![Fact::ToolFinished {
+            name: "bash".into(),
+            exit_code: if ok { 0 } else { 1 },
+            stdout: out.into(),
+            stderr: String::new(),
+            truncated: false,
+        }]
+    }
+
+    fn render_with_display(facts: &[Fact], disp: ToolDisplay) -> String {
+        let a = about();
+        let ed = editor::Editor::new();
+        Screen {
+            cols: 100, rows: 30, facts, input: &ed, status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: disp,
+        }
+        .render()
+    }
+
+    #[test]
+    fn tool_output_is_hidden_by_default_but_counted() {
+        // 默认折叠：输出常常很长，铺开会淹没对话。
+        // 但必须给出"藏了多少行"的提示，否则用户不知道有东西没显示。
+        let facts = tool_fact(true, "第一行\n第二行\n第三行");
+        let text = plain(&render_with_display(&facts, ToolDisplay::default())).join("\n");
+        assert!(!text.contains("第一行"), "默认不该展开输出：{text}");
+        assert!(text.contains("3 行输出"), "应提示有多少行输出：{text}");
+        assert!(text.contains("/details"), "应提示怎么展开：{text}");
+    }
+
+    #[test]
+    fn details_expands_the_output() {
+        let facts = tool_fact(true, "打印内容甲\n打印内容乙");
+        let disp = ToolDisplay { expanded: true, thinking: false };
+        let text = plain(&render_with_display(&facts, disp)).join("\n");
+        assert!(text.contains("打印内容甲"), "展开后应看到输出：{text}");
+        assert!(text.contains("打印内容乙"), "{text}");
+    }
+
+    #[test]
+    fn failed_tool_output_is_shown_even_when_collapsed() {
+        // 关键：失败时**强制展示** —— 出错还把原因藏起来，用户只能靠猜。
+        let facts = tool_fact(false, "错误详情：找不到文件");
+        let text = plain(&render_with_display(&facts, ToolDisplay::default())).join("\n");
+        assert!(text.contains("错误详情"), "失败输出必须可见：{text}");
+    }
+
+    #[test]
+    fn long_tool_output_is_bounded_and_reported() {
+        let long: String = (0..200).map(|i| format!("行{i}\n")).collect();
+        let facts = tool_fact(true, &long);
+        let disp = ToolDisplay { expanded: true, thinking: false };
+        let text = plain(&render_with_display(&facts, disp)).join("\n");
+        assert!(text.contains("另有"), "超上限应如实标注：{text}");
+        // 不能把 200 行全铺出来
+        assert!(!text.contains("行199"), "不该全部展开：{text}");
+    }
+
+    #[test]
+    fn truncated_output_is_labelled_as_truncated_not_as_more_lines() {
+        // "被内核截断"与"还有更多行没显示"是两件事，说法必须不同 ——
+        // 说成后者会让用户以为展开就能看到全部。
+        let facts = vec![Fact::ToolFinished {
+            name: "bash".into(),
+            exit_code: 0,
+            stdout: "部分输出".into(),
+            stderr: String::new(),
+            truncated: true,
+        }];
+        let disp = ToolDisplay { expanded: true, thinking: false };
+        let text = plain(&render_with_display(&facts, disp)).join("\n");
+        assert!(text.contains("已被截断"), "应说明输出被截断：{text}");
+    }
+
+    #[test]
+    fn reasoning_is_hidden_unless_enabled() {
+        let facts = vec![
+            Fact::AssistantThought("我先分析一下需求".into()),
+            Fact::AssistantSaid("答复正文".into()),
+        ];
+        let off = plain(&render_with_display(&facts, ToolDisplay::default())).join("\n");
+        assert!(!off.contains("我先分析"), "默认不显示推理：{off}");
+        assert!(off.contains("答复正文"), "答复始终可见：{off}");
+
+        let on = plain(&render_with_display(
+            &facts,
+            ToolDisplay { expanded: false, thinking: true },
+        ))
+        .join("\n");
+        assert!(on.contains("我先分析"), "开启后应显示推理：{on}");
+        assert!(on.contains("答复正文"), "{on}");
+    }
+
+    #[test]
+    fn reasoning_and_answer_are_separately_controllable() {
+        // 分开建模的理由：混成一个 Fact 就无法独立控制显隐
+        let facts = vec![
+            Fact::AssistantThought("推理".into()),
+            Fact::AssistantSaid("答复".into()),
+        ];
+        let disp = ToolDisplay { expanded: true, thinking: false };
+        let text = plain(&render_with_display(&facts, disp)).join("\n");
+        assert!(text.contains("答复"), "{text}");
+        assert!(!text.contains("推理"), "展开工具输出不该连带显示推理：{text}");
     }
 
     // ── which-key ────────────────────────────────────────────────────
@@ -4182,6 +4476,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None,
             whichkey: Some(&groups),
+            display: ToolDisplay::default(),
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4203,6 +4498,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None,
             whichkey: Some(&groups),
+            display: ToolDisplay::default(),
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4223,6 +4519,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: cols >= 96, view: None, diff_viewer: None,
                 whichkey: Some(&groups),
+                display: ToolDisplay::default(),
             }
             .render();
             let lines = plain(&out);
@@ -4251,7 +4548,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None,
+            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(),
         }
         .render()
     }
@@ -4377,7 +4674,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup, preformatted: None,
-            sidebar: true, view: None, diff_viewer: None, whichkey: None,
+            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
         }
         .render_with_regions()
         .1
@@ -4442,7 +4739,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
         }
         .render_with_regions();
         let (gx, gy) = r.sidebar_grip.expect("侧栏收起时应留一个把手");
@@ -4513,7 +4810,7 @@ mod tests {
                 status: "", awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None,
+                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
             }
             .render()
         };
@@ -4539,7 +4836,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
         }
         .render();
         assert!(plain(&out).join("\n").contains("下方还有"), "应提示下方还有内容");
@@ -4561,7 +4858,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(),
         }
         .render();
         let t = plain(&out).join("\n");
@@ -4602,6 +4899,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4634,6 +4932,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }
         .render();
         let t = plain(&out).join("\n");
@@ -4657,6 +4956,7 @@ mod tests {
                 view: None,
                 diff_viewer: None,
                 whichkey: None,
+                display: ToolDisplay::default(),
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -4684,6 +4984,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }
         .render();
         // 提取光标定位序列 ESC[<row>;<col>H（渲染尾部还有 ?25h 之类，需精确匹配）
@@ -4769,7 +5070,13 @@ mod tests {
             let facts = vec![
                 Fact::UserSaid("中文消息测试宽字符对齐".into()),
                 Fact::AssistantSaid("这是助手的回答，也包含中文与 emoji 🚀".into()),
-                Fact::ToolFinished { name: "bash".into(), exit_code: 0 },
+                Fact::ToolFinished {
+                name: "bash".into(),
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+            },
             ];
             let out = Screen {
                 cols, rows, facts: &facts, input: &editor::Editor::from_text("输入中文"), status: "就绪",
@@ -4778,6 +5085,7 @@ mod tests {
                 view: None,
                 diff_viewer: None,
                 whichkey: None,
+                display: ToolDisplay::default(),
             }
             .render();
             for (i, line) in plain(&out).iter().enumerate() {
@@ -4813,8 +5121,20 @@ mod tests {
 
     #[test]
     fn tool_success_and_failure_are_distinguishable() {
-        let ok = [Fact::ToolFinished { name: "bash".into(), exit_code: 0 }];
-        let bad = [Fact::ToolFinished { name: "bash".into(), exit_code: 1 }];
+        let ok = [Fact::ToolFinished {
+                name: "bash".into(),
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+            }];
+        let bad = [Fact::ToolFinished {
+                name: "bash".into(),
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+            }];
         let a = plain(&screen(60, 12, &ok, "", "s")).join("\n");
         let b = plain(&screen(60, 12, &bad, "", "s")).join("\n");
         assert!(a.contains('✓'), "成功应显示 ✓：{a}");
@@ -4920,6 +5240,7 @@ mod tests {
             view: None,
             diff_viewer: None,
             whichkey: None,
+            display: ToolDisplay::default(),
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4942,6 +5263,7 @@ mod tests {
                 view: None,
                 diff_viewer: None,
                 whichkey: None,
+                display: ToolDisplay::default(),
             }
             .render();
             plain(&out).join("\n")
@@ -5070,7 +5392,7 @@ mod tests {
         let evs = vec![
             EventMsg::TurnStarted { turn_id: "t".into() },
             EventMsg::ApprovalRequest { id: "a1".into(), detail: "d".into() },
-            EventMsg::ToolCallEnd { id: "c".into(), exit_code: 0 },
+            EventMsg::ToolCallEnd { id: "c".into(), exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false },
             EventMsg::ApprovalRequest { id: "a2".into(), detail: "d".into() },
         ];
         assert_eq!(latest_approval_id(&evs), Some("a2".to_string()));
@@ -5099,12 +5421,18 @@ mod tests {
         h.consume(&EventMsg::TurnStarted { turn_id: "t".into() }).unwrap();
         h.consume(&EventMsg::AgentMessageDone { text: "hi".into() }).unwrap();
         h.consume(&EventMsg::ToolCallBegin { id: "c".into(), name: "bash".into() }).unwrap();
-        h.consume(&EventMsg::ToolCallEnd { id: "c".into(), exit_code: 0 }).unwrap();
+        h.consume(&EventMsg::ToolCallEnd { id: "c".into(), exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false }).unwrap();
         assert_eq!(
             h.facts(),
             vec![
                 Fact::AssistantSaid("hi".into()),
-                Fact::ToolFinished { name: "bash".into(), exit_code: 0 },
+                Fact::ToolFinished {
+                name: "bash".into(),
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+            },
             ]
         );
     }
@@ -5124,6 +5452,7 @@ mod tests {
                     view: None,
                     diff_viewer: None,
                     whichkey: None,
+                    display: ToolDisplay::default(),
                 }
                 .render()
             };

@@ -650,7 +650,7 @@ impl Kernel {
                 match decision {
                     Decision::Allow | Decision::AllowAlways => self.execute_one(&call)?,
                     Decision::Deny => {
-                        let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: -1 };
+                        let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: -1, stdout: String::new(), stderr: String::new(), truncated: false };
                         self.emit_and_log(&ev)?;
                         self.messages.push(Message::ToolResult {
                             id: call.id,
@@ -818,7 +818,7 @@ impl Kernel {
             match gate(kind, self.resolution()) {
                 GateDecision::Allow => self.execute_one(&call)?,
                 GateDecision::Deny { reason } => {
-                    let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: -1 };
+                    let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: -1, stdout: String::new(), stderr: String::new(), truncated: false };
                     self.emit_and_log(&ev)?;
                     self.messages.push(Message::ToolResult {
                         id: call.id,
@@ -946,7 +946,15 @@ impl Kernel {
             }
         }
 
-        let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: output.exit_code };
+        let ev = EventMsg::ToolCallEnd {
+            id: call.id.clone(),
+            exit_code: output.exit_code,
+            // 输出必须进事件流：用户要看的是"这条命令打印了什么"，
+            // 不是一个孤零零的退出码。内核已按上限截断。
+            stdout: output.stdout.clone(),
+            stderr: output.stderr.clone(),
+            truncated: output.truncated,
+        };
         self.emit_and_log(&ev)?;
         self.messages.push(Message::ToolResult {
             id: call.id.clone(),

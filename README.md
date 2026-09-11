@@ -83,6 +83,8 @@ cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
 #   全屏 diff 查看器：/diff 或审批时按 d（hunk/文件跳转、双列视图、文件树）
 #   ctrl+/ 键位提示（which-key，按上下文显示此刻能用的键）
 #   /undo 回退对话一轮（**不还原文件**，界面会明确标注）
+#   /details 展开工具输出（默认折叠；失败时总是展示）
+#   /thinking 显示推理过程（默认隐藏）
 #   Tab 补全 / ctrl+r 历史 / ctrl+g 编辑器 / ctrl+l 清屏 / esc 关弹窗
 neo tui --provider selftest --mode default
 # 等价写法：neo --provider selftest --mode default（裸选项默认进 TUI）

@@ -53,6 +53,10 @@ pub enum Action {
     DiffViewer,
     /// 回退对话一轮（不还原文件）
     Rewind,
+    /// 展开 / 折叠工具输出
+    ToggleDetails,
+    /// 显示 / 隐藏推理过程
+    ToggleThinking,
 }
 
 /// **必须由命令触发**的动作。新增变体时要加进这里 ——
@@ -68,6 +72,8 @@ const COMMAND_ACTIONS: &[Action] = &[
     Action::Status,
     Action::DiffViewer,
     Action::Rewind,
+    Action::ToggleDetails,
+    Action::ToggleThinking,
 ];
 
 /// **只在界面内部产生**的动作（不经过命令表）。
@@ -91,6 +97,8 @@ const COMMANDS: &[Command] = &[
     Command { name: "compact", aliases: &["summarize"], desc: "压缩上下文以腾出预算", action: Action::Compact },
     Command { name: "diff", aliases: &["changes"], desc: "查看本次会话的改动", action: Action::DiffViewer },
     Command { name: "undo", aliases: &["rewind"], desc: "回退对话一轮（不还原文件）", action: Action::Rewind },
+    Command { name: "details", aliases: &["d"], desc: "展开 / 折叠工具输出", action: Action::ToggleDetails },
+    Command { name: "thinking", aliases: &["think"], desc: "显示 / 隐藏推理过程", action: Action::ToggleThinking },
     Command { name: "exit", aliases: &["quit", "q"], desc: "退出 Neo", action: Action::Quit },
 ];
 
@@ -167,6 +175,8 @@ Neo —— 编程 Agent 内核
     /status    运行状态与环境
     /diff      查看改动（全屏：hunk/文件跳转、双列视图）
     /undo      回退对话一轮（**不还原文件**，见下方说明）
+    /details   展开 / 折叠工具输出（失败时总是展示）
+    /thinking  显示 / 隐藏推理过程
     /diff      查看改动（全屏查看器：hunk/文件跳转、双列视图）
     /theme     选择配色主题（6 套）
     /next      直接切到下一个主题

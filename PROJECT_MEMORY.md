@@ -789,6 +789,42 @@ which-key 加完后 pty 测试说卡片没出现，我差点去改渲染逻辑�
 
 ---
 
+## 4.27 工具输出与推理：补上"事件里有、界面没有"的两处
+
+### (a) 又一次"定义了却没人显示"
+`ReasoningDelta` 在协议层定义了，但 `facts_of` **从未把它转成 Fact** ——
+推理过程从模型一路传进内核，然后在进界面之前被丢掉。
+同时发现另一个更严重的：**工具输出根本没进事件流**。
+`ToolCallEnd` 只带 `id` 与 `exit_code`，用户看到的永远是
+`✓ bash exit 0` —— 命令打印了什么完全看不到。
+
+这两处与之前的 `PatchProposed` 是同一类问题：**契约/事件建好了，
+但没有接到用户能看到的地方**。这已经是第三次，所以在 PROJECT_MEMORY
+里单独立了一节记录这个模式。
+
+修法：
+- `ToolCallEnd` 带上 `stdout` / `stderr` / `truncated`（内核已按上限截断）；
+- `Fact::ToolFinished` 对应扩展；
+- `Fact::AssistantThought` 新增，与 `AssistantSaid` **分开** ——
+  混成一个 Fact 就无法独立控制显隐（`/thinking` 就做不到）。
+
+### (b) 三处刻意的取舍
+1. **默认折叠工具输出**：输出常常很长，铺开会淹没对话。
+   但折叠时给出"N 行输出（/details 展开）"，否则用户不知道藏了东西。
+2. **失败时强制展示**：出错还把原因藏起来，用户只能靠猜。
+   这一条写成了测试（`failed_tool_output_is_shown_even_when_collapsed`）。
+3. **"被截断"与"还有更多行"说法必须不同**：前者是内核截的（展开也看不到全部），
+   后者只是界面折叠（展开就有）。混用会让用户以为展开能看到全部。
+
+### (c) 协议变更的连锁成本（记录以便下次估时）
+给 `ToolCallEnd` 加三个字段，波及所有构造点：内核执行路径、
+审批拒绝路径、`neo-exec` 渲染、`neo-mock` conformance、`neo-host-web` 测试。
+`cargo test --workspace --no-run` 一次就能把所有遗漏列全（类型系统的价值），
+但要逐个补。协议字段是**公共契约**，加字段的成本是"构造点数 × 一处"，
+所以宁可一次加对，也不要分几次加。
+
+---
+
 ## 5. 假通过：门禁与测试各抓到过一次自己
 
 这两次都值得记，因为它们说明"看起来有保护"有多危险：
@@ -822,7 +858,7 @@ which-key 加完后 pty 测试说卡片没出现，我差点去改渲染逻辑�
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 325 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo test --workspace      # 332 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫）
 ```
 
