@@ -119,7 +119,7 @@ fn persistence_contract_catches_tampering_backend() {
 /// 契约：声称不支持的模式，必须**显式拒绝**，不得静默放行。
 fn assert_sandbox_contract(s: &dyn SandboxBackend, mode: SandboxMode) {
     if !s.supports(mode) {
-        match s.execute(mode, "rm -rf /") {
+        match s.execute(mode, "rm -rf /", 64 * 1024) {
             SandboxOutcome::Denied { .. } => {}
             SandboxOutcome::Ran { .. } => panic!(
                 "契约违反：后端声明不支持 {mode:?}，却仍然执行了命令 —— 安全边界形同虚设"
@@ -137,7 +137,7 @@ fn sandbox_contract_holds_for_noop_backend() {
     assert_sandbox_contract(&s, SandboxMode::ReadOnly);
     // 声称支持的档位必须真的执行
     assert!(matches!(
-        s.execute(SandboxMode::DangerFullAccess, "echo hi"),
+        s.execute(SandboxMode::DangerFullAccess, "echo hi", 64 * 1024),
         SandboxOutcome::Ran { .. }
     ));
 }
@@ -150,7 +150,7 @@ fn sandbox_contract_catches_leaky_backend() {
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // 这个后端 supports() 返回 true，所以走不到 Denied 分支；
         // 下面直接断言"安全边界"这一语义：read-only 下执行必须被拒。
-        match leaky.execute(SandboxMode::ReadOnly, "rm -rf /") {
+        match leaky.execute(SandboxMode::ReadOnly, "rm -rf /", 64 * 1024) {
             SandboxOutcome::Denied { .. } => {}
             SandboxOutcome::Ran { .. } => panic!("契约违反：read-only 档位竟然执行了删除命令"),
         }

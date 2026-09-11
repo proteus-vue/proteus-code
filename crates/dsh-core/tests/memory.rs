@@ -7,6 +7,14 @@
 //! 但不保证内存**有界**。一条命令吐 GB 级输出、或每步深拷贝整份历史，
 //! 都能在完全安全的 Rust 里把进程拖垮。所以有界性必须自己测。
 
+// 计数分配器是**全局状态**：并行跑会互相污染计数，导致断言随机失败。
+// 本文件整体串行（`--test-threads=1` 的等价效果）：
+// Rust 无 per-test 串行属性，故用全局 mutex 包住会读计数的测试。
+use std::sync::Mutex;
+
+/// 串行化「读全局计数」的测试。
+static COUNTER_LOCK: Mutex<()> = Mutex::new(());
+
 use dsh_config::Config;
 use dsh_core::{
     truncate_utf8, Kernel, Message, SandboxBackend, SandboxOutcome, Tool, ToolCtx, ToolRegistry,
@@ -50,7 +58,7 @@ struct FloodSandbox;
 
 impl SandboxBackend for FloodSandbox {
     fn supports(&self, _m: SandboxMode) -> bool { true }
-    fn execute(&self, _m: SandboxMode, _cmd: &str) -> SandboxOutcome {
+    fn execute(&self, _m: SandboxMode, _cmd: &str, _limit: usize) -> SandboxOutcome {
         // 4 MB 输出（真实上限是 256 KB）
         SandboxOutcome::Ran { stdout: "x".repeat(4 * 1024 * 1024), truncated: false }
     }
@@ -61,7 +69,7 @@ struct MultibyteSandbox;
 
 impl SandboxBackend for MultibyteSandbox {
     fn supports(&self, _m: SandboxMode) -> bool { true }
-    fn execute(&self, _m: SandboxMode, _cmd: &str) -> SandboxOutcome {
+    fn execute(&self, _m: SandboxMode, _cmd: &str, _limit: usize) -> SandboxOutcome {
         // 每个「好」是 3 字节，共 3000 字节；上限设 10 字节会切在第 3 个字符中间
         SandboxOutcome::Ran { stdout: "好".repeat(1000), truncated: false }
     }
@@ -232,6 +240,7 @@ fn context_cap_errors_instead_of_growing_without_bound() {
 
 #[test]
 fn a_step_does_not_deep_copy_the_whole_history() {
+    let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // 这是对"每步 clone 整份历史（O(N²)）"那次修复的**实测**证明。
     //
     // 方法：同样一轮只有 1 步、且该步只产出 1 个 token 的响应，

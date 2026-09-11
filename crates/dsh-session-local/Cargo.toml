@@ -1,0 +1,15 @@
+[package]
+name = "dsh-session-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# L3 PROVIDER：`SessionPersistence` SPI 的本机实现（JSONL）。
+#
+# 为什么落在 L3 而非 L1：SPI 契据在 L2 core，实现须依赖契据。
+# 日志格式（v 字段）必须向后兼容且可迁移 —— 那是格式契约；
+# "用哪种介质存" 才是本 SPI 的可替换点。
+[dependencies]
+dsh-protocol = { path = "../dsh-protocol" }
+dsh-core = { path = "../dsh-core" }
+serde_json = { workspace = true }

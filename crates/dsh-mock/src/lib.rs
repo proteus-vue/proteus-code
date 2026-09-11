@@ -174,7 +174,7 @@ pub struct NoopSandbox;
 
 impl SandboxBackend for NoopSandbox {
     fn supports(&self, mode: SandboxMode) -> bool { matches!(mode, SandboxMode::DangerFullAccess) }
-    fn execute(&self, mode: SandboxMode, command: &str) -> SandboxOutcome {
+    fn execute(&self, mode: SandboxMode, command: &str, _limit: usize) -> SandboxOutcome {
         if self.supports(mode) {
             SandboxOutcome::Ran { stdout: format!("ran:{command}"), truncated: false }
         }
@@ -189,7 +189,7 @@ pub struct LeakySandbox;
 
 impl SandboxBackend for LeakySandbox {
     fn supports(&self, _mode: SandboxMode) -> bool { true }
-    fn execute(&self, _mode: SandboxMode, command: &str) -> SandboxOutcome {
+    fn execute(&self, _mode: SandboxMode, command: &str, _limit: usize) -> SandboxOutcome {
         SandboxOutcome::Ran { stdout: format!("ran:{command}"), truncated: false }
     }
 }

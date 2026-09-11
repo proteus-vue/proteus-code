@@ -1,3 +1,166 @@
-//! L5 HOST · Exec（无头 / CI）
-//! 零交互、可脚本化、可管道化。
-pub fn run(prompt: &str) -> String { format!("[exec] {prompt}") }
+//! L5 HOST · 无头 / CI —— 零交互把一轮任务跑完
+//!
+//! # 它同时是**内核的第一个真实宿主**
+//!
+//! 前四个宿主（TUI/Desktop/Web）都还没写，但内核已经不依赖界面即可运行：
+//! `dsh-exec` 用最少的代码把「真实模型 → 真实沙箱 → 真实工具」串起来，
+//! 让内核能跑通一轮真任务。这也是 T6（宿主语义等价）的第一个被试点。
+//!
+//! # 审批策略：无头环境下如何决定
+//!
+//! 无头宿主无法弹交互式审批（`HostCapabilities::interactive_prompt = false`）。
+//! 两种正确做法：
+//!   - 用 `FullAccess` 档（自动放行，风险由调用方承担）
+//!   - 用受限档 + 预置的自动应答（本实现：**默认拒绝**未预授权的写）
+//!
+//! 本实现选择**默认拒绝**：安全边界在无人值守时更该收紧，而不是放开。
+//! 想放行就显式换档（`--mode auto-edit` 或 `--mode full`），不隐式放水。
+
+use dsh_config::{resolve, Config};
+use dsh_core::{Kernel, Message, ToolRegistry};
+use dsh_protocol::{Decision, EventMsg, ExecMode, Op};
+
+/// 一轮运行的配置。
+pub struct ExecOptions {
+    pub task: String,
+    pub mode: ExecMode,
+    pub max_steps: usize,
+    /// 无人值守时对审批请求的默认动作。
+    pub on_approval: Decision,
+    pub json: bool,
+}
+
+impl Default for ExecOptions {
+    fn default() -> Self {
+        Self {
+            task: String::new(),
+            mode: ExecMode::Default,
+            max_steps: 16,
+            // 默认拒绝未预授权的写：无人值守时安全边界该收紧
+            on_approval: Decision::Deny,
+            json: false,
+        }
+    }
+}
+
+/// 跑一轮，返回（是否成功, 输出文本）。
+pub fn run_task(
+    mut kernel: Kernel,
+    opts: &ExecOptions,
+) -> (bool, String) {
+    let mut log: Vec<String> = Vec::new();
+    let mut ok = true;
+
+    let events = match kernel.submit(Op::UserTurn { text: opts.task.clone(), refs: vec![] }) {
+        Ok(e) => e,
+        Err(e) => return (false, format!("提交失败：{e}")),
+    };
+    render(&events, opts, &mut log);
+
+    // 审批循环：内核每挂起一次就应答一次，直到本轮结束。
+    // 有最大轮次上限，避免应答逻辑出错时无限转。
+    let mut guard = 0;
+    while let dsh_core::KernelState::AwaitingApproval { id } = kernel.state().clone() {
+        guard += 1;
+        if guard > 64 {
+            ok = false;
+            log.push("[exec] 审批轮次过多，中止（可能是应答逻辑或内核状态机异常）".into());
+            break;
+        }
+        if !opts.json {
+            log.push(format!("[exec] 审批 {id} → {:?}（无人值守默认策略）", opts.on_approval));
+        }
+        // Decision 是 Copy，取引用后的副本即可
+        let decision = opts.on_approval;
+        match kernel.submit(Op::Approve { id, decision }) {
+            Ok(events) => render(&events, opts, &mut log),
+            Err(e) => {
+                ok = false;
+                log.push(format!("[exec] 审批失败：{e}"));
+                break;
+            }
+        }
+    }
+
+    // 汇总最终答复
+    let final_text: String = kernel
+        .messages()
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            Message::Assistant { text, .. } if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    if opts.json {
+        let out = serde_json::json!({ "ok": ok, "final": final_text });
+        (ok, out.to_string())
+    } else {
+        if !final_text.is_empty() {
+            log.push(String::new());
+            log.push(format!("── 最终答复 ──\n{final_text}"));
+        }
+        (ok, log.join("\n"))
+    }
+}
+
+/// 事件 → 终端文本。**宿主只做渲染，不含业务逻辑。**
+fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
+    for e in events {
+        let line = match e {
+            EventMsg::TurnStarted { .. } => Some("[turn] 开始".to_string()),
+            EventMsg::AgentMessageDelta { delta } => Some(delta.clone()),
+            EventMsg::AgentMessageDone { .. } => None, // 增量已输出，避免重复
+            EventMsg::ToolCallBegin { name, id } => Some(format!("[tool] {name} ({id})")),
+            EventMsg::ToolCallEnd { id, exit_code } => {
+                Some(format!("[tool] {id} → exit {exit_code}"))
+            }
+            EventMsg::ApprovalRequest { detail, .. } => Some(format!("[审批] {detail}")),
+            EventMsg::Error { message } => Some(format!("[错误] {message}")),
+            EventMsg::TurnComplete { input_tokens, output_tokens } => Some(format!(
+                "[turn] 完成（in {input_tokens} / out {output_tokens} tokens）"
+            )),
+            EventMsg::ShutdownComplete => Some("[shutdown]".to_string()),
+            EventMsg::SessionConfigured { session_id } => {
+                Some(format!("[session] {session_id} 配置已更新"))
+            }
+            EventMsg::ReasoningDelta { delta } => Some(format!("[思考] {delta}")),
+            EventMsg::PatchProposed { path, .. } => Some(format!("[patch] {path}")),
+            EventMsg::CheckpointSaved { checkpoint_id } => {
+                Some(format!("[checkpoint] {checkpoint_id}"))
+            }
+            EventMsg::GoalProgress { done, total, .. } => Some(format!("[goal] {done}/{total}")),
+        };
+        if let Some(l) = line {
+            if !opts.json {
+                log.push(l);
+            }
+        }
+    }
+}
+
+/// 由 `neo exec` 解析出的参数构造一个可运行的 kernel。
+///
+/// 之所以把装配放在这里而不是 main：让 `main` 只做参数解析与输出，
+/// 装配逻辑可被测试与其它宿主复用。
+pub fn build_kernel(
+    session_id: &str,
+    workspace: &std::path::Path,
+    opts: &ExecOptions,
+    model: Box<dyn dsh_core::ModelProvider>,
+    sandbox: std::sync::Arc<dyn dsh_core::SandboxBackend>,
+    persistence: Box<dyn dsh_core::SessionPersistence>,
+) -> Kernel {
+    let mut tools = ToolRegistry::new();
+    dsh_capability::register_defaults(&mut tools);
+    let cfg = Config { exec_mode: opts.mode, ..Config::default() };
+    Kernel::new(session_id, cfg, tools, model, sandbox, persistence, workspace)
+        .with_max_steps(opts.max_steps)
+}
+
+/// 当前档位的可读描述（用于启动提示）。
+pub fn describe_mode(mode: ExecMode) -> String {
+    let r = resolve(mode);
+    format!("{:?}（沙箱 {:?} / 审批 {:?} / 文件编辑 {:?}）", mode, r.sandbox, r.approval, r.file_edit)
+}

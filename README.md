@@ -16,18 +16,30 @@
 |---|---|
 | 内核主循环（turn/step、审批挂起恢复、三维闸门） | ✅ **已实现**，16 项 conformance |
 | 内存有界性（输出上限、UTF-8 安全截断、上下文上限） | ✅ **已实现**，6 项实测 |
-| SPI 契约（5 个 seam + Mock 后端 + conformance） | ✅ **已实现**，10 项 |
-| 协议 / 配置 / 会话格式 | 🟡 类型与校验已有，JSONL 持久化**未接线** |
-| 真实模型 provider | ❌ **未实现**（只有 mock，内核尚无真机验证） |
-| 工具执行（bash 真实执行、apply_patch 落盘） | ❌ **未实现**（契约与分类已定） |
-| 宿主后端（TUI / Desktop / Web / Exec） | ❌ **未实现**（契据 `HostBackend` 已定） |
+| `ModelProvider` 真实后端（DeepSeek chat-completions） | ✅ **已实现**，HTTP 帧对真实服务器验证通过 |
+| `SandboxBackend` 真实后端（macOS Seatbelt） | ✅ **已实现**，6 项**真机**越权拦截测试 |
+| `SessionPersistence` 真实后端（JSONL append-only） | ✅ **已实现**，重开续号已验证 |
+| `neo exec` 无头宿主（端到端闭环） | ✅ **已实现**，离线 + 真实 provider 双路径跑通 |
+| Shell 工具真实执行（经沙箱） | ✅ **已实现**（`bash` 真跑，输出受限） |
+| **真实模型完整推理** | ⚠️ **待验**：HTTP 链路已验证，但环境里的 `DEEPSEEK_API_KEY` 是占位符，未完成一次真实推理 |
+| `apply_patch` 落盘 | ❌ **未实现**（契约与分类已定，明确返回未实现而非假装成功） |
+| TUI / Desktop / Web 宿主 | ❌ **未实现**（契据 `HostBackend` 已定；`exec` 是第一个真实宿主） |
 | Goal 编排（L4） | ❌ **未实现** |
-| OS 沙箱（Seatbelt / Landlock+bwrap） | 🟡 命令包裹已写，未接真实执行 |
+| Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |
 
-**一句话现状**：机制已验证（32 个测试），但还没有真实模型与真实执行。
-下一步是**接真实 provider + 真实 bash 执行**，让内核跑通一轮真任务。
+**一句话现状**：主循环 + 真实沙箱 + 真实模型链路 + 落盘**已闭环并跑通**；
+界面（TUI/Desktop/Web）与 `apply_patch` 落盘尚未实现。
 
----
+### 亲测可用
+
+```bash
+# 离线跑通（不需要 API key）—— 验证装配 → 内核 → 沙箱 → 落盘
+cd /tmp && neo exec "列出文件" --provider mock --mode auto-edit
+
+# 接真实模型（需要一个有效的 DEEPSEEK_API_KEY）
+export DEEPSEEK_API_KEY=sk-...
+neo exec "用一句话回答 1+1" --mode plan
+```
 
 ## 快速开始
 

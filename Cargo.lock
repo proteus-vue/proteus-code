@@ -16,10 +16,16 @@ dependencies = [
 name = "dsh-cli"
 version = "0.1.0"
 dependencies = [
+ "dsh-capability",
+ "dsh-config",
+ "dsh-core",
  "dsh-exec",
  "dsh-host-tui",
  "dsh-host-web",
+ "dsh-llm-deepseek",
  "dsh-protocol",
+ "dsh-sandbox-local",
+ "dsh-session-local",
 ]
 
 [[package]]
@@ -49,9 +55,12 @@ dependencies = [
 name = "dsh-exec"
 version = "0.1.0"
 dependencies = [
+ "dsh-capability",
+ "dsh-config",
  "dsh-core",
  "dsh-orchestration",
  "dsh-protocol",
+ "serde_json",
 ]
 
 [[package]]
@@ -79,6 +88,15 @@ dependencies = [
  "dsh-core",
  "dsh-orchestration",
  "dsh-protocol",
+]
+
+[[package]]
+name = "dsh-llm-deepseek"
+version = "0.1.0"
+dependencies = [
+ "dsh-core",
+ "dsh-protocol",
+ "serde_json",
 ]
 
 [[package]]
@@ -126,11 +144,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsh-sandbox-local"
+version = "0.1.0"
+dependencies = [
+ "dsh-core",
+ "dsh-protocol",
+]
+
+[[package]]
 name = "dsh-session"
 version = "0.1.0"
 dependencies = [
  "dsh-protocol",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dsh-session-local"
+version = "0.1.0"
+dependencies = [
+ "dsh-core",
+ "dsh-protocol",
  "serde_json",
 ]
 

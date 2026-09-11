@@ -22,7 +22,7 @@ struct TestSandbox;
 
 impl SandboxBackend for TestSandbox {
     fn supports(&self, _mode: SandboxMode) -> bool { true }
-    fn execute(&self, mode: SandboxMode, command: &str) -> SandboxOutcome {
+    fn execute(&self, mode: SandboxMode, command: &str, _limit: usize) -> SandboxOutcome {
         if mode == SandboxMode::ReadOnly && command.contains("rm ") {
             return SandboxOutcome::Denied { reason: "read-only 禁止删除".into() };
         }

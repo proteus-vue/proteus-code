@@ -15,6 +15,9 @@ members = [
   "crates/dsh-exec",
   "crates/dsh-cli",
   "crates/dsh-mock",
+  "crates/dsh-sandbox-local",
+  "crates/dsh-llm-deepseek",
+  "crates/dsh-session-local",
 ]
 
 [workspace.package]

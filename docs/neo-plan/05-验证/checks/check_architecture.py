@@ -23,6 +23,9 @@ LAYER = {
     "dsh-platform":      1,  # L1 PLATFORM
     "dsh-core":          2,  # L2
     "dsh-capability":    3,  # L3
+    "dsh-sandbox-local": 3,  # L3 PROVIDER（SandboxBackend 实现）
+    "dsh-llm-deepseek":  3,  # L3 PROVIDER（ModelProvider 实现）
+    "dsh-session-local": 3,  # L3 PROVIDER（SessionPersistence 实现）
     "dsh-orchestration": 4,  # L4
     "dsh-host-tui":      5,  # L5
     "dsh-host-desktop":  5,  # L5

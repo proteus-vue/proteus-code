@@ -151,12 +151,13 @@ pub struct ToolCtx<'a> {
 }
 
 impl ToolCtx<'_> {
-    /// 经沙箱执行一条命令并**施加输出上限**。工具执行命令的唯一入口。
+    /// 经沙箱执行一条命令。**工具执行命令的唯一入口。**
     ///
-    /// 截断是必须的：沙箱实现（真实执行器）按流读取时就得停止累积，
-    /// 否则内存已经在被吃掉，再截断也没意义。
+    /// 上限传给实现：真实执行器必须**边读边限**（读取时就停止累积）。
+    /// 上限也仍是内核的强制边界：实现即便超限返回，此处再兜一次（纵深防御），
+    /// 保证无论实现多粗心，进到模型上下文的内容都不会无界。
     pub fn exec(&self, command: &str) -> SandboxOutcome {
-        let outcome = self.sandbox.execute(self.mode, command);
+        let outcome = self.sandbox.execute(self.mode, command, self.max_output_bytes);
         match outcome {
             SandboxOutcome::Ran { stdout, truncated } => {
                 let (text, cut) = truncate_utf8(&stdout, self.max_output_bytes);
@@ -232,8 +233,13 @@ impl Default for ToolRegistry { fn default() -> Self { Self::new() } }
 pub trait SandboxBackend: Send + Sync {
     /// 本后端对给定模式的**能力声明**，供降级判断（能力可缺，但不得静默失败）。
     fn supports(&self, mode: SandboxMode) -> bool;
-    /// 执行。**越权必须被拒** —— 这是 T4 断言的核心。
-    fn execute(&self, mode: SandboxMode, command: &str) -> SandboxOutcome;
+
+    /// 执行一条命令。**越权必须被拒**（T4 断言的核心）。
+    ///
+    /// `limit_bytes` 是**单次输出上限，而且是契约的一部分**，不是事后补救：
+    /// 实现必须在**读取过程中**就停止累积（边读边丢），否则内存早已被吃掉，
+    /// 再截断毫无意义。这是"有界"从约定变成契约的关键。
+    fn execute(&self, mode: SandboxMode, command: &str, limit_bytes: usize) -> SandboxOutcome;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

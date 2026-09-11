@@ -4,8 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# `neo` multitool 入口。只做参数解析与装配 —— 业务在 L2/L3，渲染在 L5 宿主。
 [dependencies]
 dsh-protocol = { path = "../dsh-protocol" }
+dsh-core = { path = "../dsh-core" }
+dsh-config = { path = "../dsh-config" }
+dsh-capability = { path = "../dsh-capability" }
+dsh-exec = { path = "../dsh-exec" }
 dsh-host-tui = { path = "../dsh-host-tui" }
 dsh-host-web = { path = "../dsh-host-web" }
-dsh-exec = { path = "../dsh-exec" }
+dsh-sandbox-local = { path = "../dsh-sandbox-local" }
+dsh-llm-deepseek = { path = "../dsh-llm-deepseek" }
+dsh-session-local = { path = "../dsh-session-local" }
