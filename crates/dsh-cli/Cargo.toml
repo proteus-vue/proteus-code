@@ -16,3 +16,4 @@ dsh-host-web = { path = "../dsh-host-web" }
 dsh-sandbox-local = { path = "../dsh-sandbox-local" }
 dsh-llm-deepseek = { path = "../dsh-llm-deepseek" }
 dsh-session-local = { path = "../dsh-session-local" }
+serde_json = { workspace = true }

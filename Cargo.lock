@@ -6,9 +6,11 @@ version = 4
 name = "dsh-capability"
 version = "0.1.0"
 dependencies = [
+ "dsh-config",
  "dsh-core",
  "dsh-protocol",
  "dsh-sandbox",
+ "dsh-sandbox-local",
  "serde_json",
 ]
 
@@ -26,6 +28,7 @@ dependencies = [
  "dsh-protocol",
  "dsh-sandbox-local",
  "dsh-session-local",
+ "serde_json",
 ]
 
 [[package]]

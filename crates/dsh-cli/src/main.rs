@@ -29,7 +29,8 @@ exec 选项：
   --max-steps <n>              步数上限（默认 16）
   --allow-writes               无人值守时自动批准写操作（默认拒绝）
   --json                       输出 JSON（便于脚本消费）
-  --provider <deepseek|mock>   模型后端（默认 deepseek）
+  --provider <deepseek|mock|selftest>   模型后端（默认 deepseek）
+                                selftest = 按脚本调用一次工具，验证完整链路（无需 key）
 
 环境变量：
   DEEPSEEK_API_KEY             必需（provider=deepseek 时）
@@ -147,8 +148,23 @@ fn cmd_exec(args: &[String]) -> i32 {
         "mock" => Box::new(dsh_llm_deepseek::ScriptedProvider::text_only(
             "（mock provider）本回答由确定性桩产生，未调用真实模型。",
         )),
+        // 链路自检：第 1 步调用 apply_patch 改文件，第 2 步收尾。
+        // 用途是在**无 API key**时验证「模型 → 工具 → 真实落盘」整条链路。
+        // 目标文件由任务描述里的路径决定：`--workspace` 下的 `selftest.txt`。
+        "selftest" => Box::new(dsh_llm_deepseek::ScriptedProvider::scripted(
+            vec![vec![dsh_llm_deepseek::tool_call(
+                "apply_patch",
+                serde_json::json!({
+                    "path": "selftest.txt",
+                    "new": "由 selftest provider 经 apply_patch 写入。\n",
+                }),
+            )]],
+            // 中性措辞：本 provider 不知道工具是否成功（可能被沙箱拦），
+            // 断言"已落盘"会在被拦时给出**与实际不符**的输出。
+            "selftest 脚本执行完毕（工具是否成功见上方 [tool] 行与下方失败原因）。",
+        )),
         other => {
-            eprintln!("[neo] 未知 provider：{other}（可选 deepseek | mock）");
+            eprintln!("[neo] 未知 provider：{other}（可选 deepseek | mock | selftest）");
             return 2;
         }
     };

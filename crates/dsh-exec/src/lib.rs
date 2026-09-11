@@ -82,6 +82,18 @@ pub fn run_task(
         }
     }
 
+    // 失败原因可见性：工具非零退出时，把对应结果的原因打出来。
+    // 没有这一步，用户只看到 `exit -1` 却不知为什么 —— 无头宿主尤其需要。
+    if !opts.json {
+        for m in kernel.messages() {
+            if let Message::ToolResult { name, output, .. } = m {
+                if output.exit_code != 0 && !output.stderr.is_empty() {
+                    log.push(format!("[工具 {name} 失败] {}", output.stderr.trim()));
+                }
+            }
+        }
+    }
+
     // 汇总最终答复
     let final_text: String = kernel
         .messages()

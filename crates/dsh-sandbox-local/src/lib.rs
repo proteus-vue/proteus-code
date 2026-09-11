@@ -23,10 +23,10 @@
 //! 受限档位在未实现平台会**拒绝执行**，而不是降级放行 —— 静默降级会让
 //! "沙箱"变成一句空话。
 
-use dsh_core::{SandboxBackend, SandboxOutcome};
+use dsh_core::{FileOutcome, SandboxBackend, SandboxOutcome};
 use dsh_protocol::SandboxMode;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -80,6 +80,46 @@ fn seatbelt_profile(mode: SandboxMode) -> Option<String> {
     }
 }
 
+/// 判断 `path` 是否落在 `root` 之内（安全判定的核心，故单测覆盖）。
+///
+/// 三个细节，少一个就会漏：
+/// 1. **必须 canonicalize**：`/tmp` 在 macOS 上是 `/private/tmp` 的符号链接，
+///    纯字符串前缀比较会把真实路径判成"在根之外"（反之也能用符号链接逃逸）。
+/// 2. **目标可能还不存在**（新建文件/新建多级目录）：需**上溯到最近已存在的
+///    祖先**再判定。只上溯一层不够 —— `root/a/b/c.txt` 里 `a/b` 都可能待建。
+/// 3. **判定用的是祖先的真实路径**：若某个已存在的中间段是指向根外的符号链接，
+///    canonicalize 会把它解析到根外，从而正确拒绝。
+pub fn is_within(root: &Path, path: &Path) -> bool {
+    let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    match resolve_real(path) {
+        Some(real_target) => real_target.starts_with(&real_root),
+        None => false, // 解析不出来 → 宁可拒绝
+    }
+}
+
+/// 解析出目标的"真实路径"，即使目标本身尚不存在。
+///
+/// 上溯到最近可 canonicalize 的祖先，再把尚未存在的路径段原样拼回。
+fn resolve_real(path: &Path) -> Option<PathBuf> {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return Some(p);
+    }
+    let mut pending: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        let name = cursor.file_name()?.to_os_string();
+        pending.push(name);
+        cursor = cursor.parent()?.to_path_buf();
+        if let Ok(real) = std::fs::canonicalize(&cursor) {
+            let mut out = real;
+            for seg in pending.iter().rev() {
+                out.push(seg);
+            }
+            return Some(out);
+        }
+    }
+}
+
 /// 读一个管道到上限为止，**达到上限立即返回**。
 ///
 /// 为什么立即返回而不是继续 drain：`yes` 这类输出源永不结束，继续 drain
@@ -125,6 +165,39 @@ impl SandboxBackend for LocalSandbox {
         match mode {
             SandboxMode::DangerFullAccess => true,
             _ => cfg!(target_os = "macos"),
+        }
+    }
+
+    fn write_file(&self, mode: SandboxMode, path: &Path, content: &str) -> FileOutcome {
+        // 与命令执行同一套档位判定：读只档一律拒写
+        match mode {
+            SandboxMode::ReadOnly => {
+                return FileOutcome::Denied {
+                    reason: "只读档禁止写文件（沙箱是技术边界，审批策略无法放行）".into(),
+                }
+            }
+            SandboxMode::WorkspaceWrite => {
+                if !is_within(&self.workspace, path) {
+                    return FileOutcome::Denied {
+                        reason: format!(
+                            "路径在工作区之外：{}（工作区 {}）",
+                            path.display(),
+                            self.workspace.display()
+                        ),
+                    };
+                }
+            }
+            SandboxMode::DangerFullAccess => {}
+        }
+
+        if let Some(dir) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                return FileOutcome::Failed { reason: format!("无法创建目录 {}：{e}", dir.display()) };
+            }
+        }
+        match std::fs::write(path, content) {
+            Ok(()) => FileOutcome::Written { bytes: content.len() },
+            Err(e) => FileOutcome::Failed { reason: format!("写入 {} 失败：{e}", path.display()) },
         }
     }
 
@@ -261,6 +334,69 @@ mod tests {
         let (s, truncated) = lossy_tail(full[..2].to_vec(), true);
         assert!(truncated);
         assert_eq!(s, "", "半个字符必须丢弃，而不是产出无效字符串");
+    }
+
+    #[test]
+    fn is_within_handles_symlinked_tmp_and_new_files() {
+        let root = std::env::temp_dir().join("neo-within-root");
+        let _ = std::fs::create_dir_all(&root);
+
+        // 根内已存在文件
+        let inside = root.join("a.txt");
+        std::fs::write(&inside, "x").unwrap();
+        assert!(is_within(&root, &inside), "根内文件应被认作在内");
+
+        // 根内**尚不存在**的文件（新建场景）
+        let new_file = root.join("sub/b.txt");
+        assert!(is_within(&root, &new_file), "父目录存在的新文件应被认作在内");
+
+        // 根外
+        assert!(!is_within(&root, Path::new("/etc/hosts")), "根外文件必须在外");
+
+        // 符号链接逃逸：根内造一个指向 /etc 的链接
+        #[cfg(unix)]
+        {
+            let link = root.join("escape");
+            let _ = std::fs::remove_file(&link);
+            if std::os::unix::fs::symlink("/etc", &link).is_ok() {
+                assert!(
+                    !is_within(&root, &link.join("hosts")),
+                    "经符号链接逃逸到根外必须被识破"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_file_respects_modes() {
+        let root = std::env::temp_dir().join("neo-wf-root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let sb = LocalSandbox::new(&root);
+
+        // 只读档：拒
+        assert!(matches!(
+            sb.write_file(SandboxMode::ReadOnly, &root.join("x"), "y"),
+            FileOutcome::Denied { .. }
+        ));
+
+        // 工作区内：允许
+        let inside = root.join("ok.txt");
+        assert!(matches!(
+            sb.write_file(SandboxMode::WorkspaceWrite, &inside, "hello"),
+            FileOutcome::Written { .. }
+        ));
+        assert_eq!(std::fs::read_to_string(&inside).unwrap(), "hello");
+
+        // 工作区外：拒
+        assert!(matches!(
+            sb.write_file(SandboxMode::WorkspaceWrite, Path::new("/tmp/neo-escape-write.txt"), "x"),
+            FileOutcome::Denied { .. }
+        ));
+        assert!(!Path::new("/tmp/neo-escape-write.txt").exists(), "被拒的写不得落盘");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

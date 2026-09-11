@@ -89,39 +89,111 @@ impl Tool for BashTool {
 
 /// 所有文件变更的唯一通道（T7 铁律）。
 ///
-/// 存在意义：让"文件变更"成为**可审计的单点**。若允许用 shell 重定向写文件，
-/// 变更就会散落在任意命令里，无法做 hunk 级审批，也无法回放。
+/// # 为什么是"精确文本替换"而不是 unified-diff 解析
+///
+/// 1. **语义无歧义**：`old` 必须唯一命中，否则报错。unified-diff 的上下文行
+///    匹配有大量实现细节（忽略空白？偏移多少行？），每处模糊都可能**改错地方**。
+/// 2. **失败响亮**：找不到 `old` 或命中多处 → 明确报错。静默改错文件比拒绝执行
+///    危险得多（模型会以为改成功了）。
+/// 3. **可被模型稳定产出**：要求模型给出行号偏移的 diff 是常见错误源。
+///
+/// # 契约
+///
+/// | 参数 | 行为 |
+/// |---|---|
+/// | `old` 省略 | 整文件写入（不存在则创建，存在则**覆盖**） |
+/// | `old` 给出 | 精确替换。默认要求**恰好命中一次**；`all=true` 时替换全部 |
+///
+/// # 沙箱约束
+///
+/// 写入经 `ctx.write_file` —— 沙箱是唯一变更所有者。因此只读档会拒，
+/// 工作区外的路径也会拒（与 `bash` 受同一套 OS 级约束，无漏洞）。
 pub struct ApplyPatchTool;
+
+/// 统计 `needle` 在 `hay` 中出现的次数（非重叠）。
+fn count_occurrences(hay: &str, needle: &str) -> usize {
+    if needle.is_empty() { return 0; }
+    hay.match_indices(needle).count()
+}
 
 impl Tool for ApplyPatchTool {
     fn name(&self) -> &str { "apply_patch" }
 
     fn describe(&self) -> String {
-        "apply_patch(path, diff): 修改文件的唯一方式。禁止用 shell 重定向写文件。".into()
+        "apply_patch(path, old, new[, all]): 修改文件的唯一方式。\
+         old 省略=整文件写入；给出=精确替换（默认须恰好命中一次）。\
+         禁止用 shell 重定向写文件。"
+            .into()
     }
 
     // 无条件写：本工具的存在就是为了写。
     fn call_kind(&self, _args: &Value) -> CallKind { CallKind::Write }
 
-    fn execute(&self, args: &Value, _ctx: &ToolCtx) -> ToolOutput {
-        let Some(path) = arg_str(args, "path") else {
-            return ToolOutput {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: "缺少参数 path".into(),
-                truncated: false,
-            };
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput {
+        let Some(path_str) = arg_str(args, "path") else {
+            return fail("缺少参数 path");
         };
-        // 诚实边界：diff 的**解析与应用**属 M3 工作，当前仅校验参数形态。
-        // 不返回成功 —— 避免"看起来改了其实没改"的假象。
-        let _ = arg_str(args, "diff");
-        ToolOutput {
-            exit_code: -1,
-            stdout: String::new(),
-            stderr: format!("apply_patch 尚未实现落盘（path={path}）；本原型只固定契约与分类"),
-            truncated: false,
+        let Some(new) = args.get("new").and_then(Value::as_str) else {
+            return fail("缺少参数 new（要写入的内容）");
+        };
+        let old = args.get("old").and_then(Value::as_str);
+        let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+
+        let path = ctx.resolve(path_str);
+
+        // ── 组装最终内容 ───────────────────────────────────────────────
+        let content: String = match old {
+            // 整文件写入
+            None => new.to_string(),
+            // 精确替换
+            Some(old_text) => {
+                if old_text.is_empty() {
+                    return fail("old 不能为空字符串（想整文件写入就省略 old）");
+                }
+                let existing = match std::fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return fail(&format!("无法读取 {}：{e}（替换必须先有文件）", path.display()))
+                    }
+                };
+                let hits = count_occurrences(&existing, old_text);
+                if hits == 0 {
+                    return fail(&format!(
+                        "old 在 {} 中未找到 —— 内容未改动。请先用 bash cat 确认当前文本",
+                        path.display()
+                    ));
+                }
+                if hits > 1 && !all {
+                    return fail(&format!(
+                        "old 在 {} 中命中 {hits} 处，无法确定改哪一处 —— 内容未改动。\
+                         请给出更长的上下文使其唯一，或传 all=true 全部替换",
+                        path.display()
+                    ));
+                }
+                if all {
+                    existing.replace(old_text, new)
+                } else {
+                    existing.replacen(old_text, new, 1)
+                }
+            }
+        };
+
+        // ── 落盘（唯一入口：经沙箱）─────────────────────────────────────
+        match ctx.write_file(&path, &content) {
+            dsh_core::FileOutcome::Written { bytes } => ToolOutput {
+                exit_code: 0,
+                stdout: format!("已写入 {}（{bytes} 字节）", path.display()),
+                stderr: String::new(),
+                truncated: false,
+            },
+            dsh_core::FileOutcome::Denied { reason } => fail(&format!("被沙箱拒绝：{reason}")),
+            dsh_core::FileOutcome::Failed { reason } => fail(&reason),
         }
     }
+}
+
+fn fail(msg: &str) -> ToolOutput {
+    ToolOutput { exit_code: -1, stdout: String::new(), stderr: msg.to_string(), truncated: false }
 }
 
 pub struct RequestUserInputTool;

@@ -7,7 +7,7 @@
 //! 成为可能（Step 3），并提供故意违规的坏后端作为**负向用例**的被试。
 
 use dsh_core::{
-    CallKind, DiffSupport, HostBackend, HostCapabilities, ImageSupport, LoggedRecord,
+    CallKind, DiffSupport, FileOutcome, HostBackend, HostCapabilities, ImageSupport, LoggedRecord,
     ModelDelta, ModelProvider, ModelRequest, ModelStream, PersistenceError, SandboxBackend,
     SandboxOutcome, SessionPersistence, Tool, ToolCtx, ToolInvocation,
 };
@@ -174,6 +174,14 @@ pub struct NoopSandbox;
 
 impl SandboxBackend for NoopSandbox {
     fn supports(&self, mode: SandboxMode) -> bool { matches!(mode, SandboxMode::DangerFullAccess) }
+
+    fn write_file(&self, mode: SandboxMode, _path: &std::path::Path, content: &str) -> FileOutcome {
+        if self.supports(mode) {
+            FileOutcome::Written { bytes: content.len() }
+        } else {
+            FileOutcome::Denied { reason: format!("noop backend cannot enforce {mode:?}") }
+        }
+    }
     fn execute(&self, mode: SandboxMode, command: &str, _limit: usize) -> SandboxOutcome {
         if self.supports(mode) {
             SandboxOutcome::Ran { stdout: format!("ran:{command}"), truncated: false }
@@ -189,6 +197,12 @@ pub struct LeakySandbox;
 
 impl SandboxBackend for LeakySandbox {
     fn supports(&self, _mode: SandboxMode) -> bool { true }
+
+    /// 故意违规：声称支持任意档，却对只读档也照写不误。
+    /// **负向用例的被试** —— 这是最危险的一类实现（安全边界形同虚设）。
+    fn write_file(&self, _mode: SandboxMode, _path: &std::path::Path, content: &str) -> FileOutcome {
+        FileOutcome::Written { bytes: content.len() }
+    }
     fn execute(&self, _mode: SandboxMode, command: &str, _limit: usize) -> SandboxOutcome {
         SandboxOutcome::Ran { stdout: format!("ran:{command}"), truncated: false }
     }

@@ -22,6 +22,10 @@ struct TestSandbox;
 
 impl SandboxBackend for TestSandbox {
     fn supports(&self, _mode: SandboxMode) -> bool { true }
+    fn write_file(&self, _m: SandboxMode, _p: &std::path::Path, content: &str) -> dsh_core::FileOutcome {
+        dsh_core::FileOutcome::Written { bytes: content.len() }
+    }
+
     fn execute(&self, mode: SandboxMode, command: &str, _limit: usize) -> SandboxOutcome {
         if mode == SandboxMode::ReadOnly && command.contains("rm ") {
             return SandboxOutcome::Denied { reason: "read-only 禁止删除".into() };

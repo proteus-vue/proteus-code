@@ -58,6 +58,10 @@ struct FloodSandbox;
 
 impl SandboxBackend for FloodSandbox {
     fn supports(&self, _m: SandboxMode) -> bool { true }
+    fn write_file(&self, _m: SandboxMode, _p: &std::path::Path, content: &str) -> dsh_core::FileOutcome {
+        dsh_core::FileOutcome::Written { bytes: content.len() }
+    }
+
     fn execute(&self, _m: SandboxMode, _cmd: &str, _limit: usize) -> SandboxOutcome {
         // 4 MB 输出（真实上限是 256 KB）
         SandboxOutcome::Ran { stdout: "x".repeat(4 * 1024 * 1024), truncated: false }
@@ -69,6 +73,10 @@ struct MultibyteSandbox;
 
 impl SandboxBackend for MultibyteSandbox {
     fn supports(&self, _m: SandboxMode) -> bool { true }
+    fn write_file(&self, _m: SandboxMode, _p: &std::path::Path, content: &str) -> dsh_core::FileOutcome {
+        dsh_core::FileOutcome::Written { bytes: content.len() }
+    }
+
     fn execute(&self, _m: SandboxMode, _cmd: &str, _limit: usize) -> SandboxOutcome {
         // 每个「好」是 3 字节，共 3000 字节；上限设 10 字节会切在第 3 个字符中间
         SandboxOutcome::Ran { stdout: "好".repeat(1000), truncated: false }

@@ -166,6 +166,20 @@ impl ToolCtx<'_> {
             denied => denied,
         }
     }
+
+    /// 经沙箱写文件。**工具修改文件的唯一入口。**
+    pub fn write_file(&self, path: &std::path::Path, content: &str) -> FileOutcome {
+        self.sandbox.write_file(self.mode, path, content)
+    }
+
+    /// 把工具给的路径解析成绝对路径（相对路径按工作区解析）。
+    ///
+    /// 单独抽出来是因为**路径解析必须与沙箱判定用同一套语义** ——
+    /// 若工具自己拼路径、沙箱另算一遍，两者对"这是哪个文件"的答案可能不一致。
+    pub fn resolve(&self, path: &str) -> std::path::PathBuf {
+        let p = std::path::Path::new(path);
+        if p.is_absolute() { p.to_path_buf() } else { self.cwd.join(p) }
+    }
 }
 
 /// 按字节上限截断，且**不切开 UTF-8 码点**。
@@ -240,6 +254,29 @@ pub trait SandboxBackend: Send + Sync {
     /// 实现必须在**读取过程中**就停止累积（边读边丢），否则内存早已被吃掉，
     /// 再截断毫无意义。这是"有界"从约定变成契约的关键。
     fn execute(&self, mode: SandboxMode, command: &str, limit_bytes: usize) -> SandboxOutcome;
+
+    /// 在沙箱策略下写文件。**所有文件变更都必须经此。**
+    ///
+    /// # 为什么文件写入也属于沙箱，而不是"工具自己 std::fs"
+    ///
+    /// 若 `apply_patch` 直接调 `std::fs`，就会出现一个漏洞：
+    /// **同一个"写"语义，经 shell 走 OS 沙箱、经工具却不受约束。**
+    /// 那么 `workspace-write` 档就成了半张空头支票 —— 用 `apply_patch`
+    /// 可以写到工作区外，而用 `bash` 不行。
+    ///
+    /// 把写入放进沙箱契据，使「沙箱是唯一的变更所有者」成为**结构事实**：
+    /// 工具想改文件没有别的入口，实现也无从绕过策略。
+    fn write_file(&self, mode: SandboxMode, path: &std::path::Path, content: &str) -> FileOutcome;
+}
+
+/// 一次文件写入的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileOutcome {
+    Written { bytes: usize },
+    /// 策略拒绝（结构化事实，含原因）。
+    Denied { reason: String },
+    /// 策略允许但底层失败（IO 错误）。
+    Failed { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

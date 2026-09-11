@@ -348,26 +348,60 @@ mod tests {
     }
 }
 
-// ─────────────── 零网络的确定性 provider（供离线 / CLI 自检）───────────────
+// ─────────────── 零网络的确定性 provider（离线模式 / 链路自检）───────────
 
-/// 只回一句文本的确定性 provider。
+/// 脚本化 provider：按**步**给出预定响应。
 ///
-/// 存在理由：`neo exec --provider mock` 必须能在**无 API key、无网络**时跑通，
-/// 用于验证「装配 → 内核 → 沙箱 → 落盘」这条链路本身，而不消耗真实配额。
-/// 它不是"测试替身"—— `dsh-mock` 才是；这是**面向用户的离线模式**。
+/// 两种用途，语义不同：
+/// - `text_only(text)`：离线模式。只回一句话，用于不联网时验证
+///   「装配 → 内核 → 沙箱 → 落盘」这条链路本身。
+/// - `scripted(steps)`：**链路自检**。按预定脚本调用工具（如 apply_patch），
+///   用于在无 API key 的前提下验证「模型 → 工具 → 真实落盘」的完整循环。
+///
+/// 步序推断是确定性的：按请求里 assistant 消息的条数定位脚本下标。
+/// 因此同一请求序列必得同一输出（T2 可回放）。
 pub struct ScriptedProvider {
-    pub response: String,
+    pub script: Vec<Vec<ModelDelta>>,
+    pub tail: String,
 }
 
 impl ScriptedProvider {
-    pub fn text_only(text: &str) -> Self { Self { response: text.to_string() } }
+    pub fn text_only(text: &str) -> Self {
+        Self { script: Vec::new(), tail: text.to_string() }
+    }
+
+    /// 按步给出响应；每一步用完后回落到 `tail`。
+    pub fn scripted(steps: Vec<Vec<ModelDelta>>, tail: &str) -> Self {
+        Self { script: steps, tail: tail.to_string() }
+    }
 }
 
 impl ModelProvider for ScriptedProvider {
     fn name(&self) -> &str { "mock" }
-    fn stream(&self, _req: &ModelRequest<'_>) -> ModelStream {
-        Box::new(vec![ModelDelta::Text(self.response.clone())].into_iter())
+
+    fn stream(&self, req: &ModelRequest<'_>) -> ModelStream {
+        let step = req
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Message::Assistant { .. }))
+            .count();
+        let deltas = self
+            .script
+            .get(step)
+            .cloned()
+            .unwrap_or_else(|| vec![ModelDelta::Text(self.tail.clone())]);
+        Box::new(deltas.into_iter())
     }
+}
+
+/// 便利构造：一次工具调用增量（供 `--provider selftest` 的脚本使用）。
+pub fn tool_call(name: &str, args: serde_json::Value) -> ModelDelta {
+    ModelDelta::ToolCall(ToolInvocation {
+        // 确定性 id：自检模式必须可回放，不能用随机数
+        id: format!("selftest-{name}"),
+        name: name.to_string(),
+        arguments: args,
+    })
 }
 
 /// 用生产同一套帧构造，对任意 host/path 发一个 POST —— 供集成测试验证帧正确性。
