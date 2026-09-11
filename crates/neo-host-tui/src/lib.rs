@@ -1089,8 +1089,14 @@ impl Screen<'_> {
 
         // 设置视图：占满整屏
         if let Some(sections) = self.settings {
-            self.draw_settings(&mut g, sections, &mut regions);
+            // 先铺背景纹理，再画内容 —— **顺序是唯一正确的**。
+            //
+            // `fill_background` 只填 `Tone::None`（空）格、不覆盖已有内容，
+            // 所以必须在内容之前调用：反过来的话整屏都已有内容，
+            // 纹理会一个格子都画不出来（表现为"点了背景只换了名字、画面没变"）。
+            // 主界面几处渲染都是这个顺序，设置页曾写反。
             g.fill_background(self.appearance.background, self.custom_background);
+            self.draw_settings(&mut g, sections, &mut regions);
             let mut out = format!("{ESC}[H{ESC}[2J");
             out.push_str(&g.lines(&p).join("\r\n"));
             out.push_str(&format!("{ESC}[?25l"));
@@ -2800,6 +2806,8 @@ pub enum SettingAction {
     Rewind,
     /// 清空转录
     NewSession,
+    /// 真·新建会话（换 session id + 落新日志文件；旧会话可 /sessions 切回）
+    NewSessionReal,
     /// 查看 diff
     DiffViewer,
     /// 开 / 关提醒
@@ -2991,8 +2999,10 @@ pub fn settings_sections(info: &SettingsInfo) -> Vec<SettingSection> {
                 },
                 SettingRow {
                     label: "新对话".into(),
-                    value: "清空转录".into(),
-                    action: Some(SettingAction::NewSession),
+                    // 说明是"新建会话"而不是"清空屏幕"：只清转录会让内核
+                    // 仍然记得全部历史，用户以为开了新对话、模型却还在旧上下文里。
+                    value: "新建会话".into(),
+                    action: Some(SettingAction::NewSessionReal),
                     readonly_note: "",
                 },
             ],
@@ -3645,7 +3655,7 @@ fn open_settings(
         mode: about.mode_short.clone(),
         workspace: about.workspace.clone(),
         branch: about.branch.clone(),
-        session: about.session.clone(),
+        session: sessions.current(),
         context_limit: about.context_limit,
         theme: theme_name.as_str().to_string(),
         details: display.expanded,
@@ -3863,7 +3873,7 @@ fn idle_or_approval(outstanding: &Option<String>) -> String {
 /// `submit` 由调用方注入（通常是 `kernel.submit`），这样本 crate
 /// **不依赖 neo-orchestration / L3 之上的任何东西**，只依赖契据。
 pub fn run<F>(
-    about: About,
+    mut about: About,
     trust_workspace: Option<std::path::PathBuf>,
     mut theme_name: theme::ThemeName,
     sessions: &mut dyn SessionControl,
@@ -4159,6 +4169,19 @@ where
                                         status = "新对话（已清空转录；文件改动不受影响）"
                                             .to_string();
                                     }
+                                    // 与 `/new` 走**同一条**路径（handle_session_effect），
+                                    // 不在这里复制一份 —— 两处各写一遍必然漂移。
+                                    SettingAction::NewSessionReal => {
+                                        if let Some(msg) = handle_session_effect(
+                                            &Effect::NewSessionReal,
+                                            sessions,
+                                            &mut events,
+                                            &mut view_state,
+                                        ) {
+                                            status = msg;
+                                        }
+                                        settings_state = None;
+                                    }
                                     SettingAction::DiffViewer => {
                                         open_diff_viewer(&events, &mut diff_viewer);
                                         settings_state = None;
@@ -4215,25 +4238,38 @@ where
                                 }
                                 // 刷新设置页上的值（改完之后数字/状态要跟着变）。
                                 // **不复位光标** —— 复位会让画面像"闪一下没反应"。
-                                open_settings(
-                                    &mut settings_state,
-                                    &about,
-                                    &events,
-                                    &mut display,
-                                    sidebar_open,
-                                    mouse_on,
-                                    clipboard.as_ref(),
-                                    notify_backend.as_ref(),
-                                    notify_enabled,
-                                    notify_sound,
+                                //
+                                // 只在仍然停在设置页时刷新：Theme/Model/Session 三个
+                                // Picker 动作刚把 settings_state 置 None（准备开弹窗），
+                                // 无条件刷新会把它**又打开**，弹窗永远出不来 ——
+                                // 表现为"选主题/选模型回车没反应"（其实是弹窗被盖掉了）。
+                                if settings_state.is_some() {
+                                    open_settings(
+                                        &mut settings_state,
+                                        &about,
+                                        &events,
+                                        &mut display,
+                                        sidebar_open,
+                                        mouse_on,
+                                        clipboard.as_ref(),
+                                        notify_backend.as_ref(),
+                                        notify_enabled,
+                                        notify_sound,
 theme_name,
 current_appearance,
 custom_bg.is_some(),
-                                    sessions,
-                                );
+                                        sessions,
+                                    );
+                                }
                 }
             }
             }
+            // 设置分支自己渲染并 `continue`，走不到下面那句统一的 `dirty = true`。
+            // 不在这里置位的话：关掉设置（或切换模型/会话）后主界面**不会重绘**，
+            // 屏幕上留着的还是设置页那一帧 —— 表现为"退出了却还看到旧画面，
+            // 过一会儿才更新"（脱节）。任何在设置页里发生的输入都可能改了状态，
+            // 所以统统一置位，代价只是一次重绘。
+            dirty = true;
             continue;
         }
 
@@ -4580,6 +4616,10 @@ custom_bg.is_some(),
                                     }) {
                                         Ok(produced) => {
                                             events.extend(produced);
+                                            // 同步 About：模型名是从 CLI 注入的快照，
+                                            // 不更新的话设置页/弹窗会一直显示启动时那个模型
+                                            // （切换成功了但界面说旧名字 = 两处各说一套）。
+                                            about.current_model = name.clone();
                                             status = format!("已切换到 {name}");
                                         }
                                         Err(e) => status = format!("切换失败：{e}"),
@@ -4816,6 +4856,7 @@ sessions,
                                         }) {
                                             Ok(produced) => {
                                                 events.extend(produced);
+                                                about.current_model = name.clone();
                                                 status = format!("已切换到 {name}");
                                             }
                                             Err(e) => status = format!("切换失败：{e}"),
@@ -5318,6 +5359,7 @@ sessions,
                                         }) {
                                             Ok(produced) => {
                                                 events.extend(produced);
+                                                about.current_model = name.clone();
                                                 status = format!("已切换到 {name}");
                                             }
                                             Err(e) => status = format!("切换失败：{e}"),
@@ -7124,6 +7166,136 @@ mod tests {
         assert_eq!(format_unix_utc_minute(1_709_251_200), "2024-03-01 00:00");
         // 世纪闰年规则：2000-02-29
         assert_eq!(format_unix_utc_minute(951_782_400), "2000-02-29 00:00");
+    }
+
+    #[test]
+    fn settings_page_paints_the_background_texture() {
+        // 背景纹理只填 Tone::None 的格子，因此**必须在画内容之前**调用。
+        // 曾写反（先画内容再填纹理）→ 一个格子都填不上，
+        // 表现为"设置页里点背景只换了名字、画面没变化"。
+        let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
+            background: "stars".into(), logo: "large".into(), custom_background: false,
+            model_count: 3, session_count: 2,
+            version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
+            workspace: "/w".into(), branch: "".into(), session: "s".into(),
+            context_limit: 0, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 0, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let ed = editor::Editor::new();
+        let render_with = |bg: appearance::Background| {
+            let mut ap = appearance::Appearance::default();
+            ap.background = bg;
+            Screen {
+                cols: 120, rows: 36, facts: &[], input: &ed, status: "",
+                awaiting_input: false, show_cursor: false,
+                about: Some(&about()), trust: None,
+                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                sidebar: false, view: None, diff_viewer: None, whichkey: None,
+                display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                appearance: ap, custom_background: None,
+            }
+            .render()
+        };
+        // 星场应真的画出字符：与"无纹理"相比，画面必须不同
+        assert_ne!(
+            render_with(appearance::Background::Stars),
+            render_with(appearance::Background::None),
+            "设置页必须真的应用背景纹理（点了背景画面要变）"
+        );
+    }
+
+    #[test]
+    fn settings_picker_actions_are_not_swallowed_by_refresh() {
+        // 记账式断言：这三项会开弹窗（把 settings_state 置 None），
+        // 之后的"刷新设置页"必须**跳过**，否则设置页被又打开、弹窗永远出不来
+        // —— 表现就是"选主题/选模型回车没反应"。
+        // 这里直接检查值：一旦有人把它们改回"不开弹窗"的变体，测试会提醒。
+        let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
+            background: "stars".into(), logo: "large".into(), custom_background: false,
+            model_count: 3, session_count: 2,
+            version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
+            workspace: "/w".into(), branch: "".into(), session: "s".into(),
+            context_limit: 0, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 0, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let find = |label: &str| {
+            secs.iter()
+                .flat_map(|s| s.rows.iter())
+                .find(|r| r.label == label)
+                .and_then(|r| r.action)
+        };
+        assert_eq!(find("主题"), Some(SettingAction::ThemePicker));
+        assert_eq!(find("模型"), Some(SettingAction::ModelPicker));
+        assert_eq!(find("会话"), Some(SettingAction::SessionPicker));
+    }
+
+    #[test]
+    fn settings_new_session_creates_a_real_session() {
+        // "新对话"必须是**真新建会话**，不能只是清空转录：
+        // 只清屏幕的话内核仍记得全部历史，用户以为开了新对话、
+        // 模型却还在旧上下文里 —— 这是最危险的那种错觉。
+        let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
+            background: "stars".into(), logo: "large".into(), custom_background: false,
+            model_count: 3, session_count: 2,
+            version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
+            workspace: "/w".into(), branch: "".into(), session: "s".into(),
+            context_limit: 0, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 0, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let row = secs
+            .iter()
+            .flat_map(|s| s.rows.iter())
+            .find(|r| r.label == "新对话")
+            .expect("设置页应有'新对话'项");
+        assert_eq!(
+            row.action,
+            Some(SettingAction::NewSessionReal),
+            "必须是真新建会话（而非只清空转录）"
+        );
+    }
+
+    #[test]
+    fn settings_session_value_follows_live_session_not_stale_about() {
+        // 会话名必须取自 SessionControl 的**当前值**：About.session 是启动快照，
+        // 用了它就会出现"切换了会话，设置页还显示旧会话"（脱节）。
+        struct FakeSessions;
+        impl SessionControl for FakeSessions {
+            fn list(&self) -> Vec<(String, String, usize)> { vec![] }
+            fn switch(&mut self, _id: &str) -> Result<Vec<EventMsg>, String> { Ok(vec![]) }
+            fn create(&mut self) -> Result<String, String> { Ok("new".into()) }
+            fn delete(&mut self, _id: &str) -> Result<bool, String> { Ok(false) }
+            fn current(&self) -> String { "LIVE-SESSION".into() }
+        }
+        let mut sess = FakeSessions;
+        let a = about(); // 它的 session 字段是启动时的旧值
+        let mut slot = None;
+        let mut cursor = 0;
+        open_settings_fresh(
+            &mut slot, &mut cursor, &a, &[], &ToolDisplay::default(), true, true,
+            &neo_platform::NoopClipboard::new("test"), &neo_platform::NoopNotify::new("test"),
+            false, true, theme::ThemeName::Neo, appearance::Appearance::default(),
+            false, &mut sess,
+        );
+        let value = slot
+            .expect("应生成设置分节")
+            .iter()
+            .flat_map(|s| s.rows.iter())
+            .find(|r| r.label == "会话 ID")
+            .map(|r| r.value.clone())
+            .unwrap();
+        assert_eq!(
+            value, "LIVE-SESSION",
+            "会话 ID 必须取自 SessionControl 的实时值，而不是 About 的启动快照"
+        );
     }
 
     #[test]
