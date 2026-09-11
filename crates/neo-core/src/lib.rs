@@ -157,7 +157,9 @@ impl Compactor for NoCompactor {
 ///
 /// 旧版用 `if call == "bash"` 判断，脆弱：新增工具就漏判、改名就失效。
 /// 类别是**工具自己的知识**，应由工具声明。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `PartialOrd, Ord` 是为了放进 `BTreeSet`（会话级"总是允许"的类别集合）——
+// 顺序本身无意义，只需要一个确定的序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CallKind {
     /// 只读（不改变本地状态）
     Read,
@@ -588,6 +590,17 @@ pub struct Kernel {
     usage_in: u64,
     usage_out: u64,
     pending: Option<PendingApproval>,
+    /// 本会话内**永久放行**的调用类别（`Decision::AllowAlways` 的结果）。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 之前 `AllowAlways` 与 `Allow` 走同一分支 —— 协议声明了这个语义，
+    /// 内核却忽略它，于是**每个工具调用都重新问一遍**。用户连续回答十几次
+    /// `y` 仍被反复询问（真实反馈），因为每次都是新的门禁判定，没有会话级记忆。
+    ///
+    /// 只记**类别**（Read/Write/Network/Interactive），不记具体命令：
+    /// 记具体命令等于把"放行这一次"伪装成"放行这类"，而用户点的是后者。
+    granted: std::collections::BTreeSet<CallKind>,
     /// 技能注册表（`$skill` 引用的解析来源）。构造时注入，缺省为空。
     skills: crate::skills::SkillRegistry,
     /// 项目指令（AGENTS.md 级联）。构造时注入，缺省为空。
@@ -638,6 +651,7 @@ impl Kernel {
             usage_in: 0,
             usage_out: 0,
             pending: None,
+            granted: std::collections::BTreeSet::new(),
             skills: crate::skills::SkillRegistry::new(),
             instructions: crate::instructions::Instructions::default(),
             instructions_logged: false,
@@ -793,7 +807,14 @@ impl Kernel {
                 self.state = KernelState::Idle;
 
                 match decision {
-                    Decision::Allow | Decision::AllowAlways => self.execute_one(&call)?,
+                    Decision::Allow => self.execute_one(&call)?,
+                    Decision::AllowAlways => {
+                        // 记住**类别**：之后同类调用不再问。
+                        // 若只记这一条命令，用户下次仍会被问 —— 那就等于没实现。
+                        let kind = self.classify(&call);
+                        self.granted.insert(kind);
+                        self.execute_one(&call)?;
+                    }
                     Decision::Deny => {
                         let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: -1, stdout: String::new(), stderr: String::new(), truncated: false };
                         self.emit_and_log(&ev)?;
@@ -1014,7 +1035,15 @@ impl Kernel {
         for index in start..calls.len() {
             let call = calls[index].clone();
             let kind = self.classify(&call);
-            match gate(kind, self.resolution()) {
+            // 会话级放行优先于门禁：用户对这类调用说过"总是允许"。
+            // **沙箱硬边界仍是硬边界** —— 只读档下写入会被 gate 拒，
+            // 但这里要先看门禁，不能因为说过"总是允许"就越过沙箱拒绝。
+            let decision = gate(kind, self.resolution());
+            let decision = match decision {
+                GateDecision::Ask { .. } if self.granted.contains(&kind) => GateDecision::Allow,
+                other => other,
+            };
+            match decision {
                 GateDecision::Allow => self.execute_one(&call)?,
                 GateDecision::Deny { reason } => {
                     let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: -1, stdout: String::new(), stderr: String::new(), truncated: false };

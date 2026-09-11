@@ -1366,3 +1366,129 @@ fn instructions_roundtrip_restores_system_prompt() {
     k2.rebuild_from_log(&logs);
     assert_eq!(k2.system_prompt(), original_prompt, "回放必须还原同一份系统提示词");
 }
+
+// ─────────────── 会话级"总是允许"（Decision::AllowAlways）───────────────
+
+#[test]
+fn allow_always_stops_re_prompting_for_the_same_kind() {
+    // 真实反馈：用户连按十几次 y 仍被反复询问 —— 因为 AllowAlways 与 Allow
+    // 走同一分支，内核没有会话级记忆，每次调用都重新判定，必然再问。
+    // 这条测试钉住"说了总是允许之后，同类调用不再问"。
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(RecordingTool { seen: seen.clone() }));
+
+    // 三个**写**类调用（rm 前缀由 MockTool::call_kind 判为 Write）
+    let script = vec![
+        vec![
+            tool_call("w1", "bash", serde_json::json!({"cmd": "rm -rf /tmp/a"})),
+            tool_call("w2", "bash", serde_json::json!({"cmd": "rm -rf /tmp/b"})),
+            tool_call("w3", "bash", serde_json::json!({"cmd": "rm -rf /tmp/c"})),
+        ],
+        vec![ModelDelta::Text("done".into())],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        r,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+
+    let events = k.submit(Op::UserTurn { text: "clean".into(), refs: vec![] }).unwrap();
+    let ask_id = events
+        .iter()
+        .find_map(|e| match e {
+            EventMsg::ApprovalRequest { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .expect("应发出 ApprovalRequest");
+
+    // 回答"总是允许" → 后续同类调用应**直接执行、不再问**
+    let resumed = k
+        .submit(Op::Approve { id: ask_id, decision: Decision::AllowAlways })
+        .unwrap();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            "rm -rf /tmp/a".to_string(),
+            "rm -rf /tmp/b".to_string(),
+            "rm -rf /tmp/c".to_string()
+        ],
+        "说了总是允许后，同类调用应一次问完、全部执行"
+    );
+    assert!(
+        !resumed.iter().any(|e| matches!(e, EventMsg::ApprovalRequest { .. })),
+        "恢复后不得再发审批请求"
+    );
+    assert!(matches!(k.state(), KernelState::Idle));
+}
+
+#[test]
+fn allow_once_still_re_prompts_for_the_next_call() {
+    // 对照组：`Allow`（只批这一次）**必须**继续问 —— 否则"总是允许"
+    // 与"批准一次"就没有区别了（那等于静默放行）。
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(RecordingTool { seen: seen.clone() }));
+
+    let script = vec![
+        vec![
+            tool_call("w1", "bash", serde_json::json!({"cmd": "rm -rf /tmp/a"})),
+            tool_call("w2", "bash", serde_json::json!({"cmd": "rm -rf /tmp/b"})),
+        ],
+        vec![ModelDelta::Text("done".into())],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        r,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+
+    let events = k.submit(Op::UserTurn { text: "x".into(), refs: vec![] }).unwrap();
+    let id1 = events
+        .iter()
+        .find_map(|e| match e {
+            EventMsg::ApprovalRequest { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .expect("第一次应问");
+
+    let after = k.submit(Op::Approve { id: id1, decision: Decision::Allow }).unwrap();
+    let id2 = after.iter().find_map(|e| match e {
+        EventMsg::ApprovalRequest { id, .. } => Some(id.clone()),
+        _ => None,
+    });
+    assert!(id2.is_some(), "只批一次时，第二个写调用应**再次**询问");
+    assert_eq!(*seen.lock().unwrap(), vec!["rm -rf /tmp/a".to_string()], "第二个还没批，不该执行");
+}
+
+#[test]
+fn allow_always_never_bypasses_the_sandbox_hard_boundary() {
+    // 沙箱是**硬边界**：即便用户说过"总是允许写"，只读档下写入仍必须被拒。
+    // 会话级放行只作用于"审批"这一层，不得越过 gate 的 Deny。
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(RecordingTool { seen: seen.clone() }));
+
+    // Plan 档 = 只读沙箱 + OnRequest 审批
+    let script = vec![
+        vec![tool_call("w1", "bash", serde_json::json!({"cmd": "rm -rf /tmp/a"}))],
+        vec![ModelDelta::Text("done".into())],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        r,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Plan,
+    );
+
+    let events = k.submit(Op::UserTurn { text: "x".into(), refs: vec![] }).unwrap();
+    // 只读档下写入被 gate 直接拒（不发审批请求）
+    assert!(
+        !events.iter().any(|e| matches!(e, EventMsg::ApprovalRequest { .. })),
+        "只读档应直接拒绝，不该进入审批"
+    );
+    assert!(seen.lock().unwrap().is_empty(), "沙箱拒绝后不得执行");
+}

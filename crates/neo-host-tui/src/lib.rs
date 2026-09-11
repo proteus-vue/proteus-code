@@ -596,6 +596,8 @@ pub struct Screen<'a> {
     /// 观感是"两个界面来回跳"。内联展开让候选长在那一行下面 ——
     /// 全程留在同一页里，移动和选择都在原上下文完成。
     pub settings_picker: Option<&'a SettingsPicker>,
+    /// 审批对话框（模态卡片）。`Some` = 显示并接管输入。
+    pub approval: Option<&'a ApprovalPrompt>,
     /// 设置页里的表单（新增/编辑服务商）。`Some` = 显示表单并接管输入。
     pub settings_form: Option<&'a SettingsForm>,
     /// 危险操作的确认提示（如删除服务商）。`Some` = 显示并等待 y/n。
@@ -604,6 +606,44 @@ pub struct Screen<'a> {
     pub appearance: appearance::Appearance,
     /// 自定义背景字符画（`NEO_TUI_BG_FILE` 读入；优先于内置纹理）
     pub custom_background: Option<&'a Vec<String>>,
+}
+
+/// 审批对话框：把"需要你决定"做成**模态卡片**，而不是在输入框里打字。
+///
+/// # 为什么不用"输入框里回 y/n"
+///
+/// 之前审批是"输入框变黄 + 提示 y/n"，用户要在对话框外打字 —— 观感与
+/// opencode/mimo 那种"弹出确认框、↑↓ 选、回车确认"差很远（用户明确反馈）。
+/// 而且 `y` 需要敲进输入框再回车，不是一次按键。
+///
+/// 现在做成居中卡片：显示"要做什么"（工具与参数）+ 改动预览 + 三个选项，
+/// ↑↓ 选择 / 回车确认，y/n/a 作为快捷键直接生效。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalPrompt {
+    /// 这次要审批的说明（内核给的 detail）
+    pub detail: String,
+    /// 要执行的调用摘要（工具名 + 关键参数），让用户知道"批的是什么"
+    pub call: String,
+    /// 改动预览（路径, unified diff）—— 有则显示
+    pub diff: Option<(String, String)>,
+    /// 0 = 批准一次 · 1 = 总是允许这类 · 2 = 拒绝
+    pub selected: usize,
+}
+
+fn ap_choices_len() -> usize { ApprovalPrompt::CHOICES.len() }
+
+impl ApprovalPrompt {
+    /// 三个选项的文案（`selected` 是下标）。
+    pub const CHOICES: [&'static str; 3] =
+        ["批准一次（y）", "总是允许这类（a）", "拒绝（n）"];
+
+    pub fn choice_at(&self) -> neo_protocol::Decision {
+        match self.selected {
+            0 => neo_protocol::Decision::Allow,
+            1 => neo_protocol::Decision::AllowAlways,
+            _ => neo_protocol::Decision::Deny,
+        }
+    }
 }
 
 /// 信任对话框状态。
@@ -1166,6 +1206,11 @@ impl Screen<'_> {
         // which-key 覆盖层：放在正文区右下角，不压输入框（用户还要继续打字）
         if let Some(groups) = self.whichkey {
             self.draw_whichkey(&mut g, groups, chrome_top);
+        }
+        // 审批对话框：**最上层模态**。它要求用户先回答才能继续，
+        // 所以画在弹窗/which-key 之上（那些是"看一眼"的信息，不该盖住提问）。
+        if let Some(ap) = self.approval {
+            self.draw_approval(&mut g, ap, chrome_top);
         }
 
         // 侧栏最后画：它占的是自己的列区，且要求不被正文侵入
@@ -1825,6 +1870,80 @@ impl Screen<'_> {
         cursor
     }
 
+    /// 审批对话框：居中的模态卡片。
+    ///
+    /// 内容刻意分三层，按"用户判断需要什么"排序：
+    /// 1. **要做什么**（工具 + 参数摘要）—— 没有它用户是在盲批；
+    /// 2. **改动预览**（若有）—— 决定放不放行的关键信息；
+    /// 3. 三个选项（↑↓ 选、回车确认，y/a/n 直接生效）。
+    fn draw_approval(&self, g: &mut Grid, ap: &ApprovalPrompt, chrome_top: usize) {
+        let w = self.cols.saturating_sub(8).min(84).max(30);
+        // 预览最多占多少行：留出标题/调用/选项/边框的空间
+        let diff_budget = 10usize;
+        let mut body: Vec<(String, Tone)> = Vec::new();
+        body.push((format!("要执行：{}", ap.call), Tone::Text));
+        if let Some((path, diff)) = &ap.diff {
+            body.push((format!("改动：{path}"), Tone::Info));
+            for l in diff.lines().take(diff_budget) {
+                body.push((l.to_string(), Tone::Muted));
+            }
+            let shown = diff.lines().count();
+            if shown > diff_budget {
+                body.push((format!("… 共 {shown} 行（d 看完整 diff）"), Tone::Border));
+            }
+        }
+        let h = (body.len() + ap_choices_len() + 4).min(chrome_top.saturating_sub(1));
+        if h < 5 || self.cols < 30 {
+            return;
+        }
+        let top = (chrome_top.saturating_sub(h)) / 2;
+        let left = (self.cols.saturating_sub(w)) / 2;
+        let inner = w.saturating_sub(4);
+
+        // 先清整块矩形：不清的话正文会从空隙里透出来（弹窗踩过同样的坑）
+        for r in top..(top + h).min(self.rows) {
+            g.blank(r, left, (left + w).min(self.cols.saturating_sub(1)), Tone::Text);
+        }
+        let bar = "─".repeat(w.saturating_sub(2));
+        let bd = Tone::Warning; // 需要用户决定 —— 用警告色框住
+        g.put(top, left, "╭", bd);
+        g.put(top, left + 1, &bar, bd);
+        g.put(top, left + w - 1, "╮", bd);
+        let title = width::truncate_to_width("需要审批", inner).to_string();
+        g.put(top, left + 2, &title, Tone::Warning);
+
+        let mut row = top + 1;
+        for (text, tone) in &body {
+            if row >= top + h - ap_choices_len() - 1 {
+                break;
+            }
+            g.put(row, left, "│", bd);
+            let shown = width::truncate_to_width(text, inner).to_string();
+            g.put(row, left + 2, &shown, *tone);
+            g.put(row, left + w - 1, "│", bd);
+            row += 1;
+        }
+        // 选项
+        let choices = ApprovalPrompt::CHOICES;
+        for (i, c) in choices.iter().enumerate() {
+            if row >= top + h - 1 {
+                break;
+            }
+            let sel = i == ap.selected;
+            let mark = if sel { "❯ " } else { "  " };
+            let tone = if sel { Tone::Primary } else { Tone::Muted };
+            g.put(row, left, "│", bd);
+            g.put(row, left + 2, mark, tone);
+            g.put(row, left + 4, c, tone);
+            g.put(row, left + w - 1, "│", bd);
+            row += 1;
+        }
+        let br = (top + h).min(self.rows.saturating_sub(1));
+        g.put(br, left, "╰", bd);
+        g.put(br, left + 1, &bar, bd);
+        g.put(br, left + w - 1, "╯", bd);
+    }
+
     /// which-key 覆盖层：右下的键位提示卡片。
     ///
     /// 放在**右下**而不是居中：用户通常还在打字，居中会盖住刚看的内容。
@@ -2276,7 +2395,7 @@ impl Screen<'_> {
                     _ => "输入任务".to_string(),
                 };
                 let hint = if self.awaiting_input {
-                    "y 批准 / n 拒绝 > ".to_string()
+                    "y 批准 / a 总是 / n 拒绝 > ".to_string()
                 } else {
                     format!("输入任务… 例：{ex}")
                 };
@@ -2284,7 +2403,7 @@ impl Screen<'_> {
                 g.put(r, left + 2, &hint, Tone::Muted);
             } else {
                 let prefix = if self.awaiting_input && i == first {
-                    "y 批准 / n 拒绝 > ".to_string()
+                    "y 批准 / a 总是 / n 拒绝 > ".to_string()
                 } else {
                     String::new()
                 };
@@ -2369,7 +2488,7 @@ impl Screen<'_> {
             // 光标位置（1 基）：落在实际光标行列上，而不是"文本末尾"。
             let vis_row = crow.saturating_sub(first).min(shown.saturating_sub(1));
             let prefix_w = if self.awaiting_input && crow == first {
-                width::display_width("y 批准 / n 拒绝 > ")
+                width::display_width("y 批准 / a 总是 / n 拒绝 > ")
             } else {
                 0
             };
@@ -2536,10 +2655,82 @@ pub fn latest_approval_id(events: &[EventMsg]) -> Option<String> {
 /// 审批应答解析：y/Y/yes 批准，n/N/no 拒绝，其它为 None（**不提交**）。
 ///
 /// 无法识别时不提交很重要：若把随机输入当"批准"，等于悄悄放水。
-pub fn parse_approval_answer(s: &str) -> Option<bool> {
+/// 从事件流里构造审批框内容（最后一个 ApprovalRequest + 它的调用与预览）。
+///
+/// 内核会把"待审批的调用"和它的改动预览一起发出来；这里把它们聚成
+/// 一张卡片的内容 —— 用户要看到"批的是什么"，而不是只有一句
+/// "写入类调用需确认"。
+fn build_approval_prompt(events: &[EventMsg]) -> Option<ApprovalPrompt> {
+    let detail = events.iter().rev().find_map(|e| match e {
+        EventMsg::ApprovalRequest { detail, .. } => Some(detail.clone()),
+        _ => None,
+    })?;
+    // 紧邻的 PatchProposed 是本次要批的改动（内核在审批前发出）
+    let diff = events.iter().rev().find_map(|e| match e {
+        EventMsg::PatchProposed { path, diff } => Some((path.clone(), diff.clone())),
+        _ => None,
+    });
+    // 最后一个工具调用 = 待批的那个（参数摘要让用户知道在批什么）
+    let call = events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            EventMsg::ToolCallBegin { name, arguments, .. } => {
+                let brief = arguments
+                    .get("cmd")
+                    .or_else(|| arguments.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(if brief.is_empty() { name.clone() } else { format!("{name} {brief}") })
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| "(未知调用)".to_string());
+    Some(ApprovalPrompt { detail, call, diff, selected: 0 })
+}
+
+/// 就当前审批做出决定并提交给内核，若还有下一个审批则重建卡片。
+///
+/// 抽出来是为了让"快捷键"与"回车确认"走**同一条**提交路径 ——
+/// 两处各写一遍会漂移出"快捷键批了但状态没更新"这类问题。
+fn decide_approval<F>(
+    approval: &mut Option<ApprovalPrompt>,
+    outstanding: &mut Option<String>,
+    events: &mut Vec<EventMsg>,
+    submit: &mut F,
+    decision: neo_protocol::Decision,
+) where
+    F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
+{
+    *approval = None;
+    let Some(id) = outstanding.take() else { return };
+    match submit(neo_protocol::Op::Approve { id, decision }) {
+        Ok(produced) => {
+            *outstanding = latest_approval_id(&produced);
+            events.extend(produced);
+        }
+        Err(e) => events.push(EventMsg::Error { message: e }),
+    }
+}
+
+/// 审批应答：允许一次 / 总是允许这类 / 拒绝。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalAnswer {
+    Allow,
+    AllowAlways,
+    Deny,
+}
+
+/// 解析审批输入。`a` = always（总是允许**这一类**），沿用 Unix `y/n/a` 的习惯。
+///
+/// 为什么必须有"总是允许"：之前只有 y/n，于是模型每调一次工具就重新问一遍
+/// （真实反馈：连按十几次 y 仍在问）。用户想要的显然是"这类别再问了"。
+pub fn parse_approval_answer(s: &str) -> Option<ApprovalAnswer> {
     match s.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => Some(true),
-        "n" | "no" => Some(false),
+        "y" | "yes" => Some(ApprovalAnswer::Allow),
+        "a" | "always" | "all" => Some(ApprovalAnswer::AllowAlways),
+        "n" | "no" => Some(ApprovalAnswer::Deny),
         _ => None,
     }
 }
@@ -4253,7 +4444,7 @@ fn hit_test(
 /// 状态栏文案：审批挂起时明确告诉用户该敲什么，否则是常规就绪提示。
 fn idle_or_approval(outstanding: &Option<String>) -> String {
     match outstanding {
-        Some(_) => "待审批 · y 批准 / n 拒绝".to_string(),
+        Some(_) => "待审批 · y 批准 / a 总是允许这类 / n 拒绝".to_string(),
         // 空闲时不再堆一串按键说明 —— 输入框有占位提示、下方有提示行
         None => "就绪".to_string(),
     }
@@ -4311,6 +4502,8 @@ where
     let mut file_cache: Option<Vec<String>> = None;
     // 未决审批：内核挂起后必须由用户应答，否则界面只是"显示"而无法推进。
     let mut outstanding: Option<String> = None;
+    // 审批对话框内容（模态）。`None` = 无待审批。
+    let mut approval: Option<ApprovalPrompt> = None;
     // 弹窗（@ / / / 主题 / 面板）
     let mut popup_state: Option<popup::Popup> = None;
     // 只读信息屏（/help、/keys）：显示到用户按任意键
@@ -4423,6 +4616,7 @@ where
                 input: &empty_input,
                 status: "",
                 awaiting_input: false,
+                approval: None,
                 show_cursor: false,
                 about: Some(&about),
                 trust: Some(&tp),
@@ -4485,6 +4679,7 @@ where
                 // 硬编码 "" 会让这些动作"做了但看不见"（见 draw_settings 注释）。
                 status: &status,
                 awaiting_input: false,
+                approval: None,
                 show_cursor: false,
                 about: Some(&about),
                 trust: None,
@@ -4990,6 +5185,7 @@ custom_bg.is_some(),
                 input: &empty_input,
                 status: "",
                 awaiting_input: false,
+                approval: None,
                 show_cursor: false,
                 about: Some(&about),
                 trust: None,
@@ -5073,6 +5269,7 @@ custom_bg.is_some(),
                 input: &empty_input,
                 status: "按任意键返回",
                 awaiting_input: false,
+                approval: None,
                 show_cursor: false,
                 about: None,
                 trust: None,
@@ -5130,6 +5327,7 @@ custom_bg.is_some(),
                 input: &input,
                 status: &status,
                 awaiting_input: outstanding.is_some(),
+                approval: approval.as_ref(),
                 show_cursor: true,
                 about: Some(&about),
                 trust: None,
@@ -5171,6 +5369,60 @@ custom_bg.is_some(),
             whichkey_groups = None;
         }
 
+        // ── 审批对话框打开时，按键**独占**交给它 ────────────────────
+        //
+        // 放在弹窗/输入框之前：审批是"必须先回答才能继续"的模态，
+        // 让 y/n/a 成为**一次按键**（而不是"打进输入框再回车"）。
+        if approval.is_some() {
+            // 先算出"这次按键要做什么"，再动 approval ——
+            // 持着 `as_mut()` 的借用时不能同时把 approval 传给助手函数。
+            let mut decision: Option<neo_protocol::Decision> = None;
+            {
+                let ap = approval.as_mut().expect("上面已判 is_some");
+                match key {
+                    Key::Quit => break,
+                    Key::Up | Key::Char('k') => {
+                        ap.selected = ap.selected.saturating_sub(1);
+                    }
+                    Key::Down | Key::Char('j') | Key::Tab => {
+                        if ap.selected + 1 < ApprovalPrompt::CHOICES.len() {
+                            ap.selected += 1;
+                        }
+                    }
+                    // y / a / n **一次按键就生效**：选项文案里写着（y）/（a）/（n），
+                    // 若只移动高亮就与文案不符 —— 用户按 y 以为批了、实际还要回车，
+                    // 这正是"按了 y 像没反应"的来源。
+                    Key::Char('y') | Key::Char('Y') => {
+                        ap.selected = 0;
+                        decision = Some(ap.choice_at());
+                    }
+                    Key::Char('a') | Key::Char('A') => {
+                        ap.selected = 1;
+                        decision = Some(ap.choice_at());
+                    }
+                    Key::Char('n') | Key::Char('N') => {
+                        ap.selected = 2;
+                        decision = Some(ap.choice_at());
+                    }
+                    Key::Enter | Key::Char(' ') => decision = Some(ap.choice_at()),
+                    // Esc：收起卡片但**不作答** —— 待审批仍在（outstanding 未清），
+                    // 用户可以先看正文/滚动，回头再答。
+                    Key::Escape => {
+                        status = "审批仍待处理（y 批准 / a 总是 / n 拒绝）".to_string();
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(d) = decision {
+                decide_approval(&mut approval, &mut outstanding, &mut events, &mut submit, d);
+                if outstanding.is_some() {
+                    approval = build_approval_prompt(&events);
+                }
+                status = idle_or_approval(&outstanding);
+            }
+            dirty = true;
+            continue;
+        }
         // ── 弹窗打开时，按键先交给弹窗 ──────────────────────────────
         //
         // 这是"下拉菜单"的常规行为：方向键在候选间移动、Enter 确认、
@@ -5935,23 +6187,29 @@ custom_bg.is_some(),
 
                 // ── 有待审批：本行是审批应答 ──────────────────────────────
                 if let Some(id) = outstanding.clone() {
-                    let Some(allow) = parse_approval_answer(&line) else {
-                        status = "请回答 y 或 n".to_string();
+                    let Some(ans) = parse_approval_answer(&line) else {
+                        status = "请回答 y 批准 / a 总是允许这类 / n 拒绝".to_string();
                         continue;
                     };
                     outstanding = None;
                     let op = neo_protocol::Op::Approve {
                         id,
-                        decision: if allow {
-                            neo_protocol::Decision::Allow
-                        } else {
-                            neo_protocol::Decision::Deny
+                        decision: match ans {
+                            ApprovalAnswer::Allow => neo_protocol::Decision::Allow,
+                            ApprovalAnswer::AllowAlways => neo_protocol::Decision::AllowAlways,
+                            ApprovalAnswer::Deny => neo_protocol::Decision::Deny,
                         },
                     };
                     match submit(op) {
                         Ok(produced) => {
                             outstanding = latest_approval_id(&produced);
                             events.extend(produced);
+                            // 还有下一个审批就重新开框（换内容）
+                            approval = if outstanding.is_some() {
+                                build_approval_prompt(&events)
+                            } else {
+                                None
+                            };
                         }
                         Err(e) => events.push(EventMsg::Error { message: e }),
                     }
@@ -6120,6 +6378,7 @@ sessions,
                             input: &empty_input,
                             status: &running,
                             awaiting_input: false,
+                            approval: None,
                             show_cursor: false,
                             about: Some(&about),
                             trust: None,
@@ -6169,6 +6428,7 @@ sessions,
                         input: &empty_input,
                         status: &status,
                         awaiting_input: false,
+                        approval: None,
                         show_cursor: false,
                         // 这一帧是"运行中"过渡态：facts 通常已非空，不展示首屏
                         about: Some(&about),
@@ -6202,6 +6462,13 @@ sessions,
                     Ok(produced) => {
                         outstanding = latest_approval_id(&produced);
                         events.extend(produced);
+                        // 有审批请求就**弹模态框**（而不是只把输入框变黄）——
+                        // 用户明确反馈"不是那种对话框形式，和 opencode/mimo 差很远"。
+                        approval = if outstanding.is_some() {
+                            build_approval_prompt(&events)
+                        } else {
+                            None
+                        };
                     }
                     Err(e) => events.push(EventMsg::Error { message: e }),
                 }
@@ -6234,6 +6501,7 @@ mod tests {
             input: &ed,
             status,
             awaiting_input: false,
+            approval: None,
             show_cursor: false,
             about: None,
             trust: None,
@@ -6280,6 +6548,7 @@ mod tests {
             input: &editor::Editor::new(),
             status: "就绪",
             awaiting_input: false,
+            approval: None,
             show_cursor: false,
             about: Some(&a),
             trust: None,
@@ -6393,6 +6662,7 @@ mod tests {
             input: &editor::Editor::from_text("/"),
             status: "",
             awaiting_input: false,
+            approval: None,
             show_cursor: false,
             about: Some(&a),
             trust: None,
@@ -6501,6 +6771,7 @@ mod tests {
             input: &editor::Editor::new(),
             status: "按任意键返回",
             awaiting_input: false,
+            approval: None,
             show_cursor: false,
             about: None,
             trust: None,
@@ -6535,6 +6806,7 @@ mod tests {
             let out = Screen {
                 cols: 120, rows, facts: &[], input: &editor::Editor::new(), status: "就绪",
                 awaiting_input: false, show_cursor: false,
+                approval: None,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
                 sidebar: true,
@@ -6587,6 +6859,7 @@ mod tests {
                 let out = Screen {
                     cols, rows, facts: &facts, input: &editor::Editor::from_text("输入中文测试"), status: "就绪",
                     awaiting_input: true, show_cursor: true,
+                    approval: None,
                     about: Some(&a), trust: None,
                     theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
                     sidebar: true,
@@ -6623,6 +6896,7 @@ mod tests {
             let out = Screen {
                 cols, rows: 40, facts: &[], input: &editor::Editor::from_text("/"), status: "",
                 awaiting_input: false, show_cursor: false,
+                approval: None,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::OpenCode, popup: Some(&p), preformatted: None,
                 sidebar: true,
@@ -6655,6 +6929,7 @@ mod tests {
             input: &editor::Editor::new(),
             status: "就绪",
             awaiting_input: false,
+            approval: None,
             show_cursor: false,
             about: Some(&a),
             trust: None,
@@ -6719,6 +6994,7 @@ mod tests {
         let out = Screen {
             cols: 120, rows: 30, facts: &facts, input: &editor::Editor::new(), status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
             sidebar: true,
@@ -6745,6 +7021,7 @@ mod tests {
         let out = Screen {
             cols: 120, rows: 30, facts: &facts, input: &editor::Editor::new(), status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
             sidebar: true,
@@ -6813,6 +7090,7 @@ mod tests {
                 Screen {
                     cols: 80, rows: 20, facts: &[], input: &editor::Editor::new(), status: "",
                     awaiting_input: false, show_cursor: false,
+                    approval: None,
                     about: Some(&a), trust: None,
                     theme: t, popup: None, preformatted: None, sidebar: false,
                     view: None,
@@ -6848,6 +7126,7 @@ mod tests {
         let (out, _) = Screen {
             cols: 100, rows: 14, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
@@ -6866,6 +7145,7 @@ mod tests {
         plain(&Screen {
             cols, rows, facts: &[], input: &ed, status: "就绪",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -6948,6 +7228,7 @@ mod tests {
         let out = plain(&Screen {
             cols: 60, rows: 20, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -7134,6 +7415,7 @@ mod tests {
         Screen {
             cols: 100, rows: 30, facts, input: &ed, status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -7250,6 +7532,7 @@ mod tests {
             let out = Screen {
                 cols: 120, rows, facts: &[], input: &ed, status: "就绪",
                 awaiting_input: false, show_cursor: true,
+                approval: None,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -7301,6 +7584,7 @@ mod tests {
         let out = Screen {
             cols: 150, rows: 46, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: true,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -7391,6 +7675,7 @@ mod tests {
             let out = Screen {
                 cols, rows: 40, facts: &[], input: &ed, status: "",
                 awaiting_input: false, show_cursor: false,
+                approval: None,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -7422,6 +7707,7 @@ mod tests {
             let out = Screen {
                 cols: 120, rows: 30, facts: &[], input: &ed, status: "就绪",
                 awaiting_input: false, show_cursor: true,
+                approval: None,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -7485,6 +7771,7 @@ mod tests {
             let out = Screen {
                 cols: 140, rows: 60, facts: &[], input: &ed_empty(), status: "",
                 awaiting_input: false, show_cursor: false,
+                approval: None,
                 about: None, trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -7535,6 +7822,7 @@ mod tests {
         let out = Screen {
             cols: 140, rows: 40, facts: &[], input: &ed,
             status: "提醒：已开启", awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&about()), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -7572,6 +7860,7 @@ mod tests {
             let out = Screen {
                 cols: 120, rows, facts: &[], input: &ed,
                 status: "状态反馈", awaiting_input: false, show_cursor: false,
+                approval: None,
                 about: Some(&about()), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -7630,6 +7919,7 @@ mod tests {
         let out = Screen {
             cols: 120, rows: 34, facts: &[], input: &ed, status: "就绪",
             awaiting_input: false, show_cursor: true,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None,
@@ -7658,6 +7948,7 @@ mod tests {
         let out = Screen {
             cols: 120, rows: 34, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: true,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None,
@@ -7685,6 +7976,7 @@ mod tests {
             let out = Screen {
                 cols, rows: 34, facts: &[], input: &ed, status: "",
                 awaiting_input: false, show_cursor: true,
+                approval: None,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: cols >= 96, view: None, diff_viewer: None,
@@ -7722,6 +8014,7 @@ mod tests {
         Screen {
             cols, rows, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
@@ -7848,6 +8141,7 @@ mod tests {
         Screen {
             cols, rows, facts: &[], input: &ed, status: "就绪",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup, preformatted: None,
             sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
@@ -7913,6 +8207,7 @@ mod tests {
         let (_, r) = Screen {
             cols: 140, rows: 40, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&about()), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -8005,6 +8300,7 @@ mod tests {
             Screen {
                 cols: 120, rows: 36, facts: &[], input: &ed, status: "",
                 awaiting_input: false, show_cursor: false,
+                approval: None,
                 about: Some(&about()), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -8199,6 +8495,7 @@ mod tests {
         let out = Screen {
             cols: 100, rows: 30, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&about()), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -8265,6 +8562,7 @@ mod tests {
         let out = Screen {
             cols: 120, rows: 40, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&about()), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
@@ -8299,6 +8597,7 @@ mod tests {
         let (_, r) = Screen {
             cols: 140, rows: 30, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
@@ -8370,6 +8669,7 @@ mod tests {
             Screen {
                 cols: 100, rows: 20, facts: &facts, input: &editor::Editor::new(),
                 status: "", awaiting_input: false, show_cursor: false,
+                approval: None,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
@@ -8396,6 +8696,7 @@ mod tests {
         let out = Screen {
             cols: 100, rows: 20, facts: &facts, input: &editor::Editor::new(),
             status: "", awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
@@ -8418,6 +8719,7 @@ mod tests {
         let out = Screen {
             cols: 100, rows: 20, facts: &facts, input: &editor::Editor::new(),
             status: "", awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
@@ -8455,6 +8757,7 @@ mod tests {
         let out = Screen {
             cols: 120, rows: 30, facts: &[], input: &ed, status: "就绪",
             awaiting_input: false, show_cursor: true,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false,
@@ -8494,6 +8797,7 @@ mod tests {
         let out = Screen {
             cols: 120, rows: 40, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: true,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false,
@@ -8524,6 +8828,7 @@ mod tests {
             let out = Screen {
                 cols, rows: 30, facts: &[], input: &ed, status: "",
                 awaiting_input: false, show_cursor: true,
+                approval: None,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: true,
@@ -8558,6 +8863,7 @@ mod tests {
         let out = Screen {
             cols: 100, rows: 24, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: true,
+            approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false,
@@ -8667,6 +8973,7 @@ mod tests {
             let out = Screen {
                 cols, rows, facts: &facts, input: &editor::Editor::from_text("输入中文"), status: "就绪",
                 awaiting_input: false, show_cursor: false, about: Some(&a), trust: None,
+                approval: None,
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
                 view: None,
                 diff_viewer: None,
@@ -8835,6 +9142,7 @@ mod tests {
         let out = Screen {
             cols: 100, rows: 30, facts: &[], input: &editor::Editor::new(), status: "",
             awaiting_input: false, show_cursor: false,
+            approval: None,
             about: Some(&a), trust: Some(&TrustPrompt::default()),
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
             view: None,
@@ -8864,6 +9172,7 @@ mod tests {
             let out = Screen {
                 cols: 100, rows: 30, facts: &[], input: &editor::Editor::new(), status: "",
                 awaiting_input: false, show_cursor: false,
+                approval: None,
                 about: Some(&a), trust: Some(&TrustPrompt { selected: sel }),
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
                 view: None,
@@ -9016,12 +9325,55 @@ mod tests {
     }
 
     #[test]
+    fn approval_prompt_renders_a_modal_with_choices() {
+        // 审批必须是**对话框**（用户明确反馈输入框里回 y 不像 opencode/mimo）。
+        // 断言：卡片出现、三个选项都在、"批的是什么"也在。
+        let ed = editor::Editor::new();
+        let ap = ApprovalPrompt {
+            detail: "写入类调用需确认".into(),
+            call: "bash rm -rf /tmp/x".into(),
+            diff: Some(("a.txt".into(), "@@ -1 +1 @@\n-old\n+new".into())),
+            selected: 1,
+        };
+        let out = Screen {
+            cols: 120, rows: 40, facts: &[], input: &ed, status: "",
+            awaiting_input: true, show_cursor: false,
+            approval: Some(&ap),
+            about: Some(&about()), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            settings_picker: None, settings_form: None, settings_confirm: None,
+            appearance: appearance::Appearance::default(), custom_background: None,
+        }
+        .render();
+        let text = plain(&out).join("
+");
+        assert!(text.contains("需要审批"), "应有模态标题：{text}");
+        assert!(text.contains("bash rm -rf /tmp/x"), "应说明批的是什么");
+        for c in ApprovalPrompt::CHOICES {
+            assert!(text.contains(c), "缺选项 {c}");
+        }
+        // 选中项要有 ❯ 标记
+        assert!(text.contains("❯ 总是允许这类"), "选中项应有标记");
+    }
+
+    #[test]
     fn parses_approval_answers_and_rejects_noise() {
+        use ApprovalAnswer::*;
         for yes in ["y", "Y", "yes", "YES", " y "] {
-            assert_eq!(parse_approval_answer(yes), Some(true), "{yes} 应判为批准");
+            assert_eq!(parse_approval_answer(yes), Some(Allow), "{yes} 应判为批准");
+        }
+        // `a` = 总是允许这类：没有它用户会被反复问（真实反馈：连按十几次 y）
+        for always in ["a", "A", "always", "all"] {
+            assert_eq!(
+                parse_approval_answer(always),
+                Some(AllowAlways),
+                "{always} 应判为总是允许"
+            );
         }
         for no in ["n", "N", "no"] {
-            assert_eq!(parse_approval_answer(no), Some(false), "{no} 应判为拒绝");
+            assert_eq!(parse_approval_answer(no), Some(Deny), "{no} 应判为拒绝");
         }
         assert_eq!(parse_approval_answer("maybe"), None);
         assert_eq!(parse_approval_answer(""), None);
@@ -9058,6 +9410,7 @@ mod tests {
                 Screen {
                     cols: 80, rows: 20, facts: &[], input: &editor::Editor::new(), status: "",
                     awaiting_input: awaiting, show_cursor: false,
+                    approval: None,
                     about: Some(&a), trust: None,
                     theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
                     sidebar: false,
