@@ -98,6 +98,12 @@ pub type Seq = u64;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventMsg {
+    /// 用户提交的消息（内核回显）。
+    ///
+    /// 为什么内核要发它：用户**自己的话**是转录里必须可见的事实 —— 否则
+    /// 回看会话只看到模型说了什么，不知道当时问的是什么。由内核统一发，
+    /// 四个宿主才会一致（T6）；让宿主各自记住用户输入则会分叉。
+    UserSubmitted { text: String },
     SessionConfigured { session_id: String },
     TurnStarted { turn_id: String },
     AgentMessageDelta { delta: String },
@@ -136,6 +142,8 @@ pub struct ToolOutput {
 /// 一条用户必须知道的事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fact {
+    /// 用户说了什么（转录的第一类事实）
+    UserSaid(String),
     /// 助手说了这段话（流式增量已合并为完整消息）。
     AssistantSaid(String),
     /// 某次工具调用结束。
@@ -187,6 +195,7 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
             EventMsg::ApprovalRequest { detail, .. } => {
                 out.push(Fact::ApprovalNeeded { detail: detail.clone() })
             }
+            EventMsg::UserSubmitted { text } => out.push(Fact::UserSaid(text.clone())),
             EventMsg::Error { message } => out.push(Fact::Failed(message.clone())),
             EventMsg::TurnComplete { input_tokens, output_tokens } => {
                 out.push(Fact::TurnFinished {

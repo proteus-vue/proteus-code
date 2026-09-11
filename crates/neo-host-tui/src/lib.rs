@@ -224,7 +224,10 @@ fn read_key(stdin: &mut impl Read) -> Key {
 pub struct About {
     pub version: String,
     pub model: String,
+    /// 完整档位描述（首屏展示：含沙箱/审批/文件编辑三段）
     pub mode: String,
+    /// 档位短名（footer 展示，如 `default`）—— 长描述会挤掉右侧信息
+    pub mode_short: String,
     pub workspace: String,
     pub session: String,
 }
@@ -247,26 +250,200 @@ pub struct Screen<'a> {
     pub rows: usize,
     /// 已发生的用户可见事实（协议层 Fact，非宿主自造）
     pub facts: &'a [Fact],
-    /// 当前输入行
+    /// 当前输入行（纯文本；左侧竖条由渲染加，便于单独着色）
     pub input: &'a str,
-    /// 状态栏
+    /// 状态栏（左侧）
     pub status: &'a str,
+    /// 状态栏右侧信息（模型/档位等）；窄终端会自动让位
+    pub footer_right: &'a str,
+    /// 有未决审批：竖条转警告色，提示"现在该你回答"
+    pub awaiting_input: bool,
     /// 光标可视（运行中不显示输入光标）
     pub show_cursor: bool,
     /// 首屏关于信息；仅在**尚无任何事实**时展示（有对话后让位给正文）
     pub about: Option<&'a About>,
 }
 
+// ── 调色板 ──────────────────────────────────────────────────────────
+//
+// 取色对标 opencode 的默认暗色主题（其定义在 packages/tui/src/theme/assets/
+// opencode.json）：暖主色 + 冷强调色，正文与次要文字拉开层次。
+//
+// 为什么用 256 色 / truecolor 而不是 16 色 ANSI：16 色由终端主题决定，
+// 同一份代码在不同终端里色调会完全不同，做不到"设计过的样子"。
+// 这里遵循 NO_COLOR（无障碍/管道场景）与 COLORTERM/TERM 能力探测，
+// 能力不足时自动降级为 16 色 —— 见 `palette()`。
+
 const ESC: &str = "\u{1b}";
-const DIM: &str = "\u{1b}[2m";
-const BOLD: &str = "\u{1b}[1m";
-const CYAN: &str = "\u{1b}[36m";
-const RED: &str = "\u{1b}[31m";
-const YELLOW: &str = "\u{1b}[33m";
+
+/// 前景色。按能力选 truecolor(38;2) / 256 色(38;5) / 16 色。
+#[derive(Debug, Clone, Copy)]
+enum Color {
+    /// 主色（opencode darkStep9 #fab283，暖橙）
+    Primary,
+    /// 强调色（darkAccent #9d7cd8，紫）
+    Accent,
+    /// 成功（darkGreen #7fd88f）
+    Success,
+    /// 错误（darkRed #e06c75）
+    Error,
+    /// 警告（darkOrange #f5a742）
+    Warning,
+    /// 信息（darkCyan #56b6c2）
+    Info,
+    /// 正文（darkStep12 #eeeeee）
+    Text,
+    /// 次要文字（darkStep11 #808080）
+    Muted,
+    /// 边框（darkStep7 #484848）
+    Border,
+    /// 边框高亮（darkStep8 #606060）
+    BorderActive,
+}
+
+/// 终端能力（探测一次，避免每帧重算）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorMode {
+    TrueColor,
+    Ansi256,
+    Ansi16,
+    None,
+}
+
+fn detect_color_mode() -> ColorMode {
+    // NO_COLOR 是硬约定：设了就不上色（https://no-color.org）
+    if std::env::var_os("NO_COLOR").is_some() {
+        return ColorMode::None;
+    }
+    if let Ok(ct) = std::env::var("COLORTERM") {
+        if ct == "truecolor" || ct == "24bit" {
+            return ColorMode::TrueColor;
+        }
+    }
+    match std::env::var("TERM").unwrap_or_default().as_str() {
+        "dumb" | "" => ColorMode::None,
+        t if t.contains("256color") => ColorMode::Ansi256,
+        // 常见现代终端：即便没报 256/truecolor 也按 truecolor 处理
+        "xterm-kitty" | "alacritty" | "wezterm" | "foot" | "tmux-256color" => {
+            ColorMode::TrueColor
+        }
+        _ => ColorMode::Ansi16,
+    }
+}
+
+impl Color {
+    /// (R,G,B) —— 与 opencode 默认暗色主题同源
+    fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            Color::Primary => (0xfa, 0xb2, 0x83),
+            Color::Accent => (0x9d, 0x7c, 0xd8),
+            Color::Success => (0x7f, 0xd8, 0x8f),
+            Color::Error => (0xe0, 0x6c, 0x75),
+            Color::Warning => (0xf5, 0xa7, 0x42),
+            Color::Info => (0x56, 0xb6, 0xc2),
+            Color::Text => (0xee, 0xee, 0xee),
+            Color::Muted => (0x80, 0x80, 0x80),
+            Color::Border => (0x48, 0x48, 0x48),
+            Color::BorderActive => (0x60, 0x60, 0x60),
+        }
+    }
+
+    /// 256 色近似（16 色无法表达时用；数值取 xterm 256 色板最接近项）
+    fn ansi256(self) -> u8 {
+        match self {
+            Color::Primary => 216, // #ffafaf
+            Color::Accent => 140,  // #af87d7
+            Color::Success => 114, // #87d787
+            Color::Error => 168,   // #d75f87
+            Color::Warning => 215, // #ffaf5f
+            Color::Info => 73,     // #5fafaf
+            Color::Text => 255,    // #eeeeee
+            Color::Muted => 244,   // #808080
+            Color::Border => 238,  // #444444
+            Color::BorderActive => 241, // #626262
+        }
+    }
+
+    /// 16 色兜底（老终端）
+    fn ansi16(self) -> u8 {
+        match self {
+            Color::Primary | Color::Warning => 33,
+            Color::Accent => 35,
+            Color::Success => 32,
+            Color::Error => 31,
+            Color::Info => 36,
+            Color::Text => 37,
+            Color::Muted | Color::Border | Color::BorderActive => 90,
+        }
+    }
+
+    fn fg(self, mode: ColorMode) -> String {
+        let (r, g, b) = self.rgb();
+        match mode {
+            ColorMode::None => String::new(),
+            ColorMode::TrueColor => format!("{ESC}[38;2;{r};{g};{b}m"),
+            ColorMode::Ansi256 => format!("{ESC}[38;5;{}m", self.ansi256()),
+            ColorMode::Ansi16 => format!("{ESC}[{}m", self.ansi16()),
+        }
+    }
+}
+
+/// 高亮降级色：给输入框左侧竖条/强调用；能力不足时退到普通前景。
+fn faint(mode: ColorMode) -> String {
+    match mode {
+        ColorMode::None => String::new(),
+        _ => format!("{ESC}[2m"), // dim（几乎所有终端都支持）
+    }
+}
+
 const RESET: &str = "\u{1b}[0m";
+const BOLD: &str = "\u{1b}[1m";
+
+
+/// 解析后的调色板：把 `Color` 按终端能力展开成可直接拼进 format! 的转义串。
+struct Pal {
+    primary: String,
+    accent: String,
+    success: String,
+    error: String,
+    warning: String,
+    info: String,
+    text: String,
+    muted: String,
+    border: String,
+    border_active: String,
+    dim: String,
+    /// 重置序列。NO_COLOR 下必须是空串 —— 否则输出里仍残留 ESC[0m，
+    /// 既污染重定向到文件的输出，也让"无色"变成半真半假。
+    reset: String,
+}
+
+impl Pal {
+    fn new(mode: ColorMode) -> Self {
+        Self {
+            primary: Color::Primary.fg(mode),
+            accent: Color::Accent.fg(mode),
+            success: Color::Success.fg(mode),
+            error: Color::Error.fg(mode),
+            warning: Color::Warning.fg(mode),
+            info: Color::Info.fg(mode),
+            text: Color::Text.fg(mode),
+            muted: Color::Muted.fg(mode),
+            border: Color::Border.fg(mode),
+            border_active: Color::BorderActive.fg(mode),
+            dim: faint(mode),
+            reset: if mode == ColorMode::None { String::new() } else { RESET.to_string() },
+        }
+    }
+}
 
 impl Screen<'_> {
     pub fn render(&self) -> String {
+        // 每帧探测一次（两次环境变量读取，代价可忽略）；同时让测试能通过
+        // 显式设置 NO_COLOR 来断言"无色"行为。
+        let p = Pal::new(detect_color_mode());
+        let rst = &p.reset;
+
         let mut out = String::new();
         // 移到左上并清屏（比逐行清除简单且无残留）
         out.push_str(&format!("{ESC}[H{ESC}[2J"));
@@ -278,11 +455,11 @@ impl Screen<'_> {
         // 这比"启动时打印一次 banner 再清屏"更稳：不会在滚屏时留下残影。
         let lines = if self.facts.is_empty() {
             match self.about {
-                Some(a) => self.welcome_lines(a),
+                Some(a) => self.welcome_lines(a, &p),
                 None => Vec::new(),
             }
         } else {
-            self.wrap_facts(self.cols)
+            self.wrap_facts(self.cols, &p)
         };
         // 只显示最后 transcript_rows 行（自动滚到底）
         let start = lines.len().saturating_sub(transcript_rows);
@@ -295,17 +472,41 @@ impl Screen<'_> {
             out.push_str("\r\n");
         }
 
-        // 分隔线
-        out.push_str(&format!("{DIM}{}{RESET}\r\n", "─".repeat(self.cols.min(200))));
-        // 输入行
-        out.push_str(&format!("{BOLD}>{RESET} {}", self.input));
-        if self.show_cursor {
-            out.push_str(&format!("{ESC}[5m▌{ESC}[25m"));
+        // 输入区：左侧竖条（对标 opencode 的 prompt 左边框 ┃），
+        // 有未决审批时竖条转为警告色，让"现在该你回答"在余光里也看得到。
+        // 空闲用 border_active、审批用 warning —— 与"用户消息"的 accent 竖条区分开，
+        // 否则输入框和用户气泡会是同一种颜色，视觉上分不清"我在打字"与"我说过了"
+        let bar = if self.awaiting_input { &p.warning } else { &p.border_active };
+        out.push_str(&format!(
+            "{}{}\u{2503}{}{} {}\r\n",
+            bar, "", rst, p.text, self.input
+        ));
+        // 状态栏：左侧状态文本，右侧模型（对标 opencode footer 的左右分栏）
+        let mut right = String::new();
+        if !self.footer_right.is_empty() {
+            right = format!("{}{}{}", p.muted, self.footer_right, rst);
         }
-        out.push_str("\r\n");
-        // 状态栏
-        out.push_str(&format!("{DIM}{}{RESET}", width::truncate_to_width(self.status, self.cols)));
+        out.push_str(&self.status_line(&p, &right));
+
         out
+    }
+
+    /// 状态栏：左状态、右信息，按**显示宽度**左右对齐（中文占 2 列）。
+    fn status_line(&self, p: &Pal, right: &str) -> String {
+        let rst = &p.reset;
+        let left_plain = width::truncate_to_width(self.status, self.cols).to_string();
+        let right_plain = strip_ansi(right);
+        let lw = width::display_width(&left_plain);
+        let rw = width::display_width(&right_plain);
+        // 右侧信息在窄终端里会让位（宁可少显示，也不折行打乱布局）
+        if lw + rw + 2 > self.cols || rw == 0 {
+            return format!("{}{}{}{}", p.dim, p.muted, left_plain, rst);
+        }
+        let gap = self.cols - lw - rw;
+        format!(
+            "{}{}{}{}{}{}{}{}",
+            p.dim, p.muted, left_plain, rst, " ".repeat(gap), p.muted, right_plain, rst
+        )
     }
 
     /// 首屏内容：词标 + 会话信息 + 快捷键。
@@ -313,7 +514,7 @@ impl Screen<'_> {
     /// **必须自己保证放得下**：`render` 只显示末尾 `transcript_rows` 行（自动滚到底），
     /// 若首屏比可视区高，被裁掉的恰好是**顶部**——用户会看到"没有 logo 的半截首屏"。
     /// 因此这里按「奢 → 简」四档试排，选第一个放得下的档位。
-    fn welcome_lines(&self, a: &About) -> Vec<String> {
+    fn welcome_lines(&self, a: &About, p: &Pal) -> Vec<String> {
         let avail = self.rows.saturating_sub(3); // 与 render 的 transcript_rows 同算式
 
         // (词标, 副标题, 快捷键, 留白)
@@ -323,13 +524,13 @@ impl Screen<'_> {
             (false, true, true, false),
             (false, false, true, false),
         ] {
-            let lines = self.welcome_variant(a, mark, subtitle, hints, airy);
+            let lines = self.welcome_variant(a, mark, subtitle, hints, airy, p);
             if lines.len() <= avail {
                 return lines;
             }
         }
         // 极端小的终端：只留最要紧的一行 + 键值
-        self.welcome_variant(a, false, false, false, false)
+        self.welcome_variant(a, false, false, false, false, p)
     }
 
     fn welcome_variant(
@@ -339,7 +540,9 @@ impl Screen<'_> {
         subtitle: bool,
         hints: bool,
         airy: bool,
+        p: &Pal,
     ) -> Vec<String> {
+        let rst = &p.reset;
         // 定长文案也按宽度截断（窄终端里提示语会超宽）
         let fit = |s: &str| width::truncate_to_width(s, self.cols.saturating_sub(2)).to_string();
         // 键值先截断再着色：着色后含 ANSI，再按宽度截会错切
@@ -353,16 +556,23 @@ impl Screen<'_> {
 
         if mark && self.cols >= WORDMARK_MIN_COLS {
             for row in WORDMARK {
-                lines.push(format!("  {CYAN}{row}{RESET}"));
+                lines.push(format!("  {}{row}{rst}", p.primary));
             }
         } else {
-            lines.push(format!("  {BOLD}{CYAN}NEO{RESET}"));
+            lines.push(format!("  {BOLD}{}NEO{rst}", p.primary));
         }
 
         lines.push(String::new());
-        lines.push(format!("  {BOLD}Neo{RESET}{DIM} —— 编程 Agent 内核{RESET}"));
+        lines.push(format!(
+            "  {BOLD}{}Neo{rst}{} —— 编程 Agent 内核{rst}",
+            p.text, p.muted
+        ));
         if subtitle {
-            lines.push(format!("  {DIM}{}{RESET}", fit("Rust 内核 · TUI / Web / Exec 共享同一内核")));
+            lines.push(format!(
+                "  {}{}{rst}",
+                p.info,
+                fit("Rust 内核 · TUI / Web / Exec 共享同一内核")
+            ));
         }
 
         if airy {
@@ -377,17 +587,19 @@ impl Screen<'_> {
         ] {
             // pad_to_width 按**显示列**对齐（中文标签 1 字 = 2 列，不能按字符个数 pad）
             let padded = width::pad_to_width(label, 10);
-            lines.push(format!("  {DIM}{padded}{RESET}{}", cut(value)));
+            lines.push(format!("  {}{padded}{rst}{}", p.muted, cut(value)));
         }
 
         if hints {
             lines.push(String::new());
             lines.push(format!(
-                "  {DIM}{}{RESET}",
+                "  {}{}{rst}",
+                p.border,
                 fit("输入任务后回车提交 · Ctrl+R 搜索历史 · Tab 补全 @文件引用")
             ));
             lines.push(format!(
-                "  {DIM}{}{RESET}",
+                "  {}{}{rst}",
+                p.border,
                 fit("Ctrl+G 外部编辑器 · Ctrl+L 清屏 · Ctrl+C 退出")
             ));
         }
@@ -395,38 +607,88 @@ impl Screen<'_> {
     }
 
     /// 把 Fact 列表渲染成若干行文本（已含 ANSI）。
-    fn wrap_facts(&self, cols: usize) -> Vec<String> {
+    ///
+    /// 视觉语言对标 opencode：
+    ///   - 用户消息带左侧竖条（与助手正文区分开）
+    ///   - 助手正文不加框，直接跟在后面（opencode 的 assistant 就是纯文本）
+    ///   - 工具调用走"树状"缩进，成功 ✓ / 失败 ✗，细节（exit code）压暗
+    ///   - 元信息（token、会话）一律 muted，不抢正文
+    fn wrap_facts(&self, cols: usize, p: &Pal) -> Vec<String> {
+        let rst = &p.reset;
+        let inner = cols.saturating_sub(4);
         let mut lines = Vec::new();
         for f in self.facts {
             match f {
+                Fact::UserSaid(text) => {
+                    // 左侧竖条给用户消息一个"我说的话"的视觉归属
+                    let mut first = true;
+                    for l in text.lines() {
+                        for w in width::wrap_to_width(l, inner) {
+                            if first {
+                                lines.push(format!("{}\u{2503}{rst} {}{w}{rst}", p.accent, p.text));
+                                first = false;
+                            } else {
+                                lines.push(format!("{}\u{2503}{rst}  {w}", p.accent));
+                            }
+                        }
+                    }
+                    lines.push(String::new());
+                }
                 Fact::AssistantSaid(text) => {
                     for l in text.lines() {
-                        for w in width::wrap_to_width(l, cols.saturating_sub(2)) {
+                        for w in width::wrap_to_width(l, inner) {
                             lines.push(w);
                         }
                     }
                     lines.push(String::new());
                 }
                 Fact::ToolFinished { name, exit_code } => {
-                    let mark = if *exit_code == 0 { CYAN } else { RED };
+                    // 成功/失败共用一个"树杈"形状，只换图标与颜色，行宽稳定
+                    let (icon, color) = if *exit_code == 0 {
+                        ("✓", &p.success)
+                    } else {
+                        ("✗", &p.error)
+                    };
                     lines.push(format!(
-                        "{mark}▸ {name}{RESET}{DIM} exit {exit_code}{RESET}"
+                        "  {color}{icon}{rst} {name}{} exit {exit_code}{rst}",
+                        p.muted
                     ));
                 }
                 Fact::ApprovalNeeded { detail } => {
-                    lines.push(format!("{YELLOW}⚠ 需要审批：{detail}{RESET}"));
+                    // △ 与 opencode footer 的权限提示同形
+                    lines.push(format!("  {}△ 需要审批：{detail}{rst}", p.warning));
                 }
-                Fact::Failed(msg) => lines.push(format!("{RED}✗ {msg}{RESET}")),
+                Fact::Failed(msg) => lines.push(format!("  {}✗ {msg}{rst}", p.error)),
                 Fact::TurnFinished { input_tokens, output_tokens } => lines.push(format!(
-                    "{DIM}· 本轮完成（{input_tokens} in / {output_tokens} out）{RESET}"
+                    "  {}· {input_tokens} in / {output_tokens} out{rst}",
+                    p.muted
                 )),
                 Fact::SessionReady { session_id } => {
-                    lines.push(format!("{DIM}· 会话 {session_id}{RESET}"))
+                    lines.push(format!("  {}· 会话 {session_id}{rst}", p.muted))
                 }
             }
         }
         lines
     }
+}
+
+/// 去掉 ANSI 转义序列（用于量宽/右侧对齐）。
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\u{1b}' {
+            while let Some(&n) = it.peek() {
+                it.next();
+                if n == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// 用 `$EDITOR`（或 `$VISUAL`，再退到 vi）编辑一段文本，返回编辑结果。
@@ -559,6 +821,14 @@ impl HostBackend for TuiFacts {
 // 交互主循环
 // ══════════════════════════════════════════════════════════════════════
 
+/// 状态栏文案：审批挂起时明确告诉用户该敲什么，否则是常规就绪提示。
+fn idle_or_approval(outstanding: &Option<String>) -> String {
+    match outstanding {
+        Some(_) => "待审批 · 输入 y 批准 / n 拒绝 后回车".to_string(),
+        None => "就绪 · 输入任务后回车 · Ctrl+C 退出".to_string(),
+    }
+}
+
 /// 运行 TUI，直到用户退出。
 ///
 /// `submit` 由调用方注入（通常是 `kernel.submit`），这样本 crate
@@ -582,7 +852,8 @@ where
 
     let mut input = String::new();
     let mut events: Vec<EventMsg> = Vec::new();
-    let mut status = String::from("就绪 · Enter 提交 · Ctrl+R 历史 · Ctrl+G 编辑器 · @ 引用文件 · Ctrl+C 退出");
+    // 与后续状态统一用同一个构造函数，避免"首屏一种文案、之后另一种"
+    let mut status = idle_or_approval(&None);
     let mut history = input::History::default();
     // 历史浏览态：Up/Down 在历史里移动时置位，一旦用户输入字符即退出该态
     let mut browsing = false;
@@ -591,20 +862,24 @@ where
     // 未决审批：内核挂起后必须由用户应答，否则界面只是"显示"而无法推进。
     let mut outstanding: Option<String> = None;
 
+    // footer 右侧：模型 + 档位短名（对标 opencode footer 的右侧状态区）
+    let footer_right = if about.mode_short.is_empty() {
+        about.model.clone()
+    } else {
+        format!("{} · {}", about.model, about.mode_short)
+    };
+
     loop {
         let (cols, rows) = terminal_size();
         let facts = facts_of(&events);
-        let prompt = if outstanding.is_some() {
-            format!("批准该调用？[y/n] > {input}")
-        } else {
-            input.clone()
-        };
         let screen = Screen {
             cols,
             rows,
             facts: &facts,
-            input: &prompt,
+            input: &input,
             status: &status,
+            footer_right: &footer_right,
+            awaiting_input: outstanding.is_some(),
             show_cursor: true,
             about: Some(&about),
         };
@@ -724,11 +999,7 @@ where
                         }
                         Err(e) => events.push(EventMsg::Error { message: e }),
                     }
-                    status = if outstanding.is_some() {
-                        "需要审批".into()
-                    } else {
-                        "就绪 · 输入任务后回车 · Ctrl+C 退出".into()
-                    };
+                    status = idle_or_approval(&outstanding);
                     continue;
                 }
 
@@ -751,6 +1022,8 @@ where
                         facts: &facts0,
                         input: "",
                         status: &status,
+                        footer_right: &footer_right,
+                        awaiting_input: false,
                         show_cursor: false,
                         // 这一帧是"运行中"过渡态：facts 通常已非空，不展示首屏
                         about: None,
@@ -766,11 +1039,7 @@ where
                     }
                     Err(e) => events.push(EventMsg::Error { message: e }),
                 }
-                status = if outstanding.is_some() {
-                    "需要审批".into()
-                } else {
-                    "就绪 · 输入任务后回车 · Ctrl+C 退出".into()
-                };
+                status = idle_or_approval(&outstanding);
             }
             _ => {}
         }
@@ -821,7 +1090,9 @@ mod tests {
             facts: &facts,
             input: "",
             status: "s",
-            show_cursor: false,
+            footer_right: "",
+            awaiting_input: false,
+show_cursor: false,
             about: None,
         };
         let out = s.render();
@@ -858,6 +1129,100 @@ mod tests {
     }
 
     #[test]
+    fn transcript_shows_the_user_message_with_its_own_bar() {
+        // 转录必须能看出"我问了什么"，且与助手正文在视觉上可区分
+        let facts = vec![
+            Fact::UserSaid("列一下文件".into()),
+            Fact::AssistantSaid("好的".into()),
+        ];
+        let s = Screen {
+            cols: 60,
+            rows: 20,
+            facts: &facts,
+            input: "",
+            status: "就绪",
+            footer_right: "",
+            awaiting_input: false,
+            show_cursor: true,
+            about: None,
+        };
+        let out = s.render();
+        assert!(out.contains("列一下文件"), "用户消息必须可见：{out}");
+        assert!(out.contains('\u{2503}'), "用户消息应带左侧竖条：{out}");
+        assert!(out.contains("好的"), "助手正文必须可见：{out}");
+    }
+
+    #[test]
+    fn tool_success_and_failure_are_visually_distinguishable() {
+        let ok = vec![Fact::ToolFinished { name: "bash".into(), exit_code: 0 }];
+        let bad = vec![Fact::ToolFinished { name: "bash".into(), exit_code: 1 }];
+        // 用嵌套 fn 而非闭包：Screen<'a> 借入 facts，闭包推断的生命周期不够长
+        fn render_facts(f: &[Fact]) -> String {
+            Screen {
+                cols: 60, rows: 10, facts: f, input: "", status: "s",
+                footer_right: "", awaiting_input: false, show_cursor: false, about: None,
+            }
+            .render()
+        }
+        let a = render_facts(&ok);
+        let b = render_facts(&bad);
+        assert!(a.contains('✓'), "成功应显示 ✓：{a}");
+        assert!(b.contains('✗'), "失败应显示 ✗：{b}");
+    }
+
+    #[test]
+    fn no_color_env_disables_all_coloring() {
+        // NO_COLOR 是硬约定：设了就不能上色（无障碍 / 重定向到文件的场景）
+        std::env::set_var("NO_COLOR", "1");
+        let facts = vec![
+            Fact::UserSaid("hi".into()),
+            Fact::AssistantSaid("yo".into()),
+            Fact::ToolFinished { name: "bash".into(), exit_code: 0 },
+        ];
+        let s = Screen {
+            cols: 60, rows: 20, facts: &facts, input: "x", status: "s",
+            footer_right: "m", awaiting_input: false, show_cursor: false, about: None,
+        };
+        let out = s.render();
+        std::env::remove_var("NO_COLOR");
+        // 只允许定位/光标类转义（如 [H、[2J），不允许任何颜色 SGR（以 m 结尾）
+        let colored: Vec<&str> = out.split('\u{1b}')
+            .filter(|seg| seg.contains('m') && seg.chars().next().map(|c| c.is_ascii_digit() || c == '[').unwrap_or(false))
+            .filter(|seg| {
+                let head: String = seg.chars().take_while(|c| *c != 'm').collect();
+                head.chars().all(|c| c.is_ascii_digit() || c == ';' || c == '[')
+            })
+            .collect();
+        assert!(colored.is_empty(), "NO_COLOR 下不应有颜色转义：{colored:?}");
+    }
+
+    #[test]
+    fn footer_right_yields_on_narrow_terminals() {
+        // 窄终端里右侧信息让位，而不是折行打乱布局
+        let facts = vec![Fact::AssistantSaid("x".into())];
+        let s = Screen {
+            cols: 24, rows: 10, facts: &facts, input: "", status: "就绪 · 很长很长很长",
+            footer_right: "deepseek-chat · auto-edit", awaiting_input: false,
+            show_cursor: false, about: None,
+        };
+        let out = s.render();
+        assert!(out.contains("就绪"), "左侧状态应保留：{out}");
+        assert!(!out.contains("deepseek-chat"), "窄终端应舍弃右侧信息：{out}");
+    }
+
+    #[test]
+    fn status_line_aligns_right_info_to_the_edge() {
+        let s = Screen {
+            cols: 40, rows: 10, facts: &[], input: "", status: "就绪",
+            footer_right: "mock", awaiting_input: false, show_cursor: false, about: None,
+        };
+        let line = s.status_line(&Pal::new(ColorMode::None), "mock");
+        assert_eq!(width::display_width(&line), 40, "状态栏应铺满整行：{line:?}");
+        assert!(line.starts_with("就绪"), "{line:?}");
+        assert!(line.ends_with("mock"), "{line:?}");
+    }
+
+    #[test]
     fn wordmark_rows_are_equal_width() {
         // 手改词标最容易犯的错：某行多/少一个字符，终端里立刻看出错位。
         let ws: Vec<usize> = WORDMARK.iter().map(|r| r.chars().count()).collect();
@@ -872,6 +1237,7 @@ mod tests {
             version: "0.1.0".into(),
             model: "mock".into(),
             mode: "Default（沙箱 WorkspaceWrite / 审批 OnRequest）".into(),
+            mode_short: "default".into(),
             workspace: "/tmp/ws".into(),
             session: "neo-tui".into(),
         }
@@ -886,7 +1252,9 @@ mod tests {
             facts: &[],
             input: "",
             status: "就绪",
-            show_cursor: true,
+            footer_right: "",
+            awaiting_input: false,
+show_cursor: true,
             about: Some(&a),
         };
         let out = s.render();
@@ -910,7 +1278,9 @@ mod tests {
             facts: &facts,
             input: "",
             status: "就绪",
-            show_cursor: true,
+            footer_right: "",
+            awaiting_input: false,
+show_cursor: true,
             about: Some(&a),
         };
         let out = s.render();
@@ -928,7 +1298,9 @@ mod tests {
             facts: &[],
             input: "",
             status: "就绪",
-            show_cursor: true,
+            footer_right: "",
+            awaiting_input: false,
+show_cursor: true,
             about: Some(&a),
         };
         let out = s.render();
@@ -947,10 +1319,12 @@ mod tests {
             facts: &[],
             input: "",
             status: "就绪",
-            show_cursor: true,
+            footer_right: "",
+            awaiting_input: false,
+show_cursor: true,
             about: Some(&a),
         };
-        for line in s.welcome_lines(&a) {
+        for line in s.welcome_lines(&a, &Pal::new(ColorMode::None)) {
             // 去掉 ANSI 后逐行量宽
             let plain: String = {
                 let mut o = String::new();

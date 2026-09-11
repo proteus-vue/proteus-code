@@ -20,6 +20,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
   .pill { font-size:11px; padding:2px 8px; border:1px solid #334155; border-radius:999px; color:#94a3b8; }
   #log { padding:12px 16px; white-space:pre-wrap; word-break:break-word; min-height:60vh; }
   .tool { color:#7dd3fc; } .err { color:#f87171; } .ask { color:#fbbf24; }
+  .me { color:#e6edf3; border-left:2px solid #9d7cd8; padding-left:8px; margin:4px 0; }
   .dim { color:#64748b; }
   footer { position:sticky; bottom:0; border-top:1px solid #1f2937; background:#0b0f14; padding:10px 16px; display:flex; gap:8px; }
   input { flex:1; background:#111827; color:#e6edf3; border:1px solid #334155; border-radius:8px; padding:8px 10px; font:inherit; }
@@ -91,6 +92,7 @@ es.onmessage = (ev) => {
   try { m = JSON.parse(ev.data); } catch { return; }
   const k = m.kind || Object.keys(m)[0];
   if (k === 'subscribed') { line('已连上事件流', 'dim'); return; }
+  if (k === 'user_submitted') { line('┃ ' + (m.text ?? ''), 'me'); return; }
   if (k === 'agent_message_delta') { appendDelta(m); return; }
   if (k === 'agent_message_done') { line(''); return; }
   if (k === 'tool_call_begin') { line('▸ 调用工具 ' + (m.name ?? ''), 'tool'); return; }

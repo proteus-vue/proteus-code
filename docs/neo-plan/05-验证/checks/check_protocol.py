@@ -46,6 +46,8 @@ def emits(state_before, op, state_after):
     kind = op["op"]
     out = []
     if kind == "user_turn":
+        # 用户消息先回显：转录里必须能看出"当时问的是什么"
+        out.append({"kind": "user_submitted", "text": op.get("text", "")})
         out.append({"kind": "turn_started", "turn_id": next_event_id("t")})
         out.append({"kind": "agent_message_done", "text": op.get("echo", "")})
         if op.get("tool"):

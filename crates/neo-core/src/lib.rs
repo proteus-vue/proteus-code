@@ -581,6 +581,9 @@ impl Kernel {
                 // （诚实边界：解析属 M1 后续工作）。
                 let user_text =
                     if refs.is_empty() { text } else { format!("{text}\n[refs: {}]", refs.len()) };
+                // 先回显用户消息，再报 turn 开始 —— 转录顺序与用户感知一致
+                let echo = EventMsg::UserSubmitted { text: user_text.clone() };
+                self.emit_and_log(&echo)?;
                 self.messages.push(Message::User(user_text));
 
                 self.drive_steps()?;

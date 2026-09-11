@@ -1,97 +1,100 @@
 {
-  "schema": 1,
-  "cases": [
+ "schema": 1,
+ "cases": [
+  {
+   "name": "基础轮次：用户提问 + 工具调用（无需审批）",
+   "ops": [
     {
-      "name": "基础轮次：用户提问 + 工具调用（无需审批）",
-      "ops": [
-        {
-          "op": "user_turn",
-          "text": "读一下 README",
-          "echo": "好的",
-          "tool": "bash"
-        }
-      ],
-      "expected_event_kinds": [
-        "turn_started",
-        "agent_message_done",
-        "tool_call_begin",
-        "tool_call_end",
-        "turn_complete"
-      ]
-    },
-    {
-      "name": "审批流：apply_patch 需批准 -> 批准后继续",
-      "ops": [
-        {
-          "op": "user_turn",
-          "text": "改这个文件",
-          "echo": "需要确认",
-          "tool": "apply_patch",
-          "needs_approval": true
-        },
-        {
-          "op": "approve",
-          "id": "ap_0003",
-          "decision": "allow"
-        }
-      ],
-      "expected_event_kinds": [
-        "turn_started",
-        "agent_message_done",
-        "tool_call_begin",
-        "approval_request",
-        "tool_call_end",
-        "turn_complete"
-      ]
-    },
-    {
-      "name": "中断：执行中 Interrupt 在安全点生效",
-      "ops": [
-        {
-          "op": "user_turn",
-          "text": "重构整个项目",
-          "echo": "开始"
-        },
-        {
-          "op": "interrupt"
-        }
-      ],
-      "expected_event_kinds": [
-        "turn_started",
-        "agent_message_done",
-        "turn_complete",
-        "turn_complete"
-      ]
-    },
-    {
-      "name": "Goal：设置目标 -> 暂停（断点保存）",
-      "ops": [
-        {
-          "op": "goal_set",
-          "goal": "实现 JWT 认证",
-          "total": 5
-        },
-        {
-          "op": "goal_pause",
-          "goal_id": "goal_1"
-        }
-      ],
-      "expected_event_kinds": [
-        "turn_started",
-        "goal_progress",
-        "checkpoint_saved"
-      ]
-    },
-    {
-      "name": "关闭",
-      "ops": [
-        {
-          "op": "shutdown"
-        }
-      ],
-      "expected_event_kinds": [
-        "shutdown_complete"
-      ]
+     "op": "user_turn",
+     "text": "读一下 README",
+     "echo": "好的",
+     "tool": "bash"
     }
-  ]
+   ],
+   "expected_event_kinds": [
+    "user_submitted",
+    "turn_started",
+    "agent_message_done",
+    "tool_call_begin",
+    "tool_call_end",
+    "turn_complete"
+   ]
+  },
+  {
+   "name": "审批流：apply_patch 需批准 -> 批准后继续",
+   "ops": [
+    {
+     "op": "user_turn",
+     "text": "改这个文件",
+     "echo": "需要确认",
+     "tool": "apply_patch",
+     "needs_approval": true
+    },
+    {
+     "op": "approve",
+     "id": "ap_0003",
+     "decision": "allow"
+    }
+   ],
+   "expected_event_kinds": [
+    "user_submitted",
+    "turn_started",
+    "agent_message_done",
+    "tool_call_begin",
+    "approval_request",
+    "tool_call_end",
+    "turn_complete"
+   ]
+  },
+  {
+   "name": "中断：执行中 Interrupt 在安全点生效",
+   "ops": [
+    {
+     "op": "user_turn",
+     "text": "重构整个项目",
+     "echo": "开始"
+    },
+    {
+     "op": "interrupt"
+    }
+   ],
+   "expected_event_kinds": [
+    "user_submitted",
+    "turn_started",
+    "agent_message_done",
+    "turn_complete",
+    "turn_complete"
+   ]
+  },
+  {
+   "name": "Goal：设置目标 -> 暂停（断点保存）",
+   "ops": [
+    {
+     "op": "goal_set",
+     "goal": "实现 JWT 认证",
+     "total": 5
+    },
+    {
+     "op": "goal_pause",
+     "goal_id": "goal_1"
+    }
+   ],
+   "expected_event_kinds": [
+    "turn_started",
+    "goal_progress",
+    "checkpoint_saved"
+   ]
+  },
+  {
+   "name": "关闭",
+   "ops": [
+    {
+     "op": "shutdown"
+    }
+   ],
+   "expected_event_kinds": [
+    "shutdown_complete"
+   ]
+  }
+ ]
 }

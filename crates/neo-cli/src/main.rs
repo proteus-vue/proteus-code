@@ -10,7 +10,7 @@
 //! 这是「宿主不含业务逻辑」的落地点：换宿主不改这里之外任何东西。
 
 use neo_config::Config;
-use neo_exec::{build_kernel, describe_mode, run_task, ExecOptions};
+use neo_exec::{build_kernel, describe_mode, mode_short, run_task, ExecOptions};
 use neo_protocol::{Decision, EventMsg};
 use neo_protocol::ExecMode;
 use std::path::PathBuf;
@@ -354,6 +354,7 @@ fn cmd_tui(args: &[String]) -> i32 {
         version: env!("CARGO_PKG_VERSION").to_string(),
         model: provider.clone(),
         mode: describe_mode(mode),
+        mode_short: mode_short(mode).to_string(),
         workspace: workspace.display().to_string(),
         session: session_id.to_string(),
     };

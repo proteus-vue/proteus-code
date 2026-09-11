@@ -121,6 +121,8 @@ pub fn run_task(
 fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
     for e in events {
         let line = match e {
+            // 用户消息也进转录：无头输出应能看出"当时问的是什么"
+            EventMsg::UserSubmitted { text } => Some(format!("> {text}")),
             EventMsg::TurnStarted { .. } => Some("[turn] 开始".to_string()),
             EventMsg::AgentMessageDelta { delta } => Some(delta.clone()),
             EventMsg::AgentMessageDone { .. } => None, // 增量已输出，避免重复
@@ -169,6 +171,20 @@ pub fn build_kernel(
     let cfg = Config { exec_mode: opts.mode, ..Config::default() };
     Kernel::new(session_id, cfg, tools, model, sandbox, persistence, workspace)
         .with_max_steps(opts.max_steps)
+}
+
+/// 档位短名（footer / 状态栏用）。
+///
+/// 与 `describe_mode` 分开是刻意的：长描述含"沙箱/审批/文件编辑"三段，
+/// 放状态栏会把右侧信息挤掉；短名保证窄终端也放得下。
+pub fn mode_short(mode: ExecMode) -> &'static str {
+    match mode {
+        ExecMode::Plan => "plan",
+        ExecMode::ConfirmBefore => "confirm",
+        ExecMode::Default => "default",
+        ExecMode::AutoEdit => "auto-edit",
+        ExecMode::FullAccess => "full",
+    }
 }
 
 /// 当前档位的可读描述（用于启动提示）。
