@@ -1332,7 +1332,7 @@ Picker 动作的处理是 `settings_state = None; popup_state = Some(弹窗)`，
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 469 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo test --workspace      # 470 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫）
 ```
 

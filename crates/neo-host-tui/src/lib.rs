@@ -582,6 +582,12 @@ pub struct Screen<'a> {
     pub settings: Option<&'a Vec<SettingSection>>,
     /// 设置视图当前选中的可操作行（用于高亮）
     pub settings_cursor: usize,
+    /// 设置页内的**内联选择器**（在该行下方就地展开候选）。
+    ///
+    /// 为什么不用居中弹窗：设置页是全屏的，一点回车却退回聊天画面弹个小框，
+    /// 观感是"两个界面来回跳"。内联展开让候选长在那一行下面 ——
+    /// 全程留在同一页里，移动和选择都在原上下文完成。
+    pub settings_picker: Option<&'a SettingsPicker>,
     /// 外观（背景纹理 + Logo 样式）
     pub appearance: appearance::Appearance,
     /// 自定义背景字符画（`NEO_TUI_BG_FILE` 读入；优先于内置纹理）
@@ -1563,6 +1569,46 @@ impl Screen<'_> {
             .collect()
     }
 
+    /// 在设置行下方画内联候选列表；返回画完之后的行号。
+    ///
+    /// 缩进（列 6）与设置行的值列对齐 —— 视觉上"这个值展开成了这些选项"，
+    /// 而不是另开一个框。超出行数上限时只画能放下的部分（宁可少画候选，
+    /// 也不能把底部反馈行/图例顶掉）。
+    fn draw_inline_picker(
+        &self,
+        g: &mut Grid,
+        pk: &SettingsPicker,
+        mut row: usize,
+        content_max: usize,
+    ) -> usize {
+        // 留一行给"共 N 项 / 上下选择"的说明
+        let budget = content_max.saturating_sub(row + 1);
+        for (i, item) in pk.items.iter().enumerate() {
+            if i >= budget {
+                break;
+            }
+            let sel = i == pk.selected;
+            let mark = if sel { "❯ " } else { "  " };
+            let tone = if sel { Tone::Primary } else { Tone::Muted };
+            let text = if item.detail.is_empty() {
+                item.label.clone()
+            } else {
+                format!("{}  {}", item.label, item.detail)
+            };
+            let avail = self.cols.saturating_sub(10);
+            let shown = width::truncate_to_width(&text, avail).to_string();
+            g.put(row, 6, mark, tone);
+            g.put(row, 8, &shown, tone);
+            row += 1;
+        }
+        if budget > pk.items.len() {
+            let hint = format!("↑↓ 选择 · enter 确认 · esc 取消（{} 项）", pk.items.len());
+            g.put(row, 8, &hint, Tone::Border);
+            row += 1;
+        }
+        row
+    }
+
     /// 设置视图：分节列出可配置项与只读项。
     ///
     /// `regions.settings_rows` 会登记可操作行的 y 坐标，供鼠标点击命中 ——
@@ -1645,6 +1691,12 @@ impl Screen<'_> {
                     }
                 }
                 row += 1;
+                // 内联选择器：就地长在这一行下面（不跳出设置页）。
+                if let Some(pk) = self.settings_picker {
+                    if pk.label == r.label {
+                        row = self.draw_inline_picker(g, pk, row, content_max);
+                    }
+                }
             }
         }
         // 反馈行：动作做完必须让用户看见结果。
@@ -2831,6 +2883,18 @@ pub struct SettingSection {
     pub rows: Vec<SettingRow>,
 }
 
+/// 设置页内的内联选择器：在某一行**下方就地展开**候选列表。
+///
+/// 与 `popup::Popup` 的区别只在"画在哪"：候选与选中逻辑复用同一套
+/// `popup::Item` / `ItemAction`，但渲染位置贴在该行之下，不跳出去。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsPicker {
+    /// 展开在哪一行（用标签定位 —— 行是每次重算的，存下标会失效）。
+    pub label: String,
+    pub items: Vec<popup::Item>,
+    pub selected: usize,
+}
+
 /// 设置视图的运行时信息（由主循环注入 —— 宿主不自己读配置）。
 #[derive(Debug, Clone)]
 pub struct SettingsInfo {
@@ -3944,6 +4008,10 @@ where
     // 设置视图（`ctrl+p` → 设置，或 `/settings`）
     let mut settings_state: Option<Vec<SettingSection>> = None;
     let mut settings_cursor: usize = 0;
+    // 设置页内的内联选择器（在该行下方展开候选）
+    let mut settings_picker: Option<SettingsPicker> = None;
+    // 选择器里确认的一项：在本帧结束时统一执行（与 popup 的 ItemAction 复用同一处理）
+    let mut picker_apply: Option<popup::Item> = None;
     // 提醒：默认关闭（对齐 opencode 的 attention.enabled 默认 false）——
     // 没人喜欢工具自己响。要就显式开：/settings 或 NEO_TUI_NOTIFY=1。
     let mut notify_enabled = std::env::var_os("NEO_TUI_NOTIFY").is_some();
@@ -4029,6 +4097,7 @@ where
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
             };
@@ -4089,6 +4158,7 @@ where
                 display,
                 settings: Some(sections),
                 settings_cursor,
+                settings_picker: settings_picker.as_ref(),
                 appearance: current_appearance,
                 custom_background: custom_bg.as_ref(),
             };
@@ -4097,6 +4167,108 @@ where
             stdout.flush()?;
 
             let slots = settings_actionable(sections);
+            // 内联选择器里确认的一项：复用 popup 的 ItemAction 处理，
+            // 不另写一套 —— 主题/模型/会话的行为与 `/theme`、`/model`、`/sessions`
+            // 必须完全一致，复制一份必然漂移。
+            if let Some(item) = picker_apply.take() {
+                let eff = apply_popup_item(
+                    &item,
+                    &mut input,
+                    &mut status,
+                    &mut theme_name,
+                    &mut info_screen,
+                );
+                match eff {
+                    Effect::SwitchModel(name) => {
+                        match submit(neo_protocol::Op::ConfigureSession {
+                            patch: neo_protocol::SessionPatch {
+                                model: Some(name.clone()),
+                                ..Default::default()
+                            },
+                        }) {
+                            Ok(produced) => {
+                                events.extend(produced);
+                                about.current_model = name.clone();
+                                status = format!("已切换到 {name}");
+                            }
+                            Err(e) => status = format!("切换失败：{e}"),
+                        }
+                    }
+                    Effect::SwitchSession(id) => {
+                        if let Some(msg) = handle_session_effect(
+                            &Effect::SwitchSession(id),
+                            sessions,
+                            &mut events,
+                            &mut view_state,
+                        ) {
+                            status = msg;
+                        }
+                    }
+                    Effect::SetBackground(b) => {
+                        current_appearance.background = b;
+                        appearance::save_preference(current_appearance);
+                    }
+                    Effect::SetLogo(l) => {
+                        current_appearance.logo = l;
+                        appearance::save_preference(current_appearance);
+                    }
+                    // 主题在 apply_popup_item 里已直接改好 theme_name 并落盘
+                    _ => {}
+                }
+                // 值变了：刷新设置页显示（保留光标位置）
+                if settings_state.is_some() {
+                    open_settings(
+                        &mut settings_state,
+                        &about,
+                        &events,
+                        &mut display,
+                        sidebar_open,
+                        mouse_on,
+                        clipboard.as_ref(),
+                        notify_backend.as_ref(),
+                        notify_enabled,
+                        notify_sound,
+                        theme_name,
+                        current_appearance,
+                        custom_bg.is_some(),
+                        sessions,
+                    );
+                }
+            }
+            // 内联选择器打开时，按键**先给选择器**：↑↓ 在候选间移动、enter 确认、
+            // esc 收起。这样"选值"与"选设置行"是同一页里的两个层次，
+            // 不再退回聊天画面弹框（那是用户说的"割裂"）。
+            if let Some(pk) = settings_picker.as_mut() {
+                match read_key_timeout(&mut stdin, 1) {
+                    None => { dirty = true; continue; }
+                    Some(Key::Quit) => break,
+                    Some(Key::Escape) | Some(Key::Char('q')) => {
+                        settings_picker = None;
+                        status = "已收起候选".to_string();
+                    }
+                    Some(Key::Up) | Some(Key::Char('k')) => {
+                        pk.selected = pk.selected.saturating_sub(1);
+                    }
+                    Some(Key::Down) | Some(Key::Char('j')) => {
+                        if pk.selected + 1 < pk.items.len() {
+                            pk.selected += 1;
+                        }
+                    }
+                    Some(Key::Home) | Some(Key::Char('g')) => pk.selected = 0,
+                    Some(Key::End) | Some(Key::Char('G')) => {
+                        pk.selected = pk.items.len().saturating_sub(1)
+                    }
+                    Some(Key::Enter) => {
+                        if let Some(item) = pk.items.get(pk.selected).cloned() {
+                            settings_picker = None;
+                            picker_apply = Some(item);
+                        }
+                    }
+                    Some(_) => {}
+                }
+                dirty = true;
+                continue;
+            }
             // 键盘与鼠标合成同一个"要执行第几项"，之后的执行逻辑只有一份 ——
             // 两条输入路径各写一套分支，迟早会漂移出"点得到但回车不行"这类差异。
             let mut activate: Option<usize> = None;
@@ -4147,10 +4319,11 @@ where
                                         status = format!("主题：{}", theme_name.as_str());
                                     }
                                     SettingAction::ThemePicker => {
-                                        let mut tp = popup::Popup::new(popup::Kind::Theme, "");
-                                        tp.set_items(popup::theme_items(""), false);
-                                        popup_state = Some(tp);
-                                        settings_state = None;
+                                        settings_picker = Some(SettingsPicker {
+                                            label: "主题".into(),
+                                            items: popup::theme_items(""),
+                                            selected: 0,
+                                        });
                                     }
                                     SettingAction::ToggleDetails => {
                                         display.expanded = !display.expanded;
@@ -4210,39 +4383,29 @@ where
                                         appearance::save_preference(current_appearance);
                                     }
                                     SettingAction::SessionPicker => {
-                                        let mut tp =
-                                            popup::Popup::new(popup::Kind::Sessions, "");
-                                        tp.set_items(
-                                            popup::session_items(
+                                        settings_picker = Some(SettingsPicker {
+                                            label: "会话 ID".into(),
+                                            items: popup::session_items(
                                                 &sessions.list(),
                                                 &sessions.current(),
                                             ),
-                                            false,
-                                        );
-                                        popup_state = Some(tp);
-                                        settings_state = None;
+                                            selected: 0,
+                                        });
                                     }
                                     SettingAction::ModelPicker => {
-                                        let mut tp =
-                                            popup::Popup::new(popup::Kind::Models, "");
-                                        tp.set_items(
-                                            popup::model_items(
+                                        settings_picker = Some(SettingsPicker {
+                                            label: "模型".into(),
+                                            items: popup::model_items(
                                                 &about.models,
                                                 &about.current_model,
                                             ),
-                                            false,
-                                        );
-                                        popup_state = Some(tp);
-                                        settings_state = None;
+                                            selected: 0,
+                                        });
                                     }
                                 }
                                 // 刷新设置页上的值（改完之后数字/状态要跟着变）。
                                 // **不复位光标** —— 复位会让画面像"闪一下没反应"。
-                                //
-                                // 只在仍然停在设置页时刷新：Theme/Model/Session 三个
-                                // Picker 动作刚把 settings_state 置 None（准备开弹窗），
-                                // 无条件刷新会把它**又打开**，弹窗永远出不来 ——
-                                // 表现为"选主题/选模型回车没反应"（其实是弹窗被盖掉了）。
+                                // 内联选择器不关设置页，所以这里始终会刷新到。
                                 if settings_state.is_some() {
                                     open_settings(
                                         &mut settings_state,
@@ -4295,6 +4458,7 @@ custom_bg.is_some(),
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_picker: None,
                 appearance: current_appearance,
                 custom_background: custom_bg.as_ref(),
             };
@@ -4378,6 +4542,7 @@ custom_bg.is_some(),
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
             };
@@ -4431,6 +4596,7 @@ custom_bg.is_some(),
                 display,
                 settings: settings_state.as_ref(),
                 settings_cursor,
+                settings_picker: None,
                 appearance: current_appearance,
                 custom_background: custom_bg.as_ref(),
             };
@@ -5415,6 +5581,7 @@ sessions,
                             display,
                             settings: None,
                             settings_cursor: 0,
+                            settings_picker: None,
                             appearance: current_appearance,
                             custom_background: custom_bg.as_ref(),
                         }
@@ -5463,6 +5630,7 @@ sessions,
                         display,
                         settings: None,
                         settings_cursor: 0,
+                        settings_picker: None,
                         appearance: current_appearance,
                         custom_background: custom_bg.as_ref(),
                     }
@@ -5525,6 +5693,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -5569,6 +5738,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -5680,6 +5850,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -5786,6 +5957,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -5814,6 +5986,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
             }
@@ -5864,6 +6037,7 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+                    settings_picker: None,
                     appearance: appearance::Appearance::default(),
                     custom_background: None,
                 }
@@ -5898,6 +6072,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
             }
@@ -5932,6 +6107,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -5990,6 +6166,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }.render();
@@ -6014,6 +6191,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }.render();
@@ -6079,6 +6257,7 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+                    settings_picker: None,
                     appearance: appearance::Appearance::default(),
                     custom_background: None,
                 }
@@ -6106,7 +6285,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
         let text = plain(&out).join("\n");
@@ -6125,7 +6304,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None,
             appearance: ap, custom_background: None,
         }.render()).join("\n")
     }
@@ -6207,7 +6386,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None,
             appearance: appearance::Appearance {
                 background: appearance::Background::Stars,
                 logo: appearance::LogoStyle::Hidden,
@@ -6396,6 +6575,7 @@ mod tests {
             display: disp,
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -6507,7 +6687,7 @@ mod tests {
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
+                display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
             let lines = plain(&out);
@@ -6558,7 +6738,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -6649,6 +6829,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
@@ -6689,6 +6870,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: cursor,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
@@ -6737,6 +6919,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
@@ -6772,6 +6955,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
@@ -6831,6 +7015,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -6857,6 +7042,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -6882,6 +7068,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
             }
@@ -6912,7 +7099,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render()
     }
@@ -7038,7 +7225,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup, preformatted: None,
-            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions()
         .1
@@ -7105,6 +7292,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
@@ -7195,6 +7383,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                settings_picker: None,
                 appearance: ap, custom_background: None,
             }
             .render()
@@ -7310,6 +7499,57 @@ mod tests {
     }
 
     #[test]
+    fn settings_picker_expands_inline_under_its_row() {
+        // 内联选择器必须长在**那一行下面**，且不跳回聊天界面。
+        // 早先是"关掉全屏设置页 → 退回聊天画面弹个小框"，观感割裂
+        // （用户的反馈原话）；这条测试钉住"候选出现在设置页内部"。
+        let info = SettingsInfo {
+            notify: true, notify_sound: true, notify_enabled: false,
+            background: "stars".into(), logo: "large".into(), custom_background: false,
+            model_count: 3, session_count: 2,
+            version: "0.1.0".into(), binary_built: "test".into(), model: "d".into(), mode: "m".into(),
+            workspace: "/w".into(), branch: "".into(), session: "s".into(),
+            context_limit: 0, theme: "neo".into(),
+            details: false, thinking: false, sidebar: true, mouse: true, clipboard: true,
+            messages: 0, files_changed: 0,
+        };
+        let secs = settings_sections(&info);
+        let pk = SettingsPicker {
+            label: "主题".into(),
+            items: popup::theme_items(""),
+            selected: 1,
+        };
+        let ed = editor::Editor::new();
+        let out = Screen {
+            cols: 120, rows: 40, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&about()), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            settings_picker: Some(&pk),
+            appearance: appearance::Appearance::default(), custom_background: None,
+        }
+        .render();
+        let lines = plain(&out);
+        let theme_row = lines
+            .iter()
+            .position(|l| l.contains("主题"))
+            .expect("应有主题行");
+        // 候选应出现在主题行的**下方**，且带选择箭头
+        let below: Vec<&String> = lines.iter().skip(theme_row + 1).take(6).collect();
+        assert!(
+            below.iter().any(|l| l.contains('❯')),
+            "候选应内联展开在主题行下方（含 ❯ 选择标记），实得 {below:?}"
+        );
+        // 且仍显示设置标题（即没有跳出设置页）
+        assert!(
+            lines.iter().any(|l| l.trim_start().starts_with("设置")),
+            "展开候选时仍应在设置页内"
+        );
+    }
+
+    #[test]
     fn a_hidden_sidebar_leaves_a_clickable_grip() {
         // 没有把手的话，鼠标用户点收起后**再也点不开**（陷阱）
         let a = about();
@@ -7319,7 +7559,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
         let (gx, gy) = r.sidebar_grip.expect("侧栏收起时应留一个把手");
@@ -7390,7 +7630,7 @@ mod tests {
                 status: "", awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
+                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render()
         };
@@ -7416,7 +7656,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         assert!(plain(&out).join("\n").contains("下方还有"), "应提示下方还有内容");
@@ -7438,7 +7678,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -7482,6 +7722,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -7519,6 +7760,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -7547,6 +7789,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
             }
@@ -7579,6 +7822,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -7684,6 +7928,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
             }
@@ -7851,6 +8096,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_picker: None,
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }
@@ -7878,6 +8124,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_picker: None,
                 appearance: appearance::Appearance::default(),
                 custom_background: None,
             }
@@ -8071,6 +8318,7 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+                    settings_picker: None,
                     appearance: appearance::Appearance::default(),
                     custom_background: None,
                 }
