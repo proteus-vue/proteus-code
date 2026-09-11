@@ -2535,6 +2535,8 @@ enum Effect {
     NewSessionReal,
     /// 删除会话
     DeleteSession(String),
+    /// 提交压缩请求给内核
+    CompactSubmit,
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -2593,9 +2595,9 @@ fn apply_popup_item(
             commands::Action::Quit => Effect::Quit,
             commands::Action::NewSession => Effect::ClearTranscript,
             commands::Action::Compact => {
-                // 如实说明未实现，而不是假装压缩了
-                *status = "压缩上下文需要 L4 编排，尚未实现".to_string();
-                Effect::None
+                // 提交给内核（内核实现在 L4 注入的策略上）。
+                // 结果由主循环的 Effect::CompactSubmit 落实。
+                Effect::CompactSubmit
             }
             commands::Action::ThemePicker => Effect::OpenThemePicker,
             commands::Action::NextTheme => {
@@ -2778,6 +2780,8 @@ pub enum SettingAction {
     NextLogo,
     /// 打开模型选择
     ModelPicker,
+    /// 打开会话选择
+    SessionPicker,
 }
 
 /// 设置视图的一个分组。
@@ -2817,6 +2821,8 @@ pub struct SettingsInfo {
     pub custom_background: bool,
     /// 可选模型数量
     pub model_count: usize,
+    /// 会话数（供设置页展示）
+    pub session_count: usize,
     pub messages: usize,
     pub files_changed: usize,
 }
@@ -2897,10 +2903,16 @@ pub fn settings_sections(info: &SettingsInfo) -> Vec<SettingSection> {
             title: "会话",
             rows: vec![
                 SettingRow {
+                    label: "会话".into(),
+                    value: format!("{} 个（用 /sessions 切换）", info.session_count),
+                    action: Some(SettingAction::SessionPicker),
+                    readonly_note: "",
+                },
+                SettingRow {
                     label: "会话 ID".into(),
                     value: info.session.clone(),
                     action: None,
-                    readonly_note: "内核单会话；多会话需要会话库（未实现）",
+                    readonly_note: "用 /sessions 切换会话（本项只读，避免误触切走）",
                 },
                 SettingRow {
                     label: "工作区".into(),
@@ -3186,6 +3198,13 @@ fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<V
             }
             Fact::ApprovalNeeded { detail } => {
                 out.push(vec![(2, format!("△ 需要审批：{detail}"), Tone::Warning)]);
+            }
+            Fact::ContextCompacted { removed_messages } => {
+                out.push(vec![(
+                    2,
+                    format!("⇩ 上下文已压缩（{removed_messages} 条 → 摘要）"),
+                    Tone::Info,
+                )]);
             }
             Fact::Rewound { turns, removed_messages, files_kept } => {
                 // 必须同时说明"文件没回退" —— 让人以为文件也回去了最危险
@@ -3488,6 +3507,7 @@ fn open_settings(
     theme_name: theme::ThemeName,
     appearance: appearance::Appearance,
     has_custom_bg: bool,
+    sessions: &dyn SessionControl,
 ) {
     let facts = facts_of(events);
     let files_changed = facts
@@ -3505,6 +3525,7 @@ fn open_settings(
         notify_sound,
         notify_enabled,
         model_count: about.models.len(),
+        session_count: sessions.list().len(),
         background: appearance.background.as_str().to_string(),
         logo: appearance.logo.as_str().to_string(),
         custom_background: has_custom_bg,
@@ -3991,6 +4012,19 @@ where
                                             current_appearance.logo.next();
                                         appearance::save_preference(current_appearance);
                                     }
+                                    SettingAction::SessionPicker => {
+                                        let mut tp =
+                                            popup::Popup::new(popup::Kind::Sessions, "");
+                                        tp.set_items(
+                                            popup::session_items(
+                                                &sessions.list(),
+                                                &sessions.current(),
+                                            ),
+                                            false,
+                                        );
+                                        popup_state = Some(tp);
+                                        settings_state = None;
+                                    }
                                     SettingAction::ModelPicker => {
                                         let mut tp =
                                             popup::Popup::new(popup::Kind::Models, "");
@@ -4021,6 +4055,7 @@ where
 theme_name,
 current_appearance,
 custom_bg.is_some(),
+                                    sessions,
                                 );
                             }
                         }
@@ -4314,6 +4349,7 @@ custom_bg.is_some(),
 theme_name,
 current_appearance,
 custom_bg.is_some(),
+                                    sessions,
                                 );
                             }
                             Effect::ToggleSidebar => {
@@ -4350,7 +4386,15 @@ custom_bg.is_some(),
                             Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
                             // 外观类 Effect 统一处理（避免在每处弹窗分支重复一遍）
                             other => {
-                                if let Some(m) = handle_session_effect(
+                                if let Effect::CompactSubmit = &other {
+                                    match submit(neo_protocol::Op::Compact) {
+                                        Ok(produced) => {
+                                            events.extend(produced);
+                                            status = "上下文已压缩".to_string();
+                                        }
+                                        Err(e) => status = format!("压缩失败：{e}"),
+                                    }
+                                } else if let Some(m) = handle_session_effect(
                                     &other,
                                     sessions,
                                     &mut events,
@@ -4536,6 +4580,7 @@ custom_bg.is_some(),
 theme_name,
 current_appearance,
 custom_bg.is_some(),
+sessions,
                                         );
                                     }
                                     Effect::ToggleSidebar => {
@@ -4571,7 +4616,15 @@ custom_bg.is_some(),
                                     }
                                     // 外观类 Effect 统一处理（避免在每处弹窗分支重复一遍）
                                 other => {
-                                    if let Some(m) = handle_session_effect(
+                                    if let Effect::CompactSubmit = &other {
+                                        match submit(neo_protocol::Op::Compact) {
+                                            Ok(produced) => {
+                                                events.extend(produced);
+                                                status = "上下文已压缩".to_string();
+                                            }
+                                            Err(e) => status = format!("压缩失败：{e}"),
+                                        }
+                                    } else if let Some(m) = handle_session_effect(
                                         &other,
                                         sessions,
                                         &mut events,
@@ -4844,6 +4897,7 @@ custom_bg.is_some(),
 theme_name,
 current_appearance,
 custom_bg.is_some(),
+                                    sessions,
                                 );
                             }
                             Effect::ToggleSidebar => {
@@ -4871,22 +4925,33 @@ custom_bg.is_some(),
                             Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
                             // Tab 接受主题选择后不开新弹窗，直接生效即可
                             Effect::OpenThemePicker | Effect::None => {}
-                            // 外观类：统一交给 apply_appearance
+                            // 会话/压缩/外观等"其余"Effect 统一处理。
+                            // 曾在这里只处理外观，导致 `/compact` 落到空分支
+                            // **静默无操作** —— 用户明确要求压缩却什么都没发生。
                             other => {
-                                if let Some(m) =
-                                    apply_appearance(&mut current_appearance, &other)
-                                {
+                                if let Effect::CompactSubmit = &other {
+                                    match submit(neo_protocol::Op::Compact) {
+                                        Ok(produced) => {
+                                            events.extend(produced);
+                                            status = "上下文已压缩".to_string();
+                                        }
+                                        Err(e) => status = format!("压缩失败：{e}"),
+                                    }
+                                } else if let Some(m) = handle_session_effect(
+                                    &other,
+                                    sessions,
+                                    &mut events,
+                                    &mut view_state,
+                                ) {
                                     status = m;
-                                } else if let Effect::BackgroundPicker = other {
-                                    let mut tp =
-                                        popup::Popup::new(popup::Kind::Background, "");
-                                    tp.set_items(popup::background_items(""), false);
-                                    popup_state = Some(tp);
-                                } else if let Effect::LogoPicker = other {
-                                    let mut tp =
-                                        popup::Popup::new(popup::Kind::Logo, "");
-                                    tp.set_items(popup::logo_items(""), false);
-                                    popup_state = Some(tp);
+                                } else if let Some(m) = handle_ui_effect(
+                                    &other,
+                                    &mut current_appearance,
+                                    &mut popup_state,
+                                    &about,
+                                    sessions,
+                                ) {
+                                    status = m;
                                 }
                             }
                         }
@@ -5016,6 +5081,7 @@ custom_bg.is_some(),
 theme_name,
 current_appearance,
 custom_bg.is_some(),
+sessions,
                                     );
                                 }
                                 Effect::ToggleSidebar => {
@@ -5052,7 +5118,15 @@ custom_bg.is_some(),
                                 }
                                 Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
                                 other => {
-                                    if let Some(m) = handle_session_effect(
+                                    if let Effect::CompactSubmit = &other {
+                                        match submit(neo_protocol::Op::Compact) {
+                                            Ok(produced) => {
+                                                events.extend(produced);
+                                                status = "上下文已压缩".to_string();
+                                            }
+                                            Err(e) => status = format!("压缩失败：{e}"),
+                                        }
+                                    } else if let Some(m) = handle_session_effect(
                                         &other,
                                         sessions,
                                         &mut events,
@@ -6276,6 +6350,7 @@ mod tests {
             notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
         model_count: 3,
+        session_count: 2,
             version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
             context_limit: 64_000, theme: "neo".into(),
@@ -6296,6 +6371,7 @@ mod tests {
             notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
         model_count: 3,
+        session_count: 2,
             version: "0.1.0".into(), model: "deepseek".into(), mode: "default".into(),
             workspace: "/tmp/ws".into(), branch: "main".into(), session: "s1".into(),
             context_limit: 64_000, theme: "neo".into(),
@@ -6333,6 +6409,7 @@ mod tests {
         notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
         model_count: 3,
+        session_count: 2,
             version: "0.1.0".into(), model: "deepseek-chat".into(), mode: "default".into(),
             workspace: "/Volumes/data1/work/office/debug/proteus-code".into(),
             branch: "main".into(), session: "neo-tui".into(),
@@ -6368,6 +6445,7 @@ mod tests {
         notify: true, notify_sound: true, notify_enabled: false,
         background: "stars".into(), logo: "large".into(), custom_background: false,
         model_count: 3,
+        session_count: 2,
             version: "0.1.0".into(), model: "d".into(), mode: "m".into(),
             workspace: "/w".into(), branch: "".into(), session: "s".into(),
             context_limit: 0, theme: "neo".into(),

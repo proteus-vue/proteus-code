@@ -1012,3 +1012,152 @@ fn rebuild_with_empty_log_leaves_history_untouched() {
     assert_eq!(n, 0);
     assert_eq!(k.messages().len(), before, "空日志不该清空已有历史");
 }
+
+// ─────────────── 上下文压缩（Op::Compact）───────────────
+
+/// 测试用压缩器：把前 N 条换成一条摘要（切点由它决定）。
+struct FakeCompactor {
+    /// 保留最近的条数
+    keep: usize,
+    /// 触发阈值（消息数少于它就不压）
+    trigger: usize,
+}
+
+impl neo_core::Compactor for FakeCompactor {
+    fn plan(&self, messages: &[neo_core::Message]) -> Option<(String, usize)> {
+        if messages.len() < self.trigger {
+            return None;
+        }
+        // 切点必须落在 User 消息上（真实 provider 的硬约束）
+        let candidate = messages.len().saturating_sub(self.keep);
+        let cut = messages
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| matches!(m, Message::User(_)) && *i > 0 && *i <= candidate)
+            .map(|(i, _)| i)
+            .max()?;
+        Some(("（压缩摘要）".to_string(), cut))
+    }
+}
+
+#[test]
+fn compact_replaces_the_prefix_with_a_summary() {
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("ok")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    )
+    .with_compactor(Box::new(FakeCompactor { keep: 4, trigger: 6 }));
+
+    // 造 8 轮（每轮 2 条消息）
+    for i in 0..8 {
+        k.submit(Op::UserTurn { text: format!("问题{i}"), refs: vec![] }).unwrap();
+    }
+    let before = k.messages().len();
+    assert!(before >= 16, "应有 16 条以上消息，实际 {before}");
+
+    let ev = k.submit(Op::Compact).unwrap();
+    assert!(
+        ev.iter().any(|e| matches!(e, EventMsg::ContextCompacted { .. })),
+        "应发出 ContextCompacted：{ev:?}"
+    );
+    let after = k.messages();
+    assert!(after.len() < before, "压缩后应更短：{before} → {}", after.len());
+    // 第一条应是摘要（System 角色）
+    assert!(
+        matches!(&after[0], Message::System(t) if t.contains("摘要")),
+        "首条应为摘要：{:?}",
+        after[0]
+    );
+    // 关键：压缩后的历史里**不能有孤儿工具消息**
+    // （tool 消息必须能找到对应的 assistant tool_call）
+    let mut call_ids: Vec<String> = Vec::new();
+    for m in after {
+        match m {
+            Message::Assistant { tool_calls, .. } => {
+                call_ids.extend(tool_calls.iter().map(|c| c.id.clone()));
+            }
+            Message::ToolResult { id, .. } => {
+                assert!(
+                    call_ids.contains(id),
+                    "出现了孤儿工具结果 {id} —— 切点落在了轮的中间"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn compact_without_a_compactor_reports_why_not_a_silent_noop() {
+    // 未配置压缩策略时必须**明确报错**，不能假装压缩成功 ——
+    // 假装成功会让用户以为上下文空了，实际没变。
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("ok")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    let err = k.submit(Op::Compact).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("压缩"), "错误应说明压缩不可用：{msg}");
+    assert!(msg.contains("策略") || msg.contains("边界"), "应给出原因：{msg}");
+}
+
+#[test]
+fn compact_refuses_a_bogus_keep_point_instead_of_corrupting_history() {
+    // 策略给了 0 或越界的保留点 → 拒绝执行，而不是冒险砍坏历史
+    struct BadCompactor;
+    impl neo_core::Compactor for BadCompactor {
+        fn plan(&self, _m: &[neo_core::Message]) -> Option<(String, usize)> {
+            Some(("坏摘要".into(), 0)) // 0 不合法
+        }
+    }
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("ok")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    )
+    .with_compactor(Box::new(BadCompactor));
+    k.submit(Op::UserTurn { text: "hi".into(), refs: vec![] }).unwrap();
+    let before = k.messages().len();
+    assert!(k.submit(Op::Compact).is_err(), "非法保留点应被拒绝");
+    assert_eq!(k.messages().len(), before, "拒绝时不得改动历史");
+}
+
+#[test]
+fn compaction_survives_log_replay() {
+    // 日志是 append-only 的：回放必须**重演**压缩动作，
+    // 否则重建出的历史与实际发给模型的不一致。
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("ok")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    )
+    .with_compactor(Box::new(FakeCompactor { keep: 4, trigger: 6 }));
+    for i in 0..8 {
+        k.submit(Op::UserTurn { text: format!("问{i}"), refs: vec![] }).unwrap();
+    }
+    k.submit(Op::Compact).unwrap();
+    let original = k.messages().to_vec();
+    let logs = k.log_for_test();
+
+    let mut k2 = Kernel::new(
+        "s",
+        cfg(ExecMode::Default),
+        ToolRegistry::new(),
+        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::text_only("x"))),
+        Arc::new(TestSandbox),
+        Box::new(InMemoryPersistence::new()),
+        "/tmp",
+    );
+    k2.rebuild_from_log(&logs);
+    assert_eq!(
+        k2.messages(),
+        original.as_slice(),
+        "回放必须重演压缩，重建结果应与压缩后的历史一致"
+    );
+}

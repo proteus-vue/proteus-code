@@ -220,7 +220,7 @@ const COMMANDS: &[Command] = &[
         action: Action::DiffViewer, category: Category::Session, keybinding: "审批时按 d",
     },
     Command {
-        name: "compact", aliases: &["summarize"], desc: "压缩上下文（需 L4 编排，尚未实现）",
+        name: "compact", aliases: &["summarize"], desc: "压缩上下文（把较早消息摘要为一条）",
         action: Action::Compact, category: Category::Session, keybinding: "",
     },
 
@@ -376,7 +376,7 @@ Neo —— 编程 Agent 内核
     /copy      复制最近一条回复
     /details   展开 / 折叠工具输出
     /thinking  显示 / 隐藏推理
-    /compact   压缩上下文（需 L4 编排，尚未实现）
+    /compact   压缩上下文（把较早消息摘要为一条，腾出预算）
     /exit      退出（别名 quit / q）
 
 多行输入
@@ -428,7 +428,7 @@ pub fn status_text(a: &crate::About, theme_name: &str) -> String {
 
 能力
   工具      bash / apply_patch / todowrite / 提问
-  未实现    L4 目标编排（/compact 依赖它）、多会话、多模型切换
+  未实现    Goal 目标编排（/goal 系列）、技能注册表、MCP 客户端
 ",
         a.version,
         a.model,

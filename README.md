@@ -30,7 +30,7 @@
 | `apply_patch` 落盘 | ✅ **已实现**（经 `ctx.write_file` 走沙箱，唯一匹配校验，真机验证落盘） |
 | Web 宿主（零依赖 HTTP + SSE） | ✅ **已实现**（`neo-host-web`；`POST /api/turn` 提交、`GET /api/events` SSE、`/api/approve` 审批） |
 | Desktop 宿主（系统 webview 壳） | 🟡 **契据就绪**：`DesktopHost` 的 `HostBackend` 实现与 T6 覆盖已完成；wry window 层未接（原型阶段不拉入平台图形栈） |
-| Goal 编排（L4） | ❌ **未实现** |
+| Goal 编排（L4） | ✅ **已实现**：Goal 状态机（Subtask/Phase/Checkpoint/StopConditions）+ 上下文压缩策略（`/compact` 端到端，摘要与移除条数可回放） |
 | Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |
 
 **一句话现状**：内核 + 真实沙箱 + **真实模型** + 落盘 + **三宿主（exec / TUI / Web）**
@@ -54,7 +54,8 @@ neo tui --provider demo        # Markdown 高亮 + 任务清单
 ```
 
 **离线验不到的**（必须真实模型）：真实推理质量、多轮工具编排、
-模型是否真的会调 `todowrite` 维护清单、`/compact`（未实现）。
+模型是否真的会调 `todowrite` 维护清单。压缩策略本身（`/compact`）已在
+离线桩上端到端验证：日志出现 `context_compacted`，回放能重建压缩后的历史。
 界面本身与 provider 无关，所以这些以外的交互都能离线确认。
 
 ### 亲测可用
@@ -118,7 +119,7 @@ neo exec "用一句话回答 1+1" --mode plan
 cargo run -p neo-cli -- tui --provider mock    # 不装 PATH，直接用 cargo 跑 TUI
 cargo install --path crates/neo-cli --locked   # 或装成全局命令 neo
 
-cargo test --workspace     # 212 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo test --workspace     # 437 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
 cargo check --workspace    # 17 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试

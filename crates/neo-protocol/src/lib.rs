@@ -227,6 +227,11 @@ pub enum EventMsg {
     /// 让每个宿主自己维护增量状态，一旦某条增量丢了就会显示错乱。
     /// 内核已经持有累计状态，广播整表最省事也最不容易错。
     FilesChanged { files: Vec<FileChange> },
+    /// 上下文已压缩：前缀 `removed_messages` 条被替换为一条 `summary`。
+    ///
+    /// 摘要本身必须进事件流 —— 它是**模型可见**的内容（后续请求会带上），
+    /// 不落日志会让回放出的历史与真实请求不符。
+    ContextCompacted { removed_messages: usize, summary: String },
     /// 对话已回退。
     ///
     /// **明确区分"对话"与"文件"**：回退只动对话历史，磁盘上的改动**不会**
@@ -290,6 +295,8 @@ pub enum Fact {
     ApprovalNeeded { detail: String },
     /// 任务清单（模型自述的进度）。
     TodoList(Vec<TodoEntry>),
+    /// 上下文已压缩。
+    ContextCompacted { removed_messages: usize },
     /// 对话已回退（回退了 N 轮，删掉 M 条消息，有 K 个文件改动被保留）。
     Rewound { turns: usize, removed_messages: usize, files_kept: usize },
     /// 本次会话已修改的文件（含增删行数）。
@@ -367,6 +374,9 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
             }
             EventMsg::UserSubmitted { text } => out.push(Fact::UserSaid(text.clone())),
             EventMsg::TodoUpdated { items } => out.push(Fact::TodoList(items.clone())),
+            EventMsg::ContextCompacted { removed_messages, .. } => {
+                out.push(Fact::ContextCompacted { removed_messages: *removed_messages })
+            }
             EventMsg::Rewound { turns, removed_messages, files_kept } => out.push(Fact::Rewound {
                 turns: *turns,
                 removed_messages: *removed_messages,

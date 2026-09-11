@@ -115,6 +115,39 @@ pub trait ModelProvider: Send + Sync {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// 扩展点：Compactor（上下文压缩策略）
+// ══════════════════════════════════════════════════════════════════════
+//
+// # 为什么契据在 L2、实现在 L4
+//
+// 架构规矩是「依赖只能向下」，所以 L2 不能 import L4。但"压哪几条消息"
+// 确实是 L4 的策略问题（编排层决定保留多少上下文才够继续）。
+// 解法与 ModelProvider/Tool 一致：**内核定义 seam，上层实现并注入**。
+// 这样策略可替换（换压缩算法不动内核），方向也不破。
+
+/// 上下文压缩策略。
+pub trait Compactor: Send + Sync {
+    /// 给定当前消息序列，返回 `(摘要文本, 保留起点下标)`。
+    ///
+    /// `None` 表示**压不了/不该压**（例如切不出安全边界）。内核据此
+    /// 如实报错，而不是硬压 —— 产出非法请求比不压更糟。
+    ///
+    /// 关键约束（实现方必须遵守）：`keep_from` 必须落在**轮的起点**
+    /// （用户消息）上。否则会留下没有对应 tool_call 的 tool 消息，
+    /// 真实 provider 会以 400 拒绝。
+    fn plan(&self, messages: &[Message]) -> Option<(String, usize)>;
+}
+
+/// 无压缩器：`Op::Compact` 会如实报告"未配置压缩策略"。
+pub struct NoCompactor;
+
+impl Compactor for NoCompactor {
+    fn plan(&self, _messages: &[Message]) -> Option<(String, usize)> {
+        None
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // 扩展点 2/4：Tool
 // ══════════════════════════════════════════════════════════════════════
 
@@ -421,6 +454,8 @@ pub enum KernelError {
     Persistence(PersistenceError),
     /// 尚未实现的 Op（明确报错，不静默忽略）。
     Unimplemented(String),
+    /// 压缩无法执行（未配策略 / 切不出安全边界）。
+    CompactUnavailable(String),
     /// 模型切换失败（名字不存在等）。
     ///
     /// 单独变体而不是复用 `Unimplemented`：一个说"能力还没有"，
@@ -444,6 +479,7 @@ impl std::fmt::Display for KernelError {
             Self::NoPendingApproval(id) => write!(f, "无待审批调用：{id}"),
             Self::Persistence(e) => write!(f, "{e}"),
             Self::Unimplemented(what) => write!(f, "该 Op 尚未实现：{what}"),
+            Self::CompactUnavailable(msg) => write!(f, "{msg}"),
             Self::ModelSwitch(msg) => write!(f, "{msg}"),
             Self::RewindTooFar { requested, available } => write!(
                 f,
@@ -483,6 +519,8 @@ pub struct Kernel {
     tools: ToolRegistry,
     /// 模型注册表（多 provider + 当前选中）。运行时可切换。
     models: crate::models::ModelRegistry,
+    /// 上下文压缩策略（L4 实现，构造时注入；缺省不压缩）
+    compactor: Box<dyn Compactor>,
     sandbox: Arc<dyn SandboxBackend>,
     persistence: Box<dyn SessionPersistence>,
     cwd: PathBuf,
@@ -534,6 +572,7 @@ impl Kernel {
             cfg,
             tools,
             models: model,
+            compactor: Box::new(NoCompactor),
             sandbox,
             persistence,
             cwd: cwd.into(),
@@ -731,6 +770,43 @@ impl Kernel {
                 self.emit_and_log(&ev)?;
             }
 
+            Op::Compact => {
+                // 压缩 = 用一条摘要替换掉前缀消息。**不静默丢弃**：
+                // 摘要本身也落日志（模型可见即已落盘），且发事件让宿主知道
+                // 上下文变了 —— 否则用户会奇怪"模型怎么忘了前面"。
+                let before = self.messages.len();
+                match self.compactor.plan(&self.messages) {
+                    Some((summary, keep_from)) => {
+                        if keep_from == 0 || keep_from > before {
+                            // 策略给的边界不合法：拒绝执行而不是冒险砍坏历史
+                            return Err(KernelError::CompactUnavailable(format!(
+                                "压缩策略给出的保留点 {keep_from} 不合法（当前 {before} 条）"
+                            )));
+                        }
+                        // 被摘要掉的是**前缀** `[0, keep_from)`，共 keep_from 条。
+                        // 曾写成 `before - keep_from` —— 那算出来的是**保留下来的**
+                        // 条数（保留 4 条却报"压缩 4 条"，而实际压了 12 条），
+                        // 事件里的数字会误导用户，回放也会因此重演错。
+                        let removed = keep_from;
+                        let tail: Vec<Message> = self.messages[keep_from..].to_vec();
+                        self.messages.clear();
+                        self.messages.push(Message::System(summary.clone()));
+                        self.messages.extend(tail);
+                        let ev = EventMsg::ContextCompacted {
+                            removed_messages: removed,
+                            summary,
+                        };
+                        self.emit_and_log(&ev)?;
+                    }
+                    None => {
+                        // 说清楚是"没配策略"还是"暂时压不了"，用户才知道怎么办
+                        return Err(KernelError::CompactUnavailable(format!(
+                            "当前无法压缩（{before} 条消息）。可能原因：未配置压缩策略，                             或切不出安全的轮次边界（需至少一轮完整对话可压）"
+                        )));
+                    }
+                }
+            }
+
             Op::Shutdown => {
                 self.emit_and_log(&EventMsg::ShutdownComplete)?;
             }
@@ -913,6 +989,12 @@ impl Kernel {
         self.rebuild_from_log(&logs)
     }
 
+    /// 注入压缩策略（链式，构造后立即调用；不注入则 `/compact` 如实报未配置）。
+    pub fn with_compactor(mut self, c: Box<dyn Compactor>) -> Self {
+        self.compactor = c;
+        self
+    }
+
     /// 取当前会话已落盘的日志（供重建与会话切换使用）。
     pub fn log_for_test(&self) -> Vec<LoggedRecord> {
         self.persistence.load().unwrap_or_default()
@@ -971,6 +1053,18 @@ impl Kernel {
                                 text,
                                 tool_calls: std::mem::take(&mut pending_calls),
                             });
+                        }
+                        Ok(EventMsg::ContextCompacted { removed_messages, summary }) => {
+                            // 回放必须**重演**压缩动作：日志是 append-only 的，
+                            // 无法改写旧记录，只能在重放时把"当时被摘要掉的前缀"
+                            // 同样删掉并换上摘要。
+                            //
+                            // **不是 clear()**：那样会把压缩时**保留的**尾部也丢掉，
+                            // 重建出的历史比真实历史短 —— 回放与真实请求不符，
+                            // 正是"模型可见即已落盘"要防的事。
+                            let n = removed_messages.min(rebuilt.len());
+                            rebuilt.drain(0..n);
+                            rebuilt.insert(0, Message::System(summary));
                         }
                         Ok(EventMsg::ToolCallEnd {
                             id,

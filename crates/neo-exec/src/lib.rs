@@ -130,6 +130,9 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
             }
             // 未聚合前的单文件改动不单独输出（否则同一文件会刷屏）；由 FilesChanged 汇总
             EventMsg::FileChanged { .. } => None,
+            EventMsg::ContextCompacted { removed_messages, .. } => {
+                Some(format!("[compact] 上下文已压缩（{removed_messages} 条消息 → 1 条摘要）"))
+            }
             EventMsg::Rewound { turns, removed_messages, files_kept } => Some(format!(
                 "[rewind] 回退 {turns} 轮（删除 {removed_messages} 条消息）；\
                  磁盘上 {files_kept} 个文件改动**未**撤销"
@@ -204,6 +207,10 @@ pub fn build_kernel(
     let cfg = Config { exec_mode: opts.mode, ..Config::default() };
     Kernel::new(session_id, cfg, tools, models, sandbox, persistence, workspace)
         .with_max_steps(opts.max_steps)
+        // 压缩策略由 L4 提供（内核只认契据）—— 这样 `/compact` 不是空操作
+        .with_compactor(Box::new(
+            neo_orchestration::PolicyCompactor::default(),
+        ))
 }
 
 /// 档位短名（footer / 状态栏用）。
