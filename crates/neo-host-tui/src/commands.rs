@@ -49,6 +49,8 @@ pub enum Action {
     Keys,
     /// 显示状态（模型/沙箱/工作区/分支/主题/工具）
     Status,
+    /// 打开全屏 diff 查看器
+    DiffViewer,
 }
 
 /// **必须由命令触发**的动作。新增变体时要加进这里 ——
@@ -62,6 +64,7 @@ const COMMAND_ACTIONS: &[Action] = &[
     Action::Help,
     Action::Keys,
     Action::Status,
+    Action::DiffViewer,
 ];
 
 /// **只在界面内部产生**的动作（不经过命令表）。
@@ -83,6 +86,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "next", aliases: &["next-theme"], desc: "切到下一个主题", action: Action::NextTheme },
     Command { name: "new", aliases: &["clear"], desc: "开始新对话（清空当前转录）", action: Action::NewSession },
     Command { name: "compact", aliases: &["summarize"], desc: "压缩上下文以腾出预算", action: Action::Compact },
+    Command { name: "diff", aliases: &["changes"], desc: "查看本次会话的改动", action: Action::DiffViewer },
     Command { name: "exit", aliases: &["quit", "q"], desc: "退出 Neo", action: Action::Quit },
 ];
 
@@ -157,6 +161,8 @@ Neo —— 编程 Agent 内核
     /help      显示帮助
     /keys      键盘快捷键
     /status    运行状态与环境
+    /diff      查看改动（全屏：hunk/文件跳转、双列视图）
+    /diff      查看改动（全屏查看器：hunk/文件跳转、双列视图）
     /theme     选择配色主题（6 套）
     /next      直接切到下一个主题
     /new       开始新对话（清空转录）

@@ -20,6 +20,7 @@
 //! - 保存 `stty -g` 的确切状态并原样写回（不是猜一个"合理默认"）
 
 pub mod commands;
+pub mod diffview;
 pub mod editor;
 pub mod input;
 pub mod popup;
@@ -548,6 +549,8 @@ pub struct Screen<'a> {
     pub sidebar: bool,
     /// 转录滚动位置与搜索（`None` = 新建默认视图，贴底跟随）
     pub view: Option<&'a view::View>,
+    /// 全屏 diff 查看器（`Some` = 占满屏幕）
+    pub diff_viewer: Option<&'a diffview::Viewer>,
 }
 
 /// 信任对话框状态。
@@ -911,6 +914,13 @@ impl Grid {
         }
     }
 
+    /// 居中写一行（无色调片段时用）。
+    fn put_centered(&mut self, row: usize, text: &str, tone: Tone) {
+        let w = width::display_width(text);
+        let col = self.cols.saturating_sub(w) / 2;
+        self.put(row, col, text, tone);
+    }
+
     /// 给尚未写入的格子铺星场。**确定性**，所以多帧之间星位完全静止。
     fn fill_stars(&mut self) {
         for r in 0..self.rows {
@@ -979,6 +989,15 @@ impl Screen<'_> {
         let side_x0 = if show_sidebar { Some(self.cols - SIDEBAR_COLS) } else { None };
         if let Some(x0) = side_x0 {
             g.clamp_put(x0);
+        }
+
+        // 全屏 diff 查看器：占满整屏，不画输入框/侧栏/状态栏。
+        if let Some(v) = self.diff_viewer {
+            self.draw_diff_viewer(&mut g, &p, v);
+            let mut out = format!("{ESC}[H{ESC}[2J");
+            out.push_str(&g.lines(&p).join("\r\n"));
+            out.push_str(&format!("{ESC}[?25l"));
+            return (out, regions);
         }
 
         let chrome = chrome_rows(self.input.line_count());
@@ -1401,6 +1420,162 @@ impl Screen<'_> {
             .take(visible)
             .map(|(i, _)| ((top + 2 + (i - start), left, left + box_w), i))
             .collect()
+    }
+
+    /// 全屏 diff 查看器：左侧文件树（可关）+ 右侧 diff。
+    fn draw_diff_viewer(&self, g: &mut Grid, p: &Pal, v: &diffview::Viewer) {
+        let _ = p;
+        if v.is_empty() {
+            g.put_centered(1, "（无改动）", Tone::Muted);
+            g.put(2, 2, "按 q / esc 返回", Tone::Border);
+            return;
+        }
+
+        // 标题行：摘要 + 键位提示
+        let title = width::truncate_to_width(&v.summary(), self.cols.saturating_sub(2)).to_string();
+        g.put(0, 1, &title, Tone::Text);
+        let keys = "j/k 移动  ]/[ hunk  n/p 文件  v 视图  b 树  q 返回";
+        if self.cols > 70 {
+            let kw = width::display_width(keys);
+            g.put(0, self.cols.saturating_sub(kw + 1), keys, Tone::Border);
+        }
+
+        // 文件树（宽终端才显示）
+        let tree_w = if v.tree && self.cols >= 90 { 30usize } else { 0 };
+        let diff_x = if tree_w > 0 { tree_w + 1 } else { 0 };
+        if tree_w > 0 {
+            g.put(1, 0, &"─".repeat(tree_w), Tone::Border);
+            g.put(1, tree_w, "┬", Tone::Border);
+            for (i, f) in v.diff.files.iter().enumerate().take(self.rows.saturating_sub(3)) {
+                let r = 2 + i;
+                if r >= self.rows - 1 {
+                    break;
+                }
+                let selected = i == v.file_cursor;
+                let mark = if selected { "▸ " } else { "  " };
+                let counts = format!("+{} -{}", f.adds, f.dels);
+                let budget = tree_w.saturating_sub(2 + counts.len() + 2);
+                let name = truncate_left(&f.path, budget.max(4));
+                let tone = if selected { Tone::Primary } else { Tone::Muted };
+                g.put(r, 0, mark, Tone::Primary);
+                let end = g.put(r, 2, &name, tone);
+                let cx = tree_w.saturating_sub(counts.len() + 1);
+                if cx > end + 1 {
+                    g.put(r, cx, &counts, Tone::Muted);
+                }
+            }
+        }
+        // 分隔竖线
+        for r in 1..self.rows {
+            if tree_w > 0 {
+                g.put(r, tree_w, "│", Tone::Border);
+            }
+        }
+
+        // diff 内容
+        let viewport = self.rows.saturating_sub(3); // 顶部标题 + 底部提示 + 边距
+        let start = v.offset.min(v.line_count().saturating_sub(1));
+        let avail_w = self.cols.saturating_sub(diff_x + 2);
+        match v.mode {
+            diffview::ViewMode::Unified => {
+                for (i, line) in v.diff.lines.iter().enumerate().skip(start).take(viewport) {
+                    let r = 2 + (i - start);
+                    if r >= self.rows - 1 {
+                        break;
+                    }
+                    let is_cursor = i == v.cursor;
+                    self.put_diff_line(g, r, diff_x, line, avail_w, is_cursor);
+                }
+            }
+            diffview::ViewMode::Split => {
+                // 双列：左边删除/上下文，右边新增/上下文。
+                // 这不是严格的"左右对齐 diff"（那要按 hunk 配对），而是
+                // 把删除与新增分列展示 —— 宽终端下读改动的常见需求。
+                let half = avail_w / 2;
+                let mut left_row = 2usize;
+                let mut right_row = 2usize;
+                for (i, line) in v.diff.lines.iter().enumerate().skip(start) {
+                    if left_row >= self.rows - 1 && right_row >= self.rows - 1 {
+                        break;
+                    }
+                    let is_cursor = i == v.cursor;
+                    match line.kind {
+                        diffview::Kind::Del => {
+                            if left_row < self.rows - 1 {
+                                self.put_diff_line(g, left_row, diff_x, line, half, is_cursor);
+                                left_row += 1;
+                            }
+                        }
+                        diffview::Kind::Add => {
+                            if right_row < self.rows - 1 {
+                                self.put_diff_line(
+                                    g, right_row, diff_x + half, line, half, is_cursor,
+                                );
+                                right_row += 1;
+                            }
+                        }
+                        _ => {
+                            if left_row < self.rows - 1 {
+                                self.put_diff_line(g, left_row, diff_x, line, half, is_cursor);
+                                left_row += 1;
+                            }
+                            if right_row < self.rows - 1 {
+                                self.put_diff_line(
+                                    g, right_row, diff_x + half, line, half, is_cursor,
+                                );
+                                right_row += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 底部提示
+        let more = v.line_count().saturating_sub(start + viewport);
+        let foot = if more > 0 {
+            format!("↓ 下方还有 {more} 行 · 共 {} 行", v.line_count())
+        } else {
+            format!("共 {} 行", v.line_count())
+        };
+        g.put(self.rows - 1, diff_x + 1, &foot, Tone::Border);
+    }
+
+    /// 画一行 diff（含行号、标记、色调）。
+    fn put_diff_line(
+        &self,
+        g: &mut Grid,
+        row: usize,
+        x: usize,
+        line: &diffview::Line,
+        avail_w: usize,
+        is_cursor: bool,
+    ) {
+        if avail_w < 6 {
+            return;
+        }
+        // 光标行整行反白（用 Primary 前景 + 标记表明当前位置）
+        let (sign, tone) = match line.kind {
+            diffview::Kind::Header => ("", Tone::Muted),
+            diffview::Kind::HunkHeader => ("", Tone::Accent),
+            diffview::Kind::Add => ("+", Tone::Success),
+            diffview::Kind::Del => ("-", Tone::Error),
+            diffview::Kind::Context => (" ", Tone::Muted),
+        };
+        let tone = if is_cursor { Tone::Primary } else { tone };
+        let cursor_mark = if is_cursor { "▌" } else { " " };
+        g.put(row, x, cursor_mark, Tone::Primary);
+        // 行号：旧号在左、新号在右（宽度 4+4）
+        // 行号的 `{:>4}` 需要实参；空位用空串占位（宽度靠格式化保证）
+        // 分别格式化两侧再拼 —— 单条 format 里混用有/无参数容易出错
+        let left = line.old_no.map(|o| format!("{o:>4}")).unwrap_or_else(|| "    ".into());
+        let right = line.new_no.map(|n| format!("{n:>4}")).unwrap_or_else(|| "    ".into());
+        let nos = format!("{left} {right}");
+        g.put(row, x + 1, &nos, Tone::Muted);
+        g.put(row, x + 10, sign, tone);
+        let text_w = avail_w.saturating_sub(12);
+        let text = width::truncate_to_width(&line.text, text_w).to_string();
+        g.put(row, x + 12, &text, tone);
     }
 
     /// 弹窗：标题 + 候选项 + （截断时）页脚。画在输入框上方。
@@ -1967,6 +2142,8 @@ enum Effect {
     OpenThemePicker,
     /// 显示状态屏（正文由运行时拼装）
     ShowStatus,
+    /// 打开 diff 查看器
+    ShowDiff,
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -2023,6 +2200,7 @@ fn apply_popup_item(
                 Effect::None
             }
             commands::Action::Status => Effect::ShowStatus,
+            commands::Action::DiffViewer => Effect::ShowDiff,
             commands::Action::Keys => {
                 *info_screen = Some(commands::keys_text().to_string());
                 Effect::None
@@ -2275,6 +2453,29 @@ enum MouseAction {
     ToggleSidebar,
 }
 
+/// 从当前事件流里的 PatchPreview 打开 diff 查看器。
+///
+/// 汇总**所有**待审批/已发生的改动（按文件拼接），而不是只看最后一条 ——
+/// 用户按 `/diff` 想看的是"这次会话改了什么"。
+fn open_diff_viewer(events: &[EventMsg], slot: &mut Option<diffview::Viewer>) {
+    let mut text = String::new();
+    let facts = facts_of(events);
+    for f in &facts {
+        if let Fact::PatchPreview { diff, .. } = f {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(diff);
+            // 多文件之间需要换行分隔，否则两个 `+++` 会连在一起
+            if !diff.ends_with('\n') {
+                text.push('\n');
+            }
+        }
+    }
+    let parsed = diffview::parse(&text);
+    *slot = Some(diffview::Viewer::new(parsed));
+}
+
 /// 正文可用列数（与 `Screen::body_cols` 同一判据）。
 fn self_body_cols(cols: usize, sidebar: bool) -> usize {
     if sidebar && cols >= SIDEBAR_MIN_COLS {
@@ -2419,6 +2620,8 @@ where
     let mut sidebar_open = true;
     // 转录滚动/搜索状态
     let mut view_state = view::View::new();
+    // 全屏 diff 查看器（`/diff` 或审批时按 d 打开）
+    let mut diff_viewer: Option<diffview::Viewer> = None;
     // 最近一次渲染记录的命中区域。**必须跨迭代保留** ——
     // 只有 dirty 时才重绘，若把它声明在循环内，鼠标事件到达时
     // 区域是空的，命中测试永远失败（点击/滚动全部无效）。
@@ -2480,6 +2683,7 @@ where
                 preformatted: None,
                 sidebar: false,
                 view: None,
+                diff_viewer: None,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2509,6 +2713,77 @@ where
     loop {
         let (cols, rows) = terminal_size();
 
+        // ── 全屏 diff 查看器：独占输入 ──────────────────────────────
+        if let Some(v) = diff_viewer.as_mut() {
+            let screen = Screen {
+                cols,
+                rows,
+                facts: &[],
+                input: &empty_input,
+                status: "",
+                awaiting_input: false,
+                show_cursor: false,
+                about: Some(&about),
+                trust: None,
+                theme: theme_name,
+                popup: None,
+                preformatted: None,
+                sidebar: false,
+                view: None,
+                diff_viewer: Some(v),
+            };
+            write!(stdout, "{}", screen.render())?;
+            stdout.flush()?;
+            let viewport = rows.saturating_sub(3);
+            match read_key_timeout(&mut stdin, 1) {
+                None => continue,
+                Some(k) => {
+                    match k {
+                        Key::Quit => break,
+                        Key::Escape | Key::Char('q') => {
+                            diff_viewer = None;
+                            status = "已关闭 diff 查看器".to_string();
+                        }
+                        Key::Char('j') | Key::Down => v.scroll(1, viewport),
+                        Key::Char('k') | Key::Up => v.scroll(-1, viewport),
+                        Key::PageDown | Key::Char(' ') => {
+                            v.scroll((viewport / 2).max(1) as isize, viewport)
+                        }
+                        Key::PageUp => v.scroll(-((viewport / 2).max(1) as isize), viewport),
+                        Key::Char('g') | Key::Home => v.set_cursor(0, viewport),
+                        Key::Char('G') | Key::End => {
+                            let last = v.line_count().saturating_sub(1);
+                            v.set_cursor(last, viewport);
+                        }
+                        Key::Char(']') => v.hunk_step(true, viewport),
+                        Key::Char('[') => v.hunk_step(false, viewport),
+                        Key::Char('n') => v.file_step(true, viewport),
+                        Key::Char('p') => v.file_step(false, viewport),
+                        Key::Char('N') => {
+                            // 文件树里上下选择
+                            v.tree_step(1, viewport)
+                        }
+                        Key::Char('P') => v.tree_step(-1, viewport),
+                        Key::Char('v') => {
+                            v.toggle_mode();
+                            let m = match v.mode {
+                                diffview::ViewMode::Unified => "统一",
+                                diffview::ViewMode::Split => "双列",
+                            };
+                            status = format!("diff 视图：{m}");
+                        }
+                        Key::Char('b') => v.toggle_tree(),
+                        Key::Char('d') => {
+                            diff_viewer = None;
+                            status = "已关闭 diff 查看器".to_string();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        }
+
         // 信息屏（/help、/keys）：占据正文区，按任意键返回
         if let Some(text) = info_screen.as_deref() {
             let body: Vec<Vec<Seg>> = text
@@ -2532,6 +2807,7 @@ where
                 preformatted: Some(&body),
                 sidebar: false,
                 view: None,
+                diff_viewer: None,
             };
             write!(stdout, "{}", screen.render())?;
             stdout.flush()?;
@@ -2563,6 +2839,7 @@ where
                 preformatted: None,
                 sidebar: sidebar_open,
                 view: Some(&view_state),
+                diff_viewer: diff_viewer.as_ref(),
             };
             let (out, regs) = screen.render_with_regions();
             write!(stdout, "{out}")?;
@@ -2657,6 +2934,7 @@ where
                                     theme_name.as_str(),
                                 ));
                             }
+                            Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
                             Effect::None => {}
                         }
                     }
@@ -2730,6 +3008,9 @@ where
                                             popup::Popup::new(popup::Kind::Theme, "");
                                         tp.set_items(popup::theme_items(""), false);
                                         popup_state = Some(tp);
+                                    }
+                                    Effect::ShowDiff => {
+                                        open_diff_viewer(&events, &mut diff_viewer)
                                     }
                                     Effect::None => {}
                                 }
@@ -2839,6 +3120,11 @@ where
                     status = format!("搜索「{q}」：{n} 处匹配");
                 }
             }
+            Key::Char('d') if outstanding.is_some() && input.is_empty() => {
+                // 待审批时看**完整**改动（正文里只给前 200 行摘要）
+                open_diff_viewer(&events, &mut diff_viewer);
+            }
+
             Key::Char(c) if searching => {
                 input.insert_char(c);
                 // 实时把查询应用到转录（所见即所得）
@@ -2938,6 +3224,7 @@ where
                                     theme_name.as_str(),
                                 ));
                             }
+                            Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
                             // Tab 接受主题选择后不开新弹窗，直接生效即可
                             Effect::OpenThemePicker | Effect::None => {}
                         }
@@ -3050,6 +3337,7 @@ where
                                         theme_name.as_str(),
                                     ));
                                 }
+                                Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
                                 Effect::None => {}
                             }
                         }
@@ -3087,6 +3375,7 @@ where
                             preformatted: None,
                             sidebar: sidebar_open,
                             view: Some(&view_state),
+                            diff_viewer: None,
                         }
                         .render()
                     )?;
@@ -3128,6 +3417,7 @@ where
                         preformatted: None,
                         sidebar: sidebar_open,
                         view: Some(&view_state),
+                        diff_viewer: None,
                     }
                     .render()
                 )?;
@@ -3177,6 +3467,7 @@ mod tests {
             preformatted: None,
             sidebar: false,
             view: None,
+            diff_viewer: None,
         }
         .render()
     }
@@ -3212,6 +3503,7 @@ mod tests {
             preformatted: None,
             sidebar: false,
             view: None,
+            diff_viewer: None,
         }
         .render()
     }
@@ -3311,6 +3603,7 @@ mod tests {
             preformatted: None,
             sidebar: false,
             view: None,
+            diff_viewer: None,
         }
         .render();
         // 找出弹窗所在的行区间（含边框），断言这些行里没有 logo 的半块字符
@@ -3406,6 +3699,7 @@ mod tests {
             preformatted: Some(&lines),
             sidebar: false,
             view: None,
+            diff_viewer: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -3427,6 +3721,7 @@ mod tests {
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
                 sidebar: true,
                 view: None,
+                diff_viewer: None,
             }
             .render();
             let newlines = out.matches('\n').count();
@@ -3470,6 +3765,7 @@ mod tests {
                     theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
                     sidebar: true,
                     view: None,
+                    diff_viewer: None,
                 }
                 .render();
                 for (i, l) in plain(&out).iter().enumerate() {
@@ -3497,6 +3793,7 @@ mod tests {
                 theme: theme::ThemeName::OpenCode, popup: Some(&p), preformatted: None,
                 sidebar: true,
                 view: None,
+                diff_viewer: None,
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -3524,6 +3821,7 @@ mod tests {
             preformatted: None,
             sidebar,
             view: None,
+            diff_viewer: None,
         }
         .render()
     }
@@ -3575,6 +3873,7 @@ mod tests {
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
             sidebar: true,
             view: None,
+            diff_viewer: None,
         }.render();
         let text = plain(&out).join("\n");
         assert!(text.contains("上限未知"), "应说明上限未知：{text}");
@@ -3592,6 +3891,7 @@ mod tests {
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
             sidebar: true,
             view: None,
+            diff_viewer: None,
         }.render();
         assert!(plain(&out).join("\n").contains("90% of 1000"), "占用率应为 90%");
     }
@@ -3650,6 +3950,7 @@ mod tests {
                     about: Some(&a), trust: None,
                     theme: t, popup: None, preformatted: None, sidebar: false,
                     view: None,
+                    diff_viewer: None,
                 }
                 .render()
             })
@@ -3675,12 +3976,138 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
-            sidebar: false, view: None,
+            sidebar: false, view: None, diff_viewer: None,
         }
         .render_with_regions();
         let text = plain(&out).join("\n");
         assert!(text.contains('╭'), "矮终端也必须画出弹窗：{text}");
         assert!(text.contains("命令"), "至少应显示标题：{text}");
+    }
+
+    // ── diff 查看器 ──────────────────────────────────────────────────
+
+    fn viewer_screen(cols: usize, rows: usize, v: &diffview::Viewer) -> String {
+        let a = about();
+        let ed = editor::Editor::new();
+        Screen {
+            cols, rows, facts: &[], input: &ed, status: "",
+            awaiting_input: false, show_cursor: false,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: Some(v),
+        }
+        .render()
+    }
+
+    fn sample_viewer() -> diffview::Viewer {
+        diffview::Viewer::new(diffview::parse(
+            "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,4 @@\n fn main() {\n-    old();\n+    new();\n+    extra();\n }",
+        ))
+    }
+
+    #[test]
+    fn diff_viewer_renders_lines_with_markers_and_numbers() {
+        let v = sample_viewer();
+        let text = plain(&viewer_screen(120, 24, &v)).join("\n");
+        assert!(text.contains("src/main.rs"), "应显示文件路径：{text}");
+        assert!(text.contains("-"), "应显示删除标记");
+        assert!(text.contains("+"), "应显示新增标记");
+        assert!(text.contains("old();"), "应显示删除内容：{text}");
+        assert!(text.contains("new();"), "应显示新增内容：{text}");
+        assert!(text.contains("extra();"), "应显示第二处新增：{text}");
+        assert!(text.contains("@@"), "应显示 hunk 头：{text}");
+    }
+
+    #[test]
+    fn diff_viewer_shows_a_file_tree_on_wide_terminals() {
+        // 多文件时左侧应有文件树
+        let d = diffview::parse(
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-p\n+q",
+        );
+        let v = diffview::Viewer::new(d);
+        let wide = plain(&viewer_screen(120, 24, &v)).join("\n");
+        assert!(wide.contains("a.txt") && wide.contains("b.txt"), "宽终端应列出两个文件：{wide}");
+        // 窄终端不画树（否则 diff 内容没地方放）
+        let narrow_screen = viewer_screen(70, 24, &v);
+        let narrow = plain(&narrow_screen).join("\n");
+        // 标记与内容在相邻的网格格子里，屏幕上看到的是 `+ y`（中间有列号）
+        assert!(
+            narrow.contains("+ y") || narrow.contains("+ q") || narrow.contains("y") ,
+            "窄终端应仍能看到内容：{narrow}"
+        );
+    }
+
+    #[test]
+    fn diff_viewer_split_mode_puts_adds_on_the_right() {
+        let v = sample_viewer();
+        let uni = plain(&viewer_screen(120, 24, &v)).join("\n");
+        let mut v2 = sample_viewer();
+        v2.toggle_mode();
+        let split = plain(&viewer_screen(120, 24, &v2)).join("\n");
+        assert_ne!(uni, split, "切换视图应改变渲染");
+        // 双列时新增行应出现在右半部分
+        let add_row = plain(&viewer_screen(120, 24, &v2))
+            .into_iter()
+            .find(|l| l.contains("new();"))
+            .expect("应能找到新增行");
+        let pos = add_row.find("new();").unwrap();
+        assert!(pos > 40, "双列视图里新增应在右半部分（实际列 {pos}）：{add_row:?}");
+    }
+
+    #[test]
+    fn diff_viewer_lines_stay_within_width() {
+        // 行宽不变量在查看器里同样成立（超宽会折行滚屏）
+        let long = format!("+{}", "很长的中文内容".repeat(30));
+        let d = diffview::parse(&format!(
+            "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n{long}"
+        ));
+        let v = diffview::Viewer::new(d);
+        for cols in [70usize, 100, 140, 200] {
+            let out = viewer_screen(cols, 24, &v);
+            for (i, l) in plain(&out).iter().enumerate() {
+                let w = width::display_width(l);
+                assert!(w <= cols, "{cols} 第 {i} 行宽 {w} 超宽：{l:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_diff_viewer_renders_a_message_not_a_blank_screen() {
+        // 空改动时不能是一片空白 —— 用户会以为界面坏了
+        let v = diffview::Viewer::new(diffview::parse(""));
+        let text = plain(&viewer_screen(100, 20, &v)).join("\n");
+        assert!(text.contains("无改动"), "应说明没有改动：{text}");
+        assert!(text.contains("返回"), "应提示怎么退出：{text}");
+    }
+
+    #[test]
+    fn open_diff_viewer_collects_all_patch_previews() {
+        // `/diff` 应汇总本会话**所有**改动，而不是只看最后一条
+        let evs = vec![
+            EventMsg::PatchProposed {
+                path: "a.txt".into(),
+                diff: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y".into(),
+            },
+            EventMsg::PatchProposed {
+                path: "b.txt".into(),
+                diff: "--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-p\n+q".into(),
+            },
+        ];
+        let mut slot = None;
+        open_diff_viewer(&evs, &mut slot);
+        let v = slot.expect("应打开查看器");
+        assert_eq!(v.diff.files.len(), 2, "应包含两个文件");
+        let text = plain(&viewer_screen(120, 24, &v)).join("\n");
+        assert!(text.contains("a.txt") && text.contains("b.txt"), "{text}");
+    }
+
+    #[test]
+    fn open_diff_viewer_with_no_changes_still_opens() {
+        // 没改动时也应能打开（显示"无改动"），而不是静默什么都不做 ——
+        // 静默会让用户以为快捷键坏了
+        let mut slot = None;
+        open_diff_viewer(&[], &mut slot);
+        assert!(slot.is_some(), "无改动也应打开查看器并说明情况");
     }
 
     // ── 鼠标命中 ─────────────────────────────────────────────────────
@@ -3693,7 +4120,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup, preformatted: None,
-            sidebar: true, view: None,
+            sidebar: true, view: None, diff_viewer: None,
         }
         .render_with_regions()
         .1
@@ -3758,7 +4185,7 @@ mod tests {
             awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None,
+            sidebar: false, view: None, diff_viewer: None,
         }
         .render_with_regions();
         let (gx, gy) = r.sidebar_grip.expect("侧栏收起时应留一个把手");
@@ -3829,7 +4256,7 @@ mod tests {
                 status: "", awaiting_input: false, show_cursor: false,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-                sidebar: false, view: Some(v),
+                sidebar: false, view: Some(v), diff_viewer: None,
             }
             .render()
         };
@@ -3855,7 +4282,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v),
+            sidebar: false, view: Some(&v), diff_viewer: None,
         }
         .render();
         assert!(plain(&out).join("\n").contains("下方还有"), "应提示下方还有内容");
@@ -3877,7 +4304,7 @@ mod tests {
             status: "", awaiting_input: false, show_cursor: false,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v),
+            sidebar: false, view: Some(&v), diff_viewer: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -3916,6 +4343,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false,
             view: None,
+            diff_viewer: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -3946,6 +4374,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false,
             view: None,
+            diff_viewer: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -3967,6 +4396,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: true,
                 view: None,
+                diff_viewer: None,
             }
             .render();
             for (i, l) in plain(&out).iter().enumerate() {
@@ -3992,6 +4422,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false,
             view: None,
+            diff_viewer: None,
         }
         .render();
         // 提取光标定位序列 ESC[<row>;<col>H（渲染尾部还有 ?25h 之类，需精确匹配）
@@ -4084,6 +4515,7 @@ mod tests {
                 awaiting_input: false, show_cursor: false, about: Some(&a), trust: None,
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
                 view: None,
+                diff_viewer: None,
             }
             .render();
             for (i, line) in plain(&out).iter().enumerate() {
@@ -4224,6 +4656,7 @@ mod tests {
             about: Some(&a), trust: Some(&TrustPrompt::default()),
             theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
             view: None,
+            diff_viewer: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -4244,6 +4677,7 @@ mod tests {
                 about: Some(&a), trust: Some(&TrustPrompt { selected: sel }),
                 theme: theme::ThemeName::OpenCode, popup: None, preformatted: None, sidebar: false,
                 view: None,
+                diff_viewer: None,
             }
             .render();
             plain(&out).join("\n")
@@ -4424,6 +4858,7 @@ mod tests {
                     theme: theme::ThemeName::OpenCode, popup: None, preformatted: None,
                     sidebar: false,
                     view: None,
+                    diff_viewer: None,
                 }
                 .render()
             };

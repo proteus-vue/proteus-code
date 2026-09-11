@@ -80,6 +80,7 @@ cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
 #     ctrl+z 撤销 · ctrl+y 重做 · home/end · alt+b/f 按词移动
 #   转录阅读：pageup/pagedown 半页滚动 · ctrl+e 回最新 · ctrl+f 搜索
 #   鼠标：滚轮滚动转录 · 点击选弹窗项 · 点侧栏切换（收起后点右下角 ‹ 展开）
+#   全屏 diff 查看器：/diff 或审批时按 d（hunk/文件跳转、双列视图、文件树）
 #   Tab 补全 / ctrl+r 历史 / ctrl+g 编辑器 / ctrl+l 清屏 / esc 关弹窗
 neo tui --provider selftest --mode default
 # 等价写法：neo --provider selftest --mode default（裸选项默认进 TUI）
