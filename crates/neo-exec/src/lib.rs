@@ -141,7 +141,7 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
             EventMsg::TurnStarted { .. } => Some("[turn] 开始".to_string()),
             EventMsg::AgentMessageDelta { delta } => Some(delta.clone()),
             EventMsg::AgentMessageDone { .. } => None, // 增量已输出，避免重复
-            EventMsg::ToolCallBegin { name, id } => Some(format!("[tool] {name} ({id})")),
+            EventMsg::ToolCallBegin { name, id, .. } => Some(format!("[tool] {name} ({id})")),
             EventMsg::ToolCallEnd { id, exit_code, stdout, stderr, truncated } => {
                 // 无头宿主也把输出打出来：否则日志里只有退出码，
                 // 出问题时无法从日志复盘"命令到底打印了什么"。

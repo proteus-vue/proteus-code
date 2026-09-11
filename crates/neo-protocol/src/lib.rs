@@ -193,7 +193,16 @@ pub enum EventMsg {
     AgentMessageDelta { delta: String },
     AgentMessageDone { text: String },
     ReasoningDelta { delta: String },
-    ToolCallBegin { id: ToolCallId, name: String },
+    ToolCallBegin {
+        id: ToolCallId,
+        name: String,
+        /// 调用参数。**必须落日志** —— 模型下次请求要带完整的 assistant
+        /// tool_call（含 arguments），否则会话无法从日志重建、
+        /// 跨进程续聊时请求非法。这也正是 AGENTS.md「模型可见即已落日志」
+        /// 那条约束的要求。
+        #[serde(default)]
+        arguments: serde_json::Value,
+    },
     ToolCallEnd {
         id: ToolCallId,
         exit_code: i32,
@@ -333,7 +342,7 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
                     out.push(Fact::AssistantSaid(text.clone()));
                 }
             }
-            EventMsg::ToolCallBegin { id, name } => {
+            EventMsg::ToolCallBegin { id, name, .. } => {
                 tool_names.insert(id.as_str(), name.as_str());
             }
             EventMsg::ToolCallEnd { id, exit_code, stdout, stderr, truncated } => {

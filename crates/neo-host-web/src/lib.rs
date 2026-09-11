@@ -266,7 +266,7 @@ mod tests {
         // 与 exec/TUI 用同一套事实语义（T6 前提）
         let mut h = WebFacts::new();
         h.consume(&EventMsg::AgentMessageDone { text: "hi".into() }).unwrap();
-        h.consume(&EventMsg::ToolCallBegin { id: "c".into(), name: "bash".into() }).unwrap();
+        h.consume(&EventMsg::ToolCallBegin { id: "c".into(), name: "bash".into(), arguments: serde_json::Value::Null }).unwrap();
         h.consume(&EventMsg::ToolCallEnd { id: "c".into(), exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false }).unwrap();
         assert_eq!(
             h.facts(),

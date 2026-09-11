@@ -129,13 +129,16 @@ pub enum Action {
     /// 切换到指定模型（名字来自运行时注册表，不是编译期常量，
     /// 故这里用 owned String 的**索引**表达不了；改由 ItemAction 承载。）
     SwitchModel,
+    /// 打开会话列表
+    SessionPicker,
+    /// 新建会话（真新建：全新日志文件，旧会话保留）
+    NewSessionReal,
 }
 
 /// **必须由命令触发**的动作。新增变体时要加进这里 ——
 /// 编译器不会提醒"去注册一条命令"，很容易出现"动作写好了但没有命令能触发"。
 const COMMAND_ACTIONS: &[Action] = &[
     Action::Quit,
-    Action::NewSession,
     Action::Compact,
     Action::ThemePicker,
     Action::NextTheme,
@@ -156,6 +159,8 @@ const COMMAND_ACTIONS: &[Action] = &[
     Action::NextLogo,
     Action::LogoPicker,
     Action::ModelPicker,
+    Action::SessionPicker,
+    Action::NewSessionReal,
 ];
 
 /// **只在界面内部产生**的动作（不经过命令表）。
@@ -163,6 +168,10 @@ const COMMAND_ACTIONS: &[Action] = &[
 /// `SetTheme` 只由主题选择弹窗产生 —— 让用户敲 `/settheme nord`
 /// 不如让他从列表里选（名字要记，也没法预览）。这类动作刻意不注册命令。
 const INTERNAL_ONLY_ACTIONS: &[Action] = &[
+    // 旧的"清空转录"仍可从设置页触发（把当前会话的转录清掉、不新建文件）。
+    // 命令表里不再暴露它 —— `/new` 现在是**真新建会话**（NewSessionReal），
+    // 两个入口语义不同，共用一个命令名会让用户困惑。
+    Action::NewSession,
     Action::SwitchModel,
     Action::SetTheme(crate::theme::ThemeName::Nord),
     Action::SetBackground(crate::appearance::Background::Dots),
@@ -199,8 +208,8 @@ const COMMANDS: &[Command] = &[
 
     // ── 会话 ──
     Command {
-        name: "new", aliases: &["clear"], desc: "开始新对话（清空转录）",
-        action: Action::NewSession, category: Category::Session, keybinding: "",
+        name: "new", aliases: &["clear"], desc: "开始新会话（新日志文件，旧会话保留）",
+        action: Action::NewSessionReal, category: Category::Session, keybinding: "",
     },
     Command {
         name: "undo", aliases: &["rewind"], desc: "回退对话一轮（不还原文件）",
@@ -251,6 +260,10 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "models", aliases: &["model"], desc: "切换模型（运行时，无需重启）",
         action: Action::ModelPicker, category: Category::Recommended, keybinding: "",
+    },
+    Command {
+        name: "sessions", aliases: &["resume", "continue"], desc: "切换会话（列出全部，含标题）",
+        action: Action::SessionPicker, category: Category::Session, keybinding: "",
     },
     Command {
         name: "keys", aliases: &["keybindings"], desc: "键盘快捷键",
@@ -345,6 +358,8 @@ Neo —— 编程 Agent 内核
     /keys      键盘快捷键
     /status    运行状态与环境
     /diff      查看改动（全屏：hunk/文件跳转、双列视图）
+    /sessions  切换会话（别名 resume / continue）
+    /new       新建会话（旧会话保留，可 /sessions 切回）
     /undo      回退对话一轮（**不还原文件**，见下方说明）
     /details   展开 / 折叠工具输出（失败时总是展示）
     /thinking  显示 / 隐藏推理过程
@@ -361,7 +376,6 @@ Neo —— 编程 Agent 内核
     /copy      复制最近一条回复
     /details   展开 / 折叠工具输出
     /thinking  显示 / 隐藏推理
-    /new       开始新对话（清空转录）
     /compact   压缩上下文（需 L4 编排，尚未实现）
     /exit      退出（别名 quit / q）
 
@@ -534,12 +548,12 @@ mod tests {
         // 注意 `/models` 已从这条清单**移除** —— 它在本轮补上了后端能力
         // （内核持模型注册表，运行时可切换）。这条守卫的作用正是提醒：
         // 能力从"无"变"有"时，要把名字从黑名单挪出来，别留下过时的断言。
-        for bad in ["/agents", "/sessions", "/mcps", "/share", "/undo-tree"] {
+        for bad in ["/agents", "/mcps", "/share", "/undo-tree"] {
             assert!(!h.contains(bad), "不得宣传未实现命令 {bad}");
             assert!(!k.contains(bad), "不得宣传未实现命令 {bad}");
         }
         // 已实现的反面：必须出现在帮助里
-        for good in ["/models", "/settings", "/diff"] {
+        for good in ["/models", "/settings", "/diff", "/sessions"] {
             assert!(h.contains(good), "已实现命令 {good} 应出现在帮助里");
         }
     }

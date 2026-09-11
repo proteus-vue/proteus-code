@@ -22,4 +22,5 @@ neo-host-web = { path = "../neo-host-web" }
 neo-sandbox-local = { path = "../neo-sandbox-local" }
 neo-llm-deepseek = { path = "../neo-llm-deepseek" }
 neo-session-local = { path = "../neo-session-local" }
+neo-session-store = { path = "../neo-session-store" }
 serde_json = { workspace = true }

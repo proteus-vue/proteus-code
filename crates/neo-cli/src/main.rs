@@ -342,11 +342,27 @@ fn cmd_tui(args: &[String]) -> i32 {
         None => return 2,
     };
     let sandbox = Arc::new(neo_sandbox_local::LocalSandbox::new(&workspace));
-    let persistence = Box::new(neo_session_local::JsonlPersistence::new(
-        workspace.join(".neo/sessions/tui.jsonl"),
-    ));
-    let session_id = "neo-tui";
-    let mut kernel = build_kernel(session_id, &workspace, &opts, models, sandbox, persistence);
+    // 会话库：所有会话都落在这个目录下（一个会话 = 一个 .jsonl）
+    let sessions_dir = workspace.join(".neo/sessions");
+    let store = neo_session_store::SessionStore::open(&sessions_dir);
+    // 当前会话 id：优先接续最近一个（符合"打开就该继续"的直觉），
+    // 没有历史时才新建。--new 可强制开新会话。
+    let want_new = args.iter().any(|a| a == "--new");
+    let session_id = if want_new || store.is_empty() {
+        let id = store.new_id();
+        eprintln!("[neo] 新建会话 {id}");
+        id
+    } else {
+        let id = store
+            .list()
+            .first()
+            .map(|m| m.id.clone())
+            .unwrap_or_else(|| store.new_id());
+        eprintln!("[neo] 继续会话 {id}（/sessions 可切换，/new 新建）");
+        id
+    };
+    let persistence = Box::new(neo_session_local::JsonlPersistence::new(store.path_for(&session_id)));
+    let kernel = build_kernel(&session_id, &workspace, &opts, models, sandbox, persistence);
 
     // 首屏信息由 CLI 装配（宿主不读环境）—— 与 exec 启动时打印的那三行同源，
     // 避免"命令行提示"与"TUI 首屏"两处各说一套。
@@ -384,9 +400,14 @@ fn cmd_tui(args: &[String]) -> i32 {
     // 主题偏好从用户目录读（首次用默认）；由 CLI 注入，宿主不自己读配置
     let theme_name = neo_host_tui::theme::load_preference();
 
+    // 会话控制：宿主调契据，CLI 执行（含内核换会话与历史重建）。
+    // 内核用 Rc<RefCell> 与 submit 闭包共享 —— TUI 单线程，无需锁。
+    let kernel = std::rc::Rc::new(std::cell::RefCell::new(kernel));
+    let mut sessions = TuiSessions::new(kernel.clone(), store);
+    let submit_kernel = kernel.clone();
     // 注入 submit：TUI 只认契据，业务在 kernel
-    let result = neo_host_tui::run(about, gate, theme_name, move |op| {
-        kernel.submit(op).map_err(|e| e.to_string())
+    let result = neo_host_tui::run(about, gate, theme_name, &mut sessions, move |op| {
+        submit_kernel.borrow_mut().submit(op).map_err(|e| e.to_string())
     });
     match result {
         Ok(()) => 0,
@@ -394,6 +415,85 @@ fn cmd_tui(args: &[String]) -> i32 {
             eprintln!("[neo] TUI 启动失败：{e}");
             2
         }
+    }
+}
+
+
+/// TUI 的会话控制实现：持有内核与会话库，执行切换/新建/删除。
+///
+/// 它活在 CLI 层而不是宿主里，因为**只有 CLI 知道内核怎么装配** ——
+/// 宿主只调用契据（`SessionControl`），不碰内核类型。
+struct TuiSessions {
+    /// 与 submit 闭包共享同一内核（TUI 是单线程，`Rc<RefCell>` 足够且无锁）
+    kernel: std::rc::Rc<std::cell::RefCell<neo_core::Kernel>>,
+    /// 会话库：会话的列举/新建/删除都在这里（日志路径由它给出）
+    store: neo_session_store::SessionStore,
+}
+
+impl TuiSessions {
+    fn new(
+        kernel: std::rc::Rc<std::cell::RefCell<neo_core::Kernel>>,
+        store: neo_session_store::SessionStore,
+    ) -> Self {
+        Self { kernel, store }
+    }
+
+    /// 为某个会话 id 造一个 JSONL 持久化（指向该会话自己的文件）。
+    fn persistence_for(&self, id: &str) -> Box<dyn neo_core::SessionPersistence> {
+        Box::new(neo_session_local::JsonlPersistence::new(self.store.path_for(id)))
+    }
+}
+
+impl neo_host_tui::SessionControl for TuiSessions {
+    fn list(&self) -> Vec<(String, String, usize)> {
+        self.store
+            .list()
+            .into_iter()
+            .map(|m| (m.id, m.title, m.records))
+            .collect()
+    }
+
+    fn switch(&mut self, id: &str) -> Result<Vec<neo_protocol::EventMsg>, String> {
+        if !self.store.exists(id) {
+            return Err(format!("会话 {id} 不存在"));
+        }
+        let p = self.persistence_for(id);
+        // 内核换会话并重建历史
+        let mut k = self.kernel.borrow_mut();
+        k.switch_session(id, p);
+        // 把重建出的历史**转回事件流**给宿主重画转录。
+        // 从落盘日志直接取 event 记录，保持与原始流一致。
+        let logs = k.log_for_test();
+        drop(k);
+        let mut history = Vec::new();
+        for rec in logs {
+            if rec.kind == "event" {
+                if let Ok(ev) =
+                    serde_json::from_value::<neo_protocol::EventMsg>(rec.payload.clone())
+                {
+                    history.push(ev);
+                }
+            }
+        }
+        Ok(history)
+    }
+
+    fn create(&mut self) -> Result<String, String> {
+        let id = self.store.new_id();
+        let p = self.persistence_for(&id);
+        self.kernel.borrow_mut().switch_session(id.clone(), p);
+        Ok(id)
+    }
+
+    fn delete(&mut self, id: &str) -> Result<bool, String> {
+        if id == self.kernel.borrow().session_id() {
+            return Err("不能删除当前正在使用的会话（先切换到别的会话）".into());
+        }
+        self.store.delete(id).map_err(|e| e.to_string())
+    }
+
+    fn current(&self) -> String {
+        self.kernel.borrow().session_id().to_string()
     }
 }
 

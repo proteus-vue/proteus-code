@@ -32,6 +32,8 @@ pub enum Kind {
     Logo,
     /// 模型选择
     Models,
+    /// 会话选择
+    Sessions,
 }
 
 impl Kind {
@@ -44,6 +46,7 @@ impl Kind {
             Kind::Background => "背景",
             Kind::Logo => "Logo 样式",
             Kind::Models => "模型",
+            Kind::Sessions => "会话",
         }
     }
 
@@ -57,6 +60,7 @@ impl Kind {
             Kind::Logo => 4,
             // 模型列表可能较长（多服务商），给 8 行
             Kind::Models => 8,
+            Kind::Sessions => 10,
         }
     }
 }
@@ -76,6 +80,10 @@ pub enum ItemAction {
     SetLogo(crate::appearance::LogoStyle),
     /// 切换到指定模型（名字由内核注册表决定，运行时才知道）
     SwitchModel(String),
+    /// 切换到指定会话
+    SwitchSession(String),
+    /// 删除指定会话
+    DeleteSession(String),
 }
 
 /// 列表项。
@@ -248,6 +256,26 @@ pub fn theme_items(query: &str) -> Vec<Item> {
                 crate::theme::ThemeName::Catppuccin => "柔和马卡龙",
             };
             Item::plain(t.as_str().to_string(), d.to_string(), ItemAction::SetTheme(t))
+        })
+        .collect()
+}
+
+/// 会话候选（由主循环从 `SessionControl::list` 取，宿主不自己维护清单）。
+pub fn session_items(list: &[(String, String, usize)], current: &str) -> Vec<Item> {
+    list.iter()
+        .map(|(id, title, records)| {
+            let mark = if id == current { "● " } else { "  " };
+            let label = if title == id {
+                // 没有标题的会话诚实显示 id（不编造"未命名会话"之类的假名）
+                format!("{mark}{id}")
+            } else {
+                format!("{mark}{title}")
+            };
+            Item::plain(
+                label,
+                format!("{id} · {records} 条记录"),
+                ItemAction::SwitchSession(id.clone()),
+            )
         })
         .collect()
 }

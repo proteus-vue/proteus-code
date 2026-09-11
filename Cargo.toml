@@ -18,6 +18,7 @@ members = [
   "crates/neo-sandbox-local",
   "crates/neo-llm-deepseek",
   "crates/neo-session-local",
+  "crates/neo-session-store",
 ]
 
 [workspace.package]

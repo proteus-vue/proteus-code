@@ -25,7 +25,7 @@ fn shared_event_stream() -> Vec<EventMsg> {
     vec![
         EventMsg::TurnStarted { turn_id: "t1".into() },
         EventMsg::AgentMessageDone { text: "hello".into() },
-        EventMsg::ToolCallBegin { id: "c1".into(), name: "bash".into() },
+        EventMsg::ToolCallBegin { id: "c1".into(), name: "bash".into(), arguments: serde_json::Value::Null },
         EventMsg::ToolCallEnd { id: "c1".into(), exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false },
         EventMsg::TurnComplete { input_tokens: 1, output_tokens: 2 },
     ]

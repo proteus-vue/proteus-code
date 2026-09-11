@@ -40,6 +40,7 @@ dependencies = [
  "neo-protocol",
  "neo-sandbox-local",
  "neo-session-local",
+ "neo-session-store",
  "serde_json",
 ]
 
@@ -190,6 +191,15 @@ version = "0.1.0"
 dependencies = [
  "neo-core",
  "neo-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-session-store"
+version = "0.1.0"
+dependencies = [
+ "neo-protocol",
+ "neo-session",
  "serde_json",
 ]
 

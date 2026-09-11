@@ -18,6 +18,7 @@
 | 内存有界性（输出上限、UTF-8 安全截断、上下文上限） | ✅ **已实现**，6 项实测 |
 | `ModelProvider` 真实后端（DeepSeek chat-completions） | ✅ **已实现**，HTTP 帧对真实服务器验证通过 |
 | **多模型注册表 + 运行时切换**（`/models`、设置页可选） | ✅ **已实现**，真实模型实测切换后下一轮走新 provider |
+| **多会话**（`/sessions` 切换、`/new` 新建、历史重建） | ✅ **已实现**，pty 实测切换后历史逐条重建且转录正确 |
 | `SandboxBackend` 真实后端（macOS Seatbelt） | ✅ **已实现**，6 项**真机**越权拦截测试 |
 | `SessionPersistence` 真实后端（JSONL append-only） | ✅ **已实现**，重开续号已验证 |
 | `neo exec` 无头宿主（端到端闭环） | ✅ **已实现**，离线 + 真实 provider 双路径跑通 |
@@ -141,6 +142,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 │   ├── neo-exec/              L5 宿主：无头 / CI
 │   ├── neo-cli/               `neo` 入口（multitool）
 │   ├── neo-session/           会话真相源（append-only）
+│   ├── neo-session-store/     多会话库（列举 / 新建 / 删除 / 标题）
 │   ├── neo-config/            四级配置 + 模式解析
 │   └── neo-mock/              test-support：各 SPI 的 Mock 后端 + 反例后端
 ├── docs/

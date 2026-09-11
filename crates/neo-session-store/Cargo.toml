@@ -1,0 +1,11 @@
+[package]
+name = "neo-session-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# L3 PROVIDER —— 多会话的目录管理与元信息（会话库）
+[dependencies]
+neo-protocol = { path = "../neo-protocol" }
+neo-session = { path = "../neo-session" }
+serde_json = { workspace = true }

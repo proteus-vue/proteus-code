@@ -933,3 +933,82 @@ fn available_models_are_listed_for_the_host() {
     // neo-mock 的 ScriptedModelProvider 自报名为 "scripted"
     assert_eq!(list[0].name, "scripted");
 }
+
+// ─────────────── 从会话日志重建历史 ───────────────
+
+#[test]
+fn history_can_be_rebuilt_from_the_session_log() {
+    // 这是 AGENTS.md 那条约束的证明：「凡进入模型请求的内容都要能从会话日志重建」。
+    // 也是会话切换/跨进程续聊的前提 —— 不能重建就只能得到空历史。
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(RecordingTool { seen: seen.clone() }));
+    let persistence = Box::new(InMemoryPersistence::new());
+    let mut k = Kernel::new(
+        "s",
+        cfg(ExecMode::AutoEdit),
+        tools,
+        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::new(vec![
+            vec![tool_call("c1", "bash", serde_json::json!({ "cmd": "echo hi" }))],
+            vec![ModelDelta::Text("做完了".into())],
+        ]))),
+        Arc::new(TestSandbox),
+        persistence,
+        "/tmp",
+    );
+    k.submit(Op::UserTurn { text: "跑一下 echo".into(), refs: vec![] }).unwrap();
+    let original = k.messages().to_vec();
+    assert!(original.len() >= 3, "应有 用户/助手(含工具调用)/工具结果：{original:?}");
+
+    // 取日志（真实持久化会从磁盘读回，这里用同一个 box 的 load）
+    // 注意：用 session_id 无关，重建只看记录
+    let logs = k.log_for_test();
+
+    // 在新内核上重建
+    let mut k2 = Kernel::new(
+        "s",
+        cfg(ExecMode::AutoEdit),
+        ToolRegistry::new(),
+        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::text_only("x"))),
+        Arc::new(TestSandbox),
+        Box::new(InMemoryPersistence::new()),
+        "/tmp",
+    );
+    let n = k2.rebuild_from_log(&logs);
+    assert_eq!(n, original.len(), "重建条数应与原历史一致");
+
+    // 逐条比对：用户文本、助手文本、工具调用参数、工具输出
+    assert_eq!(k2.messages().len(), original.len());
+    for (a, b) in k2.messages().iter().zip(original.iter()) {
+        assert_eq!(a, b, "重建的历史必须与原历史逐条相等");
+    }
+    // 特别确认工具调用的**参数**被恢复了（否则对真实 provider 请求非法）
+    let calls: Vec<&neo_core::ToolInvocation> = k2
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            Message::Assistant { tool_calls, .. } => Some(tool_calls.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(calls.len(), 1, "应恢复出 1 个工具调用");
+    assert_eq!(calls[0].arguments["cmd"], "echo hi", "参数必须被恢复");
+}
+
+#[test]
+fn rebuild_with_empty_log_leaves_history_untouched() {
+    // 无日志 ≠ 空会话：不该把现有历史清掉（那会丢数据）
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("x")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    k.submit(Op::UserTurn { text: "hi".into(), refs: vec![] }).unwrap();
+    let before = k.messages().len();
+    assert!(before > 0);
+    let n = k.rebuild_from_log(&[]);
+    assert_eq!(n, 0);
+    assert_eq!(k.messages().len(), before, "空日志不该清空已有历史");
+}

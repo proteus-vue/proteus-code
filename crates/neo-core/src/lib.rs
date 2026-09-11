@@ -642,6 +642,7 @@ impl Kernel {
                 let begin = EventMsg::ToolCallBegin {
                     id: call.id.clone(),
                     name: call.name.clone(),
+                    arguments: call.arguments.clone(),
                 };
                 self.emit_and_log(&begin)?;
                 self.execute_one(&call)?;
@@ -811,8 +812,11 @@ impl Kernel {
                         }
                     }
                     ModelDelta::ToolCall(call) => {
-                        let ev =
-                            EventMsg::ToolCallBegin { id: call.id.clone(), name: call.name.clone() };
+                        let ev = EventMsg::ToolCallBegin {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            arguments: call.arguments.clone(),
+                        };
                         if let Err(e) = self.emit_and_log(&ev) {
                             result = Err(e);
                             break;
@@ -881,6 +885,126 @@ impl Kernel {
             }
         }
         self.drive_steps()
+    }
+
+    /// 切换到一个**已存在**的会话：换 id、换持久化目标、重建历史。
+    ///
+    /// 为什么不重建 `Kernel`：模型注册表、工具集、沙箱都是同一个，
+    /// 换会话只影响"记到哪、历史是什么"。重建整个内核会丢掉这些装配，
+    /// 且让调用方重复一遍构造代码（容易两处不一致）。
+    ///
+    /// **历史必须重建**：不重建就只是换了个文件名，模型看不到之前的对话，
+    /// 转录也是空的 —— 那与"切换会话"的语义不符。
+    pub fn switch_session(
+        &mut self,
+        session_id: impl Into<String>,
+        persistence: Box<dyn SessionPersistence>,
+    ) -> usize {
+        self.session_id = session_id.into();
+        self.persistence = persistence;
+        self.state = KernelState::Idle;
+        self.pending = None;
+        self.outbox.clear();
+        // 从现在起的轮次号独立（每个会话自己的轮次序列）
+        self.turn_counter = 0;
+        self.step_counter = 0;
+        self.steps_this_turn = 0;
+        let logs = self.persistence.load().unwrap_or_default();
+        self.rebuild_from_log(&logs)
+    }
+
+    /// 取当前会话已落盘的日志（供重建与会话切换使用）。
+    pub fn log_for_test(&self) -> Vec<LoggedRecord> {
+        self.persistence.load().unwrap_or_default()
+    }
+
+    /// 从会话日志**重建对话历史**（会话切换/进程重启后继续的前提）。
+    ///
+    /// # 为什么必须能重建
+    ///
+    /// 这是 AGENTS.md 那条约束的落实：「凡进入模型请求的内容都要能从会话日志
+    /// 重建」。若不能重建，切换会话只能得到一段空历史 —— 模型不知道之前聊过
+    /// 什么，用户看到的转录也与实际不符。
+    ///
+    /// # 重建规则（与 `messages` 的构造一一对应）
+    ///
+    /// - `op: UserTurn` → `Message::User`（用户消息是轮的起点）
+    /// - `event: AgentMessageDone` → `Message::Assistant`（**含该步的工具调用**）
+    /// - `event: ToolCallEnd` → `Message::ToolResult`
+    ///
+    /// 工具调用靠 `ToolCallBegin`（含 arguments）配对 —— 这就是为什么
+    /// `ToolCallBegin` 必须带参数：少了它，assistant 消息里的 tool_calls
+    /// 无法补全，重建出的历史对**真实 provider** 是非法的（OpenAI 规范要求
+    /// assistant 的 tool_call 与其后的 tool 结果成对出现）。
+    ///
+    /// 返回重建出的消息条数；`logs` 为空时不清空现有历史（无日志 ≠ 空会话）。
+    pub fn rebuild_from_log(&mut self, logs: &[LoggedRecord]) -> usize {
+        if logs.is_empty() {
+            return 0;
+        }
+        let mut rebuilt: Vec<Message> = Vec::new();
+        // 本步累积的工具调用：AgentMessageDone 到来时挂到 assistant 消息上
+        let mut pending_calls: Vec<ToolInvocation> = Vec::new();
+
+        for rec in logs {
+            match rec.kind.as_str() {
+                "op" => {
+                    if let Ok(Op::UserTurn { text, refs }) =
+                        serde_json::from_value::<Op>(rec.payload.clone())
+                    {
+                        // 与 submit 的拼装保持一致（引用数追加到文本后）
+                        let user_text = if refs.is_empty() {
+                            text
+                        } else {
+                            format!("{text}\n[refs: {}]", refs.len())
+                        };
+                        rebuilt.push(Message::User(user_text));
+                    }
+                }
+                "event" => {
+                    match serde_json::from_value::<EventMsg>(rec.payload.clone()) {
+                        Ok(EventMsg::ToolCallBegin { id, name, arguments }) => {
+                            pending_calls.push(ToolInvocation { id, name, arguments });
+                        }
+                        Ok(EventMsg::AgentMessageDone { text }) => {
+                            rebuilt.push(Message::Assistant {
+                                text,
+                                tool_calls: std::mem::take(&mut pending_calls),
+                            });
+                        }
+                        Ok(EventMsg::ToolCallEnd {
+                            id,
+                            exit_code,
+                            stdout,
+                            stderr,
+                            truncated,
+                        }) => {
+                            let name = rebuilt
+                                .iter()
+                                .rev()
+                                .find_map(|m| match m {
+                                    Message::Assistant { tool_calls, .. } => tool_calls
+                                        .iter()
+                                        .find(|c| c.id == id)
+                                        .map(|c| c.name.clone()),
+                                    _ => None,
+                                })
+                                .unwrap_or_default();
+                            rebuilt.push(Message::ToolResult {
+                                id,
+                                name,
+                                output: ToolOutput { exit_code, stdout, stderr, truncated },
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        let n = rebuilt.len();
+        self.messages = rebuilt;
+        n
     }
 
     /// 当前模型名（宿主展示用）。

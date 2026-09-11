@@ -2446,8 +2446,9 @@ fn refresh_popup(p: &mut popup::Popup, kind: popup::Kind, files: &mut Option<Vec
             let n = p.query.clone();
             p.set_items(popup::logo_items(&n), false);
         }
-        // 模型列表由调用方装配（需要 about 里的清单，refresh 拿不到）
+        // 模型/会话列表由调用方装配（refresh 拿不到 about 与 SessionControl）
         popup::Kind::Models => {}
+        popup::Kind::Sessions => {}
     }
 }
 
@@ -2526,6 +2527,14 @@ enum Effect {
     ModelPicker,
     /// 切换模型（提交给内核）
     SwitchModel(String),
+    /// 打开会话列表
+    SessionPicker,
+    /// 切换到指定会话（由调用方的 SessionControl 执行）
+    SwitchSession(String),
+    /// 新建会话
+    NewSessionReal,
+    /// 删除会话
+    DeleteSession(String),
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -2566,6 +2575,14 @@ fn apply_popup_item(
             input.clear();
             *status = format!("正在切换到 {name}…");
             Effect::SwitchModel(name.clone())
+        }
+        popup::ItemAction::SwitchSession(id) => {
+            input.clear();
+            Effect::SwitchSession(id.clone())
+        }
+        popup::ItemAction::DeleteSession(id) => {
+            input.clear();
+            Effect::DeleteSession(id.clone())
         }
         popup::ItemAction::Run(action) => {
             // 执行命令后必须清空输入框：`/help` 已经"用掉"了，
@@ -2613,6 +2630,8 @@ fn apply_popup_item(
             commands::Action::NextLogo => Effect::NextLogo,
             commands::Action::LogoPicker => Effect::LogoPicker,
             commands::Action::ModelPicker => Effect::ModelPicker,
+            commands::Action::SessionPicker => Effect::SessionPicker,
+            commands::Action::NewSessionReal => Effect::NewSessionReal,
             commands::Action::SwitchModel => Effect::None,
             // 这两个由选择列表内部产生（不注册命令）
             commands::Action::SetBackground(b) => Effect::SetBackground(*b),
@@ -2686,6 +2705,35 @@ fn accept_trust(ws: &std::path::Path) {
 /// 各算一次的话行号必然对不上（搜索高亮会标在无关的行上）。
 fn fact_lines(facts: &[Fact], body_cols: usize) -> Vec<Vec<Seg>> {
     fact_lines_with(facts, body_cols, ToolDisplay::default())
+}
+
+/// 会话控制契据 —— 由调用方（CLI）实现，宿主只调用。
+///
+/// # 为什么由宿主定义契据
+///
+/// 与 `submit` 闭包同一个思路：**宿主不持有内核，也不知道内核长什么样**。
+/// 它只知道"我要切换/新建/删除会话"，具体怎么重建内核是 CLI 的事。
+/// 反过来（宿主直接操作内核）会让 TUI 依赖 L2，破坏"宿主只是消费者"。
+///
+/// # 为什么 `switch` 返回事件流
+///
+/// 切换后宿主需要**重画新的转录**。返回重建出的 `EventMsg` 流，宿主直接
+/// 用它重建 Facts —— 宿主不需要知道"日志怎么读、历史怎么重建"。
+pub trait SessionControl {
+    /// 列出现有会话：(id, 标题, 记录数)。最近修改的在前。
+    fn list(&self) -> Vec<(String, String, usize)>;
+
+    /// 切换到指定会话；返回该会话的历史事件流。
+    fn switch(&mut self, id: &str) -> Result<Vec<EventMsg>, String>;
+
+    /// 新建会话；返回 (新 id, 空事件流)。
+    fn create(&mut self) -> Result<String, String>;
+
+    /// 删除会话；`Ok(false)` 表示本来就不存在。
+    fn delete(&mut self, id: &str) -> Result<bool, String>;
+
+    /// 当前会话 id。
+    fn current(&self) -> String;
 }
 
 /// 设置视图的一行。
@@ -3308,6 +3356,46 @@ where
     }
 }
 
+/// 处理会话类 Effect（切换 / 新建 / 删除）。
+///
+/// 操作由调用方的 `SessionControl` 执行 —— 宿主不重建内核、不读日志，
+/// 只把返回的事件流换成新的 Facts。返回给状态栏的文案。
+fn handle_session_effect(
+    eff: &Effect,
+    sessions: &mut dyn SessionControl,
+    events: &mut Vec<EventMsg>,
+    view: &mut view::View,
+) -> Option<String> {
+    match eff {
+        Effect::SwitchSession(id) => {
+            match sessions.switch(id) {
+                Ok(history) => {
+                    // 用重建出的历史**替换**当前转录，并把视图滚到底
+                    *events = history;
+                    view.to_bottom();
+                    Some(format!("已切换到会话 {id}"))
+                }
+                Err(e) => Some(format!("切换失败：{e}")),
+            }
+        }
+        Effect::NewSessionReal => match sessions.create() {
+            Ok(id) => {
+                // 新会话 = 空转录；旧会话已在磁盘上，可 /sessions 切回
+                events.clear();
+                view.to_bottom();
+                Some(format!("已新建会话 {id}（旧会话保留，/sessions 可切回）"))
+            }
+            Err(e) => Some(format!("新建会话失败：{e}")),
+        },
+        Effect::DeleteSession(id) => match sessions.delete(id) {
+            Ok(true) => Some(format!("已删除会话 {id}")),
+            Ok(false) => Some(format!("会话 {id} 不存在（可能已被删除）")),
+            Err(e) => Some(format!("删除失败：{e}")),
+        },
+        _ => None,
+    }
+}
+
 /// 处理外观与模型这类"纯界面状态"的 Effect。
 ///
 /// 抽成一个函数是为了让四处弹窗分支都用同一套逻辑 —— 之前每处各写一段
@@ -3319,6 +3407,7 @@ fn handle_ui_effect(
     ap: &mut appearance::Appearance,
     popup_state: &mut Option<popup::Popup>,
     about: &About,
+    sessions: &dyn SessionControl,
 ) -> Option<String> {
     // 外观类
     if let Some(m) = apply_appearance(ap, eff) {
@@ -3342,6 +3431,14 @@ fn handle_ui_effect(
             tp.set_items(popup::model_items(&about.models, &about.current_model), false);
             *popup_state = Some(tp);
             Some("模型 · ↑↓ 选择，回车切换".into())
+        }
+        Effect::SessionPicker => {
+            let list = sessions.list();
+            let cur = sessions.current();
+            let mut tp = popup::Popup::new(popup::Kind::Sessions, "");
+            tp.set_items(popup::session_items(&list, &cur), false);
+            *popup_state = Some(tp);
+            Some(format!("会话 · {} 个可选，↑↓ 选择", list.len()))
         }
         _ => None,
     }
@@ -3598,6 +3695,7 @@ pub fn run<F>(
     about: About,
     trust_workspace: Option<std::path::PathBuf>,
     mut theme_name: theme::ThemeName,
+    sessions: &mut dyn SessionControl,
     mut submit: F,
 ) -> std::io::Result<()>
 where
@@ -4252,7 +4350,14 @@ custom_bg.is_some(),
                             Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
                             // 外观类 Effect 统一处理（避免在每处弹窗分支重复一遍）
                             other => {
-                                if let Effect::SwitchModel(name) = &other {
+                                if let Some(m) = handle_session_effect(
+                                    &other,
+                                    sessions,
+                                    &mut events,
+                                    &mut view_state,
+                                ) {
+                                    status = m;
+                                } else if let Effect::SwitchModel(name) = &other {
                                     match submit(neo_protocol::Op::ConfigureSession {
                                         patch: neo_protocol::SessionPatch {
                                             model: Some(name.clone()),
@@ -4270,6 +4375,7 @@ custom_bg.is_some(),
                                     &mut current_appearance,
                                     &mut popup_state,
                                     &about,
+                                    sessions,
                                 ) {
                                     status = m;
                                 }
@@ -4465,7 +4571,14 @@ custom_bg.is_some(),
                                     }
                                     // 外观类 Effect 统一处理（避免在每处弹窗分支重复一遍）
                                 other => {
-                                    if let Effect::SwitchModel(name) = &other {
+                                    if let Some(m) = handle_session_effect(
+                                        &other,
+                                        sessions,
+                                        &mut events,
+                                        &mut view_state,
+                                    ) {
+                                        status = m;
+                                    } else if let Effect::SwitchModel(name) = &other {
                                         // 模型切换要提交 Op 给内核（宿主不持有内核）
                                         match submit(neo_protocol::Op::ConfigureSession {
                                             patch: neo_protocol::SessionPatch {
@@ -4484,6 +4597,7 @@ custom_bg.is_some(),
                                         &mut current_appearance,
                                         &mut popup_state,
                                         &about,
+                                        sessions,
                                     ) {
                                         status = m;
                                     }
@@ -4938,7 +5052,14 @@ custom_bg.is_some(),
                                 }
                                 Effect::ShowDiff => open_diff_viewer(&events, &mut diff_viewer),
                                 other => {
-                                    if let Effect::SwitchModel(name) = &other {
+                                    if let Some(m) = handle_session_effect(
+                                        &other,
+                                        sessions,
+                                        &mut events,
+                                        &mut view_state,
+                                    ) {
+                                        status = m;
+                                    } else if let Effect::SwitchModel(name) = &other {
                                         // 模型切换要提交 Op 给内核（宿主不持有内核）
                                         match submit(neo_protocol::Op::ConfigureSession {
                                             patch: neo_protocol::SessionPatch {
@@ -4957,6 +5078,7 @@ custom_bg.is_some(),
                                         &mut current_appearance,
                                         &mut popup_state,
                                         &about,
+                                        sessions,
                                     ) {
                                         status = m;
                                     }
@@ -7270,7 +7392,7 @@ mod tests {
         let mut h = TuiFacts::new();
         h.consume(&EventMsg::TurnStarted { turn_id: "t".into() }).unwrap();
         h.consume(&EventMsg::AgentMessageDone { text: "hi".into() }).unwrap();
-        h.consume(&EventMsg::ToolCallBegin { id: "c".into(), name: "bash".into() }).unwrap();
+        h.consume(&EventMsg::ToolCallBegin { id: "c".into(), name: "bash".into(), arguments: serde_json::Value::Null }).unwrap();
         h.consume(&EventMsg::ToolCallEnd { id: "c".into(), exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false }).unwrap();
         assert_eq!(
             h.facts(),
