@@ -55,7 +55,7 @@ const INPUT: &[Group] = &[
             ("ctrl+k", "删到行尾"),
             ("ctrl+u", "删到行首"),
             ("ctrl+w", "删前一个词"),
-            ("ctrl+z / ctrl+y", "撤销 / 重做"),
+            ("ctrl+_ / ctrl+y", "撤销 / 重做"),
             ("home / end", "行首 / 行尾"),
             ("alt+b / alt+f", "按词移动"),
             ("ctrl+g", "外部编辑器"),
@@ -80,6 +80,8 @@ const INPUT: &[Group] = &[
             ("pgup / pgdn", "滚动转录"),
             ("ctrl+e", "回到最新"),
             ("ctrl+l", "清屏"),
+            ("ctrl+o", "键位提示"),
+            ("ctrl+z", "挂起回 shell"),
             ("esc", "清空输入"),
             ("ctrl+c", "退出"),
         ],
@@ -217,7 +219,7 @@ mod tests {
         let gs = groups_for(Context::Input, false);
         let all: Vec<&str> = gs.iter().flat_map(|g| g.keys.iter().map(|(k, _)| *k)).collect();
         // 这些键必须真的实现了才允许出现在提示里
-        for needle in ["enter", "ctrl+k", "ctrl+u", "ctrl+z / ctrl+y", "ctrl+g", "tab", "ctrl+p"] {
+        for needle in ["enter", "ctrl+k", "ctrl+u", "ctrl+_ / ctrl+y", "ctrl+g", "tab", "ctrl+p"] {
             assert!(all.contains(&needle), "输入上下文应提示 {needle}：{all:?}");
         }
     }

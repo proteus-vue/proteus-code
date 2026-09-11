@@ -65,6 +65,15 @@ SPI_SPEC = {
         "test": "crates/neo-mock/tests/conformance.rs",
         "status": "landed",
     },
+    # 第 6 个 SPI：剪贴板。为什么它值得成为一个 seam ——
+    # 它天然有多个后端（macOS pbcopy / Linux wl-copy+xclip / headless noop），
+    # 且"写失败却显示已复制"是会误导用户的真实风险。
+    "Clipboard": {
+        "trait": "Clipboard",
+        "conformance": "T7",
+        "test": "crates/neo-platform/tests/clipboard.rs",
+        "status": "landed",
+    },
 }
 
 

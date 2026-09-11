@@ -275,6 +275,8 @@ pub enum Key {
     SearchPrev,
     /// Ctrl+O：显示当前上下文的可用键（which-key）
     WhichKey,
+    /// Ctrl+Z：挂起回 shell（前台交给用户）
+    Suspend,
     /// 鼠标事件（SGR 扩展模式）
     Mouse(mouse::MouseEvent),
     /// Ctrl+R 历史搜索
@@ -313,13 +315,20 @@ pub fn decode_key(bytes: &[u8]) -> Key {
         [0x1b, b'[', b'6', b'~'] => Key::PageDown,
         [0x05] => Key::ScrollToBottom,
         [0x06] => Key::Search,
-        // ctrl+/ 在很多终端就是 0x1f；同时接受 ctrl+o（0x0f）作为别名 ——
-        // ctrl+/ 被部分终端/输入法截获，留一个稳的备选。
-        [0x1f] | [0x0f] => Key::WhichKey,
+        [0x0f] => Key::WhichKey,
+        [0x1f] => Key::Undo,
         [0x0e] => Key::SearchNext,
         [0x0b] => Key::DeleteToLineEnd,
         [0x17] => Key::DeleteWordBackward,
-        [0x1a] => Key::Undo,
+        // ── 控制字节分配（三者曾互相冲突，这里一次说清）──
+        //   0x1a (ctrl+z) → 挂起回 shell（终端惯例，肌肉记忆最强）
+        //   0x1f (ctrl+_) → 撤销（readline/shell 惯例）
+        //   0x19 (ctrl+y) → 重做
+        //   0x0f (ctrl+o) → which-key（ctrl+/ 也常发 0x1f，故不用它）
+        // 冲突点：ctrl+z 原本是撤销、ctrl+/ 原本是 which-key，
+        // 两者都想用 0x1a/0x1f。这里按"惯例强度"重排：挂起让给 ctrl+z、
+        // 撤销让给 ctrl+_、which-key 退到 ctrl+o。
+        [0x1a] => Key::Suspend,
         [0x19] => Key::Redo,
         [0x1b, b'[', b'3', b'~'] => Key::Delete,
         [0x1b, b'[', b'H'] | [0x1b, b'[', b'1', b'~'] => Key::Home,
@@ -2238,6 +2247,8 @@ enum Effect {
     ToggleDetails,
     /// 切换推理显隐
     ToggleThinking,
+    /// 复制最近一条助手回复
+    CopyLastReply,
 }
 
 /// 执行弹窗里选中的项。返回需要主循环落实的副作用。
@@ -2299,6 +2310,7 @@ fn apply_popup_item(
             commands::Action::Rewind => Effect::Rewind,
             commands::Action::ToggleDetails => Effect::ToggleDetails,
             commands::Action::ToggleThinking => Effect::ToggleThinking,
+            commands::Action::CopyLastReply => Effect::CopyLastReply,
             commands::Action::Keys => {
                 *info_screen = Some(commands::keys_text().to_string());
                 Effect::None
@@ -2696,6 +2708,31 @@ where
     }
 }
 
+/// 复制最近一条回复到剪贴板，返回给状态栏的文案。
+///
+/// **成功与失败都要如实说**：剪贴板 SPI 的 `copy` 会真报错（找不到命令、
+/// 命令非 0 退出）。这里把它转成用户能懂的一句话，而不是笼统的"已复制"。
+fn do_copy(events: &[EventMsg], clipboard: &dyn neo_platform::Clipboard) -> String {
+    let facts = facts_of(events);
+    let Some(text) = last_reply(&facts) else {
+        return "没有可复制的回复".to_string();
+    };
+    match clipboard.copy(&text) {
+        Ok(()) => format!("已复制 {} 个字符到剪贴板", text.chars().count()),
+        Err(e) => format!("复制失败：{e}"),
+    }
+}
+
+/// 取最近一条助手回复（供 `/copy`）。
+///
+/// 只看 `AssistantSaid`（**不含推理**）—— 用户要复制的是答复，不是思考过程。
+fn last_reply(facts: &[Fact]) -> Option<String> {
+    facts.iter().rev().find_map(|f| match f {
+        Fact::AssistantSaid(t) if !t.trim().is_empty() => Some(t.clone()),
+        _ => None,
+    })
+}
+
 /// 正文可用列数（与 `Screen::body_cols` 同一判据）。
 fn self_body_cols(cols: usize, sidebar: bool) -> usize {
     if sidebar && cols >= SIDEBAR_MIN_COLS {
@@ -2794,7 +2831,8 @@ pub fn run<F>(
 where
     F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
 {
-    let raw = RawMode::enter().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    // 可重入：`ctrl+z` 挂起时要先还原终端、恢复后再进入
+    let mut raw = RawMode::enter().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     // 进备用屏：全程在第二块屏幕上画，退出时终端整块还原
     let mut alt = AltScreen::enter();
     // 鼠标上报（NEO_TUI_NO_MOUSE=1 可关，给"只想用键盘"或终端不支持的用户）
@@ -2846,6 +2884,13 @@ where
     let mut whichkey_groups: Option<Vec<whichkey::Group>> = None;
     // 工具输出 / 推理的显示方式（`/details` `/thinking` 切换）
     let mut display = ToolDisplay::default();
+    // 剪贴板：按平台选后端；不可用时退化为 noop（`/copy` 会如实报错）
+    let clipboard: Box<dyn neo_platform::Clipboard> =
+        if std::env::var_os("NEO_TUI_NO_CLIPBOARD").is_some() {
+            Box::new(neo_platform::NoopClipboard::new("已通过 NEO_TUI_NO_CLIPBOARD 禁用"))
+        } else {
+            Box::new(neo_platform::SystemClipboard::new())
+        };
     // 最近一次渲染记录的命中区域。**必须跨迭代保留** ——
     // 只有 dirty 时才重绘，若把它声明在循环内，鼠标事件到达时
     // 区域是空的，命中测试永远失败（点击/滚动全部无效）。
@@ -3174,6 +3219,9 @@ where
                                     "推理过程：隐藏".into()
                                 };
                             }
+                            Effect::CopyLastReply => {
+                                status = do_copy(&events, clipboard.as_ref())
+                            }
                             Effect::ClearTranscript => {
                                 events.clear();
                                 status = "新对话（已清空转录；文件改动不受影响）".to_string();
@@ -3204,6 +3252,41 @@ where
         }
 
         match key {
+            Key::Suspend => {
+                // 挂起回 shell：把终端**完整还原**后把前台交还给用户
+                //（`fg` 恢复）。这是终端程序的基本礼貌 —— 用户想临时敲个
+                // shell 命令不该被迫退出再重进（丢失会话）。
+                raw.restore();
+                mouse.leave();
+                alt.leave();
+                stdout.flush()?;
+
+                // 没有 libc，用 `kill` 给**自己**发 SIGTSTP。
+                // 进程会停在这次调用里，直到用户 `fg` 触发 SIGCONT。
+                let pid = std::process::id().to_string();
+                let _ = std::process::Command::new("kill")
+                    .args(["-TSTP", &pid])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+
+                // ── 已恢复（SIGCONT 之后）──
+                // 终端可能被 shell 改过（尺寸、模式），所以整个重进一遍。
+                match RawMode::enter() {
+                    Ok(r) => raw = r,
+                    Err(e) => {
+                        // 恢复失败不能装作没事：如实告知并退出，否则后续
+                        // 按键读不到，界面看起来"死了"。
+                        eprintln!("[neo] 从挂起恢复失败：{e}");
+                        break;
+                    }
+                }
+                alt = AltScreen::enter();
+                mouse = MouseMode::enter(mouse_on);
+                // 强制重绘（挂起期间终端内容可能已被覆盖）
+                dirty = true;
+            }
             Key::WhichKey => {
                 // 已显示则再按一次关掉（开关语义，避免只有"任意键关闭"一种退路）
                 if whichkey_groups.is_some() {
@@ -3293,6 +3376,9 @@ where
                                         } else {
                                             "推理过程：隐藏".into()
                                         };
+                                    }
+                                    Effect::CopyLastReply => {
+                                        status = do_copy(&events, clipboard.as_ref())
                                     }
                                     Effect::ClearTranscript => events.clear(),
                                     Effect::ShowStatus => {
@@ -3534,6 +3620,9 @@ where
                                     "推理过程：隐藏".into()
                                 };
                             }
+                            Effect::CopyLastReply => {
+                                status = do_copy(&events, clipboard.as_ref())
+                            }
                             Effect::ClearTranscript => events.clear(),
                             Effect::ShowStatus => {
                                 info_screen = Some(commands::status_text(
@@ -3655,6 +3744,9 @@ where
                                     } else {
                                         "推理过程：隐藏".into()
                                     };
+                                }
+                                Effect::CopyLastReply => {
+                                    status = do_copy(&events, clipboard.as_ref())
                                 }
                                 Effect::ClearTranscript => {
                                     events.clear();
@@ -3911,9 +4003,11 @@ mod tests {
         // 单独 ESC 现在是"关弹窗"，必须是 Escape 而非 Unknown
         assert_eq!(decode_key(&[0x1b]), Key::Escape, "单独 ESC 应为 Escape");
         assert_eq!(decode_key(&[0x10]), Key::CommandPalette);
-        // ctrl+/（0x1f）与 ctrl+o（0x0f）都应解成 which-key
-        assert_eq!(decode_key(&[0x1f]), Key::WhichKey);
-        assert_eq!(decode_key(&[0x0f]), Key::WhichKey);
+        // 控制字节分配（曾互相冲突，见 decode_key 的说明）
+        assert_eq!(decode_key(&[0x0f]), Key::WhichKey, "ctrl+o = which-key");
+        assert_eq!(decode_key(&[0x1f]), Key::Undo, "ctrl+_ = 撤销");
+        assert_eq!(decode_key(&[0x1a]), Key::Suspend, "ctrl+z = 挂起回 shell");
+        assert_eq!(decode_key(&[0x19]), Key::Redo, "ctrl+y = 重做");
         assert_eq!(decode_key(&[0x14]), Key::NextTheme);
         assert_eq!(decode_key(&[0x1b, b'[', b'Z']), Key::Unknown, "未支持的序列应为 Unknown");
     }
@@ -4347,6 +4441,78 @@ mod tests {
         let text = plain(&out).join("\n");
         assert!(text.contains('╭'), "矮终端也必须画出弹窗：{text}");
         assert!(text.contains("命令"), "至少应显示标题：{text}");
+    }
+
+    // ── 剪贴板复制 ───────────────────────────────────────────────────
+
+    /// 假的剪贴板后端：记录被复制的内容，并可模拟失败。
+    struct FakeClipboard {
+        got: std::sync::Mutex<Option<String>>,
+        fail: bool,
+    }
+    impl neo_platform::Clipboard for FakeClipboard {
+        fn name(&self) -> &'static str { "fake" }
+        fn available(&self) -> bool { !self.fail }
+        fn copy(&self, text: &str) -> Result<(), String> {
+            if self.fail {
+                return Err("模拟失败".into());
+            }
+            *self.got.lock().unwrap() = Some(text.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn copy_takes_the_latest_reply_only() {
+        let evs = vec![
+            EventMsg::AgentMessageDone { text: "第一条".into() },
+            EventMsg::AgentMessageDone { text: "第二条".into() },
+        ];
+        let cb = FakeClipboard { got: std::sync::Mutex::new(None), fail: false };
+        let msg = do_copy(&evs, &cb);
+        assert_eq!(cb.got.lock().unwrap().as_deref(), Some("第二条"), "应复制最近一条");
+        assert!(msg.contains("已复制"), "{msg}");
+    }
+
+    #[test]
+    fn copy_skips_reasoning_and_takes_the_answer() {
+        // 用户要复制的是**答复**，不是思考过程
+        let evs = vec![
+            EventMsg::ReasoningDelta { delta: "我在想...".into() },
+            EventMsg::AgentMessageDone { text: "答案是 2".into() },
+        ];
+        let cb = FakeClipboard { got: std::sync::Mutex::new(None), fail: false };
+        do_copy(&evs, &cb);
+        assert_eq!(cb.got.lock().unwrap().as_deref(), Some("答案是 2"));
+    }
+
+    #[test]
+    fn copy_with_nothing_to_copy_says_so() {
+        let cb = FakeClipboard { got: std::sync::Mutex::new(None), fail: false };
+        let msg = do_copy(&[], &cb);
+        assert!(msg.contains("没有可复制"), "{msg}");
+        assert!(cb.got.lock().unwrap().is_none(), "不该写剪贴板");
+    }
+
+    #[test]
+    fn copy_failure_is_reported_not_hidden() {
+        // 关键：剪贴板写失败必须如实说。显示"已复制"却粘出旧内容是欺骗。
+        let evs = vec![EventMsg::AgentMessageDone { text: "内容".into() }];
+        let cb = FakeClipboard { got: std::sync::Mutex::new(None), fail: true };
+        let msg = do_copy(&evs, &cb);
+        assert!(msg.contains("复制失败"), "失败必须明说：{msg}");
+        assert!(msg.contains("模拟失败"), "应带上具体原因：{msg}");
+    }
+
+    #[test]
+    fn copy_ignores_empty_replies() {
+        let evs = vec![
+            EventMsg::AgentMessageDone { text: "   ".into() },
+            EventMsg::AgentMessageDone { text: "".into() },
+        ];
+        let cb = FakeClipboard { got: std::sync::Mutex::new(None), fail: false };
+        let msg = do_copy(&evs, &cb);
+        assert!(msg.contains("没有可复制"), "空白回复不算可复制内容：{msg}");
     }
 
     // ── 工具输出 / 推理的显隐 ─────────────────────────────────────────

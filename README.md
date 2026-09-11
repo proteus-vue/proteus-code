@@ -85,6 +85,8 @@ cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
 #   /undo 回退对话一轮（**不还原文件**，界面会明确标注）
 #   /details 展开工具输出（默认折叠；失败时总是展示）
 #   /thinking 显示推理过程（默认隐藏）
+#   /copy 复制最近一条回复到系统剪贴板
+#   ctrl+z 挂起回 shell（需终端支持作业控制；fg 恢复）
 #   Tab 补全 / ctrl+r 历史 / ctrl+g 编辑器 / ctrl+l 清屏 / esc 关弹窗
 neo tui --provider selftest --mode default
 # 等价写法：neo --provider selftest --mode default（裸选项默认进 TUI）
@@ -178,6 +180,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 | `SessionPersistence` | 换会话存储介质 | jsonl(真落盘) / in-memory / tampering(反例) | ✅ |
 | `HostBackend` | 换宿主（TUI/Desktop/Web/Exec） | desktop / tui / web / mock ×2 | ✅ 4 宿主 T6 等价 |
 | `Tool` | 加能力（Shell-First） | 3 内置 + mock ×4 | ✅ |
+| `Clipboard` | 交给系统剪贴板 | system(pbcopy/wl-copy/xclip) + noop | ✅ |
 
 **每个 SPI 都配了「坏后端」作为负向用例的被试** —— 一个不能被 conformance 抓住的
 反例，等于套件没有牙齿。

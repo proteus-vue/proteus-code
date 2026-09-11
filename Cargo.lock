@@ -94,6 +94,7 @@ dependencies = [
  "neo-capability",
  "neo-config",
  "neo-core",
+ "neo-platform",
  "neo-protocol",
  "serde",
  "serde_json",

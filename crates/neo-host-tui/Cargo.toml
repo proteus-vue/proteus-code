@@ -13,6 +13,7 @@ license.workspace = true
 neo-protocol = { path = "../neo-protocol" }
 neo-core = { path = "../neo-core" }
 neo-config = { path = "../neo-config" }
+neo-platform = { path = "../neo-platform" }
 neo-capability = { path = "../neo-capability" }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,0 +1,11 @@
+﻿opencode 的 UI,缺的后端
+dialog-model / provider / variant、F2 切模型,多 provider 注册表 + 模型变体
+dialog-session-list / rename / move / timeline / fork,多会话管理
+dialog-agent、Tab 切 Agent,多 Agent（Build/Plan/Compose）
+dialog-mcp,MCP 客户端
+LSP 面板,LSP 集成
+dialog-workspace-*,多工作区 / git worktree
+dialog-stash / tag,stash 存储
+/share /unshare,分享服务
+dialog-console-org、provider connect,账号体系
+权限面板（△ N Permissions）,待审批队列

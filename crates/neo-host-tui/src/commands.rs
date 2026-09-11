@@ -57,6 +57,8 @@ pub enum Action {
     ToggleDetails,
     /// 显示 / 隐藏推理过程
     ToggleThinking,
+    /// 复制最近一条助手回复到剪贴板
+    CopyLastReply,
 }
 
 /// **必须由命令触发**的动作。新增变体时要加进这里 ——
@@ -74,6 +76,7 @@ const COMMAND_ACTIONS: &[Action] = &[
     Action::Rewind,
     Action::ToggleDetails,
     Action::ToggleThinking,
+    Action::CopyLastReply,
 ];
 
 /// **只在界面内部产生**的动作（不经过命令表）。
@@ -99,6 +102,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "undo", aliases: &["rewind"], desc: "回退对话一轮（不还原文件）", action: Action::Rewind },
     Command { name: "details", aliases: &["d"], desc: "展开 / 折叠工具输出", action: Action::ToggleDetails },
     Command { name: "thinking", aliases: &["think"], desc: "显示 / 隐藏推理过程", action: Action::ToggleThinking },
+    Command { name: "copy", aliases: &["yank"], desc: "复制最近一条回复（写入系统剪贴板）", action: Action::CopyLastReply },
     Command { name: "exit", aliases: &["quit", "q"], desc: "退出 Neo", action: Action::Quit },
 ];
 
@@ -177,6 +181,7 @@ Neo —— 编程 Agent 内核
     /undo      回退对话一轮（**不还原文件**，见下方说明）
     /details   展开 / 折叠工具输出（失败时总是展示）
     /thinking  显示 / 隐藏推理过程
+    /copy      复制最近一条回复到系统剪贴板
     /diff      查看改动（全屏查看器：hunk/文件跳转、双列视图）
     /theme     选择配色主题（6 套）
     /next      直接切到下一个主题
@@ -196,12 +201,13 @@ Neo —— 编程 Agent 内核
   alt+b / alt+f  按词移动
   ctrl+k       删到行尾      ctrl+u  删到行首
   ctrl+w       删前一个词    delete  删除光标处字符
-  ctrl+z       撤销          ctrl+y  重做
+  ctrl+_       撤销          ctrl+y  重做
   ctrl+r       搜索历史（输入框）
   ctrl+g       用 $EDITOR 编辑当前输入
   ctrl+p       命令面板      ctrl+t  切换主题
   ctrl+b       侧栏开关      ctrl+l  清屏
-  ctrl+/       键位提示（显示当前上下文可用的键）
+  ctrl+o       键位提示（显示当前上下文可用的键）
+  ctrl+z       挂起回 shell（`fg` 恢复；需终端支持作业控制）
   esc          关闭弹窗 / 清空输入 / 退出搜索
   ctrl+c       退出
 
