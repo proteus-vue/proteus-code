@@ -216,6 +216,27 @@ TUI 用 pty 驱动验证（**轮询就绪信号**再送按键，不用固定 sle
 
 ---
 
+## 4.10 TUI 的两个「用户第一次用就会撞上」的问题
+
+### (a) `neo` 不在 PATH —— 用法文本与交付形态不一致
+文档写 `neo tui`，但 `cargo build` 只产出 `target/debug/neo`，那个目录不在 `PATH` 上。
+用户直接敲 `neo` 得到 `command not found`。修法是明确的：`cargo install --path
+crates/neo-cli --locked` 装到 `~/.cargo/bin`。这只是"没说清"，不是代码错。
+
+### (b) 裸选项被当成子命令 —— 真 bug
+用法里写 `neo [选项]`，但 `main` 只匹配 `args.first()` 的字符串：
+`neo --provider mock` 落到 `Some(other) => 未知子命令：--provider`，而 `neo`（无参）
+却正常进 TUI。也就是**有无参数是两条不同路径、结论相反**。
+修法：首参以 `-` 开头时等价于 `neo tui`，并在报错信息里点明
+"若想启动 TUI，请用 neo tui <选项> 或直接 neo <选项>"。
+
+### 教训
+TUI 只能在**真 pty** 里验证 —— 管道里 `stty` 拿不到终端，本就不是终端。
+用 `pty.fork()` 驱动、按输出子串轮询（不固定 sleep），可验证
+「启动 → 提交 → 审批 y/n → 落盘 → 完成」全链。已在两种入口（`neo tui` 与裸选项）各跑一遍。
+
+---
+
 ## 5. 假通过：门禁与测试各抓到过一次自己
 
 这两次都值得记，因为它们说明"看起来有保护"有多危险：

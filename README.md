@@ -37,9 +37,16 @@
 
 ### 亲测可用
 
+**先装到 PATH**（否则 `neo` 提示 command not found —— 它只在 `target/` 里）：
+
+```bash
+cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
+```
+
 ```bash
 # 交互式（TUI）：输入任务，写操作会问 y/n；Ctrl+R 历史、Tab 补全 @ 引用
 neo tui --provider selftest --mode default
+# 等价写法：neo --provider selftest --mode default（裸选项默认进 TUI）
 
 # Web 宿主：浏览器打开 http://127.0.0.1:8787（SSE 实时事件流 + 页面内审批）
 neo serve --provider selftest --mode default
@@ -56,6 +63,9 @@ neo exec "用一句话回答 1+1" --mode plan
 
 ```bash
 # 需要 Rust（stable）
+cargo run -p neo-cli -- tui --provider mock    # 不装 PATH，直接用 cargo 跑 TUI
+cargo install --path crates/neo-cli --locked   # 或装成全局命令 neo
+
 cargo test --workspace     # 109 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
 cargo check --workspace    # 17 个 crate，零 unsafe、零 warning
 

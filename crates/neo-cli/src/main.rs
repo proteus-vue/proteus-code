@@ -59,14 +59,21 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("exec") => cmd_exec(&args[1..]),
-        Some("tui") | None => cmd_tui(&args[1..]),
+        Some("tui") => cmd_tui(&args[1..]),
         Some("serve") => cmd_serve(&args[1..]),
         Some("help") | Some("--help") | Some("-h") => {
             println!("{USAGE}");
             0
         }
+        // 无参数，或首参是选项（如 `neo --provider mock`）→ 默认进 TUI。
+        // 用法里写的是 `neo [选项]`，因此裸选项必须等价于 `neo tui [选项]`。
+        None => cmd_tui(&args[..]),
+        Some(flag) if flag.starts_with('-') => cmd_tui(&args[..]),
         Some(other) => {
-            eprintln!("[neo] 未知子命令：{other}\n\n{USAGE}");
+            // 很可能是把选项写在了子命令前面，或拼错了子命令
+            eprintln!("[neo] 未知子命令：{other}");
+            eprintln!("      若想启动 TUI，请用：neo tui <选项>  或直接：neo <选项>");
+            eprintln!("      查看全部用法：neo --help\n");
             2
         }
     };
