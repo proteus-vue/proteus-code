@@ -28,6 +28,8 @@ exec 选项：
   --workspace <dir>            工作区（默认当前目录）
   --max-steps <n>              步数上限（默认 16）
   --allow-writes               无人值守时自动批准写操作（默认拒绝）
+  --goal <目标文本>            目标模式：按行拆子任务，自动逐阶段推进
+                               直到完成或触发停止条件（与任务描述互斥）
   --json                       输出 JSON（便于脚本消费）
   --provider <deepseek|mock|selftest|demo>   模型后端（默认 deepseek）
                                 selftest = 按脚本调用一次工具，验证完整链路（无需 key）
@@ -226,6 +228,16 @@ fn cmd_exec(args: &[String]) -> i32 {
                     }
                 }
             }
+            "--goal" => {
+                i += 1;
+                match args.get(i) {
+                    Some(g) if !g.trim().is_empty() => opts.goal = Some(g.clone()),
+                    _ => {
+                        eprintln!("[neo] --goal 需要目标文本（多行目标用 $'...' 传入）");
+                        return 2;
+                    }
+                }
+            }
             "--provider" => {
                 i += 1;
                 match args.get(i) {
@@ -241,11 +253,18 @@ fn cmd_exec(args: &[String]) -> i32 {
         i += 1;
     }
 
-    if task_parts.is_empty() {
-        eprintln!("[neo] 缺少任务描述。示例：neo exec \"列出当前目录的文件\"");
+    // 目标与任务互斥：混用会让"到底执行哪个"变成谜语
+    if opts.goal.is_some() && !task_parts.is_empty() {
+        eprintln!("[neo] --goal 与任务描述互斥：目标模式用 --goal，普通任务直接给描述");
         return 2;
     }
-    opts.task = task_parts.join(" ");
+    if opts.goal.is_none() {
+        if task_parts.is_empty() {
+            eprintln!("[neo] 缺少任务描述。示例：neo exec \"列出当前目录的文件\"（或用 --goal 进入目标模式）");
+            return 2;
+        }
+        opts.task = task_parts.join(" ");
+    }
 
     // ── 装配：provider / sandbox / persistence ──────────────────────────
     let Some(models) = build_models(&provider) else {

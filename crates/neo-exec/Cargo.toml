@@ -15,3 +15,6 @@ neo-skill-loader = { path = "../neo-skill-loader" }
 neo-instructions = { path = "../neo-instructions" }
 neo-mcp = { path = "../neo-mcp" }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+neo-mock = { path = "../neo-mock" }

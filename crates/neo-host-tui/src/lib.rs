@@ -36,7 +36,7 @@ pub mod trust;
 pub mod width;
 
 use neo_core::{HostBackend, HostCapabilities, DiffSupport, ImageSupport};
-use neo_protocol::{EventMsg, Fact, facts_of};
+use neo_protocol::{goal_awaiting_advance, latest_goal_id, latest_goal_line, EventMsg, Fact, facts_of};
 use std::io::{IsTerminal, Read, Write};
 
 // ══════════════════════════════════════════════════════════════════════
@@ -2947,51 +2947,6 @@ pub fn at_query(input: &str) -> Option<&str> {
 ///
 /// 内核是严格顺序的（一次只有一个未决审批），所以取最后一个即可。
 /// 抽成纯函数是为了可单测：审批交互错了会让"需要审批"变成静默挂起。
-/// 取事件流里**最后一条**目标快照的 id。
-/// GoalCleared 显式截断：清除之后旧快照不再是"当前目标"。
-fn latest_goal_id(events: &[EventMsg]) -> Option<String> {
-    for e in events.iter().rev() {
-        match e {
-            EventMsg::GoalUpdated { snapshot } => return Some(snapshot.goal_id.clone()),
-            EventMsg::GoalCleared { .. } => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
-/// 目标单行状态（最后一次快照的摘要；清除后为 None）。
-fn latest_goal_line(events: &[EventMsg]) -> Option<String> {
-    for e in events.iter().rev() {
-        match e {
-            EventMsg::GoalUpdated { snapshot } => return Some(snapshot.summary()),
-            EventMsg::GoalCleared { .. } => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
-/// 目标是否还有待推进的子任务轮（宿主据此在 TurnComplete 后继续 GoalAdvance）。
-///
-/// 倒序找**最近一条**目标状态事件：快照给判断，GoalCleared 直接否。
-/// 有界性由编排器的停止条件保证（停止后 stopped 非空、turns_remaining
-/// 判断不再通过）。
-fn goal_awaiting_advance(events: &[EventMsg]) -> bool {
-    for e in events.iter().rev() {
-        match e {
-            EventMsg::GoalUpdated { snapshot } => {
-                return !snapshot.paused
-                    && snapshot.stopped.is_none()
-                    && snapshot.turns_remaining > 0;
-            }
-            EventMsg::GoalCleared { .. } => return false,
-            _ => {}
-        }
-    }
-    false
-}
-
 pub fn latest_approval_id(events: &[EventMsg]) -> Option<String> {
     events.iter().rev().find_map(|e| match e {
         EventMsg::ApprovalRequest { id, .. } => Some(id.clone()),

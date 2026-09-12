@@ -616,6 +616,54 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
     out
 }
 
+// ── 目标事件流的宿主侧判定（两个宿主各写一套必然漂移，收敛到 L0）────
+
+/// 目标是否还有待推进的子任务轮（宿主在 TurnComplete 后据此继续
+/// `Op::GoalAdvance`）。倒序找**最近一条**目标状态事件：快照给判断，
+/// `GoalCleared` 直接否 —— 清除之后旧快照不再是"当前目标"。
+///
+/// 有界性由编排器的停止条件保证（停止后 `stopped` 非空，此处返回 false）；
+/// 这个函数只读事件流，不推进任何东西。
+pub fn goal_awaiting_advance(events: &[EventMsg]) -> bool {
+    for e in events.iter().rev() {
+        match e {
+            EventMsg::GoalUpdated { snapshot } => {
+                return !snapshot.paused
+                    && snapshot.stopped.is_none()
+                    && snapshot.turns_remaining > 0;
+            }
+            EventMsg::GoalCleared { .. } => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// 最后一条目标快照的 id（pause / resume 要作用于**当前**目标，
+/// 不能从更早的快照里拿旧的）。
+pub fn latest_goal_id(events: &[EventMsg]) -> Option<GoalId> {
+    for e in events.iter().rev() {
+        match e {
+            EventMsg::GoalUpdated { snapshot } => return Some(snapshot.goal_id.clone()),
+            EventMsg::GoalCleared { .. } => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 目标单行状态（最后一次快照的摘要；清除后为 None）。
+pub fn latest_goal_line(events: &[EventMsg]) -> Option<String> {
+    for e in events.iter().rev() {
+        match e {
+            EventMsg::GoalUpdated { snapshot } => return Some(snapshot.summary()),
+            EventMsg::GoalCleared { .. } => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// 解析输入里的上下文引用：`@file` / `#session` / `/command` / `$skill`。
 ///
 /// **为什么放在协议层而不是各宿主**：引用符号是界面约定，但解析结果
@@ -732,6 +780,43 @@ fn ref_tokens(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goal_helpers_find_the_latest_state_and_honour_clear() {
+        let snap = |id: &str, paused: bool| GoalSnapshot {
+            goal_id: id.into(),
+            goal: "g".into(),
+            paused,
+            stopped: None,
+            subtasks: vec![GoalSubtask {
+                id: 1,
+                title: "t".into(),
+                phase: GoalPhase::Code,
+                retries: 0,
+            }],
+            iterations: 1,
+            consecutive_failures: 0,
+            turns_remaining: 3,
+            budget_used: 0,
+        };
+        let events = vec![
+            EventMsg::GoalUpdated { snapshot: snap("goal-1", false) },
+            EventMsg::UserSubmitted { text: "x".into() }, // 中间的普通事件不该挡住判定
+            EventMsg::GoalUpdated { snapshot: snap("goal-1", true) },
+        ];
+        assert!(latest_goal_id(&events).as_deref() == Some("goal-1"));
+        assert!(!goal_awaiting_advance(&events), "暂停中不该推进");
+        assert!(latest_goal_line(&events).unwrap().contains("已暂停"));
+
+        // 清除显式截断：清除之后旧快照不再是当前目标
+        let events2 = vec![
+            EventMsg::GoalUpdated { snapshot: snap("goal-1", false) },
+            EventMsg::GoalCleared { goal_id: "goal-1".into() },
+        ];
+        assert_eq!(latest_goal_id(&events2), None);
+        assert!(!goal_awaiting_advance(&events2));
+        assert_eq!(latest_goal_line(&events2), None);
+    }
 
     #[test]
     fn parse_refs_maps_all_four_sigils() {

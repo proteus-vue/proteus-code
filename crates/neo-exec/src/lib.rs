@@ -23,6 +23,10 @@ use neo_protocol::{Decision, EventMsg, ExecMode, Op};
 /// 一轮运行的配置。
 pub struct ExecOptions {
     pub task: String,
+    /// 目标模式（`--goal`）：设定目标后自动逐子任务轮推进直到完成/判停。
+    /// 与 `task` 互斥 —— 一个是普通一轮任务，一个是长程编排，混用只会
+    /// 让"到底执行哪个"变成谜语。
+    pub goal: Option<String>,
     pub mode: ExecMode,
     pub max_steps: usize,
     /// 无人值守时对审批请求的默认动作。
@@ -34,6 +38,7 @@ impl Default for ExecOptions {
     fn default() -> Self {
         Self {
             task: String::new(),
+            goal: None,
             mode: ExecMode::Default,
             // 安全阀而非工作限额：16 太小（一次"了解项目"就能用完），
             // 真实任务常在 20–50 步。见 neo_core::DEFAULT_MAX_STEPS 的说明。
@@ -46,31 +51,20 @@ impl Default for ExecOptions {
 }
 
 /// 跑一轮，返回（是否成功, 输出文本）。
-pub fn run_task(
-    mut kernel: Kernel,
+/// 审批排空：内核每挂起一次就按无人值守策略应答一次，直到本轮结束。
+/// 有最大轮次上限，避免应答逻辑出错时无限转。
+/// 从 run_task 抽出来：任务模式与目标模式的每个子任务轮都要它。
+fn drain_approvals(
+    kernel: &mut Kernel,
     opts: &ExecOptions,
-) -> (bool, String) {
-    let mut log: Vec<String> = Vec::new();
-    let mut ok = true;
-
-    // 与 TUI / Web 走同一份 `parse_refs`：`neo exec "@src/main.rs 解释下"`
-    // 与在 TUI 里敲同一句话必须等价，否则同一输入在不同宿主产生不同请求。
-    let events = match kernel.submit(Op::UserTurn {
-        refs: neo_protocol::parse_refs(&opts.task),
-        text: opts.task.clone(),
-    }) {
-        Ok(e) => e,
-        Err(e) => return (false, format!("提交失败：{e}")),
-    };
-    render(&events, opts, &mut log);
-
-    // 审批循环：内核每挂起一次就应答一次，直到本轮结束。
-    // 有最大轮次上限，避免应答逻辑出错时无限转。
+    log: &mut Vec<String>,
+    ok: &mut bool,
+) {
     let mut guard = 0;
     while let neo_core::KernelState::AwaitingApproval { id } = kernel.state().clone() {
         guard += 1;
         if guard > 64 {
-            ok = false;
+            *ok = false;
             log.push("[exec] 审批轮次过多，中止（可能是应答逻辑或内核状态机异常）".into());
             break;
         }
@@ -81,13 +75,73 @@ pub fn run_task(
         let decision = opts.on_approval;
         // 无人值守没有理由输入，reason = None（拒绝文案退回固定一句）
         match kernel.submit(Op::Approve { id, decision, reason: None }) {
-            Ok(events) => render(&events, opts, &mut log),
+            Ok(events) => render(&events, opts, log),
             Err(e) => {
-                ok = false;
+                *ok = false;
                 log.push(format!("[exec] 审批失败：{e}"));
                 break;
             }
         }
+    }
+}
+
+pub fn run_task(
+    mut kernel: Kernel,
+    opts: &ExecOptions,
+) -> (bool, String) {
+    let mut log: Vec<String> = Vec::new();
+    let mut ok = true;
+    let mut events: Vec<EventMsg> = Vec::new();
+
+    if let Some(goal) = &opts.goal {
+        // ── 目标模式：设定 + 自动推进 ────────────────────────────
+        // 无头/CI 是长程目标的主战场。一次 GoalAdvance = 一个完整
+        // 子任务轮；引擎的停止条件保证有界（外层 guard 只是防御上限，
+        // 防的是编排器实现出错 —— 正常情况下 stopped 先到）。
+        match kernel.submit(Op::GoalSet { goal: goal.clone() }) {
+            Ok(e) => {
+                render(&e, opts, &mut log);
+                events.extend(e);
+            }
+            Err(e) => return (false, format!("目标设定失败：{e}")),
+        }
+        let mut guard = 0;
+        while neo_protocol::goal_awaiting_advance(&events) {
+            guard += 1;
+            if guard > 512 {
+                ok = false;
+                log.push("[exec] 目标推进轮次过多，中止（可能是编排器未按停止条件收敛）".into());
+                break;
+            }
+            match kernel.submit(Op::GoalAdvance) {
+                Ok(e) => {
+                    render(&e, opts, &mut log);
+                    events.extend(e);
+                }
+                Err(e) => {
+                    ok = false;
+                    log.push(format!("[exec] 目标推进失败：{e}"));
+                    break;
+                }
+            }
+            // 子任务轮一样可能挂起审批 —— 与任务模式走同一条应答路径
+            drain_approvals(&mut kernel, opts, &mut log, &mut ok);
+        }
+    } else {
+        // ── 普通任务模式 ────────────────────────────────────────
+        // 与 TUI / Web 走同一份 `parse_refs`：`neo exec "@src/main.rs 解释下"`
+        // 与在 TUI 里敲同一句话必须等价，否则同一输入在不同宿主产生不同请求。
+        match kernel.submit(Op::UserTurn {
+            refs: neo_protocol::parse_refs(&opts.task),
+            text: opts.task.clone(),
+        }) {
+            Ok(e) => {
+                render(&e, opts, &mut log);
+                events.extend(e);
+            }
+            Err(e) => return (false, format!("提交失败：{e}")),
+        }
+        drain_approvals(&mut kernel, opts, &mut log, &mut ok);
     }
 
     // 失败原因可见性：工具非零退出时，把对应结果的原因打出来。

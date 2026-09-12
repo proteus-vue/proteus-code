@@ -77,6 +77,7 @@ dependencies = [
  "neo-core",
  "neo-instructions",
  "neo-mcp",
+ "neo-mock",
  "neo-orchestration",
  "neo-protocol",
  "neo-skill-loader",
