@@ -2136,6 +2136,7 @@ Rust CI 首跑在 ubuntu 上失败于 notify conformance:`SystemNotify::notify`
 钉着旧语义(不可用 → unwrap_err)。它在 macOS 上走 available 分支,
 **条件分支让本地永远测不到它** —— 这类"平台条件门控的旧断言"
 只有跨平台 CI 能抓。已改为与契约一致的静默降级断言。
+**CI 复跑全绿(verify + audit 双通过)—— Linux 测试失败排查闭环。**
 
 ### Web / Desktop × 真实模型回归（补完四宿主覆盖）
 
