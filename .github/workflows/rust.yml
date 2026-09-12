@@ -35,5 +35,10 @@ jobs:
             librsvg2-dev
       # 缓存 target 目录:全量编译从 ~10 分钟降到增量秒级
       - uses: Swatinem/rust-cache@v2
+      # 分步执行:失败阶段从 step 结论即可见,不必认证拉日志
+      - name: 编译检查(全 target)
+        run: cargo check --workspace --all-targets
+      - name: 全量测试
+        run: cargo test --workspace
       - name: 全门禁
         run: bash scripts/verify.sh
