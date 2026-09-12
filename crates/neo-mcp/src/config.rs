@@ -50,11 +50,28 @@ pub fn parse_user_config(raw: &str) -> Result<Vec<ServerSpec>, String> {
     let mut out = Vec::new();
     for s in servers {
         let name = s.get("name").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-        if name.is_empty() || s.get("command").and_then(|x| x.as_str()).is_none() {
+        let has_command = s
+            .get("command")
+            .and_then(|x| x.as_str())
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+        let has_url = s.get("url").and_then(|x| x.as_str()).is_some();
+        if name.is_empty() || !(has_command || has_url) {
             // 半条配置直接拒：带病配置最危险的表现是"起了一半还看起来正常"
-            return Err(format!("servers 里的条目缺少 name 或 command：{s}"));
+            return Err(format!(
+                "servers 里的条目缺少 name 或 transport（command / url）：{s}"
+            ));
         }
-        out.push(serde_json::from_value(s.clone()).map_err(|e| e.to_string())?);
+        let spec: ServerSpec = serde_json::from_value(s.clone()).map_err(|e| e.to_string())?;
+        // command（stdio）与 url（Streamable HTTP）恰填其一：
+        // 都填 = 到底连哪个说不清；都不填 = 一个起不来的服务器
+        if spec.command.is_empty() == spec.url.is_none() {
+            return Err(format!(
+                "服务器 {} 必须且只能填 command（stdio）或 url（HTTP）之一",
+                spec.name
+            ));
+        }
+        out.push(spec);
     }
     Ok(out)
 }
@@ -99,6 +116,19 @@ mod tests {
         assert!(parse_user_config(r#"{"servers":[{"command":"x"}]}"#).is_err());
         assert!(parse_user_config(r#"{}"#).is_err());
         assert!(parse_user_config("not json").is_err());
+    }
+
+    #[test]
+    fn command_and_url_are_mutually_exclusive_but_one_is_required() {
+        // url = Streamable HTTP 传输；与 command（stdio）恰填其一
+        let ok_http = parse_user_config(r#"{"servers":[{"name":"remote","url":"http://127.0.0.1:9999/mcp"}]}"#).unwrap();
+        assert_eq!(ok_http[0].url.as_deref(), Some("http://127.0.0.1:9999/mcp"));
+        // 都填 = 说不清连哪个；都不填 = 起不来的服务器
+        assert!(parse_user_config(
+            r#"{"servers":[{"name":"x","command":"a","url":"http://b"}]}"#
+        )
+        .is_err());
+        assert!(parse_user_config(r#"{"servers":[{"name":"x"}]}"#).is_err());
     }
 
     #[test]

@@ -35,7 +35,7 @@
 | **服务商管理**（设置页可增删改） | ✅ **已实现**：设置页内联表单新增/编辑（密钥字段打码、留空不改），删除需确认。密钥存 `~/.neo/provider_keys.json`（**0600**，与配置分离）；`base_url` 自动规范化为裸主机。缺 key 的条目跳过并提示 |
 | **上下文引用解析**（`@file` / `$skill`） | ✅ **已实现**：`@path` 与 `@path#行范围` 经沙箱读入并注入请求；`$skill` 查注册表注入正文、找不到则列出可用项。注入块落 `RefsResolved` 日志，回放一致 |
 | **项目指令级联**（`AGENTS.md`） | ✅ **已实现**：`~/.neo/AGENTS.override.md` → `~/.neo/AGENTS.md` → 仓库根 → 子目录（越具体越靠后），合并上限 32 KiB，超限如实标注截断。并入系统提示词并落 `InstructionsLoaded` 日志，回放还原同一份提示词 |
-| **MCP 外部工具**（stdio 传输，JSON-RPC） | ✅ **已实现**：`~/.neo/mcp.json` 声明服务器（用户级，项目级显式拒绝），外部工具入 `ToolRegistry` 复用审批/上限/落盘整条链路。资源与 SSE 传输未接入 |
+| **MCP 外部工具**（stdio + Streamable HTTP，JSON-RPC） | ✅ **已实现**：`~/.neo/mcp.json` 声明服务器（`command` 本地进程 / `url` 远程端点，恰填其一；用户级，项目级显式拒绝），外部工具入 `ToolRegistry` 复用审批/上限/落盘整条链路。HTTP 传输为 Streamable HTTP（2025-03-26/06-18 版本协商）。资源（resources）未接入 |
 | Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |
 
 **一句话现状**：内核 + 真实沙箱 + **真实模型** + 落盘 + **三宿主（exec / TUI / Web）**

@@ -28,6 +28,7 @@ fn real_process_handshake_list_and_call() {
         name: "test".into(),
         command: "/bin/sh".into(),
         args: vec!["-c".into(), SERVER.into()],
+        url: None,
     };
     let mut client = McpClient::spawn(&spec).expect("真进程握手应成功");
     let tools = client.list_tools().expect("tools/list 应成功");
@@ -46,6 +47,7 @@ fn nonexistent_command_reports_spawn_failure() {
         name: "nope".into(),
         command: "/nonexistent/neo-mcp-missing-cmd".into(),
         args: vec![],
+        url: None,
     };
     let err = match McpClient::spawn(&spec) {
         Ok(_) => panic!("不存在的命令不应成功"),

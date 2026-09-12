@@ -2057,7 +2057,7 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 |---|---|
 | **Desktop 的系统 webview 窗口层未接** | `DesktopHost` 的 `HostBackend` 契约实现与 T6 覆盖已完成，但 `wry` 窗口层未接（原型阶段刻意不拉入平台图形栈），因此没有可交互的桌面窗口 |
 | **Linux / Windows 沙箱未实现** | 受限档位在这些平台 **fail-closed**（拒绝执行），不会静默降级放行 |
-| **MCP 只有 stdio 传输** | SSE/HTTP 传输未做；资源（resources）与提示模板（prompts）未接入，只接了 tools |
+| **MCP 未接 resources / prompts** | stdio 与 Streamable HTTP 两种传输已就绪（tools 接入完整）；资源与提示模板未接入 —— 资源怎么暴露给模型（新引用符号还是注入）需要先做设计决定 |
 | **MCP 工具无结构化 diff 预览** | 外部工具内容由服务器决定，客户端生成不了可信 diff —— 审批时看不到"将改什么"，只有参数摘要 |
 | **技能只在启动时加载** | 引用是热路径、扫盘是冷路径，故装配时加载一次；会话中途新增技能需重启才可见（MCP 服务器同理：改 `mcp.json` 需重启） |
 | **AGENTS.md 超限不生成摘要** | 规划里是"让模型生成握手摘要"，当前只做诚实截断（截到 32 KiB 并标注） |
@@ -2065,4 +2065,4 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 | **`#session` / `/command` 引用不注入文本** | 刻意如此：它们是宿主动作而非模型上下文。宿主未实现时这两类引用是空操作 |
 | **Web 宿主无鉴权** | 默认只绑 `127.0.0.1`。若改成对外监听，必须先加鉴权 —— 它能让任何能访问端口的人在你的工作区执行写操作 |
 
-**下一步优先级建议**：MCP 的 SSE 传输与资源接入；Desktop 的 webview 窗口层。
+**下一步优先级建议**：MCP resources 的暴露设计（新引用符号 vs 注入，需要先做决定）；Desktop 的 webview 窗口层。

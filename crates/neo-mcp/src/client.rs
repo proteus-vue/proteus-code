@@ -199,32 +199,35 @@ pub struct CallOutcome {
 }
 
 impl McpClient {
-    /// 启动服务器进程并完成握手。
+    /// 启动服务器（stdio 进程或 HTTP 端点）并完成握手。
     pub fn spawn(spec: &ServerSpec) -> Result<Self, McpError> {
-        let mut client = Self {
-            child: Box::new(StdioChild::spawn(&spec.command, &spec.args)?),
-            next_id: AtomicU64::new(1),
-            poisoned: false,
+        // 传输决定协议版本：stdio 锁 2024-11-05；Streamable HTTP 自
+        // 2025-03-26 引入，接受其后继。版本协商只接受已知集合 ——
+        // 静默接受未知版本会让两端对消息语义各有各的理解。
+        let (child, accepted): (Box<dyn ChildProcess>, &[&str]) = match &spec.url {
+            Some(url) => (Box::new(HttpChild::new(url)), &HTTP_PROTOCOL_VERSIONS),
+            None => (Box::new(StdioChild::spawn(&spec.command, &spec.args)?), &[PROTOCOL_VERSION]),
         };
+        let mut client = Self { child, next_id: AtomicU64::new(1), poisoned: false };
         let params = json!({
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": accepted[0],
             "capabilities": {},
             "clientInfo": {"name": "neo", "version": env!("CARGO_PKG_VERSION")},
         });
         let result = client.request("initialize", Some(params), HANDSHAKE_TIMEOUT)?;
-        Self::check_version(&result)?;
+        Self::check_version(&result, accepted)?;
         client.notify("notifications/initialized", None)?;
         Ok(client)
     }
 
     /// 版本协商检查（`spawn` 用；独立成函数以便直测）。
-    /// 只接受我们声明的版本。静默接受未知版本会让两端
-    /// 对消息语义各有各的理解 —— 那比连不上更难查。
-    fn check_version(result: &Value) -> Result<(), McpError> {
+    /// 只接受声明的版本集合。
+    fn check_version(result: &Value, accepted: &[&str]) -> Result<(), McpError> {
         let got = result.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
-        if got != PROTOCOL_VERSION {
+        if !accepted.contains(&got) {
             return Err(McpError::Protocol(format!(
-                "协议版本不一致：客户端 {PROTOCOL_VERSION}，服务器 {got:?}"
+                "协议版本不一致：客户端 {}，服务器 {got:?}",
+                accepted.join(" / ")
             )));
         }
         Ok(())
@@ -350,13 +353,93 @@ impl Drop for McpClient {
     }
 }
 
-/// 服务器进程声明（来自用户级配置）。
+/// 服务器传输声明（来自用户级配置）。
+///
+/// 两种形态二选一：`command`（stdio，本机进程）或 `url`（Streamable
+/// HTTP，远程/内网服务器）。配置校验强制恰填其一。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServerSpec {
     pub name: String,
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// HTTP 传输接受的协议版本（Streamable HTTP 自 2025-03-26 引入；
+/// 2025-06-18 是其后继）。stdio 保持 2024-11-05 严格单一版本。
+pub const HTTP_PROTOCOL_VERSIONS: [&str; 2] = ["2025-03-26", "2025-06-18"];
+
+/// Streamable HTTP 传输：把"POST JSON → 读回 JSON/短 SSE"映射到
+/// `ChildProcess` 的行协议上。
+///
+/// 映射关系（刻意的）：`send(line)` = POST 一条 JSON-RPC 请求，把响应
+/// 解出的消息排进队列；`recv` = 逐条吐出。对 [`McpClient`] 而言对端
+/// 仍是"会说换行 JSON 的东西"，握手/分页/超时/错误映射全部复用。
+/// 会话由 `Mcp-Session-Id` 响应头建立并在后续请求回传。
+pub struct HttpChild {
+    url: String,
+    session_id: Option<String>,
+    pending: std::collections::VecDeque<String>,
+    last_error: Option<String>,
+}
+
+impl HttpChild {
+    pub fn new(url: &str) -> Self {
+        Self { url: url.to_string(), session_id: None, pending: Default::default(), last_error: None }
+    }
+}
+
+impl ChildProcess for HttpChild {
+    fn send(&mut self, line: &str) -> std::io::Result<()> {
+        self.pending.clear(); // HTTP 是请求/响应式：新请求作废旧残影
+        let mut headers: Vec<(&str, String)> = Vec::new();
+        if let Some(sid) = &self.session_id {
+            headers.push(("Mcp-Session-Id", sid.clone()));
+        }
+        let resp = crate::http::post_json(&self.url, line, &headers, std::time::Duration::from_secs(120))
+            .map_err(std::io::Error::other)?;
+        if let Some(sid) = resp.header("mcp-session-id") {
+            self.session_id = Some(sid.to_string());
+        }
+        match resp.status {
+            200 => {
+                let is_sse = resp
+                    .header("content-type")
+                    .map(|c| c.contains("text/event-stream"))
+                    .unwrap_or(false);
+                if is_sse {
+                    self.pending.extend(crate::http::sse_data_lines(&resp.body));
+                } else if !resp.body.trim().is_empty() {
+                    self.pending.push_back(resp.body.trim().to_string());
+                }
+                Ok(())
+            }
+            // 202 = 通知已收（无响应体）—— 队列留空即可
+            202 => Ok(()),
+            status => {
+                let excerpt: String = resp.body.chars().take(200).collect();
+                let msg = format!("HTTP {status}: {excerpt}");
+                self.last_error = Some(msg.clone());
+                Err(std::io::Error::other(msg))
+            }
+        }
+    }
+    fn recv_timeout(&mut self, _timeout: Duration) -> Result<Option<String>, RecvError> {
+        // 响应在 send 时已完整到达：队列空 = 本轮消息取完
+        Ok(self.pending.pop_front())
+    }
+    fn exited(&mut self) -> bool {
+        false // 远端服务器没有"进程退出"的概念
+    }
+    fn stderr_tail(&mut self) -> String {
+        self.last_error.clone().unwrap_or_default()
+    }
+    fn kill(&mut self) {
+        self.session_id = None; // 丢弃会话（无连接可杀）
+    }
 }
 
 #[cfg(test)]
@@ -535,9 +618,11 @@ mod tests {
     fn version_mismatch_is_an_explicit_error() {
         // 协商只接受声明的版本：不一致必须显式失败，绝不静默继续
         let bad = json!({"protocolVersion": "1999-01-01"});
-        let err = McpClient::check_version(&bad).unwrap_err();
+        let err = McpClient::check_version(&bad, &[PROTOCOL_VERSION]).unwrap_err();
         assert!(err.to_string().contains("1999-01-01"), "错误要说清两边的版本：{err}");
         let good = json!({"protocolVersion": PROTOCOL_VERSION});
-        assert!(McpClient::check_version(&good).is_ok());
+        assert!(McpClient::check_version(&good, &[PROTOCOL_VERSION]).is_ok());
+        // HTTP 传输接受两个版本
+        assert!(McpClient::check_version(&json!({"protocolVersion": "2025-06-18"}), &HTTP_PROTOCOL_VERSIONS).is_ok());
     }
 }

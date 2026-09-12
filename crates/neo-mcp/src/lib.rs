@@ -35,6 +35,7 @@
 //! 工具输出按内核给的字节上限截断（UTF-8 安全）。
 pub mod client;
 pub mod config;
+pub mod http;
 pub mod tool;
 pub mod wire;
 
