@@ -39,6 +39,17 @@ jobs:
       - name: 编译检查(全 target)
         run: cargo check --workspace --all-targets
       - name: 全量测试
-        run: cargo test --workspace
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/test-out.log
+          code=$?
+          # 失败用例与 panic 摘要以 ::error 注解上墙(API 可读,免认证拉日志)
+          grep -E '^test .* FAILED' /tmp/test-out.log | head -20 | while read -r line; do
+            echo "::error title=Test Failed::$line"
+          done
+          grep -E "panicked at" /tmp/test-out.log | head -10 | while read -r line; do
+            echo "::error title=Panic::$line"
+          done
+          exit $code
       - name: 全门禁
         run: bash scripts/verify.sh
