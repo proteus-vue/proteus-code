@@ -91,6 +91,14 @@ impl Tool for McpResourceTool {
         CallKind::Read
     }
 
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"uri": {"type": "string", "description": "资源 URI"}},
+            "required": ["uri"]
+        })
+    }
+
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput {
         let Some(uri) = args.get("uri").and_then(Value::as_str) else {
             return self.failure(McpError::Protocol("缺少 uri 参数".into()));
@@ -179,6 +187,12 @@ impl Tool for McpTool {
 
     /// MCP 工具没有"改哪个文件"的结构化预览 —— 内容由服务器决定，
     /// 客户端无从生成可信 diff。不预览就不预览，不编一个假的。
+    /// 服务器声明的 input_schema 原样上报 —— 它就是 JSON Schema,
+    /// 与 function-calling 的 parameters 完全同构,不改写一字。
+    fn parameters(&self) -> Value {
+        self.input_schema.clone()
+    }
+
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput {
         let mut conn = self.connection.lock().unwrap_or_else(|e| e.into_inner());
         match conn.call_tool(&self.qualified_name, args) {

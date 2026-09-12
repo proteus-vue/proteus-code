@@ -46,6 +46,14 @@ const WRITE_MARKERS: &[&str] = &[
 pub struct BashTool;
 
 impl Tool for BashTool {
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"cmd": {"type": "string", "description": "要执行的命令"}},
+            "required": ["cmd"]
+        })
+    }
+
     fn name(&self) -> &str { "bash" }
 
     fn describe(&self) -> String {
@@ -119,6 +127,19 @@ fn count_occurrences(hay: &str, needle: &str) -> usize {
 }
 
 impl Tool for ApplyPatchTool {
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "目标文件路径"},
+                "old": {"type": "string", "description": "原内容（省略 = 整文件写入）"},
+                "new": {"type": "string", "description": "新内容"},
+                "all": {"type": "boolean", "description": "路径歧义时是否允许全部匹配"}
+            },
+            "required": ["path", "new"]
+        })
+    }
+
     fn name(&self) -> &str { "apply_patch" }
 
     fn describe(&self) -> String {
@@ -235,6 +256,14 @@ fn fail(msg: &str) -> ToolOutput {
 pub struct RequestUserInputTool;
 
 impl Tool for RequestUserInputTool {
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"prompt": {"type": "string", "description": "要问用户的问题"}},
+            "required": ["prompt"]
+        })
+    }
+
     fn name(&self) -> &str { "request_user_input" }
     fn describe(&self) -> String { "request_user_input(prompt): 向用户提问。".into() }
     fn call_kind(&self, _args: &Value) -> CallKind { CallKind::Interactive }
@@ -247,6 +276,104 @@ impl Tool for RequestUserInputTool {
             stderr: "request_user_input 需宿主交互能力；本原型未接线".into(),
             truncated: false,
         }
+    }
+}
+
+/// 从参数里解析任务清单条目（owned）。
+///
+/// **宽容字符串化**:真机回归(glm-4.6)发现,即使 schema 里写明"数组",
+/// 模型仍可能把整个数组 JSON 序列化成字符串传入(`"items": "[{...}]"`,
+/// 双重编码)。字符串能解析成数组就接受 —— 对端是概率系统,输入规范化
+/// 是 harness 的 courtesy,不是对错误的纵容。
+fn parse_todo_entries(args: &Value) -> Vec<TodoEntry> {
+    // 数组直取;字符串按 JSON 解析（双重编码的宽容路径）
+    let items: Vec<Value> = match args.get("items") {
+        Some(Value::Array(items)) => items.clone(),
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Array(items)) => items,
+            _ => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    items
+        .iter()
+        .filter_map(|it| {
+            let content = it.get("content")?.as_str()?.to_string();
+            let status = match it.get("status").and_then(Value::as_str) {
+                Some("completed") => TodoStatus::Completed,
+                Some("in_progress") => TodoStatus::InProgress,
+                _ => TodoStatus::Pending,
+            };
+            Some(TodoEntry { content, status })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod todo_tests {
+    use super::*;
+    use neo_protocol::SandboxMode;
+
+    #[test]
+    fn stringified_array_is_tolerated() {
+        // 真机 glm-4.6 实测:模型把数组双重编码成字符串传入。
+        // harness 规范化输入而不是反复报错 —— 一次解析,省一轮重试。
+        let t = TodoWriteTool;
+        let stringified = serde_json::json!({
+            "items": "[{\"content\": \"修复\", \"status\": \"completed\"}]"
+        });
+        let out = t.execute(&stringified, &fake_ctx());
+        assert_eq!(out.exit_code, 0, "{}", out.stderr);
+        let events = t.report(&stringified);
+        assert_eq!(events.len(), 1, "字符串化数组也应产生清单事件");
+        match &events[0] {
+            EventMsg::TodoUpdated { items } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].content, "修复");
+                assert_eq!(items[0].status, TodoStatus::Completed);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_array_still_works_and_garbage_is_rejected() {
+        let t = TodoWriteTool;
+        let plain = serde_json::json!({"items": [{"content": "a", "status": "pending"}]});
+        assert_eq!(t.execute(&plain, &fake_ctx()).exit_code, 0);
+        // 垃圾字符串(不是 JSON 数组)仍如实拒绝
+        let garbage = serde_json::json!({"items": "not json at all"});
+        assert_eq!(t.execute(&garbage, &fake_ctx()).exit_code, -1);
+        // 缺参仍拒绝
+        assert_eq!(t.execute(&serde_json::json!({}), &fake_ctx()).exit_code, -1);
+        // **空数组合法**(整表替换成空 = 清空清单),不是错误
+        let empty = t.execute(&serde_json::json!({"items": []}), &fake_ctx());
+        assert_eq!(empty.exit_code, 0, "空数组是合法的清空语义:{}", empty.stderr);
+        assert!(empty.stdout.contains("0 项"));
+    }
+
+    #[test]
+    fn parameters_schema_declares_the_items_array() {
+        let s = TodoWriteTool.parameters();
+        assert_eq!(s["properties"]["items"]["type"], "array", "schema 必须声明数组形状");
+        assert_eq!(s["required"], serde_json::json!(["items"]));
+    }
+
+    /// 泄漏一个静态 ToolCtx(测试专用;NullSandbox 无需真实清理)。
+    fn fake_ctx() -> ToolCtx<'static> {
+        struct Null;
+        impl neo_core::SandboxBackend for Null {
+            fn supports(&self, _m: SandboxMode) -> bool { true }
+            fn write_file(&self, _m: SandboxMode, _p: &std::path::Path, c: &str) -> neo_core::FileOutcome {
+                neo_core::FileOutcome::Written { bytes: c.len() }
+            }
+            fn execute(&self, _m: SandboxMode, _c: &str, _l: usize) -> neo_core::SandboxOutcome {
+                neo_core::SandboxOutcome::Ran { stdout: String::new(), truncated: false }
+            }
+        }
+        let sandbox: &'static Null = Box::leak(Box::new(Null));
+        let cwd: &'static std::path::Path = Box::leak(std::path::PathBuf::from("/tmp").into_boxed_path());
+        ToolCtx { sandbox, mode: SandboxMode::WorkspaceWrite, cwd, max_output_bytes: 64 * 1024 }
     }
 }
 
@@ -274,6 +401,27 @@ pub struct SubagentSpec {
 pub struct TodoWriteTool;
 
 impl Tool for TodoWriteTool {
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+                        },
+                        "required": ["content", "status"]
+                    },
+                    "description": "完整任务清单（整表替换）"
+                }
+            },
+            "required": ["items"]
+        })
+    }
+
     fn name(&self) -> &str { "todowrite" }
 
     fn describe(&self) -> String {
@@ -286,36 +434,33 @@ impl Tool for TodoWriteTool {
 
     /// 清单通过协议事件公告给宿主（宿主据此渲染进度面板）。
     fn report(&self, args: &Value) -> Vec<EventMsg> {
-        let Some(items) = args.get("items").and_then(Value::as_array) else {
-            return Vec::new();
-        };
-        let parsed: Vec<TodoEntry> = items
-            .iter()
-            .filter_map(|it| {
-                let content = it.get("content")?.as_str()?.to_string();
-                let status = match it.get("status").and_then(Value::as_str) {
-                    Some("completed") => TodoStatus::Completed,
-                    Some("in_progress") => TodoStatus::InProgress,
-                    _ => TodoStatus::Pending,
-                };
-                Some(TodoEntry { content, status })
-            })
-            .collect();
         // 上限：清单是给人看的，过长就失去意义；也避免超大参数写进事件流
-        let capped: Vec<TodoEntry> = parsed.into_iter().take(MAX_TODOS).collect();
+        let capped: Vec<TodoEntry> = parse_todo_entries(args).into_iter().take(MAX_TODOS).collect();
+        if capped.is_empty() {
+            return Vec::new();
+        }
         vec![EventMsg::TodoUpdated { items: capped }]
     }
 
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput {
-        let n = args.get("items").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
-        if n == 0 {
+        // 缺参/不可解析 = 错误;**空数组 = 合法**(整表替换成空 = 清空清单)
+        let items_present = match args.get("items") {
+            Some(Value::Array(_)) => true,
+            Some(Value::String(s)) => serde_json::from_str::<Value>(s)
+                .map(|v| v.is_array())
+                .unwrap_or(false),
+            _ => false,
+        };
+        if !items_present {
             return ToolOutput {
                 exit_code: -1,
                 stdout: String::new(),
-                stderr: "缺少参数 items（应为数组）".into(),
+                stderr: "缺少参数 items（应为数组,或可解析的 JSON 数组字符串）".into(),
                 truncated: false,
             };
         }
+        let n = parse_todo_entries(args).len();
+        let _ = ctx;
         let _ = ctx;
         ToolOutput {
             exit_code: 0,

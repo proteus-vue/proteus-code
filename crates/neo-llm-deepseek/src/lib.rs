@@ -157,9 +157,10 @@ impl DeepSeekProvider {
                         "function": {
                             "name": t.name,
                             "description": t.description,
-                            // 本原型的工具不声明细粒度参数 schema（内核的 ToolSchema
-                            // 只有 name/description）。补参数 schema 属后续工作。
-                            "parameters": { "type": "object", "properties": {}, "additionalProperties": true }
+                            // 结构化参数 schema:模型靠它得到参数的形状契约。
+                            // 真机回归(glm-4.6)发现没有它时模型会把数组
+                            // 参数字符串化(双重编码),反复重试浪费预算。
+                            "parameters": t.parameters,
                         }
                     })
                 })

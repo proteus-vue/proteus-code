@@ -78,6 +78,8 @@ pub enum Message {
 pub struct ToolSchema {
     pub name: String,
     pub description: String,
+    /// 参数 JSON Schema（原样给 provider 的 function.parameters）
+    pub parameters: Value,
 }
 
 /// 一次模型请求。
@@ -388,6 +390,17 @@ pub trait Tool: Send + Sync {
         Vec::new()
     }
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput;
+
+    /// 参数的 JSON Schema（OpenAI function-calling 的 `parameters`）。
+    ///
+    /// 为什么必须有：真机回归（glm-4.6）发现,没有结构化 schema 时模型
+    /// 只能靠散文描述猜参数形状,曾把整个数组**字符串化**后传进来
+    /// （双重编码）,反复重试浪费大量预算。schema 是模型与工具之间
+    /// 唯一可靠的结构契约。默认空对象 schema（任意参数）——
+    /// 没有结构化参数的工具不必实现。
+    fn parameters(&self) -> Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
 }
 
 /// 用 BTreeMap 而非 HashMap —— 保证工具描述顺序稳定（提示词缓存命中的前提）
@@ -408,7 +421,11 @@ impl ToolRegistry {
     pub fn schemas(&self) -> Vec<ToolSchema> {
         self.tools
             .values()
-            .map(|t| ToolSchema { name: t.name().into(), description: t.describe() })
+            .map(|t| ToolSchema {
+                name: t.name().into(),
+                description: t.describe(),
+                parameters: t.parameters(),
+            })
             .collect()
     }
 
