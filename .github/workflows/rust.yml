@@ -43,11 +43,17 @@ jobs:
           set -o pipefail
           cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/test-out.log
           code=$?
-          # 失败定位以 ::error 注解上墙(API 可读,免认证拉日志)
-          grep -E '^test .* FAILED|^failures:$|panicked at|^error(\[|:)' /tmp/test-out.log | sort -u | head -25 | while read -r line; do
-            echo "::error title=CI Test Failure::$line"
-          done
-          echo "::error title=Log Tail::$(tail -c 1500 /tmp/test-out.log | tr '\n' '§' | head -c 1400)"
+          # 失败定位写进 STEP SUMMARY —— check-run output 字段免认证可读
+          {
+            echo "## 失败用例"
+            grep -E '^test .* FAILED' /tmp/test-out.log | head -20 || true
+            echo "## panic 摘要"
+            grep -E 'panicked at' /tmp/test-out.log | head -10 || true
+            echo "## 编译错误(若有)"
+            grep -E '^error(\[|:)' /tmp/test-out.log | head -15 || true
+            echo "## 日志尾部"
+            tail -c 2500 /tmp/test-out.log
+          } >> "$GITHUB_STEP_SUMMARY"
           exit $code
       - name: 全门禁
         run: bash scripts/verify.sh
