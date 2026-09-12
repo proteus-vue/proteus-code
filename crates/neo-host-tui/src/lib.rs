@@ -4929,12 +4929,22 @@ fn attention_signals(
     seen: &std::collections::HashSet<String>,
 ) -> Vec<(String, neo_platform::Attention, String)> {
     let mut out = Vec::new();
+    // 最后一条用户消息的头 —— 完成通知带上"当时在做什么",
+    // 否则通知只有 token 数,用户不知道是哪个任务完成了。
+    let mut last_user_task = String::new();
     for f in facts {
+        if let Fact::UserSaid(t) = f {
+            last_user_task = t.chars().take(40).collect();
+        }
         let (key, kind, detail) = match f {
             Fact::TurnFinished { input_tokens, output_tokens } => (
                 format!("done:{input_tokens}:{output_tokens}"),
                 neo_platform::Attention::TurnComplete,
-                format!("完成（{input_tokens} in / {output_tokens} out）"),
+                if last_user_task.is_empty() {
+                    format!("完成（{input_tokens} in / {output_tokens} out）")
+                } else {
+                    format!("完成:{last_user_task}（{input_tokens} in / {output_tokens} out）")
+                },
             ),
             Fact::Failed(msg) => (
                 format!("err:{}", msg.chars().take(64).collect::<String>()),
@@ -8124,6 +8134,33 @@ mod tests {
         ];
         let seen = std::collections::HashSet::new();
         assert!(attention_signals(&facts, &seen).is_empty(), "普通事实不该提醒");
+    }
+
+    #[test]
+    fn completion_notification_carries_the_task_context() {
+        // 完成通知只有 token 数 = 用户不知道是哪个任务完成了。
+        // 通知应带上"当时在做什么"（最后一条用户消息的头）。
+        let facts = vec![
+            Fact::UserSaid("修复 divide 的除零 bug".into()),
+            Fact::ToolFinished {
+                name: "apply_patch".into(),
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+            },
+            Fact::TurnFinished { input_tokens: 100, output_tokens: 20 },
+        ];
+        let sigs = attention_signals(&facts, &std::collections::HashSet::new());
+        assert_eq!(sigs.len(), 1);
+        let (_, kind, detail) = &sigs[0];
+        assert!(matches!(kind, neo_platform::Attention::TurnComplete));
+        assert!(detail.contains("修复 divide"), "通知应含任务摘要：{detail}");
+        assert!(detail.contains("100 in"), "保留 token 数：{detail}");
+        // 无用户消息时退回旧文案（比如 shell 直输的轮次）
+        let bare = vec![Fact::TurnFinished { input_tokens: 0, output_tokens: 0 }];
+        let (_, _, d) = &attention_signals(&bare, &std::collections::HashSet::new())[0];
+        assert!(d.starts_with("完成（"), "无任务上下文时退回固定文案：{d}");
     }
 
     #[test]

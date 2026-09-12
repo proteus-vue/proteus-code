@@ -593,6 +593,21 @@ fn describe_kind(kind: CallKind) -> &'static str {
     }
 }
 
+/// 参数里的第一个字符串值的摘要(≤40 字符) —— 审批 detail 的动作部分。
+/// 内核不解析工具特有参数名(那是工具的知识),只取"第一个字符串"作示意:
+/// apply_patch → path,bash → cmd,覆盖常见形态。
+fn call_arg_summary(args: &serde_json::Value) -> String {
+    let Some(obj) = args.as_object() else { return String::new() };
+    for v in obj.values() {
+        if let Some(s) = v.as_str() {
+            let head: String = s.chars().take(40).collect();
+            let ell = if s.chars().count() > 40 { "…" } else { "" };
+            return format!("{head}{ell}");
+        }
+    }
+    String::new()
+}
+
 /// 类别的协议名（`EventMsg::ApprovalRequest.kind`）。
 /// 审批卡片上"总是允许"将放行的范围由此单一事实源给出 ——
 /// 宿主按工具名自行推断会与内核的实际放行范围分叉。
@@ -1313,6 +1328,10 @@ impl Kernel {
                     // 审批前先给**改动的具体内容**：只说"写入类调用需确认"，
                     // 用户是在盲批 —— 不知道改哪个文件、改了什么。
                     // 预览由工具提供（只有它知道参数怎么变成改动），内核只转发。
+                    // detail 同时带上具体动作（工具名 + 首个字符串参数）——
+                    // 它是审批通知/无头日志的内容源，桌面通知曾只有通用文案,
+                    // 用户看到"需要审批"却不知道是什么在等他。
+                    let detail = format!("{detail}:{} {}", call.name, call_arg_summary(&call.arguments));
                     if let Some(tool) = self.tools.get(&call.name) {
                         if let Some((path, diff)) = tool.preview(&call.arguments) {
                             let ev = EventMsg::PatchProposed { path, diff };

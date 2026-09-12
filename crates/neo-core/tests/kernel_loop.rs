@@ -342,6 +342,29 @@ fn approval_request_carries_the_kernel_classified_kind() {
 }
 
 #[test]
+fn approval_detail_names_the_concrete_action() {
+    // 审批通知/无头日志的内容源是 detail:只有"写入类调用需确认"这种
+    // 通用文案,用户看到通知不知道是什么在等他。必须带具体动作
+    // (工具名 + 首个字符串参数)。
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(MockTool::writing("w")));
+    let script = vec![
+        vec![tool_call("w1", "w", serde_json::json!({"path": "src/foo.rs"}))],
+        vec![ModelDelta::Text("ok".into())],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)), r,
+        Box::new(InMemoryPersistence::new()), ExecMode::Default,
+    );
+    let events = k.submit(Op::UserTurn { text: "x".into(), refs: vec![] }).unwrap();
+    let detail = events.iter().find_map(|e| match e {
+        EventMsg::ApprovalRequest { detail, .. } => Some(detail.clone()), _ => None,
+    }).expect("应有审批请求");
+    assert!(detail.contains("w"), "detail 要含工具名:{detail}");
+    assert!(detail.contains("src/foo.rs"), "detail 要含参数摘要:{detail}");
+}
+
+#[test]
 fn approving_without_a_pending_request_is_an_error() {
     let mut k = kernel_with(
         Box::new(ScriptedModelProvider::text_only("x")), read_tool(),
