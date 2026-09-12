@@ -1562,6 +1562,7 @@ struct GoalShared {
     seen_kinds: Vec<&'static str>,
     completes: usize,
     last_failed: Option<bool>,
+    last_review_text: Option<String>,
 }
 
 impl ScriptedOrchestrator {
@@ -1595,10 +1596,16 @@ impl GoalOrchestrator for ScriptedOrchestrator {
     fn next_turn_prompt(&mut self) -> Option<String> {
         self.prompts.pop_front()
     }
-    fn on_turn_complete(&mut self, _usage: (u64, u64), failed: bool) -> Vec<EventMsg> {
+    fn on_turn_complete(
+        &mut self,
+        _usage: (u64, u64),
+        failed: bool,
+        review_text: &str,
+    ) -> Vec<EventMsg> {
         let mut sh = self.shared.lock().unwrap();
         sh.completes += 1;
         sh.last_failed = Some(failed);
+        sh.last_review_text = Some(review_text.to_string());
         vec![EventMsg::GoalUpdated { snapshot: self_snapshot() }]
     }
     fn observe(&mut self, event: &EventMsg) {

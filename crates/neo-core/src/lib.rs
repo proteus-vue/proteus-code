@@ -198,9 +198,16 @@ pub trait GoalOrchestrator: Send {
     fn has_pending_turn(&self) -> bool;
     /// 取下一轮的提示词（消费一轮额度）。`None` = 没有待执行轮。
     fn next_turn_prompt(&mut self) -> Option<String>;
-    /// 一个子任务轮结束。`usage` = 本轮 token 消耗，`failed` = 本轮是否出错。
+    /// 一个子任务轮结束。`usage` = 本轮 token 消耗，`failed` = 本轮的
+    /// 硬失败信号（Error 事件 / 非零退出的工具调用），`review_text` =
+    /// 本轮**模型的最终答复**（审查阶段由实现方解析显式结论）。
     /// 实现方据此推进阶段/重试/判停，返回状态快照事件。
-    fn on_turn_complete(&mut self, usage: (u64, u64), failed: bool) -> Vec<EventMsg>;
+    fn on_turn_complete(
+        &mut self,
+        usage: (u64, u64),
+        failed: bool,
+        review_text: &str,
+    ) -> Vec<EventMsg>;
     /// 回放：消费日志事件、重建内部状态。必须幂等且与在线推进一致。
     fn observe(&mut self, event: &EventMsg);
 }
@@ -670,6 +677,8 @@ pub struct Kernel {
     goal_turn_in_flight: bool,
     /// 目标子任务轮内是否发生过 Error 事件（引擎的审查失败判据）
     goal_turn_failed: bool,
+    /// 目标子任务轮内模型最后一条答复（审查阶段解析显式结论用）
+    goal_turn_last_text: Option<String>,
     sandbox: Arc<dyn SandboxBackend>,
     persistence: Box<dyn SessionPersistence>,
     cwd: PathBuf,
@@ -745,6 +754,7 @@ impl Kernel {
             goal: None,
             goal_turn_in_flight: false,
             goal_turn_failed: false,
+            goal_turn_last_text: None,
             sandbox,
             persistence,
             cwd: cwd.into(),
@@ -915,6 +925,7 @@ impl Kernel {
                 // 被回退掉的目标子任务轮同理作废（轮都没了，谈不上完成）
                 self.goal_turn_in_flight = false;
                 self.goal_turn_failed = false;
+                self.goal_turn_last_text = None;
                 let ev = EventMsg::Rewound {
                     turns,
                     removed_messages: removed,
@@ -931,6 +942,7 @@ impl Kernel {
                 // 在飞标记，否则下一个普通轮的结束会被误当成目标轮的结束。
                 self.goal_turn_in_flight = false;
                 self.goal_turn_failed = false;
+                self.goal_turn_last_text = None;
                 self.emit_and_log(&EventMsg::Error { message: "已中断".into() })?;
             }
 
@@ -1042,6 +1054,7 @@ impl Kernel {
                 };
                 self.goal_turn_in_flight = true;
                 self.goal_turn_failed = false;
+                self.goal_turn_last_text = None;
                 self.begin_turn(prompt, Vec::new())?;
                 self.drive_steps()?;
             }
@@ -1170,7 +1183,9 @@ impl Kernel {
                 self.goal_turn_in_flight = false;
                 let failed = self.goal_turn_failed;
                 self.goal_turn_failed = false;
-                let events = self.with_goal(|g| g.on_turn_complete(usage, failed))?;
+                let review_text = self.goal_turn_last_text.take().unwrap_or_default();
+                let events =
+                    self.with_goal(|g| g.on_turn_complete(usage, failed, &review_text))?;
                 for ev in &events {
                     self.emit_and_log(ev)?;
                 }
@@ -1787,6 +1802,10 @@ impl Kernel {
                 EventMsg::Error { .. } => self.goal_turn_failed = true,
                 EventMsg::ToolCallEnd { exit_code, .. } if *exit_code != 0 => {
                     self.goal_turn_failed = true;
+                }
+                // 多步轮会有多条 AgentMessageDone：最后一条 = 模型的最终结论
+                EventMsg::AgentMessageDone { text } => {
+                    self.goal_turn_last_text = Some(text.clone());
                 }
                 _ => {}
             }
