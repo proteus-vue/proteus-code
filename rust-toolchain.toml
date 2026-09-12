@@ -1,0 +1,7 @@
+# 工具链钉版。原因:桌面窗口层(wry/tao)的传递依赖树里,若干包的
+# 最新版已使用 edition2024(需要 cargo >= 1.85)。Cargo.lock 里已把
+# 这些依赖钉在 1.83 兼容版本(idna_adapter / hashbrown / indexmap /
+# num_enum / dlopen2_derive,见 PROJECT_MEMORY §4.56 与桌面窗口层
+# 的提交说明);再钉住工具链,防止一次 `cargo update` 把树漂移到
+# 本工具链无法解析的状态。
+1.83.0
