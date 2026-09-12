@@ -1,0 +1,12 @@
+[package]
+name = "neo-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# L3 PROVIDER —— MCP 客户端（把外部工具服务器的能力变成 ToolRegistry 里的 Tool）
+[dependencies]
+neo-core = { path = "../neo-core" }
+neo-protocol = { path = "../neo-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

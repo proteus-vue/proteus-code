@@ -13,4 +13,5 @@ neo-capability = { path = "../neo-capability" }
 neo-orchestration = { path = "../neo-orchestration" }
 neo-skill-loader = { path = "../neo-skill-loader" }
 neo-instructions = { path = "../neo-instructions" }
+neo-mcp = { path = "../neo-mcp" }
 serde_json = { workspace = true }

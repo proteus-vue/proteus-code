@@ -1619,7 +1619,9 @@ impl Screen<'_> {
     /// 右侧面板：Context（用量）/ Todo（进度）/ Files（改动）。
     ///
     /// 对齐 opencode 的 sidebar 插件集，但**只放我们有数据的三块** ——
-    /// 它还有 MCP / LSP 面板，我们没有 MCP 与 LSP，做了只会是空面板。
+    /// 它还有 MCP / LSP 面板：MCP 工具虽然已能接入（neo-mcp），但侧栏
+    /// 面板需要"服务器连接状态"这类运行时数据，装配信息之外的东西
+    /// 当前不展示，做了会是空面板；LSP 没有。
     fn draw_sidebar(&self, g: &mut Grid, p: &Pal, x0: usize) {
         let _ = p;
         let w = self.cols.saturating_sub(x0);

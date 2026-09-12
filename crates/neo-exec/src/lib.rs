@@ -222,6 +222,55 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
 
 /// 由 `neo exec` 解析出的参数构造一个可运行的 kernel。
 ///
+/// 把 MCP 外部工具注册进工具注册表，返回**警告**（启动失败/配置问题）。
+///
+/// 抽成可测函数的原因：`build_kernel` 依赖内核全家桶，端到端测装配
+/// 要模拟模型与沙箱；而 MCP 接线的关键行为（用户级配置生效、项目级
+/// 拒绝、服务器失败不拖垮装配）只需要这一层。配置路径与工作区都是
+/// 参数 —— 测试用临时目录，不碰进程级 `NEO_HOME`（并行测试会串环境，
+/// PROJECT_MEMORY 4.13d 的教训）。
+pub fn register_mcp_tools(
+    tools: &mut ToolRegistry,
+    config_path: Option<&std::path::Path>,
+    workspace: &std::path::Path,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Err(e) = neo_mcp::config::reject_project_level(workspace) {
+        warnings.push(e);
+    }
+    let specs = match config_path {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(raw) => match neo_mcp::config::parse_user_config(&raw) {
+                Ok(specs) => specs,
+                Err(e) => {
+                    warnings.push(format!("配置 {} 无法解析：{e}", path.display()));
+                    Vec::new()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                warnings.push(format!("读取 {}: {e}", path.display()));
+                Vec::new()
+            }
+        },
+        // 没有可用的 NEO_HOME = 没配 MCP（可选能力，不是错误）
+        None => Vec::new(),
+    };
+    for spec in specs {
+        // 一台服务器起不来不拖垮整个应用：如实告警后继续，
+        // 缺哪些工具在模型侧可见（工具列表就是事实，不是静默缺失）。
+        match neo_mcp::connect(&spec) {
+            Ok((_, mcp_tools)) => {
+                for t in mcp_tools {
+                    tools.register(std::sync::Arc::new(t));
+                }
+            }
+            Err(e) => warnings.push(format!("服务器「{}」不可用：{e}", spec.name)),
+        }
+    }
+    warnings
+}
+
 /// 之所以把装配放在这里而不是 main：让 `main` 只做参数解析与输出，
 /// 装配逻辑可被测试与其它宿主复用。
 pub fn build_kernel(
@@ -231,9 +280,15 @@ pub fn build_kernel(
     models: neo_core::models::ModelRegistry,
     sandbox: std::sync::Arc<dyn neo_core::SandboxBackend>,
     persistence: Box<dyn neo_core::SessionPersistence>,
-) -> Kernel {
-    let mut tools = ToolRegistry::new();
+) -> Kernel {    let mut tools = ToolRegistry::new();
     neo_capability::register_defaults(&mut tools);
+    // MCP 外部工具：装配点接入。用户必须先在 ~/.neo/mcp.json 里声明
+    // 服务器 —— 这是用户自己的决定；项目级 mcp.json 显式拒绝
+    // （仓库指定的可执行文件 = 供应链注入，见 neo_mcp::config 的说明）。
+    // 警告**返回**而不在这里打印：装配可被测试复用，输出渠道由调用方定。
+    for warning in register_mcp_tools(&mut tools, neo_mcp::config::user_config_path().as_deref(), workspace) {
+        eprintln!("[mcp] {warning}");
+    }
     let cfg = Config { exec_mode: opts.mode, ..Config::default() };
     // 技能目录在**装配点**加载一次（而不是每次 `$skill` 引用都扫盘）：
     // 引用是热路径，扫盘是冷路径。代价是会话中途新增技能需要重启才可见 ——

@@ -30,6 +30,7 @@ LAYER = {
     "neo-skill-loader":  3,  # L3 PROVIDER（技能目录发现与加载）
     "neo-instructions":  3,  # L3 PROVIDER（AGENTS.md 级联加载）
     "neo-providers":     3,  # L3 PROVIDER（服务商注册表：用户级 JSON）
+    "neo-mcp":           3,  # L3 PROVIDER（MCP 客户端：外部工具服务器 → Tool 实现）
     "neo-orchestration": 4,  # L4
     "neo-host-tui":      5,  # L5
     "neo-host-desktop":  5,  # L5
