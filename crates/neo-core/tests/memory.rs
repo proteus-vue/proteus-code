@@ -119,7 +119,7 @@ fn tool_output_is_capped_and_reports_truncation() {
     let mut k = Kernel::new(
         "s", Config { exec_mode: ExecMode::AutoEdit, ..Config::default() },
         registry(),
-        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::new(vec![
+        neo_core::models::ModelRegistry::single(std::sync::Arc::new(ScriptedModelProvider::new(vec![
             vec![neo_mock::tool_call("t1", "probe", serde_json::json!({}))],
             vec![neo_core::ModelDelta::Text("done".into())],
         ]))),
@@ -173,7 +173,7 @@ fn sandbox_level_truncation_is_propagated() {
     let mut k = Kernel::new(
         "s", Config { exec_mode: ExecMode::AutoEdit, ..Config::default() },
         registry(),
-        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::new(vec![
+        neo_core::models::ModelRegistry::single(std::sync::Arc::new(ScriptedModelProvider::new(vec![
             vec![neo_mock::tool_call("t1", "probe", serde_json::json!({}))],
             vec![neo_core::ModelDelta::Text("d".into())],
         ]))),
@@ -198,7 +198,7 @@ fn multibyte_output_through_the_kernel_stays_valid() {
     let mut k = Kernel::new(
         "s", Config { exec_mode: ExecMode::AutoEdit, ..Config::default() },
         registry(),
-        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::new(vec![
+        neo_core::models::ModelRegistry::single(std::sync::Arc::new(ScriptedModelProvider::new(vec![
             vec![neo_mock::tool_call("t1", "probe", serde_json::json!({}))],
             vec![neo_core::ModelDelta::Text("d".into())],
         ]))),
@@ -227,7 +227,7 @@ fn context_cap_errors_instead_of_growing_without_bound() {
     let mut k = Kernel::new(
         "s", Config { exec_mode: ExecMode::AutoEdit, ..Config::default() },
         ToolRegistry::new(),
-        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::text_only("x"))),
+        neo_core::models::ModelRegistry::single(std::sync::Arc::new(ScriptedModelProvider::text_only("x"))),
         Arc::new(FloodSandbox),
         Box::new(InMemoryPersistence::new()),
         "/tmp",
@@ -268,7 +268,7 @@ fn a_step_does_not_deep_copy_the_whole_history() {
         let mut k = Kernel::new(
             "s", Config { exec_mode: ExecMode::AutoEdit, ..Config::default() },
             ToolRegistry::new(),
-            neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::text_only("single-token"))),
+            neo_core::models::ModelRegistry::single(std::sync::Arc::new(ScriptedModelProvider::text_only("single-token"))),
             Arc::new(FloodSandbox),
             Box::new(InMemoryPersistence::new()),
             "/tmp",

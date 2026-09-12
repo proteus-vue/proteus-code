@@ -578,7 +578,7 @@ impl TuiSessions {
 fn provider_of(
     e: &neo_providers::ProviderEntry,
     key: &str,
-) -> (neo_core::models::ModelInfo, Box<dyn neo_core::ModelProvider>) {
+) -> (neo_core::models::ModelInfo, std::sync::Arc<dyn neo_core::ModelProvider>) {
     let (host, url_path) = e
         .base_url
         .as_deref()
@@ -609,7 +609,7 @@ fn provider_of(
         context_limit: e.context_limit,
         production: e.production,
     };
-    (info, Box::new(p))
+    (info, std::sync::Arc::new(p))
 }
 
 /// TUI 的服务商管理实现。
@@ -859,18 +859,18 @@ fn detect_branch(ws: &std::path::Path) -> String {
 fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
     use neo_core::models::{ModelInfo, ModelRegistry};
     let mk = |name: &str, desc: &str, limit: u64, production: bool,
-              p: Box<dyn neo_core::ModelProvider>| {
+              p: std::sync::Arc<dyn neo_core::ModelProvider>| {
         (ModelInfo { name: name.into(), description: desc.into(), context_limit: limit, production }, p)
     };
 
-    let mut entries: Vec<(ModelInfo, Box<dyn neo_core::ModelProvider>)> = Vec::new();
+    let mut entries: Vec<(ModelInfo, std::sync::Arc<dyn neo_core::ModelProvider>)> = Vec::new();
 
     // 真实模型：只在 key 可用时注册。缺 key 时不给一个"假 deepseek"条目 ——
     // 那会让 /models 列出一个切过去就报错的选项。
     let mut deepseek_ok = false;
     match neo_llm_deepseek::DeepSeekProvider::from_env() {
         Ok(p) => {
-            entries.push(mk("deepseek", "DeepSeek chat-completions（真实模型）", 64_000, true, Box::new(p)));
+            entries.push(mk("deepseek", "DeepSeek chat-completions（真实模型）", 64_000, true, std::sync::Arc::new(p)));
             deepseek_ok = true;
         }
         Err(e) => {
@@ -885,23 +885,21 @@ fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
 
     // 离线可用的桩：始终注册，便于随时对照（标 production=false，UI 可区分）
     entries.push(mk("mock", "确定性桩：只回一句话，不调真实模型", 0, false,
-        Box::new(neo_llm_deepseek::ScriptedProvider::text_only(
+        std::sync::Arc::new(neo_llm_deepseek::ScriptedProvider::text_only(
             "（mock provider）本回答由确定性桩产生，未调用真实模型。"))));
     entries.push(mk("demo", "演示渲染：Markdown + 任务清单", 0, false,
-        Box::new(neo_llm_deepseek::ScriptedProvider::demo().with_name("demo"))));
+        std::sync::Arc::new(neo_llm_deepseek::ScriptedProvider::demo().with_name("demo"))));
     entries.push(mk("selftest", "自检：按脚本调一次 apply_patch", 0, false,
-        Box::new(neo_llm_deepseek::ScriptedProvider::scripted(
+        std::sync::Arc::new(neo_llm_deepseek::ScriptedProvider::scripted(
             vec![vec![neo_llm_deepseek::tool_call(
                 "apply_patch",
                 serde_json::json!({
                     "path": "selftest.txt",
-                    "new": "由 selftest provider 经 apply_patch 写入。
-",
+                    "new": "由 selftest provider 经 apply_patch 写入。\n",
                 }),
             )]],
             "selftest 脚本执行完毕（工具是否成功见上方工具行与失败原因）。",
-        )
-        .with_name("selftest"))));
+        ).with_name("selftest"))));
 
     // ── 用户级注册表里的服务商（providers.json）──────────────────────
     //

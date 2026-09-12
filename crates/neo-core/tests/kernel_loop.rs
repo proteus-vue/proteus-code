@@ -90,7 +90,7 @@ fn kernel_with(
         "s1",
         cfg(mode),
         tools,
-        neo_core::models::ModelRegistry::single(model),
+        neo_core::models::ModelRegistry::single(std::sync::Arc::from(model)),
         Arc::new(TestSandbox),
         persistence,
         "/tmp",
@@ -540,7 +540,7 @@ fn real_apply_patch_reports_its_change_after_writing() {
         "s",
         cfg(ExecMode::AutoEdit),
         tools,
-        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::new(vec![
+        neo_core::models::ModelRegistry::single(std::sync::Arc::new(ScriptedModelProvider::new(vec![
             vec![tool_call(
                 "c1",
                 "apply_patch",
@@ -861,7 +861,7 @@ fn configure_session_actually_switches_the_provider() {
                 context_limit: limit,
                 production: true,
             },
-            Box::new(ReplyAs(name)) as Box<dyn ModelProvider>,
+            std::sync::Arc::new(ReplyAs(name)) as std::sync::Arc<dyn ModelProvider>,
         )
     };
     let reg = ModelRegistry::new("small", vec![mk("small", 32_000), mk("big", 128_000)]).unwrap();
@@ -938,7 +938,7 @@ fn model_switch_emits_an_event_and_updates_the_config() {
                 context_limit: 64_000,
                 production: false,
             },
-            Box::new(ReplyAs("solo")) as Box<dyn ModelProvider>,
+            std::sync::Arc::new(ReplyAs("solo")) as std::sync::Arc<dyn ModelProvider>,
         )],
     )
     .unwrap();
@@ -996,7 +996,7 @@ fn history_can_be_rebuilt_from_the_session_log() {
         "s",
         cfg(ExecMode::AutoEdit),
         tools,
-        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::new(vec![
+        neo_core::models::ModelRegistry::single(std::sync::Arc::new(ScriptedModelProvider::new(vec![
             vec![tool_call("c1", "bash", serde_json::json!({ "cmd": "echo hi" }))],
             vec![ModelDelta::Text("做完了".into())],
         ]))),
@@ -1017,7 +1017,7 @@ fn history_can_be_rebuilt_from_the_session_log() {
         "s",
         cfg(ExecMode::AutoEdit),
         ToolRegistry::new(),
-        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::text_only("x"))),
+        neo_core::models::ModelRegistry::single(std::sync::Arc::new(ScriptedModelProvider::text_only("x"))),
         Arc::new(TestSandbox),
         Box::new(InMemoryPersistence::new()),
         "/tmp",
@@ -1197,7 +1197,7 @@ fn compaction_survives_log_replay() {
         "s",
         cfg(ExecMode::Default),
         ToolRegistry::new(),
-        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::text_only("x"))),
+        neo_core::models::ModelRegistry::single(std::sync::Arc::new(ScriptedModelProvider::text_only("x"))),
         Arc::new(TestSandbox),
         Box::new(InMemoryPersistence::new()),
         "/tmp",
@@ -1244,7 +1244,7 @@ fn kernel_with_parts(
         "s1",
         cfg(ExecMode::Default),
         ToolRegistry::new(),
-        neo_core::models::ModelRegistry::single(Box::new(ScriptedModelProvider::text_only("ok"))),
+        neo_core::models::ModelRegistry::single(std::sync::Arc::new(ScriptedModelProvider::text_only("ok"))),
         sandbox,
         persistence,
         "/tmp",

@@ -53,7 +53,7 @@ pub struct ModelInfo {
 /// 多 provider 注册表 + 当前选中项。
 pub struct ModelRegistry {
     /// 名字 → provider。`BTreeMap` 保证遍历顺序稳定（UI 列表不会乱跳）。
-    providers: BTreeMap<String, Box<dyn ModelProvider>>,
+    providers: BTreeMap<String, std::sync::Arc<dyn ModelProvider>>,
     /// 名字 → 元信息
     infos: BTreeMap<String, ModelInfo>,
     /// 当前使用的名字
@@ -65,7 +65,7 @@ impl ModelRegistry {
     /// 空注册表让内核无法工作，必须在这里拦住而不是等到第一次请求。
     pub fn new(
         default: &str,
-        entries: Vec<(ModelInfo, Box<dyn ModelProvider>)>,
+        entries: Vec<(ModelInfo, std::sync::Arc<dyn ModelProvider>)>,
     ) -> Result<Self, String> {
         let mut providers = BTreeMap::new();
         let mut infos = BTreeMap::new();
@@ -94,7 +94,7 @@ impl ModelRegistry {
     }
 
     /// 单 provider 的便捷构造（旧的"只有一个模型"场景）。
-    pub fn single(p: Box<dyn ModelProvider>) -> Self {
+    pub fn single(p: std::sync::Arc<dyn ModelProvider>) -> Self {
         let name = p.name().to_string();
         let info = ModelInfo {
             name: name.clone(),
@@ -113,7 +113,7 @@ impl ModelRegistry {
     ///
     /// 名字校验与 `new` 一致：注册名必须等于 provider 自报名，
     /// 否则列表显示 A、日志记 B（两处各说一套）。
-    pub fn add(&mut self, info: ModelInfo, p: Box<dyn ModelProvider>) -> Result<(), String> {
+    pub fn add(&mut self, info: ModelInfo, p: std::sync::Arc<dyn ModelProvider>) -> Result<(), String> {
         if p.name() != info.name {
             return Err(format!(
                 "注册名 {} 与 provider 自报名 {} 不一致",
@@ -151,6 +151,15 @@ impl ModelRegistry {
         self.providers
             .get(&self.current)
             .map(|b| b.as_ref())
+            .expect("current 必然存在于 providers（构造与切换均已校验）")
+    }
+
+    /// 当前 provider 的共享句柄。子代理内核与主内核**共用同一个实例**
+    /// （`stream(&self)` 是只读契据，无状态可竞争），不再各造一份。
+    pub fn shared_provider(&self) -> std::sync::Arc<dyn ModelProvider> {
+        self.providers
+            .get(&self.current)
+            .cloned()
             .expect("current 必然存在于 providers（构造与切换均已校验）")
     }
 
@@ -218,8 +227,8 @@ mod tests {
         ModelRegistry::new(
             "a",
             vec![
-                (info("a"), Box::new(Named("a"))),
-                (info("b"), Box::new(Named("b"))),
+                (info("a"), std::sync::Arc::new(Named("a"))),
+                (info("b"), std::sync::Arc::new(Named("b"))),
             ],
         )
         .unwrap()
@@ -262,7 +271,7 @@ mod tests {
     #[test]
     fn mismatched_name_is_rejected_at_construction() {
         // 注册名 A、provider 自报 B → 列表显示 A 而日志记 B，必须拦住
-        let e = ModelRegistry::new("a", vec![(info("a"), Box::new(Named("b")))]).unwrap_err();
+        let e = ModelRegistry::new("a", vec![(info("a"), std::sync::Arc::new(Named("b")))]).unwrap_err();
         assert!(e.contains("不一致"), "{e}");
     }
 
@@ -274,7 +283,7 @@ mod tests {
 
     #[test]
     fn default_must_exist() {
-        let e = ModelRegistry::new("缺失", vec![(info("a"), Box::new(Named("a")))]).unwrap_err();
+        let e = ModelRegistry::new("缺失", vec![(info("a"), std::sync::Arc::new(Named("a")))]).unwrap_err();
         assert!(e.contains("未注册"), "{e}");
         assert!(e.contains('a'), "应列出已注册的名字：{e}");
     }
@@ -289,7 +298,7 @@ mod tests {
 
     #[test]
     fn single_provider_convenience_works() {
-        let r = ModelRegistry::single(Box::new(Named("only")));
+        let r = ModelRegistry::single(std::sync::Arc::new(Named("only")));
         assert_eq!(r.current(), "only");
         assert_eq!(r.len(), 1);
         assert_eq!(r.current_context_limit(), 0, "单 provider 便捷构造不编造上下文窗口");
@@ -302,11 +311,11 @@ mod tests {
             vec![
                 (
                     ModelInfo { name: "small".into(), description: String::new(), context_limit: 32_000, production: true },
-                    Box::new(Named("small")),
+                    std::sync::Arc::new(Named("small")),
                 ),
                 (
                     ModelInfo { name: "big".into(), description: String::new(), context_limit: 128_000, production: true },
-                    Box::new(Named("big")),
+                    std::sync::Arc::new(Named("big")),
                 ),
             ],
         )

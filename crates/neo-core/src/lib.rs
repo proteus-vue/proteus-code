@@ -1611,7 +1611,7 @@ impl Kernel {
     pub fn add_model(
         &mut self,
         info: crate::models::ModelInfo,
-        p: Box<dyn ModelProvider>,
+        p: std::sync::Arc<dyn ModelProvider>,
     ) -> Result<(), String> {
         self.models.add(info, p)
     }
