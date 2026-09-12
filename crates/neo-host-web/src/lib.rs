@@ -24,6 +24,7 @@ pub mod broadcast;
 pub mod http;
 pub mod page;
 
+use std::sync::{Arc, Mutex};
 use neo_core::{DiffSupport, HostBackend, HostCapabilities, ImageSupport};
 use neo_protocol::{EventMsg, Fact, Op};
 use std::io::Write;
@@ -127,11 +128,26 @@ where
     let (op_tx, op_rx): (Sender<Op>, Receiver<Op>) = channel();
 
     // 内核侧工作线程：独占处理 Op，把事件广播出去。
+    // 当前目标 id：pause/resume 要作用于**当前**目标。内核线程是唯一
+    // 能看到全部事件流的地方，快照/清除事件经过时更新这份共享状态 ——
+    // 路由处理器只读它，不自己猜。
+    let current_goal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let bus_for_worker = bus.clone();
+    let goal_for_worker = current_goal.clone();
     let kernel_thread = std::thread::spawn(move || {
         while let Ok(op) = op_rx.recv() {
             let events = handle_op(op);
             for e in &events {
+                match e {
+                    EventMsg::GoalUpdated { snapshot } => {
+                        *goal_for_worker.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(snapshot.goal_id.clone());
+                    }
+                    EventMsg::GoalCleared { .. } => {
+                        *goal_for_worker.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    }
+                    _ => {}
+                }
                 {
                     let json = wire_event(e);
                     let dropped = bus_for_worker.publish(&json);
@@ -147,7 +163,7 @@ where
     let ops = op_tx.clone();
     let http_thread = std::thread::spawn(move || {
         let _ = http::serve(listener, move |stream, req| {
-            route(stream, req, &bus_for_http, &ops);
+            route(stream, req, &bus_for_http, &ops, &current_goal);
         });
     });
 
@@ -164,6 +180,7 @@ fn route(
     req: http::Request,
     bus: &broadcast::Broadcast,
     ops: &Sender<Op>,
+    current_goal: &Arc<Mutex<Option<String>>>,
 ) {
     // 路由只看路径部分（query 由具体 handler 自行解析）
     let path_only = req.path.split('?').next().unwrap_or("/").to_string();
@@ -235,6 +252,73 @@ fn route(
                 return;
             }
             let _ = http::write_response(stream, 200, "text/plain; charset=utf-8", "ok");
+        }
+        ("POST", "/api/goal") => {
+            // 目标文本就是请求体（与 /api/turn 同风格；多行 = 多子任务）。
+            //
+            // 服务端**刻意不**踢第一脚推进：推进由"看到最新快照的一方"
+            // 驱动（页面在 goal_updated 后提交 advance）。否则服务端踢 +
+            // 快照驱动会各提交一次，同一阶段跑两遍。
+            // curl 用户则显式调 GET /api/goal?action=advance —— 谁驱动
+            // 谁看清状态，这是节奏控制权的单一事实源。
+            let goal = req.body.trim();
+            if goal.is_empty() {
+                let _ = http::write_response(stream, 400, "text/plain; charset=utf-8", "目标为空");
+                return;
+            }
+            if ops.send(Op::GoalSet { goal: goal.to_string() }).is_err() {
+                let _ = http::write_response(stream, 503, "text/plain; charset=utf-8", "内核线程已退出");
+                return;
+            }
+            let _ = http::write_response(stream, 200, "text/plain; charset=utf-8", "已提交");
+        }
+        ("GET", "/api/goal") => {
+            // action=pause|resume|clear|advance（query 传参，便于 curl）
+            let mut action = String::new();
+            if let Some(q) = req.path.split_once('?').map(|(_, q)| q) {
+                for pair in q.split('&') {
+                    let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                    if k == "action" {
+                        action = v.to_string();
+                    }
+                }
+            }
+            let op = match action.as_str() {
+                "advance" => Some(Op::GoalAdvance),
+                "clear" => Some(Op::GoalClear),
+                "pause" | "resume" => {
+                    let id = current_goal.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    match id {
+                        Some(id) if action == "pause" => Some(Op::GoalPause { goal_id: id }),
+                        Some(id) => Some(Op::GoalResume { goal_id: id }),
+                        // 没有活动目标：如实告知，而不是提交一个必然报错的 Op
+                        None => {
+                            let _ = http::write_response(
+                                stream,
+                                409,
+                                "text/plain; charset=utf-8",
+                                "没有活动目标",
+                            );
+                            return;
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let Some(op) = op else {
+                let _ = http::write_response(
+                    stream,
+                    400,
+                    "text/plain; charset=utf-8",
+                    "action 必须是 pause / resume / clear / advance",
+                );
+                return;
+            };
+            if ops.send(op).is_err() {
+                let _ = http::write_response(stream, 503, "text/plain; charset=utf-8", "内核线程已退出");
+                return;
+            }
+            let _ = http::write_response(stream, 200, "text/plain; charset=utf-8", "已提交");
         }
         ("GET", "/api/facts") => {
             // 只读诊断端点：当前订阅者数（便于确认有界性行为）

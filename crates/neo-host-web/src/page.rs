@@ -26,6 +26,9 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
   input { flex:1; background:#111827; color:#e6edf3; border:1px solid #334155; border-radius:8px; padding:8px 10px; font:inherit; }
   button { background:#1d4ed8; color:#fff; border:0; border-radius:8px; padding:8px 14px; font:inherit; cursor:pointer; }
   button.ghost { background:#1f2937; }
+  #goalbar { display:flex; gap:8px; padding:8px 16px; border-bottom:1px solid #1f2937; align-items:flex-end; }
+  #goalbar textarea { flex:1; background:#111827; color:#e6edf3; border:1px solid #334155; border-radius:8px; padding:6px 10px; font:inherit; resize:vertical; }
+  .goal { color:#7dd3fc; }
 </style>
 </head>
 <body>
@@ -34,6 +37,13 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
   <span class="pill" id="subs">订阅 0</span>
   <button class="ghost" id="clear" style="margin-left:auto">清屏</button>
 </header>
+<div id="goalbar">
+  <textarea id="goal" rows="2" placeholder="目标（每行一个子任务，留空行分隔）"></textarea>
+  <button id="goal-set">开始</button>
+  <button class="ghost" id="goal-pause">暂停</button>
+  <button class="ghost" id="goal-resume">恢复</button>
+  <button class="ghost" id="goal-clear">清除</button>
+</div>
 <div id="log"></div>
 <footer>
   <input id="task" placeholder="输入任务，回车提交（写操作会要求审批）" autocomplete="off">
@@ -47,6 +57,47 @@ const input = document.getElementById('task');
 
 // 待审批的调用 id：内核挂起后必须由用户应答
 let pendingApproval = null;
+// 目标编排：goal = 最新快照（每次 goal_updated 整体覆盖）
+let goal = null;
+const goalBox = document.getElementById('goal');
+
+function phaseName(p) {
+  return { plan:'计划', code:'执行', review:'审查', learn:'复盘', done:'完成' }[p] ?? p;
+}
+function goalSummary(s) {
+  const done = s.subtasks.filter(t => t.phase === 'done').length;
+  const head = '🎯 ' + s.goal_id + ': ' + done + '/' + s.subtasks.length + ' 完成';
+  if (s.stopped) return head + ' · 已停止：' + s.stopped;
+  const cur = s.subtasks.find(t => t.phase !== 'done');
+  const tail = cur ? ' 当前：' + cur.title + '（' + phaseName(cur.phase) + '）' : ' 全部完成';
+  return head + tail + (s.paused ? ' · 已暂停' : '');
+}
+// 推进的**单一驱动源**：goal_updated 快照。决策永远基于最新状态 ——
+// 若改由 turn_complete 驱动，本地快照会比事件流晚一步，最终轮会多发
+// 一次 advance 并报"没有待执行"（浏览器实测抓到的竞态）。
+// 一次 advance = 一个完整子任务轮；停止条件由引擎保证。
+async function maybeGoalAdvance() {
+  if (!goal || goal.paused || goal.stopped || !(goal.turns_remaining > 0)) return;
+  try { await fetch('./api/goal?action=advance'); }
+  catch (e) { line('目标推进失败：' + e, 'err'); }
+}
+async function goalAction(action) {
+  try {
+    const r = await fetch('./api/goal?action=' + action);
+    if (!r.ok) line('目标操作失败：' + (await r.text()), 'err');
+  } catch (e) { line('目标操作失败：' + e, 'err'); }
+}
+document.getElementById('goal-set').onclick = async () => {
+  const text = goalBox.value.trim();
+  if (!text) { line('目标为空', 'ask'); return; }
+  try {
+    const r = await fetch('./api/goal', { method: 'POST', body: text });
+    if (!r.ok) line('目标提交失败：' + (await r.text()), 'err');
+  } catch (e) { line('目标提交失败：' + e, 'err'); }
+};
+document.getElementById('goal-pause').onclick = () => goalAction('pause');
+document.getElementById('goal-resume').onclick = () => goalAction('resume');
+document.getElementById('goal-clear').onclick = () => goalAction('clear');
 
 function line(text, cls) {
   const d = document.createElement('div');
@@ -103,6 +154,17 @@ es.onmessage = (ev) => {
     return;
   }
   if (k === 'error') { line('✗ ' + (m.message ?? ''), 'err'); return; }
+  if (k === 'goal_updated') {
+    goal = m.snapshot;
+    line(goalSummary(goal), 'goal');
+    maybeGoalAdvance();
+    return;
+  }
+  if (k === 'goal_cleared') {
+    goal = null;
+    line('🎯 目标 ' + (m.goal_id ?? '') + ' 已清除', 'dim');
+    return;
+  }
   if (k === 'turn_complete') {
     line('· 本轮完成（' + (m.input_tokens ?? 0) + ' in / ' + (m.output_tokens ?? 0) + ' out）', 'dim');
     return;
