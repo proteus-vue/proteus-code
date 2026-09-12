@@ -622,11 +622,14 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
 /// `ContextRef`（"这是一个文件引用"）是协议语义。放在 L0 后，TUI / Desktop / Web
 /// 共用同一份解析，不会各自漂移出"某个宿主不识别 `$`"这类分叉。
 ///
-/// 规则：符号后必须有非空目标（单独的 `@` 不算引用）；目标按空白切分，
-/// 因此路径带空格需由上层改用引号语法（当前版本不支持）。
+/// 规则：符号后必须有非空目标（单独的 `@` 不算引用）。目标按空白切分；
+/// **路径带空格用引号语法** —— `@"my file.txt"`、`$'我的技能'`，
+/// 引号体内空白是目标的一部分，`\"` 表示字面引号；行范围紧跟右引号
+/// （`@"a b.rs"#12-40`）。空引号体 = 无引用；未闭合的引号整体按
+/// 普通词处理（不猜意图）。
 pub fn parse_refs(input: &str) -> Vec<ContextRef> {
     let mut out = Vec::new();
-    for token in input.split_whitespace() {
+    for token in ref_tokens(input) {
         let Some(first) = token.chars().next() else { continue };
         let kind = match first {
             '@' => RefKind::File,
@@ -653,6 +656,79 @@ pub fn parse_refs(input: &str) -> Vec<ContextRef> {
     out
 }
 
+/// 把输入切成候选引用 token。
+///
+/// 与 `split_whitespace` 的唯一差别：符号（@ # / $）后紧跟引号时，
+/// **引号体（可含空白）整体作为 token 的目标** —— `@"my file.txt"` 的
+/// target 是 `my file.txt` 而不是 `my`。其余行为与空白切分完全一致：
+/// 不猜意图 —— 未闭合/空引号体按普通词处理（与历史行为兼容）。
+fn ref_tokens(input: &str) -> Vec<String> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let sigil = matches!(c, '@' | '#' | '/' | '$');
+        let start = i;
+        i += 1;
+        // 引号体只在"符号后紧跟引号"时特殊处理
+        if sigil && i < chars.len() && (chars[i] == '"' || chars[i] == '\'') {
+            let quote = chars[i];
+            i += 1;
+            let mut body = String::new();
+            let mut closed = false;
+            while i < chars.len() {
+                let ch = chars[i];
+                if ch == '\\' && i + 1 < chars.len() && chars[i + 1] == quote {
+                    body.push(quote);
+                    i += 2;
+                    continue;
+                }
+                if ch == quote {
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                body.push(ch);
+                i += 1;
+            }
+            if closed {
+                if body.is_empty() {
+                    // 空目标 = 没有引用（与"单独的 @ 不算引用"同一条规则）
+                    continue;
+                }
+                // 行范围紧跟右引号：@"a b.rs"#12-40 —— 与非引号路径的
+                // `#行号` 语义一致（是否合法范围由 parse_file_ref 判定）
+                if i < chars.len() && chars[i] == '#' {
+                    while i < chars.len() && !chars[i].is_whitespace() {
+                        body.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                out.push(format!("{c}{body}"));
+                continue;
+            }
+            // 未闭合：回退为普通词（从符号起吃到下一个空白，含引号字符
+            // —— 与历史行为一致，不猜意图）
+            i = start;
+            while i < chars.len() && !chars[i].is_whitespace() {
+                i += 1;
+            }
+            out.push(chars[start..i].iter().collect());
+            continue;
+        }
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        out.push(chars[start..i].iter().collect());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +745,49 @@ mod tests {
                 ContextRef { kind: RefKind::Skill, target: "skill-x".into(), lines: None },
             ]
         );
+    }
+
+    #[test]
+    fn quoted_paths_keep_whitespace_in_the_target() {
+        // 引号语法的核心价值：带空格的路径不再被空白切分切坏
+        let refs = parse_refs(r##"看下 @"my file.txt"#2-3 和 @'单 字.md'"##);
+        assert_eq!(
+            refs,
+            vec![
+                ContextRef {
+                    kind: RefKind::File,
+                    target: "my file.txt".into(),
+                    lines: Some((2, 3)),
+                },
+                ContextRef {
+                    kind: RefKind::File,
+                    target: "单 字.md".into(),
+                    lines: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn quoted_target_supports_escaped_quote_and_all_sigils() {
+        let refs = parse_refs(r#"@"a\"b.md" $'skill 一'"#);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].target, "a\"b.md", r#"\" 应为字面引号"#);
+        assert_eq!(refs[1].kind, RefKind::Skill);
+        assert_eq!(refs[1].target, "skill 一");
+    }
+
+    #[test]
+    fn unclosed_or_empty_quotes_fall_back_to_plain_words() {
+        // 不猜意图：未闭合引号整体按普通词 —— 与历史行为一致
+        let refs = parse_refs("@\"没闭合 file");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].target, "\"没闭合", "未闭合引号按普通词（含引号字符）");
+        // 空引号体 = 目标为空 = 不算引用
+        assert!(parse_refs("@\"\"").is_empty());
+        // 引号不在符号后：与老行为一致（普通词）
+        let refs2 = parse_refs("echo \"hi there\"");
+        assert!(refs2.is_empty());
     }
 
     #[test]
