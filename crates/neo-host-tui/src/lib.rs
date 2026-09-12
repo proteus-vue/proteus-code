@@ -647,6 +647,10 @@ pub struct Screen<'a> {
     pub settings: Option<&'a Vec<SettingSection>>,
     /// 设置视图当前选中的可操作行（用于高亮）
     pub settings_cursor: usize,
+    /// 设置页当前选中的**分类**（左侧竖排分类列的下标）。
+    /// opencode 的结构性差异：分类在左列导航，右侧只显示该分类的行 ——
+    /// 而不是所有节从上到下排成一列（行多时底部项根本看不见）。
+    pub settings_category: usize,
     /// 设置页内的**内联选择器**（在该行下方就地展开候选）。
     ///
     /// 为什么不用居中弹窗：设置页是全屏的，一点回车却退回聊天画面弹个小框，
@@ -994,6 +998,11 @@ pub struct Regions {
     /// 只登记**可操作项**，与 `settings_cursor` 同一坐标空间 ——
     /// 点击后直接复用 Enter 的分支，两条输入路径不会各算一套。
     pub settings_rows: Vec<(usize, usize)>,
+    /// 设置页左列的分类命中框：`((y 行号, x0, x1), 分类下标)`。点分类 = 切换右侧内容。
+    ///
+    /// 必须带 x 边界：分类行与内容行共享同一网格行，不限定 x 的话，
+    /// 点内容区会被当成点分类（点击错语义）。
+    pub settings_categories: Vec<((usize, usize, usize), usize)>,
 }
 /// 居中的首屏片段（列由居中逻辑算，不用自己给）
 type Styled = (String, Tone);
@@ -1809,6 +1818,7 @@ impl Screen<'_> {
         pk: &SettingsPicker,
         mut row: usize,
         content_max: usize,
+        x: usize,
     ) -> usize {
         // 留一行给"共 N 项 / 上下选择"的说明
         let budget = content_max.saturating_sub(row + 1);
@@ -1824,15 +1834,15 @@ impl Screen<'_> {
             } else {
                 format!("{}  {}", item.label, item.detail)
             };
-            let avail = self.cols.saturating_sub(10);
+            let avail = self.cols.saturating_sub(x + 4);
             let shown = width::truncate_to_width(&text, avail).to_string();
-            g.put(row, 6, mark, tone);
-            g.put(row, 8, &shown, tone);
+            g.put(row, x, mark, tone);
+            g.put(row, x + 2, &shown, tone);
             row += 1;
         }
         if budget > pk.items.len() {
             let hint = format!("↑↓ 选择 · enter 确认 · esc 取消（{} 项）", pk.items.len());
-            g.put(row, 8, &hint, Tone::Border);
+            g.put(row, x + 2, &hint, Tone::Border);
             row += 1;
         }
         row
@@ -1843,6 +1853,10 @@ impl Screen<'_> {
     /// `regions.settings_rows` 会登记可操作行的 y 坐标，供鼠标点击命中 ——
     /// 与 `settings_cursor` 用同一坐标空间（只数可操作行），
     /// 这样"点第 k 项"与"光标移到第 k 项再回车"必然作用于同一项。
+    ///
+    /// 布局对齐 opencode 的结构性差异（用户多次提及）：**左侧竖排分类列**，
+    /// 右侧只显示当前分类的行 —— 而不是所有节从上到下排成一列
+    /// （行多时底部项被裁掉，根本看不见）。←→ 或点击左列切换分类。
     fn draw_settings(
         &self,
         g: &mut Grid,
@@ -1852,87 +1866,111 @@ impl Screen<'_> {
         // 标题
         let title = "设置";
         g.put(0, 2, title, Tone::Text);
-        let hint = "↑↓ 移动  enter 执行  q / esc 返回";
-        if self.cols > 50 {
+        let hint = "←→ 切分类  ↑↓ 移动  enter 执行  q / esc 返回";
+        if self.cols > 66 {
             let w = width::display_width(hint);
             g.put(0, self.cols.saturating_sub(w + 2), hint, Tone::Border);
         }
         let bar = "─".repeat(self.cols.saturating_sub(2));
         g.put(1, 1, &bar, Tone::Border);
 
-        let label_w = 14usize;
-        let mut row = 2usize;
-        // 底部留两行：反馈行 + 图例行。内容必须停在这之前，
-        // 否则最后几项会压在被反馈行覆盖的位置上。
+        // ── 左侧分类列 ────────────────────────────────────────────
+        const CAT_X: usize = 2;
+        const CAT_W: usize = 10;
         let content_max = self.rows.saturating_sub(2);
+        let cat = self.settings_category.min(sections.len().saturating_sub(1));
+        let mut crow = 3usize;
+        for (i, sec) in sections.iter().enumerate() {
+            if crow >= content_max {
+                break;
+            }
+            let selected = i == cat;
+            if selected {
+                // 选中分类铺高亮底色条（与行选中同一原语）
+                g.fill_bg(crow, crow + 1, 1, CAT_X + CAT_W, Bg::Selected);
+                g.put(crow, CAT_X, "▸ ", Tone::Primary);
+                g.put(crow, CAT_X + 2, sec.title, Tone::Primary);
+            } else {
+                g.put(crow, CAT_X, "  ", Tone::Muted);
+                g.put(crow, CAT_X + 2, sec.title, Tone::Muted);
+            }
+            // 登记分类命中框：点击 = 切换分类（与 ←→ 同一语义）。
+            // x 范围限定在左列格子内（1 基约定与 popup_items 相同）。
+            regions.settings_categories.push(((crow, 1, CAT_X + CAT_W), i));
+            crow += 1;
+        }
+        // 竖分隔线：分类列与内容区的边界
+        for r in 2..content_max {
+            g.put(r, CAT_X + CAT_W + 1, "│", Tone::Border);
+        }
+
+        // ── 右侧：当前分类的行 ────────────────────────────────────
+        let content_x = CAT_X + CAT_W + 3;
+        let sec = &sections[cat];
+        let label_w = 14usize;
         // 高亮下标必须与 Enter 用**同一个坐标空间**：只数可操作行。
         //
         // 之前这里数的是**全部行**（含只读行），而 `settings_cursor` 只在
         // 可操作行间移动 —— 于是高亮停在第 k 行、Enter 却作用在 `slots[k]`
         // （因只读行插在中间，通常更靠后）。表现就是：高亮停在只读行上，
         // 或"选中某一项按回车，动的是别的项 / 像没反应"。
+        g.put(2, content_x, sec.title, Tone::Accent);
+        let mut row = 3usize;
         let mut act: usize = 0;
-        for sec in sections {
-            if row + 1 >= content_max {
+        for r in &sec.rows {
+            if row >= content_max {
                 break;
             }
-            row += 1; // 节前空行
-            g.put(row, 2, sec.title, Tone::Accent);
+            let actionable = r.action.is_some();
+            let selected = actionable && act == self.settings_cursor;
+            if actionable {
+                // 登记行号 → 可操作序号（鼠标点击即用这个序号，等同于 Enter）
+                regions.settings_rows.push((row, act));
+                act += 1;
+            }
+            // 光标只停在可操作行上；只读行用弱色 + 说明
+            let mark = if selected { "▸ " } else { "  " };
+            if selected {
+                // 选中行铺高亮底色条（与审批卡片一致）——
+                // 光标位置只靠 ▸ 太弱，列表选中态应当"整行可见"。
+                // 只铺**内容区**：铺到最左会盖住分类列。
+                g.fill_bg(row, row + 1, content_x - 1, self.cols.saturating_sub(1), Bg::Selected);
+                g.put(row, content_x - 1, mark, Tone::Primary);
+            }
+            let lt = if actionable { Tone::Text } else { Tone::Muted };
+            let padded = width::pad_to_width(&r.label, label_w);
+            g.put(row, content_x + 1, &padded, lt);
+            // 值
+            let vt = if actionable {
+                Tone::Info
+            } else {
+                Tone::Muted
+            };
+            let vx = content_x + 1 + label_w + 2;
+            let note_w = if r.readonly_note.is_empty() {
+                self.cols.saturating_sub(vx + 2)
+            } else {
+                width::display_width(&r.value).min(self.cols.saturating_sub(vx + 2))
+            };
+            let v = width::truncate_to_width(&r.value, note_w.max(4)).to_string();
+            let vend = g.put(row, vx, &v, vt);
+            // 只读原因（右侧，弱色）
+            if !r.readonly_note.is_empty() {
+                let nx = vend + 2;
+                if nx < self.cols.saturating_sub(6) {
+                    let note = width::truncate_to_width(
+                        r.readonly_note,
+                        self.cols.saturating_sub(nx + 2),
+                    )
+                    .to_string();
+                    g.put(row, nx, &note, Tone::Border);
+                }
+            }
             row += 1;
-            for r in &sec.rows {
-                if row >= content_max {
-                    break;
-                }
-                let actionable = r.action.is_some();
-                let selected = actionable && act == self.settings_cursor;
-                if actionable {
-                    // 登记行号 → 可操作序号（鼠标点击即用这个序号，等同于 Enter）
-                    regions.settings_rows.push((row, act));
-                    act += 1;
-                }
-                // 光标只停在可操作行上；只读行用弱色 + 说明
-                let mark = if selected { "▸ " } else { "  " };
-                if selected {
-                    // 选中行铺高亮底色条（与审批卡片一致）——
-                    // 光标位置只靠 ▸ 太弱，列表选中态应当"整行可见"
-                    g.fill_bg(row, row + 1, 1, self.cols.saturating_sub(1), Bg::Selected);
-                    g.put(row, 1, mark, Tone::Primary);
-                }
-                let lt = if actionable { Tone::Text } else { Tone::Muted };
-                let padded = width::pad_to_width(&r.label, label_w);
-                g.put(row, 3, &padded, lt);
-                // 值
-                let vt = if actionable {
-                    Tone::Info
-                } else {
-                    Tone::Muted
-                };
-                let vx = 3 + label_w + 2;
-                let note_w = if r.readonly_note.is_empty() {
-                    self.cols.saturating_sub(vx + 2)
-                } else {
-                    width::display_width(&r.value).min(self.cols.saturating_sub(vx + 2))
-                };
-                let v = width::truncate_to_width(&r.value, note_w.max(4)).to_string();
-                let vend = g.put(row, vx, &v, vt);
-                // 只读原因（右侧，弱色）
-                if !r.readonly_note.is_empty() {
-                    let nx = vend + 2;
-                    if nx < self.cols.saturating_sub(6) {
-                        let note = width::truncate_to_width(
-                            r.readonly_note,
-                            self.cols.saturating_sub(nx + 2),
-                        )
-                        .to_string();
-                        g.put(row, nx, &note, Tone::Border);
-                    }
-                }
-                row += 1;
-                // 内联选择器：就地长在这一行下面（不跳出设置页）。
-                if let Some(pk) = self.settings_picker {
-                    if pk.label == r.label {
-                        row = self.draw_inline_picker(g, pk, row, content_max);
-                    }
+            // 内联选择器：就地长在这一行下面（不跳出设置页）。
+            if let Some(pk) = self.settings_picker {
+                if pk.label == r.label {
+                    row = self.draw_inline_picker(g, pk, row, content_max, content_x + 1);
                 }
             }
         }
@@ -3677,6 +3715,7 @@ where
                     display,
                     settings: None,
                     settings_cursor: 0,
+                    settings_category: 0,
                     settings_picker: None,
                     settings_form: None,
                     settings_confirm: None,
@@ -4450,6 +4489,8 @@ enum MouseAction {
     ToggleSidebar,
     /// 点到设置页第 N 个可操作项（N 与 `settings_cursor` 同一空间）
     SettingsRow(usize),
+    /// 点到设置页左列第 N 个分类（切换右侧内容）
+    SettingsCategory(usize),
 }
 
 /// 从当前事件流里的 PatchPreview 打开 diff 查看器。
@@ -4925,6 +4966,14 @@ fn hit_test(
         return None;
     }
 
+    // 设置页左列：点分类 = 切换右侧内容（与键盘 ←→ 同一语义）。
+    // 坐标约定与 popup_items 相同：y 是 1 基、x ∈ (x0, x1]。
+    for ((y, x0, x1), idx) in &r.settings_categories {
+        if ev.y == *y + 1 && ev.x > *x0 && ev.x <= *x1 {
+            return Some(MouseAction::SettingsCategory(*idx));
+        }
+    }
+
     // 设置页：点在可操作行上 → 执行该项（与 Enter 同一分支）。
     // 排在弹窗之前判断也无妨：设置视图是独占的，不会与弹窗同时出现。
     //
@@ -5074,6 +5123,8 @@ where
     // 设置视图（`ctrl+p` → 设置，或 `/settings`）
     let mut settings_state: Option<Vec<SettingSection>> = None;
     let mut settings_cursor: usize = 0;
+    // 左侧分类列当前选中的分类（切换时重置 cursor、收起选择器）
+    let mut settings_category: usize = 0;
     // 设置页内的内联选择器（在该行下方展开候选）
     let mut settings_picker: Option<SettingsPicker> = None;
     // 选择器里确认的一项：在本帧结束时统一执行（与 popup 的 ItemAction 复用同一处理）
@@ -5175,6 +5226,7 @@ where
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_category: 0,
             settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
@@ -5248,6 +5300,7 @@ where
                 display,
                 settings: Some(sections),
                 settings_cursor,
+                settings_category,
                 settings_picker: settings_picker.as_ref(),
                 settings_form: settings_form.as_ref(),
                 settings_confirm: confirm_delete.as_deref(),
@@ -5258,7 +5311,12 @@ where
             write!(stdout, "{rendered}")?;
             stdout.flush()?;
 
-            let slots = settings_actionable(sections);
+            // 可操作项只取**当前分类**的：settings_cursor 与左列分类
+            // 是两个独立坐标 —— 换分类后光标从 0 重新数（键位处理里重置）。
+            let slots: Vec<(usize, usize)> = settings_actionable(sections)
+                .into_iter()
+                .filter(|(si, _)| *si == settings_category)
+                .collect();
             // 内联选择器里确认的一项：复用 popup 的 ItemAction 处理，
             // 不另写一套 —— 主题/模型/会话的行为与 `/theme`、`/model`、`/sessions`
             // 必须完全一致，复制一份必然漂移。
@@ -5499,41 +5557,63 @@ where
             // 键盘与鼠标合成同一个"要执行第几项"，之后的执行逻辑只有一份 ——
             // 两条输入路径各写一套分支，迟早会漂移出"点得到但回车不行"这类差异。
             let mut activate: Option<usize> = None;
-            match read_key_timeout(&mut stdin, 1) {
-                None => continue, // 超时：只在尺寸变化时由顶层判断
-                Some(k) => match k {
-                    Key::Quit => break,
-                    Key::Escape | Key::Char('q') => {
-                        settings_state = None;
-                        status = "已关闭设置".to_string();
-                    }
-                    // 鼠标点击可操作行 = 光标移过去 + 回车
-                    Key::Mouse(ev) => {
-                        if let Some(MouseAction::SettingsRow(idx)) =
-                            hit_test(&sregions, &ev, None, false)
-                        {
-                            settings_cursor = idx;
-                            activate = Some(idx);
+                match read_key_timeout(&mut stdin, 1) {
+                    None => continue, // 超时：只在尺寸变化时由顶层判断
+                    Some(k) => match k {
+                        Key::Quit => break,
+                        Key::Escape | Key::Char('q') => {
+                            settings_state = None;
+                            status = "已关闭设置".to_string();
                         }
-                    }
-                    // 光标只在**可操作行**之间移动 —— 停在只读行上会让
-                    // 用户以为按 enter 能改点什么。
-                    Key::Up | Key::Char('k') => {
-                        settings_cursor = settings_cursor.saturating_sub(1);
-                    }
-                    Key::Down | Key::Char('j') => {
-                        if settings_cursor + 1 < slots.len() {
-                            settings_cursor += 1;
+                        // 鼠标点击：分类行 = 切换分类；可操作行 = 光标移过去 + 回车
+                        Key::Mouse(ev) => {
+                            match hit_test(&sregions, &ev, None, false) {
+                                Some(MouseAction::SettingsCategory(idx)) => {
+                                    settings_category = idx;
+                                    settings_cursor = 0;
+                                    // 选择器长在旧行下面 —— 换分类后它归属的行
+                                    // 不在了，留着会画错位置或张冠李戴。
+                                    settings_picker = None;
+                                }
+                                Some(MouseAction::SettingsRow(idx)) => {
+                                    settings_cursor = idx;
+                                    activate = Some(idx);
+                                }
+                                _ => {}
+                            }
                         }
-                    }
-                    Key::Home | Key::Char('g') => settings_cursor = 0,
-                    Key::End | Key::Char('G') => {
-                        settings_cursor = slots.len().saturating_sub(1)
-                    }
-                    Key::Enter => activate = Some(settings_cursor),
-                    _ => {}
-                },
-            }
+                        // ←→ 在左列分类间移动（opencode 的结构性导航：
+                        // 分类在左列换页，↑↓ 在当前页的行间移动）
+                        Key::Left | Key::Char('h') => {
+                            settings_category = settings_category
+                                .checked_sub(1)
+                                .unwrap_or(sections.len().saturating_sub(1));
+                            settings_cursor = 0;
+                            settings_picker = None;
+                        }
+                        Key::Right | Key::Char('l') | Key::Tab => {
+                            settings_category = (settings_category + 1) % sections.len().max(1);
+                            settings_cursor = 0;
+                            settings_picker = None;
+                        }
+                        // 光标只在**可操作行**之间移动 —— 停在只读行上会让
+                        // 用户以为按 enter 能改点什么。
+                        Key::Up | Key::Char('k') => {
+                            settings_cursor = settings_cursor.saturating_sub(1);
+                        }
+                        Key::Down | Key::Char('j') => {
+                            if settings_cursor + 1 < slots.len() {
+                                settings_cursor += 1;
+                            }
+                        }
+                        Key::Home | Key::Char('g') => settings_cursor = 0,
+                        Key::End | Key::Char('G') => {
+                            settings_cursor = slots.len().saturating_sub(1)
+                        }
+                        Key::Enter => activate = Some(settings_cursor),
+                        _ => {}
+                    },
+                }
             if let Some(activated) = activate {
                 if let Some((si, ri)) = slots.get(activated).copied() {
                             if let Some(action) =
@@ -5754,6 +5834,7 @@ custom_bg.is_some(),
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_category: 0,
             settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: current_appearance,
@@ -5840,6 +5921,7 @@ custom_bg.is_some(),
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_category: 0,
             settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
@@ -5896,6 +5978,7 @@ custom_bg.is_some(),
                 display,
                 settings: settings_state.as_ref(),
                 settings_cursor,
+                settings_category,
                 settings_picker: None,
             settings_form: None, settings_confirm: None,
                 appearance: current_appearance,
@@ -6261,6 +6344,7 @@ custom_bg.is_some(),
                         // 这个动作在此不可达。保留分支是为了让 match 穷尽 ——
                         // 将来若有人把设置改成非独占，编译器会立刻提醒这里需要接线。
                         MouseAction::SettingsRow(_) => {}
+                        MouseAction::SettingsCategory(_) => {}
                         MouseAction::ScrollTranscript(up) => {
                             let body = rows
                                 .saturating_sub(chrome_rows(input.line_count()));
@@ -6960,6 +7044,7 @@ sessions,
                             display,
                             settings: None,
                             settings_cursor: 0,
+                            settings_category: 0,
             settings_form: None, settings_confirm: None,
                             settings_picker: None,
                             appearance: current_appearance,
@@ -7011,6 +7096,7 @@ sessions,
                         display,
                         settings: None,
                         settings_cursor: 0,
+                        settings_category: 0,
             settings_form: None, settings_confirm: None,
                         settings_picker: None,
                         appearance: current_appearance,
@@ -7107,6 +7193,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -7154,6 +7241,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -7268,6 +7356,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -7377,6 +7466,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -7408,6 +7498,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_category: 0,
             settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
@@ -7461,6 +7552,7 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+                    settings_category: 0,
             settings_form: None, settings_confirm: None,
                     settings_picker: None,
                     appearance: appearance::Appearance::default(),
@@ -7498,6 +7590,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_category: 0,
             settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
@@ -7535,6 +7628,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -7596,6 +7690,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -7623,6 +7718,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -7691,6 +7787,7 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+                    settings_category: 0,
             settings_form: None, settings_confirm: None,
                     settings_picker: None,
                     appearance: appearance::Appearance::default(),
@@ -7721,7 +7818,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
         let text = plain(&out).join("\n");
@@ -7741,7 +7838,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None,
             appearance: ap, custom_background: None,
         }.render()).join("\n")
     }
@@ -7824,7 +7921,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance {
                 background: appearance::Background::Stars,
                 logo: appearance::LogoStyle::Hidden,
@@ -8014,6 +8111,7 @@ mod tests {
             display: disp,
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -8128,7 +8226,7 @@ mod tests {
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+                display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
             let lines = plain(&out);
@@ -8180,7 +8278,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -8272,6 +8370,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                settings_category: 0,
                 settings_picker: None,
             settings_form: None, settings_confirm: None,
                 appearance: appearance::Appearance::default(), custom_background: None,
@@ -8304,6 +8403,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+                settings_category: 0,
                 settings_picker: None,
             settings_form: None, settings_confirm: None,
                 appearance: appearance::Appearance::default(), custom_background: None,
@@ -8359,34 +8459,56 @@ mod tests {
         let slots = settings_actionable(&secs);
         assert!(slots.len() > 3, "需要足够多的可操作项才能暴露错位");
 
-        for cursor in 0..slots.len() {
-            let out = Screen {
-                cols: 140, rows: 60, facts: &[], input: &ed_empty(), status: "",
-                awaiting_input: false, show_cursor: false,
-                approval: None,
-                about: None, trust: None,
-                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-                sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: cursor,
-                settings_picker: None,
-            settings_form: None, settings_confirm: None,
-                appearance: appearance::Appearance::default(), custom_background: None,
+        // 分类页模型：`settings_cursor` 只在**当前分类**的可操作行间移动，
+        // 与左列分类是两个独立坐标。逐个（分类, 光标）组合渲染，
+        // 断言高亮行正是 Enter 会作用的行。
+        for (cat, _sec) in secs.iter().enumerate() {
+            let cat_slots: Vec<(usize, usize)> =
+                slots.iter().copied().filter(|(si, _)| *si == cat).collect();
+            for cursor in 0..cat_slots.len() {
+                let out = Screen {
+                    cols: 140, rows: 60, facts: &[], input: &ed_empty(), status: "",
+                    awaiting_input: false, show_cursor: false,
+                    approval: None,
+                    about: None, trust: None,
+                    theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                    sidebar: false, view: None, diff_viewer: None, whichkey: None,
+                    display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: cursor,
+                    settings_category: cat,
+                    settings_picker: None,
+                    settings_form: None, settings_confirm: None,
+                    appearance: appearance::Appearance::default(), custom_background: None,
+                }
+                .render();
+                let lines = plain(&out);
+                // 底部提示行里也有一个 ▸（说明文字），排除它只数真正的行高亮
+                let marked: Vec<&String> = lines
+                    .iter()
+                    .filter(|l| l.contains('▸') && !l.contains("灰字为只读项"))
+                    .collect();
+                // 左列的分类高亮必须存在（▸ 在竖线 │ 之前）
+                assert!(
+                    marked.iter().any(|l| match (l.find('▸'), l.find('│')) {
+                        (Some(m), Some(s)) => m < s,
+                        _ => false,
+                    }),
+                    "cat={cat}：左列应有一个分类高亮：{marked:?}"
+                );
+                // 内容区的行高亮：▸ 在 │ **之后**。注意分类高亮与行高亮
+                // 可能落在**同一文本行**（左右两列同行渲染），所以不能数
+                // ▸ 的个数 —— 要按"│ 之后的 ▸"定位内容区高亮。
+                let row_line = marked.iter().find(|l| {
+                    l.find('│').map(|s| l[s..].contains('▸')).unwrap_or(false)
+                });
+                let (si, ri) = cat_slots[cursor];
+                let want = &secs[si].rows[ri].label;
+                let row_line = row_line
+                    .unwrap_or_else(|| panic!("cat={cat} cursor={cursor} 内容区应有一行高亮：{marked:?}"));
+                assert!(
+                    row_line.contains(want.as_str()),
+                    "cat={cat} cursor={cursor}: 高亮行是 {row_line:?}，但 Enter 会作用在 {want:?}"
+                );
             }
-            .render();
-            let lines = plain(&out);
-            // 底部提示行里也有一个 ▸（说明文字），排除它只数真正的行高亮
-            let marked: Vec<&String> = lines
-                .iter()
-                .filter(|l| l.contains('▸') && !l.contains("灰字为只读项"))
-                .collect();
-            assert_eq!(marked.len(), 1, "cursor={cursor} 应恰有一行高亮：{marked:?}");
-            let (si, ri) = slots[cursor];
-            let want = &secs[si].rows[ri].label;
-            assert!(
-                marked[0].contains(want.as_str()),
-                "cursor={cursor}: 高亮行是 {:?}，但 Enter 会作用在 {want:?}",
-                marked[0]
-            );
         }
     }
 
@@ -8419,6 +8541,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                settings_category: 0,
             settings_picker: None,
             settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
@@ -8457,6 +8580,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                settings_category: 0,
                 settings_picker: None,
             settings_form: None, settings_confirm: None,
                 appearance: appearance::Appearance::default(), custom_background: None,
@@ -8519,6 +8643,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -8548,6 +8673,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -8576,6 +8702,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_category: 0,
             settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
@@ -8609,7 +8736,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render()
     }
@@ -8736,7 +8863,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup, preformatted: None,
-            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions()
         .1
@@ -8784,6 +8911,7 @@ mod tests {
     fn clicking_a_settings_row_maps_to_that_exact_row() {
         // 鼠标点击设置行必须命中**同一项**：命中用的序号与 settings_cursor
         // 同一坐标空间，点第 k 项就该执行第 k 项（与 Enter 等价）。
+        // 分类页模型：命中区按**当前分类**登记 —— 每个分类分别验证。
         let info = SettingsInfo {
             notify: true, notify_sound: true, notify_enabled: false,
             background: "stars".into(), logo: "large".into(), custom_background: false,
@@ -8796,6 +8924,66 @@ mod tests {
         };
         let secs = settings_sections(&info);
         let ed = editor::Editor::new();
+        for (cat, sec) in secs.iter().enumerate() {
+            let (_, r) = Screen {
+                cols: 140, rows: 40, facts: &[], input: &ed, status: "",
+                awaiting_input: false, show_cursor: false,
+                approval: None,
+                about: Some(&about()), trust: None,
+                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                sidebar: false, view: None, diff_viewer: None, whichkey: None,
+                display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                settings_category: cat,
+                settings_picker: None,
+                settings_form: None, settings_confirm: None,
+                appearance: appearance::Appearance::default(), custom_background: None,
+            }
+            .render_with_regions();
+            // 该分类里每个可操作行都有命中区，且序号正确。
+            // 注意序号是"可操作项的序数"（0..n），不是行下标 ——
+            // 只读行不占序号。
+            let actionable: Vec<usize> = sec
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.action.is_some())
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(
+                r.settings_rows.len(),
+                actionable.len(),
+                "分类 {cat}：每个可操作行都应有鼠标命中区"
+            );
+            for (y, idx) in &r.settings_rows {
+                assert!(
+                    *idx < actionable.len(),
+                    "命中序号 {idx} 越界（分类 {cat} 可操作项 {} 个）",
+                    actionable.len()
+                );
+                // 关键：用**终端坐标**（1 基）去点，而不是网格行号。
+                // 上一版这里直接传 `*y`，与实现里漏掉 `+1` 的假设一致，
+                // 于是测试通过但真机点击永远错一行 —— 测试复刻了实现的错误假设，
+                // 等于没测。坐标契约必须按真实来源（SGR 是 1 基）来验。
+                assert_eq!(
+                    hit_test(&r, &ev(mouse::Button::Left, 20, *y + 1, true), None, false),
+                    Some(MouseAction::SettingsRow(*idx)),
+                    "点击第 {} 行应命中第 {idx} 项",
+                    *y + 1
+                );
+            }
+            // 只读行没有命中区（点它不能触发任何动作）
+            let mut row_y = 3usize; // 内容区第一行（标题在 row 2）
+            for row in &sec.rows {
+                if row.action.is_none() {
+                    assert!(
+                        !r.settings_rows.iter().any(|(y, _)| y == &row_y),
+                        "只读行 {row_y}（{}）不该可点击", row.label
+                    );
+                }
+                row_y += 1;
+            }
+        }
+        // 分类列：全部分类都登记、都可点、命中正确的下标
         let (_, r) = Screen {
             cols: 140, rows: 40, facts: &[], input: &ed, status: "",
             awaiting_input: false, show_cursor: false,
@@ -8804,55 +8992,29 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            settings_category: 0,
             settings_picker: None,
             settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
-        let rows = settings_actionable(&secs);
-        assert_eq!(
-            r.settings_rows.len(),
-            rows.len(),
-            "每个可操作行都应有鼠标命中区"
-        );
-        for (y, idx) in &r.settings_rows {
-            assert!(
-                *idx < rows.len(),
-                "命中序号 {idx} 越界（可操作项 {n} 个）", n = rows.len()
-            );
-            // 关键：用**终端坐标**（1 基）去点，而不是网格行号。
-            // 上一版这里直接传 `*y`，与实现里漏掉 `+1` 的假设一致，
-            // 于是测试通过但真机点击永远错一行 —— 测试复刻了实现的错误假设，
-            // 等于没测。坐标契约必须按真实来源（SGR 是 1 基）来验。
+        assert_eq!(r.settings_categories.len(), secs.len(), "每个分类都应有命中区");
+        for ((y, _, _), idx) in &r.settings_categories {
             assert_eq!(
-                hit_test(&r, &ev(mouse::Button::Left, 20, *y + 1, true), None, false),
-                Some(MouseAction::SettingsRow(*idx)),
-                "点击第 {} 行应命中第 {idx} 项",
+                hit_test(&r, &ev(mouse::Button::Left, 4, *y + 1, true), None, false),
+                Some(MouseAction::SettingsCategory(*idx)),
+                "点击分类行 {} 应命中第 {idx} 个分类",
                 *y + 1
             );
         }
-        // 只读行不该有命中区（点它不能触发任何动作）。
-        // 行号按 draw_settings 的真实布局算：起始 row=2，每节先空一行再标题（+2），
-        // 然后每行占一行。
-        let actionable_ys: Vec<usize> = r.settings_rows.iter().map(|(y, _)| *y).collect();
-        let mut ro_y = 2usize;
-        let mut readonly_ys: Vec<usize> = Vec::new();
-        for sec in &secs {
-            ro_y += 2; // 节前空行 + 节标题
-            for row in &sec.rows {
-                if row.action.is_none() {
-                    readonly_ys.push(ro_y);
-                }
-                ro_y += 1;
-            }
-        }
-        for y in &readonly_ys {
-            assert!(
-                !actionable_ys.contains(y),
-                "只读行 {y} 不该可点击"
+        // 点在内容区（x 超出分类列）不得命中分类 —— 分类行与内容行共享网格行
+        for ((y, _, _), idx) in &r.settings_categories {
+            assert_ne!(
+                hit_test(&r, &ev(mouse::Button::Left, 30, *y + 1, true), None, false),
+                Some(MouseAction::SettingsCategory(*idx)),
+                "内容区点击不得命中分类 {idx}"
             );
         }
-        assert!(!readonly_ys.is_empty(), "用例里应存在只读行，否则这条断言没意义");
     }
 
     #[test]
@@ -8897,6 +9059,7 @@ mod tests {
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
                 display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                settings_category: 0,
                 settings_picker: None,
             settings_form: None, settings_confirm: None,
                 appearance: ap, custom_background: None,
@@ -9092,6 +9255,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                settings_category: 0,
             settings_picker: None, settings_form: Some(&pk), settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
         }
@@ -9159,6 +9323,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                settings_category: 0,
             settings_picker: Some(&pk), settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
         }
@@ -9192,7 +9357,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
         let (gx, gy) = r.sidebar_grip.expect("侧栏收起时应留一个把手");
@@ -9264,7 +9429,7 @@ mod tests {
                 approval: None,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render()
         };
@@ -9291,7 +9456,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         assert!(plain(&out).join("\n").contains("下方还有"), "应提示下方还有内容");
@@ -9314,7 +9479,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -9359,6 +9524,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -9399,6 +9565,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -9430,6 +9597,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_category: 0,
             settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
@@ -9465,6 +9633,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -9573,6 +9742,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_category: 0,
             settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
@@ -9743,6 +9913,7 @@ mod tests {
             display: ToolDisplay::default(),
             settings: None,
             settings_cursor: 0,
+            settings_category: 0,
             settings_form: None, settings_confirm: None,
             settings_picker: None,
             appearance: appearance::Appearance::default(),
@@ -9773,6 +9944,7 @@ mod tests {
                 display: ToolDisplay::default(),
                 settings: None,
                 settings_cursor: 0,
+                settings_category: 0,
             settings_form: None, settings_confirm: None,
                 settings_picker: None,
                 appearance: appearance::Appearance::default(),
@@ -9961,6 +10133,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+                settings_category: 0,
             settings_picker: None, settings_form: None, settings_confirm: None,
             appearance: ap_state, custom_background: None,
         }
@@ -9999,6 +10172,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+                settings_category: 0,
             settings_picker: None, settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
         }
@@ -10181,6 +10355,7 @@ mod tests {
                     display: ToolDisplay::default(),
                     settings: None,
                     settings_cursor: 0,
+                    settings_category: 0,
             settings_form: None, settings_confirm: None,
                     settings_picker: None,
                     appearance: appearance::Appearance::default(),
