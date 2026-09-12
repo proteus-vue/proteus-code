@@ -1540,3 +1540,243 @@ fn allow_always_never_bypasses_the_sandbox_hard_boundary() {
     );
     assert!(seen.lock().unwrap().is_empty(), "沙箱拒绝后不得执行");
 }
+
+// ── 目标编排（Goal）接线 ─────────────────────────────────────────────
+//
+// 内核的契约：Goal 系列 Op 的机制（落日志、子任务轮当普通 turn 跑、
+// 回放喂 observe）。编排策略由 L4 实现 —— 这里用脚本桩替代，只验内核侧。
+
+use neo_core::GoalOrchestrator;
+use neo_protocol::{GoalPhase as KGoalPhase, GoalSnapshot, GoalSubtask as KGoalSubtask};
+
+/// 脚本编排器：预排好每轮的提示词；共享状态用 Arc<Mutex> 暴露给测试
+/// （内核按 `Box<dyn GoalOrchestrator>` 拥有编排器，测试无法直接读它）。
+struct ScriptedOrchestrator {
+    shared: Arc<std::sync::Mutex<GoalShared>>,
+    prompts: std::collections::VecDeque<String>,
+    paused: bool,
+}
+
+#[derive(Default)]
+struct GoalShared {
+    seen_kinds: Vec<&'static str>,
+    completes: usize,
+    last_failed: Option<bool>,
+}
+
+impl ScriptedOrchestrator {
+    fn goal_id(&self) -> Option<String> {
+        Some("goal-1".into())
+    }
+}
+
+impl GoalOrchestrator for ScriptedOrchestrator {
+    fn goal_id(&self) -> Option<String> {
+        self.goal_id()
+    }
+    fn set_goal(&mut self, _goal: &str) -> Vec<EventMsg> {
+        vec![EventMsg::GoalUpdated { snapshot: self_snapshot() }]
+    }
+    fn pause(&mut self) -> Vec<EventMsg> {
+        self.paused = true;
+        vec![EventMsg::GoalUpdated { snapshot: self_snapshot() }]
+    }
+    fn resume(&mut self) -> Vec<EventMsg> {
+        self.paused = false;
+        vec![EventMsg::GoalUpdated { snapshot: self_snapshot() }]
+    }
+    fn clear(&mut self) -> Vec<EventMsg> {
+        self.prompts.clear();
+        vec![EventMsg::GoalCleared { goal_id: "goal-1".into() }]
+    }
+    fn has_pending_turn(&self) -> bool {
+        !self.prompts.is_empty() && !self.paused
+    }
+    fn next_turn_prompt(&mut self) -> Option<String> {
+        self.prompts.pop_front()
+    }
+    fn on_turn_complete(&mut self, _usage: (u64, u64), failed: bool) -> Vec<EventMsg> {
+        let mut sh = self.shared.lock().unwrap();
+        sh.completes += 1;
+        sh.last_failed = Some(failed);
+        vec![EventMsg::GoalUpdated { snapshot: self_snapshot() }]
+    }
+    fn observe(&mut self, event: &EventMsg) {
+        let kind = match event {
+            EventMsg::GoalUpdated { .. } => "goal_updated",
+            EventMsg::UserSubmitted { .. } => "user_submitted",
+            EventMsg::TurnComplete { .. } => "turn_complete",
+            _ => "other",
+        };
+        self.shared.lock().unwrap().seen_kinds.push(kind);
+    }
+}
+
+fn self_snapshot() -> GoalSnapshot {
+    GoalSnapshot {
+        goal_id: "goal-1".into(),
+        goal: "脚本目标".into(),
+        paused: false,
+        stopped: None,
+        subtasks: vec![KGoalSubtask {
+            id: 1,
+            title: "脚本子任务".into(),
+            phase: KGoalPhase::Code,
+            retries: 0,
+        }],
+        iterations: 0,
+        consecutive_failures: 0,
+        turns_remaining: 1,
+        budget_used: 0,
+    }
+}
+
+fn goal_kernel(
+    script: Vec<Vec<ModelDelta>>,
+    prompts: &[&str],
+) -> (neo_core::Kernel, Arc<std::sync::Mutex<GoalShared>>) {
+    let shared = Arc::new(std::sync::Mutex::new(GoalShared::default()));
+    let orch = ScriptedOrchestrator {
+        shared: shared.clone(),
+        prompts: prompts.iter().map(|s| s.to_string()).collect(),
+        paused: false,
+    };
+    let k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    )
+    .with_goal_orchestrator(Box::new(orch));
+    (k, shared)
+}
+
+#[test]
+fn goal_ops_fail_with_a_clear_error_when_no_orchestrator_is_configured() {
+    // 未注入编排策略：Goal 系列 Op 如实报错，不静默假装成功
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("x")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    let err = k
+        .submit(Op::GoalSet { goal: "x".into() })
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("未配置编排策略"), "{err}");
+    let err = k.submit(Op::GoalAdvance).unwrap_err().to_string();
+    assert!(err.contains("目标编排不可用"), "{err}");
+}
+
+#[test]
+fn goal_advance_runs_a_full_subtask_turn_and_advances_the_engine() {
+    // 核心：子任务轮就是普通 turn —— 沙箱/审批/落盘复用，
+    // TurnComplete 之后内核推进编排器并发快照。
+    let (mut k, shared) = goal_kernel(
+        vec![vec![ModelDelta::Text("子任务做完了".into())]],
+        &["【目标 goal-1】请执行子任务"],
+    );
+    k.submit(Op::GoalSet { goal: "脚本目标".into() }).unwrap();
+    let events = k.submit(Op::GoalAdvance).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(e, EventMsg::UserSubmitted { text } if text.contains("子任务"))),
+        "子任务提示词必须作为用户消息进入转录：{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, EventMsg::TurnComplete { .. })),
+        "子任务轮应完整跑到 TurnComplete"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, EventMsg::GoalUpdated { .. })),
+        "轮结束后编排器应发状态快照"
+    );
+    let sh = shared.lock().unwrap();
+    assert_eq!(sh.completes, 1, "编排器的 on_turn_complete 应被调用一次");
+    assert_eq!(sh.last_failed, Some(false), "本轮无失败，审查判据应为通过");
+}
+
+#[test]
+fn goal_pause_blocks_advance_until_resume() {
+    let (mut k, _shared) = goal_kernel(
+        vec![vec![ModelDelta::Text("ok".into())]],
+        &["子任务 1"],
+    );
+    k.submit(Op::GoalSet { goal: "x".into() }).unwrap();
+    k.submit(Op::GoalPause { goal_id: "goal-1".into() }).unwrap();
+    // 编排器暂停后 has_pending_turn = false → GoalAdvance 如实报错
+    let err = k.submit(Op::GoalAdvance).unwrap_err().to_string();
+    assert!(err.contains("没有待执行的子任务轮"), "{err}");
+    k.submit(Op::GoalResume { goal_id: "goal-1".into() }).unwrap();
+    // 恢复后可推进（这里只验证不再报"没有待执行"；轮本身跑通）
+    k.submit(Op::GoalAdvance).unwrap();
+}
+
+#[test]
+fn goal_pause_with_wrong_id_is_rejected() {
+    // id 不匹配是参数错误：悄悄作用于别的目标是最危险的静默无操作
+    let (mut k, _shared) = goal_kernel(vec![], &[]);
+    k.submit(Op::GoalSet { goal: "x".into() }).unwrap();
+    let err = k
+        .submit(Op::GoalPause { goal_id: "goal-9".into() })
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("goal-9"), "错误要点明请求的 id：{err}");
+}
+
+#[test]
+fn goal_clear_stops_the_cycle_and_logs_it() {
+    let (mut k, _shared) = goal_kernel(
+        vec![vec![ModelDelta::Text("ok".into())]],
+        &["子任务 1"],
+    );
+    k.submit(Op::GoalSet { goal: "x".into() }).unwrap();
+    let events = k.submit(Op::GoalClear).unwrap();
+    assert!(events.iter().any(|e| matches!(e, EventMsg::GoalCleared { goal_id } if goal_id == "goal-1")));
+    let err = k.submit(Op::GoalAdvance).unwrap_err().to_string();
+    assert!(err.contains("没有待执行"), "清除后推进应如实报错：{err}");
+}
+
+#[test]
+fn replay_feeds_every_event_to_the_orchestrator() {
+    // kill 进程后续跑的前提：rebuild_from_log 必须把事件喂给编排器。
+    // 验证方式：跑一个目标会话 → 换新内核（带新编排器）从日志重建 →
+    // 新编排器收到了同样的关键事件。
+    let (mut k, _shared) = goal_kernel(
+        vec![vec![ModelDelta::Text("done".into())]],
+        &["子任务 1"],
+    );
+    k.submit(Op::GoalSet { goal: "x".into() }).unwrap();
+    k.submit(Op::GoalAdvance).unwrap();
+    let logs = k.log_for_test();
+
+    // 新内核 + 新编排器，从同一份日志重建
+    let (fresh_shared, orch) = {
+        let shared = Arc::new(std::sync::Mutex::new(GoalShared::default()));
+        let orch = ScriptedOrchestrator {
+            shared: shared.clone(),
+            prompts: std::collections::VecDeque::new(),
+            paused: false,
+        };
+        (shared, orch)
+    };
+    let mut fresh = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("x")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    )
+    .with_goal_orchestrator(Box::new(orch));
+    fresh.rebuild_from_log(&logs);
+    let sh = fresh_shared.lock().unwrap();
+    assert!(
+        sh.seen_kinds.contains(&"goal_updated"),
+        "重建必须把快照事件喂给编排器：{:?}",
+        sh.seen_kinds
+    );
+    assert!(
+        sh.seen_kinds.contains(&"user_submitted"),
+        "重建也包含普通对话事件：{:?}",
+        sh.seen_kinds
+    );
+}

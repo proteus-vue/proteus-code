@@ -285,6 +285,40 @@ const COMMANDS: &[Command] = &[
     },
 ];
 
+/// `/goal` 系列的参数形态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalCmd<'a> {
+    /// 设定（或重定向）目标：文本**每行一个子任务**，没有换行 = 单子任务
+    Set(&'a str),
+    /// 暂停推进（目标保留）
+    Pause,
+    /// 恢复推进
+    Resume,
+    /// 清除目标
+    Clear,
+    /// 查询当前状态
+    Status,
+}
+
+/// 解析 `/goal` 系列。`None` = 不是 /goal（其它 `/xxx` 照旧走命令表）。
+///
+/// 前缀相同的命令（`/goals`）必须返回 None —— 命令按前缀吞掉的话，
+/// 以后谁加一个 `/goals` 命令就永远匹配不到了。
+pub fn parse_goal_command(line: &str) -> Option<GoalCmd<'_>> {
+    let rest = line.strip_prefix("/goal")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let arg = rest.trim();
+    Some(match arg {
+        "" => GoalCmd::Status,
+        "pause" | "p" => GoalCmd::Pause,
+        "resume" | "r" => GoalCmd::Resume,
+        "clear" | "c" | "off" => GoalCmd::Clear,
+        text => GoalCmd::Set(text),
+    })
+}
+
 /// 检查"动作 ↔ 命令"的可达性，返回问题列表（空 = 一致）。
 ///
 /// 读 `COMMANDS` 而不是 `registry()` —— 后者在 debug 下会调本函数，
@@ -373,6 +407,8 @@ Neo —— 编程 Agent 内核
     /background  切换背景纹理（/background-list 可选）
     /logo        切换 Logo 样式（/logo-list 可选）
     /models      切换模型（运行时，无需重启）
+    /goal        目标编排：/goal <目标>（每行一个子任务）开始并逐步执行；
+                 /goal pause|resume|clear 暂停 / 恢复 / 清除；/goal 看状态
     /copy      复制最近一条回复
     /details   展开 / 折叠工具输出
     /thinking  显示 / 隐藏推理
@@ -429,8 +465,9 @@ pub fn status_text(a: &crate::About, theme_name: &str) -> String {
 能力
   工具      bash / apply_patch / todowrite / 提问
   已实现    上下文引用（@file / $skill）、项目指令级联（AGENTS.md）、
-            上下文压缩（/compact）、多会话、服务商注册表（providers.json）
-  未实现    Goal 目标编排（/goal 系列）、MCP 客户端、桌面 webview 窗口层
+            上下文压缩（/compact）、多会话、服务商注册表（providers.json）、
+            目标编排（/goal，四阶段 + 重试 + 判停）、MCP 外部工具
+  未实现    桌面 webview 窗口层
 ",
         a.version,
         a.model,
@@ -558,5 +595,31 @@ mod tests {
         for good in ["/models", "/settings", "/diff", "/sessions"] {
             assert!(h.contains(good), "已实现命令 {good} 应出现在帮助里");
         }
+    }
+}
+
+#[cfg(test)]
+mod goal_tests {
+    use super::*;
+
+    #[test]
+    fn goal_command_parsing_covers_all_forms() {
+        assert_eq!(parse_goal_command("/goal"), Some(GoalCmd::Status));
+        assert_eq!(parse_goal_command("/goal "), Some(GoalCmd::Status));
+        assert_eq!(
+            parse_goal_command("/goal 实现登录\n写测试"),
+            Some(GoalCmd::Set("实现登录\n写测试"))
+        );
+        assert_eq!(parse_goal_command("/goal pause"), Some(GoalCmd::Pause));
+        assert_eq!(parse_goal_command("/goal resume"), Some(GoalCmd::Resume));
+        assert_eq!(parse_goal_command("/goal clear"), Some(GoalCmd::Clear));
+        assert_eq!(parse_goal_command("/goal c"), Some(GoalCmd::Clear));
+    }
+
+    #[test]
+    fn prefix_lookalikes_are_not_swallowed() {
+        // /goals、/goalkeeper 不是 /goal —— 前缀相同但必须放行给命令表
+        assert_eq!(parse_goal_command("/goals"), None);
+        assert_eq!(parse_goal_command("/goalkeeper x"), None);
     }
 }

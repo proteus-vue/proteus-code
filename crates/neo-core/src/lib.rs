@@ -165,6 +165,47 @@ impl Compactor for NoCompactor {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// 扩展点：GoalOrchestrator（目标编排）
+// ══════════════════════════════════════════════════════════════════════
+//
+// 与 Compactor 同一条理由：目标怎么拆、阶段怎么走是 **L4 的策略**，
+// 内核只提供机制 —— 把编排器产出的事件落日志、把子任务轮当普通 turn 跑
+// （沙箱/审批/上限全部复用），以及在回放时把日志喂回去重建状态。
+
+/// 目标编排契据。实现方维护全部编排状态；内核不知道"阶段"长什么样。
+///
+/// # 有界性由实现方负责
+///
+/// `next_turn_prompt` 每消费一次就少一轮；停止条件触发后
+/// `has_pending_turn` 必须返回 false —— 否则宿主的推进循环没有出口。
+///
+/// # 回放即重建
+///
+/// `observe` 会被内核在 `rebuild_from_log` 时对**每一条**事件调用：
+/// 实现方从自己发出过的快照事件里恢复状态（kill 进程后续跑的核心）。
+pub trait GoalOrchestrator: Send {
+    /// 当前目标 id；无活动目标为 `None`。
+    fn goal_id(&self) -> Option<String>;
+    /// 设定（或重定向）目标。返回要落日志的事件（快照）。
+    fn set_goal(&mut self, goal: &str) -> Vec<EventMsg>;
+    /// 暂停：目标保留，停止推进。
+    fn pause(&mut self) -> Vec<EventMsg>;
+    /// 恢复推进。
+    fn resume(&mut self) -> Vec<EventMsg>;
+    /// 清除目标（发 `GoalCleared`；之后 `goal_id` 为 None）。
+    fn clear(&mut self) -> Vec<EventMsg>;
+    /// 是否还有待执行的子任务轮（暂停/停止/无目标 = false）。
+    fn has_pending_turn(&self) -> bool;
+    /// 取下一轮的提示词（消费一轮额度）。`None` = 没有待执行轮。
+    fn next_turn_prompt(&mut self) -> Option<String>;
+    /// 一个子任务轮结束。`usage` = 本轮 token 消耗，`failed` = 本轮是否出错。
+    /// 实现方据此推进阶段/重试/判停，返回状态快照事件。
+    fn on_turn_complete(&mut self, usage: (u64, u64), failed: bool) -> Vec<EventMsg>;
+    /// 回放：消费日志事件、重建内部状态。必须幂等且与在线推进一致。
+    fn observe(&mut self, event: &EventMsg);
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // 扩展点 2/4：Tool
 // ══════════════════════════════════════════════════════════════════════
 
@@ -566,6 +607,11 @@ pub enum KernelError {
     /// 为什么不静默丢弃最老的：模型的视角必须与日志一致（"模型可见即已落盘"）。
     /// 悄悄丢消息会让回放出的历史与实际请求不符 —— 那比报错危险得多。
     ContextBudgetExceeded { messages: usize, limit: usize },
+    /// Goal 系列无法执行：没配置编排策略，或目标已暂停/停止/无待执行轮。
+    ///
+    /// 单独变体：让 "没配策略" 与 "目标此刻不可推进" 有各自的措辞，
+    /// 用户才知道下一步是"换宿主配置"还是"先 /goal resume"。
+    GoalUnavailable(String),
 }
 
 impl std::fmt::Display for KernelError {
@@ -584,6 +630,7 @@ impl std::fmt::Display for KernelError {
                 f,
                 "上下文超上限（{messages} > {limit} 条），需压缩后再继续；压缩属 L4 职责，当前未实现"
             ),
+            Self::GoalUnavailable(msg) => write!(f, "目标编排不可用：{msg}"),
         }
     }
 }
@@ -616,6 +663,13 @@ pub struct Kernel {
     models: crate::models::ModelRegistry,
     /// 上下文压缩策略（L4 实现，构造时注入；缺省不压缩）
     compactor: Box<dyn Compactor>,
+    /// 目标编排器（L4 实现，构造时注入；缺省 = Goal 系列如实报"未配置"）
+    goal: Option<Box<dyn GoalOrchestrator>>,
+    /// 当前是否有一轮**目标子任务轮**在飞（从 GoalAdvance 开始，
+    /// 到 TurnComplete 结束；审批挂起期间保持）。
+    goal_turn_in_flight: bool,
+    /// 目标子任务轮内是否发生过 Error 事件（引擎的审查失败判据）
+    goal_turn_failed: bool,
     sandbox: Arc<dyn SandboxBackend>,
     persistence: Box<dyn SessionPersistence>,
     cwd: PathBuf,
@@ -688,6 +742,9 @@ impl Kernel {
             tools,
             models: model,
             compactor: Box::new(NoCompactor),
+            goal: None,
+            goal_turn_in_flight: false,
+            goal_turn_failed: false,
             sandbox,
             persistence,
             cwd: cwd.into(),
@@ -855,6 +912,9 @@ impl Kernel {
                 // 状态回到空闲：回退时可能在等审批，那批调用已经没有意义
                 self.pending = None;
                 self.state = KernelState::Idle;
+                // 被回退掉的目标子任务轮同理作废（轮都没了，谈不上完成）
+                self.goal_turn_in_flight = false;
+                self.goal_turn_failed = false;
                 let ev = EventMsg::Rewound {
                     turns,
                     removed_messages: removed,
@@ -867,6 +927,10 @@ impl Kernel {
                 // 中断只在**工具调用边界**生效（安全点），杜绝半写状态。
                 self.pending = None;
                 self.state = KernelState::Idle;
+                // 被中断的目标子任务轮不再有 TurnComplete —— 必须同步作废
+                // 在飞标记，否则下一个普通轮的结束会被误当成目标轮的结束。
+                self.goal_turn_in_flight = false;
+                self.goal_turn_failed = false;
                 self.emit_and_log(&EventMsg::Error { message: "已中断".into() })?;
             }
 
@@ -929,6 +993,57 @@ impl Kernel {
 
             Op::Shutdown => {
                 self.emit_and_log(&EventMsg::ShutdownComplete)?;
+            }
+
+            // ── 目标编排（Goal）────────────────────────────────────
+            // 机制在内核（落日志、跑子任务轮、回放重建），策略在编排器。
+            Op::GoalSet { goal } => {
+                let events = self.with_goal(|g| g.set_goal(&goal))?;
+                for ev in &events {
+                    self.emit_and_log(ev)?;
+                }
+            }
+            Op::GoalPause { goal_id } => {
+                self.check_goal_id(&goal_id)?;
+                let events = self.with_goal(|g| g.pause())?;
+                for ev in &events {
+                    self.emit_and_log(ev)?;
+                }
+            }
+            Op::GoalResume { goal_id } => {
+                self.check_goal_id(&goal_id)?;
+                let events = self.with_goal(|g| g.resume())?;
+                for ev in &events {
+                    self.emit_and_log(ev)?;
+                }
+            }
+            Op::GoalClear => {
+                let events = self.with_goal(|g| g.clear())?;
+                for ev in &events {
+                    self.emit_and_log(ev)?;
+                }
+            }
+            Op::GoalAdvance => {
+                // 取一个待执行的子任务轮，按普通 turn 跑 —— 沙箱、审批、
+                // 上限、落盘全部复用既有链路，不为目标另开执行通道。
+                // begin_turn 只开场不驱动：逐帧宿主随后 Pump（与 UserTurn
+                // 同一个不冻结的架构）。
+                let prompt = {
+                    let g = self.goal.as_mut().ok_or_else(|| {
+                        KernelError::GoalUnavailable("未配置编排策略".into())
+                    })?;
+                    if !g.has_pending_turn() {
+                        return Err(KernelError::GoalUnavailable(
+                            "没有待执行的子任务轮（可能已暂停、停止或全部完成）".into(),
+                        ));
+                    }
+                    g.next_turn_prompt()
+                        .ok_or_else(|| KernelError::GoalUnavailable("没有待执行的子任务轮".into()))?
+                };
+                self.goal_turn_in_flight = true;
+                self.goal_turn_failed = false;
+                self.begin_turn(prompt, Vec::new())?;
+                self.drive_steps()?;
             }
 
             other => return Err(KernelError::Unimplemented(format!("{other:?}"))),
@@ -1040,13 +1155,26 @@ impl Kernel {
     }
 
     /// 没有挂起时结束本轮（发 TurnComplete）。
+    ///
+    /// 若刚结束的是**目标子任务轮**：在这里推进编排器（阶段前进/重试/判停）
+    /// 并落日志快照 —— 用轮次结束这个单一事件驱动编排，而不是散在各处。
     fn finish_turn_if_idle(&mut self) -> Result<(), KernelError> {
         if matches!(self.state, KernelState::Idle) {
+            let usage = (self.usage_in, self.usage_out);
             let done = EventMsg::TurnComplete {
-                input_tokens: self.usage_in,
-                output_tokens: self.usage_out,
+                input_tokens: usage.0,
+                output_tokens: usage.1,
             };
             self.emit_and_log(&done)?;
+            if self.goal_turn_in_flight {
+                self.goal_turn_in_flight = false;
+                let failed = self.goal_turn_failed;
+                self.goal_turn_failed = false;
+                let events = self.with_goal(|g| g.on_turn_complete(usage, failed))?;
+                for ev in &events {
+                    self.emit_and_log(ev)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1276,6 +1404,18 @@ impl Kernel {
         self
     }
 
+    /// 注入目标编排器。缺省 `None`：Goal 系列 Op 会如实报错
+    /// （"未配置编排策略"），而不是静默假装成功。
+    pub fn with_goal_orchestrator(mut self, g: Box<dyn GoalOrchestrator>) -> Self {
+        self.goal = Some(g);
+        self
+    }
+
+    /// 当前目标的单行状态（宿主展示用）。无活动目标为 `None`。
+    pub fn goal_status(&self) -> Option<String> {
+        self.goal.as_ref().and_then(|g| g.goal_id()).map(|id| format!("目标 {id} 进行中"))
+    }
+
     /// 取当前会话已落盘的日志（供重建与会话切换使用）。
     pub fn log_for_test(&self) -> Vec<LoggedRecord> {
         self.persistence.load().unwrap_or_default()
@@ -1319,77 +1459,17 @@ impl Kernel {
                 }
                 "event" => {
                     match serde_json::from_value::<EventMsg>(rec.payload.clone()) {
-                        // 指令是系统提示词的组成，回放必须还原**当时**那一份，
-                        // 而不是重新读盘（AGENTS.md 可能已被改）。还原后重拼提示词，
-                        // 否则回放出的请求与真实请求系统提示词不一致。
-                        Ok(EventMsg::InstructionsLoaded { sources, block, truncated }) => {
-                            self.instructions = crate::instructions::Instructions {
-                                sources,
-                                block,
-                                truncated,
-                            };
-                            self.instructions_logged = true;
-                            self.refresh_system_prompt();
-                        }
-                        Ok(EventMsg::UserSubmitted { text }) => {
-                            rebuilt.push(Message::User(text));
-                        }
-                        // 注入块拼到刚推入的用户消息之后：submit 里就是
-                        // `{text}\n\n{block}`，这里必须还原同一顺序。
-                        Ok(EventMsg::RefsResolved { block, .. }) => {
-                            if !block.is_empty() {
-                                if let Some(Message::User(t)) = rebuilt.last_mut() {
-                                    t.push_str("\n\n");
-                                    t.push_str(&block);
-                                }
+                        // 目标编排状态从快照事件重建：最后一条快照即当前状态
+                        //（kill 进程后重启能续跑的核心）。没有编排器时跳过
+                        //（状态无处安放，日志本身仍完整可审计）。
+                        Ok(ev) => {
+                            if let Some(g) = self.goal.as_mut() {
+                                g.observe(&ev);
                             }
+                            self.replay_event(ev, &mut rebuilt, &mut pending_calls);
                         }
-                        Ok(EventMsg::ToolCallBegin { id, name, arguments }) => {
-                            pending_calls.push(ToolInvocation { id, name, arguments });
-                        }
-                        Ok(EventMsg::AgentMessageDone { text }) => {
-                            rebuilt.push(Message::Assistant {
-                                text,
-                                tool_calls: std::mem::take(&mut pending_calls),
-                            });
-                        }
-                        Ok(EventMsg::ContextCompacted { removed_messages, summary }) => {
-                            // 回放必须**重演**压缩动作：日志是 append-only 的，
-                            // 无法改写旧记录，只能在重放时把"当时被摘要掉的前缀"
-                            // 同样删掉并换上摘要。
-                            //
-                            // **不是 clear()**：那样会把压缩时**保留的**尾部也丢掉，
-                            // 重建出的历史比真实历史短 —— 回放与真实请求不符，
-                            // 正是"模型可见即已落盘"要防的事。
-                            let n = removed_messages.min(rebuilt.len());
-                            rebuilt.drain(0..n);
-                            rebuilt.insert(0, Message::System(summary));
-                        }
-                        Ok(EventMsg::ToolCallEnd {
-                            id,
-                            exit_code,
-                            stdout,
-                            stderr,
-                            truncated,
-                        }) => {
-                            let name = rebuilt
-                                .iter()
-                                .rev()
-                                .find_map(|m| match m {
-                                    Message::Assistant { tool_calls, .. } => tool_calls
-                                        .iter()
-                                        .find(|c| c.id == id)
-                                        .map(|c| c.name.clone()),
-                                    _ => None,
-                                })
-                                .unwrap_or_default();
-                            rebuilt.push(Message::ToolResult {
-                                id,
-                                name,
-                                output: ToolOutput { exit_code, stdout, stderr, truncated },
-                            });
-                        }
-                        _ => {}
+                        // 坏事件跳过（schema 门禁挡在前面，这里兜底不 panic）
+                        Err(_) => {}
                     }
                 }
                 _ => {}
@@ -1398,6 +1478,85 @@ impl Kernel {
         let n = rebuilt.len();
         self.messages = rebuilt;
         n
+    }
+
+    /// 回放单条事件对**消息历史**的作用（rebuild_from_log 的 match 体）。
+    ///
+    /// 抽成方法是为了让"喂编排器 observe"与"重建消息历史"在同一条
+    /// 事件流上各取所需 —— 两件事都做，但互不掺和。
+    fn replay_event(
+        &mut self,
+        ev: EventMsg,
+        rebuilt: &mut Vec<Message>,
+        pending_calls: &mut Vec<ToolInvocation>,
+    ) {
+        match ev {
+            // 指令是系统提示词的组成，回放必须还原**当时**那一份，
+            // 而不是重新读盘（AGENTS.md 可能已被改）。还原后重拼提示词，
+            // 否则回放出的请求与真实请求系统提示词不一致。
+            EventMsg::InstructionsLoaded { sources, block, truncated } => {
+                self.instructions = crate::instructions::Instructions {
+                    sources,
+                    block,
+                    truncated,
+                };
+                self.instructions_logged = true;
+                self.refresh_system_prompt();
+            }
+            EventMsg::UserSubmitted { text } => {
+                rebuilt.push(Message::User(text));
+            }
+            // 注入块拼到刚推入的用户消息之后：submit 里就是
+            // `{text}\n\n{block}`，这里必须还原同一顺序。
+            EventMsg::RefsResolved { block, .. } => {
+                if !block.is_empty() {
+                    if let Some(Message::User(t)) = rebuilt.last_mut() {
+                        t.push_str("\n\n");
+                        t.push_str(&block);
+                    }
+                }
+            }
+            EventMsg::ToolCallBegin { id, name, arguments } => {
+                pending_calls.push(ToolInvocation { id, name, arguments });
+            }
+            EventMsg::AgentMessageDone { text } => {
+                rebuilt.push(Message::Assistant {
+                    text,
+                    tool_calls: std::mem::take(pending_calls),
+                });
+            }
+            EventMsg::ContextCompacted { removed_messages, summary } => {
+                // 回放必须**重演**压缩动作：日志是 append-only 的，
+                // 无法改写旧记录，只能在重放时把"当时被摘要掉的前缀"
+                // 同样删掉并换上摘要。
+                //
+                // **不是 clear()**：那样会把压缩时**保留的**尾部也丢掉，
+                // 重建出的历史比真实历史短 —— 回放与真实请求不符，
+                // 正是"模型可见即已落盘"要防的事。
+                let n = removed_messages.min(rebuilt.len());
+                rebuilt.drain(0..n);
+                rebuilt.insert(0, Message::System(summary));
+            }
+            EventMsg::ToolCallEnd { id, exit_code, stdout, stderr, truncated } => {
+                let name = rebuilt
+                    .iter()
+                    .rev()
+                    .find_map(|m| match m {
+                        Message::Assistant { tool_calls, .. } => tool_calls
+                            .iter()
+                            .find(|c| c.id == id)
+                            .map(|c| c.name.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                rebuilt.push(Message::ToolResult {
+                    id,
+                    name,
+                    output: ToolOutput { exit_code, stdout, stderr, truncated },
+                });
+            }
+            _ => {}
+        }
     }
 
     /// 当前模型名（宿主展示用）。
@@ -1620,8 +1779,43 @@ impl Kernel {
     }
 
     fn emit_and_log(&mut self, ev: &EventMsg) -> Result<(), KernelError> {
+        // 目标子任务轮的失败判据（审查代理）：轮内出现 Error 事件，或
+        // 工具以非零退出码结束 —— 单点记账，新的出错路径自动被算进去。
+        // 审批拒绝的调用也以非零结束，同样计入（子任务被拦 = 没完成）。
+        if self.goal_turn_in_flight {
+            match ev {
+                EventMsg::Error { .. } => self.goal_turn_failed = true,
+                EventMsg::ToolCallEnd { exit_code, .. } if *exit_code != 0 => {
+                    self.goal_turn_failed = true;
+                }
+                _ => {}
+            }
+        }
         self.outbox.push(ev.clone());
         self.log("event", ev)
+    }
+
+    /// 在活动编排器上执行操作；未配置编排策略时如实报错。
+    fn with_goal<F>(&mut self, f: F) -> Result<Vec<EventMsg>, KernelError>
+    where
+        F: FnOnce(&mut Box<dyn GoalOrchestrator>) -> Vec<EventMsg>,
+    {
+        match self.goal.as_mut() {
+            Some(g) => Ok(f(g)),
+            None => Err(KernelError::GoalUnavailable("未配置编排策略".into())),
+        }
+    }
+
+    /// GoalPause/Resume 带目标 id：与当前目标不一致是**参数错误**
+    /// （用户想暂停的可能是另一个目标），拒绝而不是悄悄作用于错的那个。
+    fn check_goal_id(&self, want: &str) -> Result<(), KernelError> {
+        match self.goal.as_ref().and_then(|g| g.goal_id()) {
+            Some(id) if id == want => Ok(()),
+            Some(id) => Err(KernelError::GoalUnavailable(format!(
+                "目标 id 不匹配：当前 {id}，请求 {want}"
+            ))),
+            None => Err(KernelError::GoalUnavailable("没有活动目标".into())),
+        }
     }
 
     /// 把项目指令（系统提示词的组成）落一次日志。

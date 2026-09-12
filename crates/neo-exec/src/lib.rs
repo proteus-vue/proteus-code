@@ -203,6 +203,9 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
             } else {
                 format!("[model] 已切换到 {model}（上下文 {context_limit} tokens）")
             }),
+            // 目标推进对无头输出同样重要：CI 日志里要能看到"跑到哪一步了"
+            EventMsg::GoalUpdated { snapshot } => Some(format!("[goal] {}", snapshot.summary())),
+            EventMsg::GoalCleared { goal_id } => Some(format!("[goal] {goal_id} 已清除")),
             // 推理默认不单独打（噪声大）；`--json` 时它在事件流里，
             // 需要时按需取。这里只给一个极简标记，避免刷屏。
             EventMsg::ReasoningDelta { .. } => None,
@@ -303,6 +306,11 @@ pub fn build_kernel(
         // 压缩策略由 L4 提供（内核只认契据）—— 这样 `/compact` 不是空操作
         .with_compactor(Box::new(
             neo_orchestration::PolicyCompactor::default(),
+        ))
+        // 目标编排同理：策略在 L4（四阶段引擎），内核只认契据 ——
+        // `/goal` 系列从此可达，子任务轮复用普通 turn 的整条链路
+        .with_goal_orchestrator(Box::new(
+            neo_orchestration::EngineGoalOrchestrator::default(),
         ))
         .with_skills(skills)
         .with_instructions(instructions)

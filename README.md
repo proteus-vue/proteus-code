@@ -31,7 +31,7 @@
 | Web 宿主（零依赖 HTTP + SSE） | ✅ **已实现**（`neo-host-web`；`POST /api/turn` 提交、`GET /api/events` SSE、`/api/approve` 审批） |
 | Desktop 宿主（系统 webview 壳） | 🟡 **契据就绪**：`DesktopHost` 的 `HostBackend` 实现与 T6 覆盖已完成；wry window 层未接（原型阶段不拉入平台图形栈） |
 | 上下文压缩（L4 策略） | ✅ **已实现**：`Compactor` seam 在 L2、策略在 L4；`/compact` 端到端，摘要与移除条数可回放 |
-| Goal 目标编排（`/goal` 系列） | 🟡 **状态机就绪、未接线**：`GoalEngine`（Plan→Code→Review→Learn + Checkpoint/StopConditions）有测试，但 `Op::GoalSet/Pause/Resume` 在内核仍落到"未实现" |
+| **Goal 目标编排**（`/goal` 系列） | ✅ **已接线**：`/goal <目标>`（每行一个子任务）自动逐阶段推进（Plan→Code→Review→Learn），审查失败回退重做 ≤3 次，四项停止条件生效；快照事件落日志，**kill 后重启从日志重建续跑**。审查判据是确定性的失败代理（轮内 Error/非零退出），非模型自评；挂钟停止条件未实现（破坏回放确定性） |
 | **服务商管理**（设置页可增删改） | ✅ **已实现**：设置页内联表单新增/编辑（密钥字段打码、留空不改），删除需确认。密钥存 `~/.neo/provider_keys.json`（**0600**，与配置分离）；`base_url` 自动规范化为裸主机。缺 key 的条目跳过并提示 |
 | **上下文引用解析**（`@file` / `$skill`） | ✅ **已实现**：`@path` 与 `@path#行范围` 经沙箱读入并注入请求；`$skill` 查注册表注入正文、找不到则列出可用项。注入块落 `RefsResolved` 日志，回放一致 |
 | **项目指令级联**（`AGENTS.md`） | ✅ **已实现**：`~/.neo/AGENTS.override.md` → `~/.neo/AGENTS.md` → 仓库根 → 子目录（越具体越靠后），合并上限 32 KiB，超限如实标注截断。并入系统提示词并落 `InstructionsLoaded` 日志，回放还原同一份提示词 |

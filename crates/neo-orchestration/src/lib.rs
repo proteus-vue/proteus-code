@@ -1,9 +1,16 @@
 //! L4 ORCHESTRATION —— Goal 引擎（吸收 ZCode Goal Mode）
 //!
 //! 四阶段闭环 Plan -> Code -> Review -> Learn（吸收自开源 zcode CLI）
+//!
+//! Goal 编排对内核的接线在 [`goal`]：内核只认 `GoalOrchestrator` 契据，
+//! 这里用 [`GoalEngine`] 提供策略实现（拆解 / 阶段提示词 / 重试 / 判停）。
+
+pub mod goal;
 
 use neo_protocol::GoalId;
 use serde::{Deserialize, Serialize};
+
+pub use goal::EngineGoalOrchestrator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

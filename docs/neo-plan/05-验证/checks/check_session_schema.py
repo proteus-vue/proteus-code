@@ -17,7 +17,7 @@ GOLDEN_DIR = os.path.join(HERE, "..", "golden")
 ALLOWED_KINDS = {
     "op", "event",
     "session_configured", "turn_started", "agent_message_delta", "agent_message_done",
-    "reasoning_delta", "tool_call_begin", "tool_call_end", "approval_request",
+    "reasoning_delta", "tool_call_begin", "tool_call_end", "approval_request", "goal_updated", "goal_cleared",
     "patch_proposed", "checkpoint_saved", "goal_progress", "error",
     "turn_complete", "shutdown_complete",
 }

@@ -2947,6 +2947,51 @@ pub fn at_query(input: &str) -> Option<&str> {
 ///
 /// 内核是严格顺序的（一次只有一个未决审批），所以取最后一个即可。
 /// 抽成纯函数是为了可单测：审批交互错了会让"需要审批"变成静默挂起。
+/// 取事件流里**最后一条**目标快照的 id。
+/// GoalCleared 显式截断：清除之后旧快照不再是"当前目标"。
+fn latest_goal_id(events: &[EventMsg]) -> Option<String> {
+    for e in events.iter().rev() {
+        match e {
+            EventMsg::GoalUpdated { snapshot } => return Some(snapshot.goal_id.clone()),
+            EventMsg::GoalCleared { .. } => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 目标单行状态（最后一次快照的摘要；清除后为 None）。
+fn latest_goal_line(events: &[EventMsg]) -> Option<String> {
+    for e in events.iter().rev() {
+        match e {
+            EventMsg::GoalUpdated { snapshot } => return Some(snapshot.summary()),
+            EventMsg::GoalCleared { .. } => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 目标是否还有待推进的子任务轮（宿主据此在 TurnComplete 后继续 GoalAdvance）。
+///
+/// 倒序找**最近一条**目标状态事件：快照给判断，GoalCleared 直接否。
+/// 有界性由编排器的停止条件保证（停止后 stopped 非空、turns_remaining
+/// 判断不再通过）。
+fn goal_awaiting_advance(events: &[EventMsg]) -> bool {
+    for e in events.iter().rev() {
+        match e {
+            EventMsg::GoalUpdated { snapshot } => {
+                return !snapshot.paused
+                    && snapshot.stopped.is_none()
+                    && snapshot.turns_remaining > 0;
+            }
+            EventMsg::GoalCleared { .. } => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 pub fn latest_approval_id(events: &[EventMsg]) -> Option<String> {
     events.iter().rev().find_map(|e| match e {
         EventMsg::ApprovalRequest { id, .. } => Some(id.clone()),
@@ -3726,7 +3771,31 @@ where
                 };
                 write!(stdout, "{}", screen.render())?;
                 stdout.flush()?;
-                if done || outstanding.is_some() {
+                if outstanding.is_some() {
+                    return Ok(());
+                }
+                if done {
+                    // 目标编排：本轮是子任务轮且还有剩余 → 提交下一轮并
+                    // 继续泵（一次 GoalAdvance = 一个完整子任务轮，有界；
+                    // 引擎停止条件触发后这里自然停）。
+                    if goal_awaiting_advance(events) {
+                        match submit(neo_protocol::Op::GoalAdvance) {
+                            Ok(produced) => {
+                                *outstanding = latest_approval_id(&produced);
+                                events.extend(produced);
+                                if outstanding.is_some() {
+                                    // 下一轮先挂审批：交回上层审批路径，
+                                    // 批准后 resume 会再进泵循环
+                                    return Ok(());
+                                }
+                                continue;
+                            }
+                            Err(e) => {
+                                events.push(EventMsg::Error { message: e });
+                                return Ok(());
+                            }
+                        }
+                    }
                     return Ok(());
                 }
             }
@@ -4394,6 +4463,14 @@ fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<V
                     format!("（上下文 {context_limit}）")
                 };
                 out.push(vec![(2, format!("⇄ 模型已切换为 {model}{tail}"), Tone::Info)]);
+            }
+            Fact::Goal(line) => {
+                // 目标推进是长程任务的路标 —— 用 Primary 色让它在一串
+                // 工具行里一眼可辨
+                out.push(vec![(2, line.clone(), Tone::Primary)]);
+            }
+            Fact::GoalCleared(goal_id) => {
+                out.push(vec![(2, format!("🎯 目标 {goal_id} 已清除"), Tone::Muted)]);
             }
         }
     }
@@ -6873,6 +6950,94 @@ custom_bg.is_some(),
 
                 // ── `/命令`：直接执行，不进模型 ──────────────────────
                 let trimmed = line.trim();
+                // `/goal` 带自由文本参数（目标本身就是一句话），
+                // 与 `/goal pause|resume|clear|状态查询` 一起先于通用命令表处理
+                if let Some(cmd) = commands::parse_goal_command(trimmed) {
+                    match cmd {
+                        commands::GoalCmd::Set(text) => {
+                            match submit(neo_protocol::Op::GoalSet { goal: text.to_string() }) {
+                                Ok(produced) => {
+                                    events.extend(produced);
+                                    // 设定后**立即开始推进**第一个子任务轮 ——
+                                    // 否则用户设完目标还得想办法"启动"它。
+                                    match submit(neo_protocol::Op::GoalAdvance) {
+                                        Ok(produced) => {
+                                            events.extend(produced);
+                                            pump_until_boundary(
+                                                &mut submit, &mut events, &mut outstanding,
+                                                &about, &empty_input, &view_state, display,
+                                                sidebar_open, theme_name, current_appearance,
+                                                custom_bg.as_ref(), &mut stdout, &mut stdin,
+                                                cols, rows,
+                                            )?;
+                                        }
+                                        Err(e) => status = format!("目标已设定，但启动失败：{e}"),
+                                    }
+                                }
+                                Err(e) => status = e,
+                            }
+                            dirty = true;
+                            continue;
+                        }
+                        commands::GoalCmd::Pause => {
+                            if let Some(id) = latest_goal_id(&events) {
+                                match submit(neo_protocol::Op::GoalPause { goal_id: id }) {
+                                    Ok(produced) => events.extend(produced),
+                                    Err(e) => status = e,
+                                }
+                            } else {
+                                status = "没有活动目标（/goal <目标> 开始，每行一个子任务）".into();
+                            }
+                            dirty = true;
+                            continue;
+                        }
+                        commands::GoalCmd::Resume => {
+                            if let Some(id) = latest_goal_id(&events) {
+                                match submit(neo_protocol::Op::GoalResume { goal_id: id }) {
+                                    Ok(produced) => {
+                                        events.extend(produced);
+                                        match submit(neo_protocol::Op::GoalAdvance) {
+                                            Ok(produced) => {
+                                                events.extend(produced);
+                                                pump_until_boundary(
+                                                    &mut submit, &mut events, &mut outstanding,
+                                                    &about, &empty_input, &view_state, display,
+                                                    sidebar_open, theme_name, current_appearance,
+                                                    custom_bg.as_ref(), &mut stdout, &mut stdin,
+                                                    cols, rows,
+                                                )?;
+                                            }
+                                            Err(e) => status = e,
+                                        }
+                                    }
+                                    Err(e) => status = e,
+                                }
+                            } else {
+                                status = "没有活动目标".into();
+                            }
+                            dirty = true;
+                            continue;
+                        }
+                        commands::GoalCmd::Clear => {
+                            // 清除不带 id（内核清除当前目标）；有没有目标只决定提示
+                            if latest_goal_id(&events).is_some() {
+                                match submit(neo_protocol::Op::GoalClear) {
+                                    Ok(produced) => events.extend(produced),
+                                    Err(e) => status = e,
+                                }
+                            } else {
+                                status = "没有活动目标".into();
+                            }
+                            dirty = true;
+                            continue;
+                        }
+                        commands::GoalCmd::Status => {
+                            status = latest_goal_line(&events).unwrap_or_else(|| {
+                                "没有活动目标（/goal <目标> 开始，目标文本每行一个子任务）".into()
+                            });
+                        }
+                    }
+                }
                 if let Some(rest) = trimmed.strip_prefix('/') {
                     // 只取命令名（后面可带参数，当前命令都不需要参数）
                     let name = rest.split_whitespace().next().unwrap_or("");

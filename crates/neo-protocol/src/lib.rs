@@ -119,6 +119,12 @@ pub enum Op {
     GoalSet { goal: String },
     GoalPause { goal_id: GoalId },
     GoalResume { goal_id: GoalId },
+    /// 推进目标：执行**一个**子任务轮（一次完整 turn），跑完自动推进引擎。
+    /// 与 `Pump` 同理是有界的 —— 一次只跑一轮，宿主控制节奏；
+    /// 是否还有下一轮看最新 `GoalUpdated` 快照的 `turns_remaining`。
+    GoalAdvance,
+    /// 清除目标（目标与其进度一并丢弃，会话保留）。
+    GoalClear,
     Shutdown,
 }
 
@@ -189,6 +195,94 @@ pub enum TodoStatus {
     Pending,
     InProgress,
     Completed,
+}
+
+// ── 目标编排（Goal）────────────────────────────────────────────────
+
+/// 目标子任务所处的阶段（Plan→Code→Review→Learn 的四阶段闭环 + 完成）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalPhase {
+    Plan,
+    Code,
+    Review,
+    Learn,
+    Done,
+}
+
+/// 一个子任务在快照里的形态。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalSubtask {
+    pub id: usize,
+    pub title: String,
+    pub phase: GoalPhase,
+    pub retries: u32,
+}
+
+/// 目标编排状态的**完整快照**。
+///
+/// 每次状态变化都发整份快照而不是增量：回放重建 = 取最后一条即可，
+/// 宿主展示 = 直接读，不需要自己累计差量 —— 状态单一事实源在编排器，
+/// 快照即它当时的全部。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalSnapshot {
+    /// 确定性编号（`goal-N`，按编排器内计数器派生，不用随机/时钟）
+    pub goal_id: GoalId,
+    /// 用户设定的目标原文
+    pub goal: String,
+    /// 暂停中（不推进，但目标保留）
+    pub paused: bool,
+    /// 引擎触发停止条件后的原因（非空时不再推进）
+    pub stopped: Option<String>,
+    pub subtasks: Vec<GoalSubtask>,
+    /// 已消耗的编排步数
+    pub iterations: usize,
+    /// 连续失败计数（审查判停的依据 —— 回放重建后判停行为必须一致，
+    /// 所以它必须在快照里，而不能只活在内存里）
+    pub consecutive_failures: u32,
+    /// 还需要多少个子任务轮（**下限估计**：审查失败的重试会让实际更多）。
+    /// 宿主据此决定要不要继续 `GoalAdvance`。
+    pub turns_remaining: usize,
+    /// 目标已消耗的 token 预算
+    pub budget_used: u64,
+}
+
+impl GoalSnapshot {
+    /// 已完成子任务数。
+    pub fn done_count(&self) -> usize {
+        self.subtasks.iter().filter(|s| s.phase == GoalPhase::Done).count()
+    }
+
+    /// 用户可见的单行摘要（宿主渲染的单一事实源 —— 各宿主拼各的
+    /// 会漂移出"同一个目标在 TUI 和 exec 长两副样子"）。
+    pub fn summary(&self) -> String {
+        let current = self.subtasks.iter().find(|s| s.phase != GoalPhase::Done);
+        let cur = match (self.stopped.as_deref(), current) {
+            (Some(reason), _) => format!("已停止：{reason}"),
+            (None, Some(s)) => format!("当前：{}（{}）", s.title, phase_name(s.phase)),
+            (None, None) => "全部完成".to_string(),
+        };
+        let paused = if self.paused { " · 已暂停" } else { "" };
+        format!(
+            "🎯 {}: {}/{} 完成 · {}{}",
+            self.goal_id,
+            self.done_count(),
+            self.subtasks.len(),
+            cur,
+            paused
+        )
+    }
+}
+
+/// 阶段的中文名（摘要用）。
+fn phase_name(p: GoalPhase) -> &'static str {
+    match p {
+        GoalPhase::Plan => "计划",
+        GoalPhase::Code => "执行",
+        GoalPhase::Review => "审查",
+        GoalPhase::Learn => "复盘",
+        GoalPhase::Done => "完成",
+    }
 }
 
 pub type ApprovalId = String;
@@ -309,6 +403,14 @@ pub enum EventMsg {
     /// 也就不会出现"某一步的增量丢了导致清单错乱"。
     TodoUpdated { items: Vec<TodoEntry> },
     GoalProgress { goal_id: GoalId, done: usize, total: usize },
+    /// 目标编排状态变化（设定 / 阶段推进 / 暂停 / 恢复 / 停止）。
+    ///
+    /// 快照是**完整**状态：回放重建取最后一条即可（kill 进程后续跑的核心）。
+    /// 目标文本会经子任务轮进入模型上下文 —— 模型可见，故必须落日志。
+    GoalUpdated { snapshot: GoalSnapshot },
+    /// 目标已被清除（清除不是快照 —— 没有目标就没有快照可发；
+    /// 宿主与回放以此显式撤销Goal 显示与状态）。
+    GoalCleared { goal_id: GoalId },
     Error { message: String },
     TurnComplete { input_tokens: u64, output_tokens: u64 },
     ShutdownComplete,
@@ -391,6 +493,12 @@ pub enum Fact {
     InstructionsLoaded { sources: Vec<String>, truncated: bool },
     /// 模型已切换（含新模型的上下文窗口，0 = 未知）。
     ModelSwitched { model: String, context_limit: u64 },
+    /// 目标编排状态（单行摘要，由 `GoalSnapshot::summary` 生成 ——
+    /// 摘要在协议层拼好，宿主直接展示，不各自拼一套）。
+    Goal(String),
+    /// 目标已清除（宿主应撤掉目标显示，而不是读最后一条快照 ——
+    /// 快照是历史，清除是现在时）。
+    GoalCleared(String),
 }
 
 /// 从事件序列抽取用户可见事实。
@@ -488,6 +596,8 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
                     context_limit: *context_limit,
                 })
             }
+            EventMsg::GoalUpdated { snapshot } => out.push(Fact::Goal(snapshot.summary())),
+            EventMsg::GoalCleared { goal_id } => out.push(Fact::GoalCleared(goal_id.clone())),
             // 其余事件不承载"必须知道"的事实：
             // TurnStarted/ToolCallBegin 是过程提示；ReasoningDelta 是思考过程；
             // PatchProposed/CheckpointSaved/GoalProgress/ShutdownComplete 属状态推进。
