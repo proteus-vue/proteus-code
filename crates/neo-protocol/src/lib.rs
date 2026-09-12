@@ -94,14 +94,20 @@ pub enum Op {
     /// 由用户显式输入的命令不再问审批 —— 等价于用户自己在 shell 里敲它。
     Shell { command: String },
     Interrupt,
-    Approve { id: ApprovalId, decision: Decision },
+    /// 落实一次审批。
+    ///
+    /// `reason` 仅在 `decision = Deny` 时有意义：用户拒绝时**为什么拒**。
+    /// 它会进入模型可见的工具结果（"用户拒绝了该调用：<理由>"）——
+    /// 模型因此知道该换个做法，而不是原样重试（真机实测过这个差别）。
+    /// 没有理由输入的宿主（exec / Web）传 `None`，行为与之前完全一致。
+    Approve { id: ApprovalId, decision: Decision, #[serde(default)] reason: Option<String> },
     /// 与 `Approve` 相同，但**只执行本步剩余的调用**，不驱动后续步骤。
     ///
     /// 供逐帧宿主（TUI）用：`Approve` 会在一次调用里把整轮剩下的
     /// 模型往返全部跑完 —— 那里可能又有多次网络请求，界面再次冻结
     /// （用户曾因此在冻结期间敲键，解冻后那些键被逐个处理，误触退出）。
     /// 逐帧宿主用这个变体，然后自己 `Pump` 逐步推进。
-    ApproveStep { id: ApprovalId, decision: Decision },
+    ApproveStep { id: ApprovalId, decision: Decision, #[serde(default)] reason: Option<String> },
     ConfigureSession { patch: SessionPatch },
     Compact,
     Fork,
@@ -269,7 +275,13 @@ pub enum EventMsg {
         #[serde(default)]
         truncated: bool,
     },
-    ApprovalRequest { id: ApprovalId, detail: String },
+    /// 需要用户审批。
+    ///
+    /// `kind` 是内核判定的**调用类别**（read / write / network / interactive），
+    /// 不是工具名 —— "总是允许"将放行的范围由它定义。它必须由内核单一事实源
+    /// 给出：宿主若按工具名自行推断，bash 这类"按命令内容分类"的工具就会
+    /// 显示成与内核实际放行范围不一致的类别（显示"只读"、实际放行"写入"）。
+    ApprovalRequest { id: ApprovalId, detail: String, #[serde(default)] kind: String },
     PatchProposed { path: String, diff: String },
     CheckpointSaved { checkpoint_id: String },
     /// 单个文件发生改动（**由工具上报**，内核据此累计）。

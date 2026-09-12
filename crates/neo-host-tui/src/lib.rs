@@ -687,8 +687,18 @@ pub struct ApprovalPrompt {
     pub summary: String,
     /// 改动预览（路径, unified diff）—— 有则显示
     pub diff: Option<(String, String)>,
+    /// 内核判定的调用类别（read/write/network/interactive）。
+    /// "总是允许"将放行的范围由它定义 —— 单一事实源在内核，
+    /// 宿主按工具名推断会与实际放行范围分叉（bash 按命令内容分类）。
+    pub kind: String,
     /// 0 = 批准一次 · 1 = 总是允许这类 · 2 = 拒绝
     pub selected: usize,
+    /// 二段确认（opencode P8）：选"总是允许"后先展示**将放行的范围**再确认，
+    /// 不直接生效。`Some(i)` = 处于确认段（0=确认 1=取消）。
+    pub confirm_always: Option<usize>,
+    /// 拒绝理由（opencode P9）：`Some(text)` = 正在输入拒绝理由，
+    /// 提交时随 `Decision::Deny` 回给模型（模型据此换个做法）。
+    pub reject_reason: Option<String>,
 }
 
 impl ApprovalPrompt {
@@ -698,11 +708,26 @@ impl ApprovalPrompt {
     pub const CHOICES: [&'static str; 3] =
         ["允许一次 once", "总是允许 always", "拒绝 reject"];
 
+    /// 二段确认的两个选项（确认 / 取消）。
+    pub const ALWAYS_CHOICES: [&'static str; 2] = ["确认 confirm", "取消 cancel"];
+
     pub fn choice_at(&self) -> neo_protocol::Decision {
         match self.selected {
             0 => neo_protocol::Decision::Allow,
             1 => neo_protocol::Decision::AllowAlways,
             _ => neo_protocol::Decision::Deny,
+        }
+    }
+
+    /// "总是允许"将放行的范围说明（人类可读）。
+    /// 数据来自内核的 `ApprovalRequest.kind`，不是按工具名猜的。
+    pub fn always_scope(&self) -> String {
+        match self.kind.as_str() {
+            "write" => "写入类调用（写文件、执行有副作用的命令）".to_string(),
+            "read" => "读取类调用（只读命令、读文件）".to_string(),
+            "network" => "网络类调用（访问网络）".to_string(),
+            "interactive" => "交互类调用（向用户提问）".to_string(),
+            _ => format!("「{}」类调用", self.kind),
         }
     }
 }
@@ -2016,12 +2041,47 @@ impl Screen<'_> {
     /// 内容刻意分三层，按"用户判断需要什么"排序：
     /// 1. **要做什么**（工具 + 参数摘要）—— 没有它用户是在盲批；
     /// 2. **改动预览**（若有）—— 决定放不放行的关键信息；
-    /// 3. 三个选项（↑↓ 选、回车确认，y/a/n 直接生效）。
+    /// 3. 三个选项（←→ 选、回车确认，y/a/n 直接生效）。
+    ///
+    /// 另有两个二段（parity P8/P9）：选"总是允许"先确认范围、
+    /// 明确选拒绝可附理由。绘制共用同一个卡片原语 `draw_modal_card`。
     fn draw_approval(&self, g: &mut Grid, ap: &ApprovalPrompt, chrome_top: usize) {
-        // 范式对齐 opencode（docs/opencode-parity.md §2、§3）：
-        //   遮罩 → 面板（底色 + 左竖条）→ 内容 → 独立底色的选项条（药丸）
-        // 不用四角框：层级来自底色与单边条，边框会把内容"关进盒子"、吃宽度。
-        let w = self.cols.saturating_sub(6).min(88).max(36);
+        // ── 拒绝理由段（P9）──────────────────────────────────────
+        if let Some(reason) = &ap.reject_reason {
+            let body = vec![
+                ("△ 拒绝".to_string(), Tone::Warning),
+                ("  可附一句理由，随拒绝回给模型：".to_string(), Tone::Text),
+                (format!("  ▸ {reason}▏"), Tone::Text),
+                ("  （留空则不带理由）".to_string(), Tone::Border),
+            ];
+            self.draw_modal_card(
+                g,
+                body,
+                &[],
+                0,
+                "enter 提交  esc 返回  ctrl+c 直接拒绝",
+                chrome_top,
+            );
+            return;
+        }
+        // ── always 确认段（P8）────────────────────────────────────
+        if let Some(sel) = ap.confirm_always {
+            let body = vec![
+                ("△ 总是允许".to_string(), Tone::Warning),
+                ("  在 Neo 重启之前，这类调用将不再询问：".to_string(), Tone::Text),
+                (format!("  • {}", ap.always_scope()), Tone::Text),
+            ];
+            self.draw_modal_card(
+                g,
+                body,
+                &ApprovalPrompt::ALWAYS_CHOICES,
+                sel,
+                "⇆ 选择  enter 确认  esc 取消",
+                chrome_top,
+            );
+            return;
+        }
+        // ── 选择段 ────────────────────────────────────────────────
         let mut body: Vec<(String, Tone)> = Vec::new();
         // 两行标题（与 opencode 一致）：
         //   ① 固定的"需要审批"（warning 三角）—— 说明**这是什么**
@@ -2052,6 +2112,32 @@ impl Screen<'_> {
         }
         // 不再显示内核的原始 detail（"写入类调用需确认"）——
         // 类型化标题已经更准确地说明了在批什么，重复一遍只是噪音。
+        self.draw_modal_card(
+            g,
+            body,
+            &ApprovalPrompt::CHOICES,
+            ap.selected,
+            "⇆ 选择  enter 确认  esc 拒绝",
+            chrome_top,
+        );
+    }
+
+    /// 模态卡片绘制原语：遮罩 → 面板（底色 + 左竖条）→ 内容 →
+    /// 独立底色的选项条（横向药丸）+ 右侧键位提示。
+    ///
+    /// 所有模态（审批三段、以及今后的新界面）都走这一个原语 ——
+    /// "每个页面各长一副样子"正是打地鼠的温床（见 docs/opencode-parity.md 纪律）。
+    /// `choices` 为空时只画提示条（文本输入段没有药丸）。
+    fn draw_modal_card(
+        &self,
+        g: &mut Grid,
+        body: Vec<(String, Tone)>,
+        choices: &[&str],
+        selected: usize,
+        hint: &str,
+        chrome_top: usize,
+    ) {
+        let w = self.cols.saturating_sub(6).min(88).max(36);
         // 高度：内容 + 选项条(1) + 上下内边距
         let h = body.len() + 3;
         if h + 2 >= chrome_top || w < 36 {
@@ -2087,8 +2173,8 @@ impl Screen<'_> {
         let bar_row = top + h - 2;
         g.fill_bg(bar_row, bar_row + 1, left + 1, left + w, Bg::Element);
         let mut x = left + 2;
-        for (i, label) in ApprovalPrompt::CHOICES.iter().enumerate() {
-            let sel = i == ap.selected;
+        for (i, label) in choices.iter().enumerate() {
+            let sel = i == selected;
             let text = format!(" {label} ");
             let tw = width::display_width(&text);
             if x + tw >= left + w - 1 {
@@ -2105,7 +2191,6 @@ impl Screen<'_> {
             x += tw + 1;
         }
         // ⑤ 右侧键位提示（opencode 底部右侧常驻）
-        let hint = "⇆ 选择  enter 确认  esc 拒绝";
         let hw = width::display_width(hint);
         if left + w > hw + 4 && left + w > x + hw + 2 {
             g.put(bar_row, left + w - hw - 1, hint, Tone::Muted);
@@ -2838,10 +2923,14 @@ pub fn latest_approval_id(events: &[EventMsg]) -> Option<String> {
 /// 一张卡片的内容 —— 用户要看到"批的是什么"，而不是只有一句
 /// "写入类调用需确认"。
 fn build_approval_prompt(events: &[EventMsg]) -> Option<ApprovalPrompt> {
-    let detail = events.iter().rev().find_map(|e| match e {
-        EventMsg::ApprovalRequest { detail, .. } => Some(detail.clone()),
+    // 最后一个审批请求是待批的那个（内核一次只有一个未决审批）
+    let last = events.iter().rev().find_map(|e| match e {
+        EventMsg::ApprovalRequest { detail, kind, .. } => {
+            Some((detail.clone(), kind.clone()))
+        }
         _ => None,
     })?;
+    let (detail, kind) = last;
     // 紧邻的 PatchProposed 是本次要批的改动（内核在审批前发出）
     let diff = events.iter().rev().find_map(|e| match e {
         EventMsg::PatchProposed { path, diff } => Some((path.clone(), diff.clone())),
@@ -2876,7 +2965,17 @@ fn build_approval_prompt(events: &[EventMsg]) -> Option<ApprovalPrompt> {
         other => ("⚙".to_string(), format!("调用工具 {other}"), String::new()),
     };
     let _ = name;
-    Some(ApprovalPrompt { detail, title, icon, summary, diff, selected: 0 })
+    Some(ApprovalPrompt {
+        detail,
+        title,
+        icon,
+        summary,
+        diff,
+        kind,
+        selected: 0,
+        confirm_always: None,
+        reject_reason: None,
+    })
 }
 
 /// 就当前审批做出决定并提交给内核，若还有下一个审批则重建卡片。
@@ -2889,6 +2988,7 @@ fn decide_approval<F>(
     events: &mut Vec<EventMsg>,
     submit: &mut F,
     decision: neo_protocol::Decision,
+    reason: Option<String>,
 ) -> bool
 where
     F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
@@ -2899,7 +2999,7 @@ where
     // 后者会在一次调用里把整轮剩下的模型往返全跑完 —— 审批之后界面又冻结，
     // 用户在冻结期间敲的键会在解冻后被逐个处理（误触退出的来源之一）。
     // 剩余步骤由调用方用 `Op::Pump` 逐步推进。
-    match submit(neo_protocol::Op::ApproveStep { id, decision }) {
+    match submit(neo_protocol::Op::ApproveStep { id, decision, reason }) {
         Ok(produced) => {
             *outstanding = latest_approval_id(&produced);
             events.extend(produced);
@@ -2926,6 +3026,158 @@ pub fn parse_approval_answer(s: &str) -> Option<ApprovalAnswer> {
         "y" | "yes" => Some(ApprovalAnswer::Allow),
         "a" | "always" | "all" => Some(ApprovalAnswer::AllowAlways),
         "n" | "no" => Some(ApprovalAnswer::Deny),
+        _ => None,
+    }
+}
+
+/// 审批模态里一次按键的**动作**。纯状态修改不产生动作（返回 None）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalAction {
+    /// 提交审批决定。`reason` 仅在拒绝时有意义（parity P9）。
+    Decide(neo_protocol::Decision, Option<String>),
+    /// 打开完整 diff 查看器：大改动时 10 行预览不够判断。
+    /// 查看器是独占全屏模式，关闭后回到本卡片（审批仍待答）。
+    OpenDiff,
+}
+
+/// 审批模态的按键处理（纯函数，可脱离终端单测）。
+///
+/// 三个阶段（`ApprovalPrompt` 上的字段即状态机）：
+/// 1. **选择段**：三个药丸（允许一次 / 总是允许 / 拒绝）；
+/// 2. **always 确认段**（parity P8）：选"总是允许"先展示**将放行的范围**再确认，
+///    不直接生效 —— 用户应当知道自己授权了什么；范围语义是"直到重启"；
+/// 3. **拒绝理由段**（parity P9）：明确选了拒绝（回车 / `n`）时输入理由，
+///    随 `Decision::Deny` 回给模型 —— 模型据此换个做法而不是原样重试。
+///
+/// 快捷键保持与已对齐的 opencode 语义一致（parity P6/P12）：
+/// 选择段 `esc` / ctrl+c = **立即拒绝**（快速通道不新增摩擦）；
+/// 确认段 esc / ctrl+c = 取消（esc 恒等于最后一个选项）。
+pub fn approval_key(ap: &mut ApprovalPrompt, key: Key) -> Option<ApprovalAction> {
+    // ── 拒绝理由段：文本输入 ──────────────────────────────────────
+    if ap.reject_reason.is_some() {
+        match key {
+            Key::Enter => {
+                let reason = ap.reject_reason.take();
+                // 空白理由 = 不带理由的普通拒绝（保留快速语义）
+                let reason = reason.filter(|r| !r.trim().is_empty());
+                return Some(ApprovalAction::Decide(neo_protocol::Decision::Deny, reason));
+            }
+            // esc = 退出当前输入、回到选择段（文本输入的惯例；用户可能改主意）
+            Key::Escape => ap.reject_reason = None,
+            // ctrl+c = 快速脱身：不带理由直接拒绝，不再问第二次
+            Key::Quit => {
+                ap.reject_reason = None;
+                return Some(ApprovalAction::Decide(neo_protocol::Decision::Deny, None));
+            }
+            Key::Backspace => {
+                if let Some(r) = ap.reject_reason.as_mut() {
+                    r.pop();
+                }
+            }
+            Key::Char(c) => {
+                if let Some(r) = ap.reject_reason.as_mut() {
+                    // 有界：理由是给模型看的一句话，不是文章（内存有界性是内核义务）
+                    if r.chars().count() < 200 {
+                        r.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+        return None;
+    }
+    // ── always 确认段 ────────────────────────────────────────────
+    if ap.confirm_always.is_some() {
+        match key {
+            Key::Left | Key::Char('h') | Key::Up | Key::Char('k') => {
+                ap.confirm_always = Some(0);
+            }
+            Key::Right | Key::Char('l') | Key::Down | Key::Char('j') | Key::Tab => {
+                ap.confirm_always = Some(1);
+            }
+            Key::Char('y') | Key::Char('Y') => {
+                ap.confirm_always = None;
+                return Some(ApprovalAction::Decide(neo_protocol::Decision::AllowAlways, None));
+            }
+            // esc / ctrl+c / n = 取消 → 回选择段（审批还在，不丢）
+            Key::Escape | Key::Quit | Key::Char('n') | Key::Char('N') => {
+                ap.confirm_always = None;
+            }
+            Key::Enter | Key::Char(' ') => {
+                let confirmed = ap.confirm_always == Some(0);
+                ap.confirm_always = None;
+                if confirmed {
+                    return Some(ApprovalAction::Decide(neo_protocol::Decision::AllowAlways, None));
+                }
+            }
+            _ => {}
+        }
+        return None;
+    }
+    // ── 选择段 ───────────────────────────────────────────────────
+    match key {
+        // ctrl+c = 拒绝（opencode 把 app.exit 在权限框内重绑为 Reject）
+        Key::Quit => {
+            ap.selected = ApprovalPrompt::CHOICES.len() - 1;
+            Some(ApprovalAction::Decide(ap.choice_at(), None))
+        }
+        Key::Up | Key::Char('k') => {
+            ap.selected = ap.selected.saturating_sub(1);
+            None
+        }
+        Key::Down | Key::Char('j') | Key::Tab => {
+            if ap.selected + 1 < ApprovalPrompt::CHOICES.len() {
+                ap.selected += 1;
+            }
+            None
+        }
+        // y / a / n 一次按键生效（与选项文案一致）—— 但 a / n 现在先进入
+        // 各自的二段（确认范围 / 填理由），**不直接提交**（P8/P9 的本意）。
+        Key::Char('y') | Key::Char('Y') => {
+            ap.selected = 0;
+            Some(ApprovalAction::Decide(ap.choice_at(), None))
+        }
+        Key::Char('a') | Key::Char('A') => {
+            ap.selected = 1;
+            ap.confirm_always = Some(0);
+            None
+        }
+        Key::Char('n') | Key::Char('N') => {
+            ap.selected = 2;
+            ap.reject_reason = Some(String::new());
+            None
+        }
+        // ←/→ 在横向药丸间移动
+        Key::Left | Key::Char('h') => {
+            ap.selected = ap.selected.saturating_sub(1);
+            None
+        }
+        Key::Right | Key::Char('l') => {
+            if ap.selected + 1 < ApprovalPrompt::CHOICES.len() {
+                ap.selected += 1;
+            }
+            None
+        }
+        // d = 看完整改动：大 diff 时卡片里的 10 行预览不够判断，
+        // 而提示写了"d 看完整"就必须真的能按 —— 提示按不到的键比不提示更糟。
+        // 查看器是独占全屏模式，关闭后回到本卡片（审批仍待答）。
+        Key::Char('d') if ap.diff.is_some() => return Some(ApprovalAction::OpenDiff),
+        Key::Enter | Key::Char(' ') => match ap.selected {
+            1 => {
+                ap.confirm_always = Some(0);
+                None
+            }
+            2 => {
+                ap.reject_reason = Some(String::new());
+                None
+            }
+            _ => Some(ApprovalAction::Decide(ap.choice_at(), None)),
+        },
+        // esc = 拒绝（快速通道，不带理由 —— 与已验证的 P6/P12 行为一致）
+        Key::Escape => {
+            ap.selected = ApprovalPrompt::CHOICES.len() - 1;
+            Some(ApprovalAction::Decide(ap.choice_at(), None))
+        }
         _ => None,
     }
 }
@@ -5674,110 +5926,65 @@ custom_bg.is_some(),
 
         // ── 审批对话框打开时，按键**独占**交给它 ────────────────────
         //
-        // 放在弹窗/输入框之前：审批是"必须先回答才能继续"的模态，
-        // 让 y/n/a 成为**一次按键**（而不是"打进输入框再回车"）。
+        // 放在弹窗/输入框之前：审批是"必须先回答才能继续"的模态。
+        // 三段状态机（选择 / always 确认 / 拒绝理由）抽成了纯函数
+        // `approval_key`，可脱离终端单测 —— 审批交互错了会让"需要审批"
+        // 变成静默挂起。
         if approval.is_some() {
             // 先算出"这次按键要做什么"，再动 approval ——
             // 持着 `as_mut()` 的借用时不能同时把 approval 传给助手函数。
-            let mut decision: Option<neo_protocol::Decision> = None;
-            {
+            let action: Option<ApprovalAction> = {
                 let ap = approval.as_mut().expect("上面已判 is_some");
-                match key {
-                    // **ctrl+c 在这里 = 拒绝，不是退出**。
-                    //
-                    // opencode 的权限对话框把 `app.exit`（默认 ctrl+c/ctrl+d）
-                    // **重绑定**为 "Reject permission"（permission.tsx 的
-                    // commands 里 `name: "app.exit"` → `onSelect(escapeKey)`）。
-                    // 我们之前是 `Key::Quit => break`（直接退出应用）—— 用户在
-                    // 审批框上按 ctrl+c 想取消，结果整个会话没了（"突然退出会话"）。
-                    Key::Quit => {
-                        ap.selected = ApprovalPrompt::CHOICES.len() - 1;
-                        decision = Some(ap.choice_at());
-                    }
-                    Key::Up | Key::Char('k') => {
-                        ap.selected = ap.selected.saturating_sub(1);
-                    }
-                    Key::Down | Key::Char('j') | Key::Tab => {
-                        if ap.selected + 1 < ApprovalPrompt::CHOICES.len() {
-                            ap.selected += 1;
-                        }
-                    }
-                    // y / a / n **一次按键就生效**：选项文案里写着（y）/（a）/（n），
-                    // 若只移动高亮就与文案不符 —— 用户按 y 以为批了、实际还要回车，
-                    // 这正是"按了 y 像没反应"的来源。
-                    // 便捷键：y/a/n 直接选定并生效（与选项文案的 once/always/reject 对应；
-                    // 键位提示在底部右侧，不塞进标签里）
-                    Key::Char('y') | Key::Char('Y') => {
-                        ap.selected = 0;
-                        decision = Some(ap.choice_at());
-                    }
-                    Key::Char('a') | Key::Char('A') => {
-                        ap.selected = 1;
-                        decision = Some(ap.choice_at());
-                    }
-                    Key::Char('n') | Key::Char('N') => {
-                        ap.selected = 2;
-                        decision = Some(ap.choice_at());
-                    }
-                    // ←/→ 在选项间移动（opencode 用左右键，不是上下）——
-                    // 选项是**横向药丸**，用上下键不符合空间直觉。
-                    Key::Left | Key::Char('h') => {
-                        ap.selected = ap.selected.saturating_sub(1);
-                    }
-                    Key::Right | Key::Char('l') => {
-                        if ap.selected + 1 < ApprovalPrompt::CHOICES.len() {
-                            ap.selected += 1;
-                        }
-                    }
-                    Key::Enter | Key::Char(' ') => decision = Some(ap.choice_at()),
-                    // Esc = **拒绝**（opencode 的语义：esc 总等于最后一个选项，
-                    // 权限场景最后一项就是 reject）。之前是"收起但不作答"，
-                    // 用户按 esc 看不到任何结果，只会以为卡住了。
-                    Key::Escape => {
-                        ap.selected = ApprovalPrompt::CHOICES.len() - 1;
-                        decision = Some(ap.choice_at());
-                    }
-                    _ => {}
+                approval_key(ap, key)
+            };
+            match action {
+                Some(ApprovalAction::OpenDiff) => {
+                    // 卡片保持打开（审批仍待答）；查看器独占全屏，
+                    // 关闭后下一帧自然回到卡片。
+                    open_diff_viewer(&events, &mut diff_viewer);
                 }
-            }
-            if let Some(d) = decision {
-                let resume = decide_approval(
-                    &mut approval,
-                    &mut outstanding,
-                    &mut events,
-                    &mut submit,
-                    d,
-                );
-                if outstanding.is_some() {
-                    // 还有下一个审批：换内容继续问
-                    approval = build_approval_prompt(&events);
-                } else if resume {
-                    // 没有待审批了 → 逐步推进本轮剩余步骤（每步重绘，
-                    // 不再出现"批准后界面又冻住"）
-                    pump_until_boundary(
-                        &mut submit,
-                        &mut events,
+                Some(ApprovalAction::Decide(d, reason)) => {
+                    let resume = decide_approval(
+                        &mut approval,
                         &mut outstanding,
-                        &about,
-                        &empty_input,
-                        &view_state,
-                        display,
-                        sidebar_open,
-                        theme_name,
-                        current_appearance,
-                        custom_bg.as_ref(),
-                        &mut stdout,
-                        &mut stdin,
-                        cols,
-                        rows,
-                    )?;
-                    approval = if outstanding.is_some() {
-                        build_approval_prompt(&events)
-                    } else {
-                        None
-                    };
+                        &mut events,
+                        &mut submit,
+                        d,
+                        reason,
+                    );
+                    if outstanding.is_some() {
+                        // 还有下一个审批：换内容继续问
+                        approval = build_approval_prompt(&events);
+                    } else if resume {
+                        // 没有待审批了 → 逐步推进本轮剩余步骤（每步重绘，
+                        // 不再出现"批准后界面又冻住"）
+                        pump_until_boundary(
+                            &mut submit,
+                            &mut events,
+                            &mut outstanding,
+                            &about,
+                            &empty_input,
+                            &view_state,
+                            display,
+                            sidebar_open,
+                            theme_name,
+                            current_appearance,
+                            custom_bg.as_ref(),
+                            &mut stdout,
+                            &mut stdin,
+                            cols,
+                            rows,
+                        )?;
+                        approval = if outstanding.is_some() {
+                            build_approval_prompt(&events)
+                        } else {
+                            None
+                        };
+                    }
+                    status = idle_or_approval(&outstanding);
                 }
-                status = idle_or_approval(&outstanding);
+                // 其余按键只改了卡片状态（移动高亮/进入二段），没有要提交的动作
+                None => {}
             }
             dirty = true;
             continue;
@@ -6558,6 +6765,8 @@ custom_bg.is_some(),
                             ApprovalAnswer::AllowAlways => neo_protocol::Decision::AllowAlways,
                             ApprovalAnswer::Deny => neo_protocol::Decision::Deny,
                         },
+                        // 文本应答通道没有理由输入（模态才有），拒绝退回固定文案
+                        reason: None,
                     };
                     match submit(op) {
                         Ok(produced) => {
@@ -9695,9 +9904,9 @@ mod tests {
     fn finds_the_latest_outstanding_approval() {
         let evs = vec![
             EventMsg::TurnStarted { turn_id: "t".into() },
-            EventMsg::ApprovalRequest { id: "a1".into(), detail: "d".into() },
+            EventMsg::ApprovalRequest { id: "a1".into(), detail: "d".into(), kind: "write".into() },
             EventMsg::ToolCallEnd { id: "c".into(), exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false },
-            EventMsg::ApprovalRequest { id: "a2".into(), detail: "d".into() },
+            EventMsg::ApprovalRequest { id: "a2".into(), detail: "d".into(), kind: "write".into() },
         ];
         assert_eq!(latest_approval_id(&evs), Some("a2".to_string()));
         assert_eq!(latest_approval_id(&[]), None);
@@ -9737,7 +9946,10 @@ mod tests {
             icon: "#".into(),
             summary: "$ echo hi".into(),
             diff: None,
+            kind: "write".into(),
             selected: 0,
+            confirm_always: None,
+            reject_reason: None,
         };
         let mut ap_state = appearance::Appearance::default();
         ap_state.background = appearance::Background::Stars;
@@ -9774,7 +9986,10 @@ mod tests {
             icon: "#".into(),
             summary: "$ rm -rf /tmp/x".into(),
             diff: Some(("a.txt".into(), "@@ -1 +1 @@\n-old\n+new".into())),
+            kind: "write".into(),
             selected: 1,
+            confirm_always: None,
+            reject_reason: None,
         };
         let out = Screen {
             cols: 120, rows: 40, facts: &[], input: &ed, status: "",
@@ -9819,6 +10034,110 @@ mod tests {
         }
         assert_eq!(parse_approval_answer("maybe"), None);
         assert_eq!(parse_approval_answer(""), None);
+    }
+
+    /// 构造一个默认的审批卡片（选择段）。
+    fn approval_prompt() -> ApprovalPrompt {
+        ApprovalPrompt {
+            detail: "写入类调用需确认".into(),
+            title: "Shell 命令".into(),
+            icon: "#".into(),
+            summary: "$ rm -rf /tmp/x".into(),
+            diff: None,
+            kind: "write".into(),
+            selected: 0,
+            confirm_always: None,
+            reject_reason: None,
+        }
+    }
+
+    #[test]
+    fn allow_always_never_takes_effect_without_the_scope_confirmation() {
+        // parity P8：`a` / 回车选"总是允许"不得直接生效 —— 必须先展示
+        // 将放行的范围，用户确认后（且仅在确认后）才提交 AllowAlways。
+        let mut ap = approval_prompt();
+        assert_eq!(approval_key(&mut ap, Key::Char('a')), None, "a 不得直接提交");
+        assert_eq!(ap.confirm_always, Some(0), "应进入范围确认段");
+        // 取消（esc）= 回选择段，什么都没提交
+        assert_eq!(approval_key(&mut ap, Key::Escape), None);
+        assert_eq!(ap.confirm_always, None, "取消后应回到选择段");
+        // 再进确认段，回车在"确认"上 → 这一次才真正提交 AllowAlways
+        assert_eq!(approval_key(&mut ap, Key::Char('a')), None);
+        assert_eq!(
+            approval_key(&mut ap, Key::Enter),
+            Some(ApprovalAction::Decide(neo_protocol::Decision::AllowAlways, None)),
+            "确认段回车 = 放行这一类"
+        );
+    }
+
+    #[test]
+    fn always_scope_names_the_kernel_classified_kind() {
+        // 范围列表说的是内核判定的类别，不是工具名推断
+        let ap = approval_prompt();
+        assert_eq!(ap.always_scope(), "写入类调用（写文件、执行有副作用的命令）");
+        let mut net = approval_prompt();
+        net.kind = "network".into();
+        assert!(net.always_scope().contains("网络"), "网络类要有自己的说法");
+    }
+
+    #[test]
+    fn reject_reason_is_collected_then_sent_with_the_deny() {
+        // parity P9：明确选拒绝（`n` 或回车在 reject 上）→ 进理由段；
+        // 带理由提交 / 空提交 / esc 返回 / ctrl+c 快速拒绝，四条路径都要对。
+        let mut ap = approval_prompt();
+        assert_eq!(approval_key(&mut ap, Key::Char('n')), None, "n 不得直接提交");
+        assert_eq!(ap.reject_reason.as_deref(), Some(""), "应进入理由输入段");
+        // esc = 返回选择段（改主意），不提交
+        assert_eq!(approval_key(&mut ap, Key::Escape), None);
+        assert!(ap.reject_reason.is_none(), "esc 后应回到选择段");
+        // 回车在 reject 药丸上同样进理由段（另一条明确拒绝路径）
+        ap.selected = 2;
+        assert_eq!(approval_key(&mut ap, Key::Enter), None);
+        // 输入理由后回车 → Deny + 理由
+        assert_eq!(approval_key(&mut ap, Key::Char('别')), None);
+        assert_eq!(approval_key(&mut ap, Key::Char('动')), None);
+        assert_eq!(
+            approval_key(&mut ap, Key::Enter),
+            Some(ApprovalAction::Decide(neo_protocol::Decision::Deny, Some("别动".into()))),
+            "enter = 带理由拒绝"
+        );
+        // 空理由提交 = 不带理由的普通拒绝（不把空字符串发给内核）
+        ap.reject_reason = Some("   ".into());
+        assert_eq!(
+            approval_key(&mut ap, Key::Enter),
+            Some(ApprovalAction::Decide(neo_protocol::Decision::Deny, None)),
+            "空白理由应视为不带理由"
+        );
+        // ctrl+c = 快速脱身：不带理由直接拒绝
+        ap.reject_reason = Some("半截".into());
+        assert_eq!(
+            approval_key(&mut ap, Key::Quit),
+            Some(ApprovalAction::Decide(neo_protocol::Decision::Deny, None)),
+            "ctrl+c 不得退出应用，而是直接拒绝"
+        );
+    }
+
+    #[test]
+    fn build_approval_prompt_takes_kind_from_the_kernel_event() {
+        let events = vec![
+            EventMsg::ToolCallBegin { id: "c1".into(), name: "bash".into(), arguments: serde_json::json!({"cmd": "ls"}) },
+            EventMsg::ApprovalRequest { id: "a1".into(), detail: "需确认".into(), kind: "read".into() },
+        ];
+        let ap = build_approval_prompt(&events).expect("应能构造审批卡片");
+        assert_eq!(ap.kind, "read", "kind 必须来自内核事件（bash 按 ls 本该是 read）");
+        assert!(ap.confirm_always.is_none() && ap.reject_reason.is_none(), "初始应在选择段");
+    }
+
+    #[test]
+    fn d_opens_the_full_diff_only_when_there_is_a_diff() {
+        // 卡片提示"d 看完整"—— 提示的键必须真的能按，且仅在真有 diff 时
+        let mut with_diff = ApprovalPrompt {
+            diff: Some(("a.txt".into(), "@@ -1 +1 @@".into())),
+            ..approval_prompt()
+        };
+        assert_eq!(approval_key(&mut with_diff, Key::Char('d')), Some(ApprovalAction::OpenDiff));
+        let mut no_diff = approval_prompt();
+        assert_eq!(approval_key(&mut no_diff, Key::Char('d')), None, "无 diff 时 d 不得假装打开");
     }
 
     #[test]

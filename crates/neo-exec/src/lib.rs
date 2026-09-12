@@ -79,7 +79,8 @@ pub fn run_task(
         }
         // Decision 是 Copy，取引用后的副本即可
         let decision = opts.on_approval;
-        match kernel.submit(Op::Approve { id, decision }) {
+        // 无人值守没有理由输入，reason = None（拒绝文案退回固定一句）
+        match kernel.submit(Op::Approve { id, decision, reason: None }) {
             Ok(events) => render(&events, opts, &mut log),
             Err(e) => {
                 ok = false;

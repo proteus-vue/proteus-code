@@ -178,8 +178,8 @@ This will allow the following patterns until OpenCode is restarted
 | P5 | 选项条 | 独立底色带(element) | ✅ 底部 element 底色带 | ✅ 已改 |
 | P6 | esc 语义 | = 最后一个选项（reject） | ✅ esc = 拒绝 | ✅ 已改 |
 | P7 | 权限标题 | 按类型给图标+具体描述 | ✅ `△ 需要审批` + `→ 编辑 <path>` / `# Shell 命令` + `$ <cmd>` | ✅ 已改 |
-| P8 | always 语义 | 二次确认 + 列出范围 + "直到重启" | ❌ 仍直接生效（待做：确认段 + 范围列表） | ⬜ 待做 |
-| P9 | 拒绝带理由 | 支持 | ❌ 无（需协议加 message 字段） | ⬜ 待做 |
+| P8 | always 语义 | 二次确认 + 列出范围 + "直到重启" | ✅ 确认段列出内核判定的**类别**（`ApprovalRequest.kind` 单一事实源），文案"在 Neo 重启之前，这类调用将不再询问"；esc/ctrl+c 取消回选择段 | ✅ 已改 |
+| P9 | 拒绝带理由 | 支持 | ✅ 明确选拒绝（回车/`n`）进理由段，随 `Op::Approve{reason}` 回给模型（进 stderr，模型可见）；esc/ctrl+c = 不带理由快速拒绝 | ✅ 已改 |
 | P10 | 键位提示 | 底部右侧常驻 | ✅ `⇆ 选择 enter 确认 esc 拒绝` | ✅ 已改 |
 | P11 | 左右键选择 | `←/→` 在选项间移动 | ✅ 已支持（含 h/l） | ✅ 已改 |
 | P12 | **ctrl+c 语义（分层）** | 权限框内 = **拒绝**（`app.exit` 被重绑为 Reject）；运行中 = 中断；空闲 = 退出 | ✅ 三段对齐 | ✅ 已改 |

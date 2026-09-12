@@ -525,6 +525,18 @@ fn describe_kind(kind: CallKind) -> &'static str {
     }
 }
 
+/// 类别的协议名（`EventMsg::ApprovalRequest.kind`）。
+/// 审批卡片上"总是允许"将放行的范围由此单一事实源给出 ——
+/// 宿主按工具名自行推断会与内核的实际放行范围分叉。
+fn call_kind_name(kind: CallKind) -> &'static str {
+    match kind {
+        CallKind::Read => "read",
+        CallKind::Write => "write",
+        CallKind::Network => "network",
+        CallKind::Interactive => "interactive",
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // 内核：turn/step 主循环
 // ══════════════════════════════════════════════════════════════════════
@@ -812,12 +824,12 @@ impl Kernel {
                 // opencode 的 `!` 只把输出附到会话里，模型下一轮才看到它。
             }
 
-            Op::Approve { id, decision } => {
-                self.resolve_approval(id, decision, true)?;
+            Op::Approve { id, decision, reason } => {
+                self.resolve_approval(id, decision, reason, true)?;
             }
             // 同 `Approve`，但**不驱动**后续步骤（逐帧宿主用，配合 `Op::Pump`）。
-            Op::ApproveStep { id, decision } => {
-                self.resolve_approval(id, decision, false)?;
+            Op::ApproveStep { id, decision, reason } => {
+                self.resolve_approval(id, decision, reason, false)?;
             }
 
             Op::Rewind { turns } => {
@@ -1139,7 +1151,11 @@ impl Kernel {
                     }
                     // 确定性 id：由 (turn, step, index) 派生，不用随机/时钟
                     let id = format!("approval-{}-{}-{}", self.turn_counter, self.step_counter, index);
-                    let ev = EventMsg::ApprovalRequest { id: id.clone(), detail };
+                    let ev = EventMsg::ApprovalRequest {
+                        id: id.clone(),
+                        detail,
+                        kind: call_kind_name(kind).to_string(),
+                    };
                     self.emit_and_log(&ev)?;
                     self.pending = Some(PendingApproval { calls: calls.to_vec(), index });
                     self.state = KernelState::AwaitingApproval { id };
@@ -1153,6 +1169,10 @@ impl Kernel {
     /// 恢复后继续同一步剩余调用；跑完则进入下一步。
     /// 落实一次审批：执行/记类别/记拒绝，然后按 `drive` 决定是否继续跑完整轮。
     ///
+    /// `reason` 仅在拒绝时使用：用户的拒绝理由进入模型可见的工具结果 ——
+    /// 模型因此知道"为什么被拒"，可以换个做法而不是重试同一件事
+    /// （真机实测：不给理由时模型会说"工具返回空、无报错"然后原样重试）。
+    ///
     /// `drive = false`（逐帧宿主）时只执行**本步剩余调用**就返回 ——
     /// 后续步骤由宿主 `Op::Pump` 逐步推进。这样审批之后也不会出现
     /// "一次调用里跑完多次网络往返"的冻结。
@@ -1160,6 +1180,7 @@ impl Kernel {
         &mut self,
         id: ApprovalId,
         decision: Decision,
+        reason: Option<String>,
         drive: bool,
     ) -> Result<(), KernelError> {
         let Some(pending) = self.pending.take() else {
@@ -1178,6 +1199,11 @@ impl Kernel {
                 self.execute_one(&call)?;
             }
             Decision::Deny => {
+                // 拒绝理由进 stderr（工具结果的组成部分，模型可见即已落日志）
+                let deny_text = match reason.as_deref().map(str::trim) {
+                    Some(r) if !r.is_empty() => format!("用户拒绝了该调用：{r}"),
+                    _ => "用户拒绝了该调用".to_string(),
+                };
                 let ev = EventMsg::ToolCallEnd {
                     id: call.id.clone(),
                     exit_code: -1,
@@ -1189,7 +1215,7 @@ impl Kernel {
                 self.messages.push(Message::ToolResult {
                     id: call.id,
                     name: call.name,
-                    output: denied_output("用户拒绝了该调用"),
+                    output: denied_output(&deny_text),
                 });
             }
         }

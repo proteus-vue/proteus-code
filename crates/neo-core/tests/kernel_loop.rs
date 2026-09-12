@@ -262,7 +262,7 @@ fn a_write_suspends_the_turn_and_approval_resumes_it() {
         "挂起时不得结束本轮");
 
     // 批准 → 执行 → 继续下一步 → 收尾
-    let resumed = k.submit(Op::Approve { id: ask_id, decision: Decision::Allow }).unwrap();
+    let resumed = k.submit(Op::Approve { id: ask_id, decision: Decision::Allow, reason: None }).unwrap();
     assert_eq!(*seen.lock().unwrap(), vec!["rm -rf /tmp/x".to_string()], "批准后应执行");
     assert!(matches!(k.state(), KernelState::Idle));
     assert!(resumed.iter().any(|e| matches!(e, EventMsg::TurnComplete { .. })),
@@ -285,7 +285,7 @@ fn denial_records_a_tool_result_without_executing() {
     let events = k.submit(Op::UserTurn { text: "x".into(), refs: vec![] }).unwrap();
     let id = events.iter().find_map(|e| match e { EventMsg::ApprovalRequest { id, .. } => Some(id.clone()), _ => None }).unwrap();
 
-    k.submit(Op::Approve { id, decision: Decision::Deny }).unwrap();
+    k.submit(Op::Approve { id, decision: Decision::Deny, reason: None }).unwrap();
     assert!(seen.lock().unwrap().is_empty(), "拒绝后不得执行");
     // 拒绝也要留一条工具结果，模型才知道"这条路被否决"
     assert!(k.messages().iter().any(|m| matches!(
@@ -294,12 +294,60 @@ fn denial_records_a_tool_result_without_executing() {
 }
 
 #[test]
+fn denial_reason_reaches_the_model_visible_result() {
+    // 拒绝理由是模型可见内容（parity P9）：模型据此换个做法而不是原样重试。
+    // 真机实测过差别：不带理由时模型会说"工具返回空、无报错"然后重试。
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(RecordingTool { seen: seen.clone() }));
+    let script = vec![
+        vec![tool_call("w1", "bash", serde_json::json!({"cmd": "rm -rf /tmp/x"}))],
+        vec![ModelDelta::Text("ok".into())],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)), r,
+        Box::new(InMemoryPersistence::new()), ExecMode::Default,
+    );
+    let events = k.submit(Op::UserTurn { text: "x".into(), refs: vec![] }).unwrap();
+    let id = events.iter().find_map(|e| match e { EventMsg::ApprovalRequest { id, .. } => Some(id.clone()), _ => None }).unwrap();
+
+    k.submit(Op::Approve { id, decision: Decision::Deny, reason: Some("别动 /tmp".into()) }).unwrap();
+    assert!(seen.lock().unwrap().is_empty(), "拒绝后不得执行");
+    assert!(k.messages().iter().any(|m| matches!(
+        m, Message::ToolResult { output, .. }
+            if output.exit_code == -1 && output.stderr.contains("用户拒绝了该调用：别动 /tmp")
+    )), "拒绝理由必须进入模型可见的工具结果");
+    // 理由也必须随事件落盘（模型可见即已落日志 —— 由 ToolResult 进历史保证）
+}
+
+#[test]
+fn approval_request_carries_the_kernel_classified_kind() {
+    // "总是允许"放行的范围由内核判定（parity P8 的范围列表数据源）：
+    // 事件必须带 kind，宿主不得按工具名自行推断（bash 按命令内容分类）。
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(MockTool::writing("w")));
+    let script = vec![
+        vec![tool_call("w1", "w", serde_json::json!({}))],
+        vec![ModelDelta::Text("ok".into())],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)), r,
+        Box::new(InMemoryPersistence::new()), ExecMode::Default,
+    );
+    let events = k.submit(Op::UserTurn { text: "x".into(), refs: vec![] }).unwrap();
+    let kind = events.iter().find_map(|e| match e {
+        EventMsg::ApprovalRequest { kind, .. } => Some(kind.clone()), _ => None,
+    }).expect("审批请求必须带类别");
+    assert_eq!(kind, "write", "写工具应被内核判为 write");
+}
+
+#[test]
 fn approving_without_a_pending_request_is_an_error() {
     let mut k = kernel_with(
         Box::new(ScriptedModelProvider::text_only("x")), read_tool(),
         Box::new(InMemoryPersistence::new()), ExecMode::Default,
     );
-    let err = k.submit(Op::Approve { id: "nope".into(), decision: Decision::Allow });
+    let err = k.submit(Op::Approve { id: "nope".into(), decision: Decision::Allow, reason: None });
     assert!(err.is_err(), "无待审批却批准应报错");
 }
 
@@ -324,7 +372,7 @@ fn each_call_in_one_step_gets_its_own_approval() {
     let id1 = ev1.iter().find_map(|e| match e { EventMsg::ApprovalRequest { id, .. } => Some(id.clone()), _ => None }).unwrap();
 
     // 批准第一个后，第二个调用仍须再问一次
-    let ev2 = k.submit(Op::Approve { id: id1, decision: Decision::Allow }).unwrap();
+    let ev2 = k.submit(Op::Approve { id: id1, decision: Decision::Allow, reason: None }).unwrap();
     let id2 = ev2.iter().find_map(|e| match e { EventMsg::ApprovalRequest { id, .. } => Some(id.clone()), _ => None });
     assert!(id2.is_some(), "同一步的第二个写调用必须再问一次");
     assert_ne!(id2.unwrap(), ev1.iter().find_map(|e| match e { EventMsg::ApprovalRequest { id, .. } => Some(id.clone()), _ => None }).unwrap(),
@@ -1405,7 +1453,7 @@ fn allow_always_stops_re_prompting_for_the_same_kind() {
 
     // 回答"总是允许" → 后续同类调用应**直接执行、不再问**
     let resumed = k
-        .submit(Op::Approve { id: ask_id, decision: Decision::AllowAlways })
+        .submit(Op::Approve { id: ask_id, decision: Decision::AllowAlways, reason: None })
         .unwrap();
 
     assert_eq!(
@@ -1455,7 +1503,7 @@ fn allow_once_still_re_prompts_for_the_next_call() {
         })
         .expect("第一次应问");
 
-    let after = k.submit(Op::Approve { id: id1, decision: Decision::Allow }).unwrap();
+    let after = k.submit(Op::Approve { id: id1, decision: Decision::Allow, reason: None }).unwrap();
     let id2 = after.iter().find_map(|e| match e {
         EventMsg::ApprovalRequest { id, .. } => Some(id.clone()),
         _ => None,

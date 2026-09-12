@@ -229,7 +229,8 @@ fn route(
             } else {
                 neo_protocol::Decision::Deny
             };
-            if ops.send(Op::Approve { id, decision }).is_err() {
+            // Web 宿主暂无理由输入，reason = None（拒绝文案退回固定一句）
+            if ops.send(Op::Approve { id, decision, reason: None }).is_err() {
                 let _ = http::write_response(stream, 503, "text/plain; charset=utf-8", "内核线程已退出");
                 return;
             }
