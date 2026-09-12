@@ -23,6 +23,7 @@ members = [
   "crates/neo-instructions",
   "crates/neo-providers",
   "crates/neo-mcp",
+  "crates/neo-agent-loader",
 ]
 
 [workspace.package]

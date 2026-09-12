@@ -21,6 +21,7 @@ use neo_config::{resolve, Config, FileEditPolicy, ModeResolution};
 use neo_protocol::*;
 use serde_json::Value;
 pub mod models;
+pub mod agents;
 pub mod skills;
 pub mod instructions;
 
@@ -404,6 +405,8 @@ pub trait Tool: Send + Sync {
 }
 
 /// 用 BTreeMap 而非 HashMap —— 保证工具描述顺序稳定（提示词缓存命中的前提）
+/// `Clone` 供子代理工厂做白名单裁剪(Arc 内层,克隆廉价)。
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<dyn Tool>>,
 }

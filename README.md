@@ -34,6 +34,7 @@
 | **Goal 目标编排**（`/goal` 系列） | ✅ **三宿主可用**：TUI `/goal <目标>`、exec `--goal`、Web 目标栏（`/api/goal`）。自动逐阶段推进（Plan→Code→Review→Learn），审查失败回退重做 ≤3 次（含**模型显式叫停**），四项停止条件生效；快照事件落日志，**kill 后重启从日志重建续跑**。审查是硬失败信号 + 模型自评（沉默视为通过）；挂钟停止条件未实现（破坏回放确定性） |
 | **服务商管理**（设置页可增删改） | ✅ **已实现**：设置页内联表单新增/编辑（密钥字段打码、留空不改），删除需确认。密钥存 `~/.neo/provider_keys.json`（**0600**，与配置分离）；`base_url` 自动规范化为裸主机。缺 key 的条目跳过并提示 |
 | **上下文引用解析**（`@file` / `$skill`） | ✅ **已实现**：`@path` 与 `@path#行范围` 经沙箱读入并注入请求；`$skill` 查注册表注入正文、找不到则列出可用项。注入块落 `RefsResolved` 日志，回放一致 |
+| **子代理**（Markdown 定义 + 工具白名单） | ✅ **已实现**：`.neo/agents/*.md`（frontmatter: name/tools/model），注册为 `agent_<名>` 工具；子内核审批 Never、沙箱硬边界继承、过程不进主转录。真机验证主模型委派成功 |
 | **项目指令级联**（`AGENTS.md`） | ✅ **已实现**：`~/.neo/AGENTS.override.md` → `~/.neo/AGENTS.md` → 仓库根 → 子目录（越具体越靠后），合并上限 32 KiB，超限如实标注截断。并入系统提示词并落 `InstructionsLoaded` 日志，回放还原同一份提示词 |
 | **MCP 外部工具 + 资源**（stdio + Streamable HTTP，JSON-RPC） | ✅ **已实现**：`~/.neo/mcp.json` 声明服务器（`command` 本地进程 / `url` 远程端点，恰填其一；用户级，项目级显式拒绝），外部工具入 `ToolRegistry` 复用审批/上限/落盘整条链路；**资源**以每服务器一个 `mcp__<server>__read_resource` 工具暴露（描述内嵌资源目录，模型可控调用）。提示模板（prompts）未接入 |
 | Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |

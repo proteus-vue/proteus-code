@@ -347,6 +347,52 @@ pub fn build_kernel(
         eprintln!("[mcp] {warning}");
     }
     let cfg = Config { exec_mode: opts.mode, ..Config::default() };
+    // 子代理:装配点加载(Markdown 定义,工作区 .neo/agents + 用户级),
+    // 与技能/指令同一取舍 —— 会话中途新增定义需重启才可见。
+    // 共享模型实例(Arc)+ 白名单裁剪的子内核,审批固定 Never(无人值守)。
+    {
+        let resolution = neo_config::resolve(opts.mode);
+        let agent_dirs = {
+            let mut dirs = Vec::new();
+            if let Some(d) = workspace.join(".neo/agents").canonicalize().ok() {
+                dirs.push(d);
+            }
+            if let Some(home) = neo_agent_loader::neo_home() {
+                if let Some(d) = home.join("agents").canonicalize().ok() {
+                    dirs.push(d);
+                }
+            }
+            dirs
+        };
+        let report = neo_agent_loader::load_dirs(&agent_dirs);
+        for w in &report.problems {
+            eprintln!("[agents] {w}");
+        }
+        if !report.agents.is_empty() {
+            let sandbox_mode = resolution.sandbox;
+            let provider = models.shared_provider();
+            let model_name = cfg.model.clone();
+            let factory = std::sync::Arc::new(neo_core::agents::AgentFactory::new(
+                provider,
+                model_name,
+                tools.clone(),
+                sandbox.clone(),
+                sandbox_mode,
+                workspace,
+                opts.max_steps,
+            ));
+            for loaded in &report.agents {
+                if loaded.spec.model.is_some() {
+                    // 指定模型:当前版本子代理继承主内核模型(诚实边界),
+                    // per-agent 模型切换等注册表支持多实例后开放。
+                    eprintln!("[agents] 子代理 {} 声明了 model,当前版本忽略(继承主模型)", loaded.spec.name);
+                }
+                tools.register(std::sync::Arc::new(
+                    neo_core::agents::AgentTool::new(factory.clone(), loaded.spec.clone()),
+                ));
+            }
+        }
+    }
     // 技能目录在**装配点**加载一次（而不是每次 `$skill` 引用都扫盘）：
     // 引用是热路径，扫盘是冷路径。代价是会话中途新增技能需要重启才可见 ——
     // 这个取舍写在 README 的诚实边界里。
