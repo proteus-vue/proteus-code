@@ -319,7 +319,7 @@ pub fn register_mcp_tools(
         match neo_mcp::connect(&spec) {
             Ok((_, mcp_tools)) => {
                 for t in mcp_tools {
-                    tools.register(std::sync::Arc::new(t));
+                    tools.register(t);
                 }
             }
             Err(e) => warnings.push(format!("服务器「{}」不可用：{e}", spec.name)),

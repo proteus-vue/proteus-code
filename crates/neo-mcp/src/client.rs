@@ -353,6 +353,105 @@ impl Drop for McpClient {
     }
 }
 
+/// `resources/list` 里的一条资源描述。
+#[derive(Debug, Clone)]
+pub struct ResourceInfo {
+    pub uri: String,
+    pub name: String,
+    pub description: String,
+    pub mime_type: String,
+}
+
+/// 一次资源读取的结果。
+#[derive(Debug, Clone)]
+pub struct ResourceContent {
+    pub text: String,
+    pub truncated: bool,
+}
+
+impl McpClient {
+    /// 列出服务器的资源（自动跟随分页游标）。
+    pub fn list_resources(&mut self) -> Result<Vec<ResourceInfo>, McpError> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_TOOL_PAGES {
+            let params = cursor.as_ref().map(|c| json!({"cursor": c}));
+            let result = self.request("resources/list", params, LIST_TIMEOUT)?;
+            let items =
+                result.get("resources").and_then(Value::as_array).cloned().unwrap_or_default();
+            for r in items {
+                let uri = r.get("uri").and_then(Value::as_str).unwrap_or_default().to_string();
+                if uri.is_empty() {
+                    continue; // 没有 URI 的资源无法被读取，跳过
+                }
+                out.push(ResourceInfo {
+                    uri,
+                    name: r.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                    description: r
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    mime_type: r
+                        .get("mimeType")
+                        .and_then(Value::as_str)
+                        .unwrap_or("text/plain")
+                        .to_string(),
+                });
+            }
+            cursor = result
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            if cursor.is_none() {
+                return Ok(out);
+            }
+        }
+        Err(McpError::Protocol(format!("resources/list 分页超过 {MAX_TOOL_PAGES} 页仍未结束")))
+    }
+
+    /// 读取一个资源。文本内容拼接；二进制（blob）用诚实占位符标出 ——
+    /// 模型上下文里塞 base64 既无用又烧预算。
+    pub fn read_resource(&mut self, uri: &str) -> Result<ResourceContent, McpError> {
+        let params = json!({"uri": uri});
+        let result = self.request("resources/read", Some(params), CALL_TIMEOUT)?;
+        let mut text = String::new();
+        let mut truncated = false;
+        if let Some(items) = result.get("contents").and_then(Value::as_array) {
+            for item in items {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                match item.get("text").and_then(Value::as_str) {
+                    Some(t) => text.push_str(t),
+                    None => {
+                        text.push_str("[二进制资源：");
+                        text.push_str(
+                            item.get("mimeType").and_then(Value::as_str).unwrap_or("未知类型"),
+                        );
+                        text.push(']');
+                    }
+                }
+            }
+        }
+        // 有界：资源正文按上限截断（UTF-8 安全）
+        if text.len() > MAX_RESOURCE_BYTES {
+            let mut end = MAX_RESOURCE_BYTES;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            truncated = true;
+        }
+        Ok(ResourceContent { text, truncated })
+    }
+}
+
+/// 单个资源正文上限。资源是"整段读进上下文"的东西 —— 不设上限的话
+/// 一个日志资源就能把上下文撑爆。
+pub const MAX_RESOURCE_BYTES: usize = 256 * 1024;
+
 /// 服务器传输声明（来自用户级配置）。
 ///
 /// 两种形态二选一：`command`（stdio，本机进程）或 `url`（Streamable

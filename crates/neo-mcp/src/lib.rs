@@ -40,8 +40,9 @@ pub mod tool;
 pub mod wire;
 
 pub use client::{McpClient, McpError, ServerSpec};
+use neo_core::Tool;
 pub use config::load_user_config;
-pub use tool::McpTool;
+pub use tool::{McpResourceTool, McpTool};
 
 /// 启动一个服务器、完成握手、列出工具，返回（共享连接，工具集合）。
 ///
@@ -49,13 +50,24 @@ pub use tool::McpTool;
 /// 全部工具共享同一条连接 —— 一个服务器进程服务它的全部工具。
 pub fn connect(
     spec: &ServerSpec,
-) -> Result<(std::sync::Arc<std::sync::Mutex<McpClient>>, Vec<McpTool>), McpError> {
+) -> Result<(std::sync::Arc<std::sync::Mutex<McpClient>>, Vec<std::sync::Arc<dyn Tool>>), McpError> {
     let client = McpClient::spawn(spec)?;
     let conn = std::sync::Arc::new(std::sync::Mutex::new(client));
     let infos = conn.lock().unwrap_or_else(|e| e.into_inner()).list_tools()?;
-    let tools = infos
+    let mut tools: Vec<std::sync::Arc<dyn Tool>> = infos
         .iter()
-        .map(|info| McpTool::new(&spec.name, info, conn.clone()))
+        .map(|info| std::sync::Arc::new(McpTool::new(&spec.name, info, conn.clone())) as std::sync::Arc<dyn Tool>)
         .collect();
+
+    // 资源：暴露成一个读取工具。很多服务器不实现 resources ——
+    // 方法不存在（-32601）就是"没有资源"，不算错误；其余错误照常上抛。
+    let resources = match conn.lock().unwrap_or_else(|e| e.into_inner()).list_resources() {
+        Ok(r) => r,
+        Err(McpError::Server { code: -32601, .. }) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    if !resources.is_empty() {
+        tools.push(std::sync::Arc::new(McpResourceTool::new(&spec.name, &resources, conn.clone())) as std::sync::Arc<dyn Tool>);
+    }
     Ok((conn, tools))
 }

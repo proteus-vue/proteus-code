@@ -21,6 +21,100 @@ fn sanitize(raw: &str) -> String {
         .collect()
 }
 
+/// 资源目录在工具描述里的上限：目录是给模型看的"菜单"，
+/// 列 50 条足够定位，超出部分如实标注（菜单本身也要有界）。
+const MAX_LISTED_RESOURCES: usize = 50;
+
+/// 把一个 MCP 服务器的**资源**暴露成一个工具（`mcp__<server>__read_resource`）。
+///
+/// # 为什么是工具而不是新的引用符号
+///
+/// MCP 里资源是"应用控制"的上下文、工具是"模型控制"的动作；把资源包成
+/// 可调用工具，等于把选择权交给模型 —— 这与 NEO 的架构一致（模型用工具
+/// 干活），且**零新协议面**：审批、上限、落盘整条 Tool 管线原样复用。
+/// 用户侧的 `@` 注入（人挑资源）是另一条合法路径，留给将来按需补。
+/// 一个服务器一个读取工具（而不是每资源一个）：资源集合可能很大，
+/// 且 URIs 本身就适合作为参数传入。
+pub struct McpResourceTool {
+    connection: Arc<Mutex<McpClient>>,
+    qualified_name: String,
+    /// 资源目录（描述的一部分，构造后字节不变 —— 提示词缓存前提）
+    catalog: String,
+    catalog_count: usize,
+}
+
+impl McpResourceTool {
+    pub fn new(
+        server_name: &str,
+        resources: &[crate::client::ResourceInfo],
+        connection: Arc<Mutex<McpClient>>,
+    ) -> Self {
+        let mut catalog = String::new();
+        for r in resources.iter().take(MAX_LISTED_RESOURCES) {
+            catalog.push_str(&format!("- {}（{}）{}
+", r.uri, r.mime_type, r.description));
+        }
+        if resources.len() > MAX_LISTED_RESOURCES {
+            catalog.push_str(&format!("… 还有 {} 条未列出
+", resources.len() - MAX_LISTED_RESOURCES));
+        }
+        Self {
+            connection,
+            qualified_name: format!("mcp__{}__read_resource", sanitize(server_name)),
+            catalog,
+            catalog_count: resources.len(),
+        }
+    }
+
+    fn failure(&self, e: McpError) -> ToolOutput {
+        ToolOutput { exit_code: -1, stdout: String::new(), stderr: e.to_string(), truncated: false }
+    }
+}
+
+impl Tool for McpResourceTool {
+    fn name(&self) -> &str {
+        &self.qualified_name
+    }
+
+    fn describe(&self) -> String {
+        let schema = r#"{"type":"object","properties":{"uri":{"type":"string","description":"资源 URI"}},"required":["uri"]}"#;
+        format!(
+            "{}(MCP 参数 schema: {}): 读取外部服务器声明的资源。
+可用资源（{} 条）：
+{}",
+            self.qualified_name, schema, self.catalog_count, self.catalog
+        )
+    }
+
+    /// MCP 的资源定义上是只读的 —— 这不是推测，是协议契约。
+    fn call_kind(&self, _args: &Value) -> CallKind {
+        CallKind::Read
+    }
+
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput {
+        let Some(uri) = args.get("uri").and_then(Value::as_str) else {
+            return self.failure(McpError::Protocol("缺少 uri 参数".into()));
+        };
+        let mut conn = self.connection.lock().unwrap_or_else(|e| e.into_inner());
+        match conn.read_resource(uri) {
+            Ok(c) => {
+                let (text, cut) = truncate_utf8(&c.text, ctx.max_output_bytes);
+                ToolOutput {
+                    exit_code: 0,
+                    stdout: text,
+                    stderr: if c.truncated && !cut {
+                        "资源正文已按服务器侧上限截断".into()
+                    } else {
+                        String::new()
+                    },
+                    truncated: c.truncated || cut,
+                }
+            }
+            Err(e) => self.failure(e),
+        }
+    }
+}
+
 /// 一个 MCP 工具在内核里的形态。
 pub struct McpTool {
     connection: Arc<Mutex<McpClient>>,
@@ -124,6 +218,27 @@ fn truncate_utf8(s: &str, max: usize) -> (String, bool) {
 mod tests {
     use super::*;
     use crate::client::ToolInfo;
+    use neo_core::{SandboxBackend, SandboxOutcome};
+    use neo_protocol::SandboxMode;
+
+    /// 全放行沙箱桩：资源工具的 execute 走 ToolCtx 参数。
+    struct NullSandbox;
+    impl SandboxBackend for NullSandbox {
+        fn supports(&self, _m: SandboxMode) -> bool { true }
+        fn write_file(&self, _m: SandboxMode, _p: &std::path::Path, c: &str) -> neo_core::FileOutcome {
+            neo_core::FileOutcome::Written { bytes: c.len() }
+        }
+        fn execute(&self, _m: SandboxMode, _c: &str, _l: usize) -> SandboxOutcome {
+            SandboxOutcome::Ran { stdout: String::new(), truncated: false }
+        }
+    }
+
+    fn test_ctx() -> ToolCtx<'static> {
+        // 泄漏一个静态沙箱仅为测试；ToolCtx 只借用它
+        let sandbox: &'static NullSandbox = Box::leak(Box::new(NullSandbox));
+        let cwd: &'static std::path::Path = Box::leak(std::path::PathBuf::from("/tmp").into_boxed_path());
+        ToolCtx { sandbox, mode: SandboxMode::WorkspaceWrite, cwd, max_output_bytes: 256 * 1024 }
+    }
 
     fn info(name: &str, ro: Option<bool>) -> ToolInfo {
         ToolInfo {
@@ -191,5 +306,66 @@ mod tests {
     fn never_client() -> McpClient {
         use crate::client::mock::MockChild;
         McpClient::with_child(Box::new(MockChild::new(vec![])))
+    }
+
+    #[test]
+    fn resource_tool_lists_catalog_and_is_read() {
+        use crate::client::ResourceInfo;
+        let resources = vec![
+            ResourceInfo {
+                uri: "file:///logs/app.log".into(),
+                name: "应用日志".into(),
+                description: "最近的应用日志".into(),
+                mime_type: "text/plain".into(),
+            },
+            ResourceInfo {
+                uri: "db://main/users".into(),
+                name: "用户表".into(),
+                description: "".into(),
+                mime_type: "application/json".into(),
+            },
+        ];
+        let conn = Arc::new(Mutex::new(never_client()));
+        let t = McpResourceTool::new("my-srv", &resources, conn);
+        assert_eq!(t.name(), "mcp__my_srv__read_resource", "每服务器一个读取工具");
+        assert_eq!(t.call_kind(&Value::Null), CallKind::Read, "资源在 MCP 定义上是只读的");
+        let d1 = t.describe();
+        assert_eq!(d1, t.describe(), "描述必须字节稳定");
+        assert!(d1.contains("file:///logs/app.log"), "目录要含 URI：{d1}");
+        assert!(d1.contains("2 条"), "目录要标注条数：{d1}");
+        assert!(d1.contains(r#""required":["uri"]"#), "参数 schema 要说明必填 uri");
+    }
+
+    #[test]
+    fn resource_catalog_itself_is_bounded() {
+        use crate::client::ResourceInfo;
+        let many: Vec<ResourceInfo> = (0..80)
+            .map(|i| ResourceInfo {
+                uri: format!("res://{i}"),
+                name: format!("r{i}"),
+                description: String::new(),
+                mime_type: "text/plain".into(),
+            })
+            .collect();
+        let conn = Arc::new(Mutex::new(never_client()));
+        let t = McpResourceTool::new("s", &many, conn);
+        assert!(t.describe().contains("还有 30 条未列出"), "超出目录上限要如实标注");
+        assert!(t.describe().len() < 10_000, "目录本身要有界");
+    }
+
+    #[test]
+    fn resource_tool_requires_uri_argument() {
+        use crate::client::ResourceInfo;
+        let resources = vec![ResourceInfo {
+            uri: "res://x".into(),
+            name: "x".into(),
+            description: String::new(),
+            mime_type: "text/plain".into(),
+        }];
+        let conn = Arc::new(Mutex::new(never_client()));
+        let t = McpResourceTool::new("s", &resources, conn);
+        let out = t.execute(&Value::Null, &test_ctx());
+        assert_eq!(out.exit_code, -1);
+        assert!(out.stderr.contains("缺少 uri"), "{}", out.stderr);
     }
 }

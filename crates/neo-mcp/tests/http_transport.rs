@@ -93,13 +93,33 @@ fn spawn_server() -> (String, std::thread::JoinHandle<()>) {
                     stream.write_all(head.as_bytes()).expect("202");
                 }
                 ("tools/list", _) => {
-                    // 客户端必须带会话头 —— 不带就是实现漏了会话管理
-                    // （头在 read_request 里没单独返回，这里靠 seen 顺序保证）
                     respond_sse(
                         &mut stream,
                         &json!({"jsonrpc":"2.0","id":id,"result":{"tools":[
                             {"name":"echo","description":"HTTP 回声","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}}
                         ]}}),
+                    );
+                }
+                ("resources/list", _) => {
+                    // 一个文本资源 + 一个二进制资源（验证 blob 占位符）
+                    respond_sse(
+                        &mut stream,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"resources":[
+                            {"uri":"file:///docs/readme.md","name":"readme","description":"说明文档","mimeType":"text/markdown"},
+                            {"uri":"db://main/dump","name":"dump","mimeType":"application/octet-stream"}
+                        ]}}),
+                    );
+                }
+                ("resources/read", _) => {
+                    let uri = msg.pointer("/params/uri").and_then(Value::as_str).unwrap_or("");
+                    let contents = if uri.contains("readme") {
+                        json!([{"uri": uri, "text": "# HTTP 资源正文"}])
+                    } else {
+                        json!([{"uri": uri, "blob": "AAEC", "mimeType": "application/octet-stream"}])
+                    };
+                    respond_sse(
+                        &mut stream,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"contents": contents}}),
                     );
                 }
                 ("tools/call", _) => {
@@ -110,7 +130,7 @@ fn spawn_server() -> (String, std::thread::JoinHandle<()>) {
                 }
                 _ => panic!("服务器收到意外请求：{request_line} {body}"),
             }
-            if seen >= 4 {
+            if seen >= 7 {
                 break;
             }
         }
@@ -119,16 +139,56 @@ fn spawn_server() -> (String, std::thread::JoinHandle<()>) {
 }
 
 #[test]
-fn http_transport_handshake_session_list_and_call() {
+fn http_transport_connect_exposes_tools_and_resources() {
+    // 走装配组合路径 connect()：tools 与 resources 都变成 Tool 列表
     let (url, server) = spawn_server();
     let spec = ServerSpec { name: "http".into(), command: String::new(), args: vec![], url: Some(url) };
-    let mut client = McpClient::spawn(&spec).expect("HTTP 握手应成功");
-    let tools = client.list_tools().expect("tools/list 应成功");
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name, "echo");
-    let out = client.call_tool("echo", &json!({})).expect("tools/call 应成功");
-    assert_eq!(out.text, "来自 HTTP 的回复");
+    let (_conn, tools) = neo_mcp::connect(&spec).expect("HTTP 握手应成功");
+    let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+    assert!(names.contains(&"mcp__http__echo"), "{names:?}");
+    assert!(
+        names.contains(&"mcp__http__read_resource"),
+        "有资源的服务器应带一个读取工具：{names:?}"
+    );
+
+    // 资源工具：描述里有目录，execute 走真实 HTTP 读取
+    let rt = tools.iter().find(|t| t.name() == "mcp__http__read_resource").expect("resource tool");
+    let desc = rt.describe();
+    assert!(desc.contains("file:///docs/readme.md"), "{desc}");
+    assert!(desc.contains("db://main/dump"));
+
+    let ctx = test_ctx();
+    let out = rt.execute(&json!({"uri": "file:///docs/readme.md"}), &ctx);
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout, "# HTTP 资源正文");
+
+    // 二进制资源 → 诚实占位符
+    let out = rt.execute(&json!({"uri": "db://main/dump"}), &ctx);
+    assert!(out.stdout.contains("[二进制资源：application/octet-stream]"), "{}", out.stdout);
+
+    // 普通工具照常
+    let echo = tools.iter().find(|t| t.name() == "mcp__http__echo").expect("echo");
+    let out = echo.execute(&json!({}), &ctx);
+    assert_eq!(out.stdout, "来自 HTTP 的回复");
+
     server.join().expect("服务器线程正常退出");
+}
+
+/// 集成测试用的 ToolCtx（全放行沙箱桩）。
+fn test_ctx() -> neo_core::ToolCtx<'static> {
+    struct AllowSandbox;
+    impl neo_core::SandboxBackend for AllowSandbox {
+        fn supports(&self, _m: neo_protocol::SandboxMode) -> bool { true }
+        fn write_file(&self, _m: neo_protocol::SandboxMode, _p: &std::path::Path, c: &str) -> neo_core::FileOutcome {
+            neo_core::FileOutcome::Written { bytes: c.len() }
+        }
+        fn execute(&self, _m: neo_protocol::SandboxMode, _c: &str, _l: usize) -> neo_core::SandboxOutcome {
+            neo_core::SandboxOutcome::Ran { stdout: String::new(), truncated: false }
+        }
+    }
+    let sandbox: &'static AllowSandbox = Box::leak(Box::new(AllowSandbox));
+    let cwd: &'static std::path::Path = Box::leak(std::path::PathBuf::from("/tmp").into_boxed_path());
+    neo_core::ToolCtx { sandbox, mode: neo_protocol::SandboxMode::WorkspaceWrite, cwd, max_output_bytes: 256 * 1024 }
 }
 
 #[test]
