@@ -19,6 +19,7 @@ neo-capability = { path = "../neo-capability" }
 neo-exec = { path = "../neo-exec" }
 neo-host-tui = { path = "../neo-host-tui" }
 neo-host-web = { path = "../neo-host-web" }
+neo-host-desktop = { path = "../neo-host-desktop" }
 neo-sandbox-local = { path = "../neo-sandbox-local" }
 neo-llm-deepseek = { path = "../neo-llm-deepseek" }
 neo-session-local = { path = "../neo-session-local" }

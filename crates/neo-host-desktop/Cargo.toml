@@ -10,3 +10,5 @@ license.workspace = true
 neo-protocol = { path = "../neo-protocol" }
 neo-core = { path = "../neo-core" }
 neo-orchestration = { path = "../neo-orchestration" }
+wry = "0.46.1"
+tao = "0.31.1"

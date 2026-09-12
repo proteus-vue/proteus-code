@@ -10,8 +10,14 @@
 //! - Windows : WebView2，Win11 自带；Win10 需装运行时
 //! - Linux   : WebKitGTK，需系统包
 //!
-//! 注：本原型不引入 wry 依赖（避免原型阶段拉入平台图形栈），
-//! 只固定契据与分层；真实实现时在 window 层接入。
+//! 窗口层已接入（`window` 模块）：wry + tao，窗口只是**壳** ——
+//! 系统 webview 指向 Web 宿主服务的页面（本地回环端口），完整复用
+//! Web 宿主的界面与事件流，因此没有第三套消费逻辑要证明等价。
+//! 关于依赖：wry/tao 内部含平台 unsafe（FFI 绑定），本项目各 crate
+//! 自身代码保持零 unsafe —— 引入的是依赖而非本项目的不安全代码，
+//! 这条边界由门禁的 unsafe 扫描持续守护。
+
+pub mod window;
 
 use neo_core::{DiffSupport, HostBackend, HostCapabilities, ImageSupport};
 use neo_protocol::{EventMsg, Fact};

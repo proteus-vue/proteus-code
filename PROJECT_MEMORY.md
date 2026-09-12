@@ -2055,7 +2055,7 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 
 | 缺口 | 影响 |
 |---|---|
-| **Desktop 的系统 webview 窗口层未接** | `DesktopHost` 的 `HostBackend` 契约实现与 T6 覆盖已完成，但 `wry` 窗口层未接（原型阶段刻意不拉入平台图形栈），因此没有可交互的桌面窗口 |
+| **Desktop 窗口内交互未机器验证** | `neo desktop` 窗口层已接（wry + tao，复用 Web 宿主全栈）；进程/服务/SSE 连接已机器验证（订阅者=1），但窗口内的点击/审批等交互需真人实机确认 |
 | **Linux / Windows 沙箱未实现** | 受限档位在这些平台 **fail-closed**（拒绝执行），不会静默降级放行 |
 | **MCP 未接 prompts** | 两种传输 + tools + **resources**（每服务器一个 `read_resource` 工具，目录嵌在描述里）已就绪；提示模板未接入 —— 它更像"参数化的 slash 命令"，与现有命令体系的映射需要设计 |
 | **MCP 工具无结构化 diff 预览** | 外部工具内容由服务器决定，客户端生成不了可信 diff —— 审批时看不到"将改什么"，只有参数摘要 |

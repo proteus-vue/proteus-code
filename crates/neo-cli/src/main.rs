@@ -34,6 +34,13 @@ exec 选项：
   --provider <deepseek|mock|selftest|demo>   模型后端（默认 deepseek）
                                 selftest = 按脚本调用一次工具，验证完整链路（无需 key）
 
+desktop 选项：
+  --workspace <dir>            工作区（默认当前目录）
+  --provider <...>             模型后端（同 serve）
+  --mode <...>                 执行模式（同 serve）
+                               桌面窗口 = 系统 webview 指向内置 Web 宿主
+                               （本地回环端口，窗口关闭即退出）
+
 serve 选项：
   --addr <host:port>           监听地址（默认 127.0.0.1:8787）
   --mode <...>                 执行模式（默认 default；Web 有交互审批，不需要放水）
@@ -63,6 +70,7 @@ fn main() {
         Some("exec") => cmd_exec(&args[1..]),
         Some("tui") => cmd_tui(&args[1..]),
         Some("serve") => cmd_serve(&args[1..]),
+        Some("desktop") => cmd_desktop(&args[1..]),
         Some("help") | Some("--help") | Some("-h") => {
             println!("{USAGE}");
             0
@@ -180,6 +188,105 @@ fn cmd_serve(args: &[String]) -> i32 {
     eprintln!("       注意：事件流不重放，浏览器页面会先自动连上 SSE 再提交任务");
     // 内核线程在 op 通道关闭前不会退出，join 即"服务于请求直到进程结束"。
     let _ = kernel_thread.join();
+    0
+}
+
+/// 启动桌面窗口（系统 webview）。
+///
+/// 窗口只是壳：完整复用 Web 宿主（本地回环端口 + 内置页面），
+/// T6 宿主等价因此天然成立 —— 桌面跑的就是 Web 宿主，没有第三套
+/// 事件消费逻辑要证明等价。窗口关闭 = 退出应用（随 op 通道关闭，
+/// 内核线程停机）。
+fn cmd_desktop(args: &[String]) -> i32 {
+    let mut workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut provider = "deepseek".to_string();
+    let mut mode = ExecMode::Default;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--workspace" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => workspace = PathBuf::from(p),
+                    None => {
+                        eprintln!("[neo] --workspace 需要一个目录");
+                        return 2;
+                    }
+                }
+            }
+            "--provider" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => provider = p.clone(),
+                    None => {
+                        eprintln!("[neo] --provider 需要一个值");
+                        return 2;
+                    }
+                }
+            }
+            "--mode" => {
+                i += 1;
+                match args.get(i).map(|s| parse_mode(s)) {
+                    Some(Ok(m)) => mode = m,
+                    Some(Err(e)) => {
+                        eprintln!("[neo] {e}");
+                        return 2;
+                    }
+                    None => {
+                        eprintln!("[neo] --mode 需要一个值");
+                        return 2;
+                    }
+                }
+            }
+            other => {
+                eprintln!("[neo] desktop 不认识的参数：{other}");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+
+    let Some(models) = build_models(&provider) else {
+        return 2;
+    };
+    let sandbox = Arc::new(neo_sandbox_local::LocalSandbox::new(&workspace));
+    let persistence = Box::new(neo_session_local::JsonlPersistence::new(
+        workspace.join(".neo/sessions/neo-desktop.jsonl"),
+    ));
+    let opts = ExecOptions { mode, max_steps: 32, ..Default::default() };
+    let mut kernel = build_kernel("neo-desktop", &workspace, &opts, models, sandbox, persistence);
+
+    // 只绑回环 + 临时端口：窗口是唯一的预期访问者（安全模型与 serve 一致，
+    // 对外监听需先加鉴权 —— 见诚实清单）。
+    let (server, kernel_thread) = match neo_host_web::start("127.0.0.1:0", move |op| {
+        kernel
+            .submit(op)
+            .unwrap_or_else(|e| vec![EventMsg::Error { message: e.to_string() }])
+    }) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[neo] 无法启动本地服务：{e}");
+            return 2;
+        }
+    };
+    let url = format!("http://{}", server.addr);
+
+    eprintln!("[neo] 工作区 {}", workspace.display());
+    eprintln!("[neo] 模式   {}", describe_mode(mode));
+    eprintln!("[neo] 模型   {provider}");
+    eprintln!("[neo] 桌面窗口 {url}（关闭窗口即退出）");
+
+    // 事件流不重放：窗口先连上 SSE 再提交任务 —— 页面加载即建连，
+    // 与 serve 同一约定。
+    let served = server; // 持有 server：ops 通道在窗口关闭前必须活着
+    let result = neo_host_desktop::window::run_window(&url, "NEO");
+    drop(served); // 窗口已关：关闭 op 通道，内核线程停机
+    let _ = kernel_thread.join();
+    if let Err(e) = result {
+        eprintln!("[neo] {e}");
+        return 1;
+    }
     0
 }
 

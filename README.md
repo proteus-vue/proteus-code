@@ -29,7 +29,7 @@
 | **真实模型完整推理** | ✅ **已验证**（真实模型 → 真实工具调用 → 真实沙箱 → 真实落盘，端到端跑通） |
 | `apply_patch` 落盘 | ✅ **已实现**（经 `ctx.write_file` 走沙箱，唯一匹配校验，真机验证落盘） |
 | Web 宿主（零依赖 HTTP + SSE） | ✅ **已实现**（`neo-host-web`；`POST /api/turn` 提交、`GET /api/events` SSE、`/api/approve` 审批） |
-| Desktop 宿主（系统 webview 壳） | 🟡 **契据就绪**：`DesktopHost` 的 `HostBackend` 实现与 T6 覆盖已完成；wry window 层未接（原型阶段不拉入平台图形栈） |
+| **Desktop 宿主**（系统 webview 窗口） | ✅ **已实现**：`neo desktop` 打开系统 webview 窗口（macOS WKWebView / Windows WebView2 / Linux WebKitGTK），**复用 Web 宿主全栈**（本地回环端口 + 内置页面，T6 等价天然成立），窗口关闭即退出。窗口内交互验证需真人实机（进程/服务/SSE 连接已机器验证） |
 | 上下文压缩（L4 策略） | ✅ **已实现**：`Compactor` seam 在 L2、策略在 L4；`/compact` 端到端，摘要与移除条数可回放 |
 | **Goal 目标编排**（`/goal` 系列） | ✅ **三宿主可用**：TUI `/goal <目标>`、exec `--goal`、Web 目标栏（`/api/goal`）。自动逐阶段推进（Plan→Code→Review→Learn），审查失败回退重做 ≤3 次（含**模型显式叫停**），四项停止条件生效；快照事件落日志，**kill 后重启从日志重建续跑**。审查是硬失败信号 + 模型自评（沉默视为通过）；挂钟停止条件未实现（破坏回放确定性） |
 | **服务商管理**（设置页可增删改） | ✅ **已实现**：设置页内联表单新增/编辑（密钥字段打码、留空不改），删除需确认。密钥存 `~/.neo/provider_keys.json`（**0600**，与配置分离）；`base_url` 自动规范化为裸主机。缺 key 的条目跳过并提示 |
@@ -38,9 +38,8 @@
 | **MCP 外部工具 + 资源**（stdio + Streamable HTTP，JSON-RPC） | ✅ **已实现**：`~/.neo/mcp.json` 声明服务器（`command` 本地进程 / `url` 远程端点，恰填其一；用户级，项目级显式拒绝），外部工具入 `ToolRegistry` 复用审批/上限/落盘整条链路；**资源**以每服务器一个 `mcp__<server>__read_resource` 工具暴露（描述内嵌资源目录，模型可控调用）。提示模板（prompts）未接入 |
 | Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |
 
-**一句话现状**：内核 + 真实沙箱 + **真实模型** + 落盘 + **三宿主（exec / TUI / Web）**
-已全部闭环并跑通；T6 宿主等价铁律在四宿主上生效。剩 Desktop 的系统 webview 窗口层
-未接（原型阶段刻意不引入平台图形栈）。
+**一句话现状**：内核 + 真实沙箱 + **真实模型** + 落盘 + **四宿主（exec / TUI / Web / Desktop）**
+已全部闭环并跑通；T6 宿主等价铁律在四宿主上生效（桌面复用 Web 栈）。
 
 ### 离线自验（不需要 API key）
 
