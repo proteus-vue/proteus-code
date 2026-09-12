@@ -235,6 +235,29 @@ impl Tool for MockTool {
     }
 }
 
+/// 恒失败工具（负例）：类别可配 —— 审查记账的"只读失败 vs 写入失败"
+/// 分类测试需要一颗能指定类别的失败弹。
+pub struct FailingTool {
+    pub tool_name: String,
+    pub kind: CallKind,
+    pub reason: String,
+}
+
+impl FailingTool {
+    pub fn new(tool_name: &str, kind: CallKind, reason: &str) -> Self {
+        Self { tool_name: tool_name.to_string(), kind, reason: reason.to_string() }
+    }
+}
+
+impl Tool for FailingTool {
+    fn name(&self) -> &str { &self.tool_name }
+    fn describe(&self) -> String { format!("{}(args): 恒失败负例工具。", self.tool_name) }
+    fn call_kind(&self, _args: &serde_json::Value) -> CallKind { self.kind }
+    fn execute(&self, _args: &serde_json::Value, _ctx: &ToolCtx) -> ToolOutput {
+        ToolOutput { exit_code: -1, stdout: String::new(), stderr: self.reason.clone(), truncated: false }
+    }
+}
+
 /// 有状态工具：每次执行递增计数，返回计数。用于验证"同一步内多次调用"的顺序。
 pub struct CountingTool { pub calls: std::sync::atomic::AtomicUsize }
 

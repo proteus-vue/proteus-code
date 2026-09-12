@@ -679,6 +679,9 @@ pub struct Kernel {
     goal_turn_failed: bool,
     /// 目标子任务轮内模型最后一条答复（审查阶段解析显式结论用）
     goal_turn_last_text: Option<String>,
+    /// 目标子任务轮内各调用的语义类别（id → kind）——
+    /// 审查记账用它区分"探测失败"与"修复失败"
+    goal_turn_call_kinds: std::collections::BTreeMap<String, CallKind>,
     sandbox: Arc<dyn SandboxBackend>,
     persistence: Box<dyn SessionPersistence>,
     cwd: PathBuf,
@@ -755,6 +758,7 @@ impl Kernel {
             goal_turn_in_flight: false,
             goal_turn_failed: false,
             goal_turn_last_text: None,
+            goal_turn_call_kinds: Default::default(),
             sandbox,
             persistence,
             cwd: cwd.into(),
@@ -926,6 +930,7 @@ impl Kernel {
                 self.goal_turn_in_flight = false;
                 self.goal_turn_failed = false;
                 self.goal_turn_last_text = None;
+                self.goal_turn_call_kinds.clear();
                 let ev = EventMsg::Rewound {
                     turns,
                     removed_messages: removed,
@@ -943,6 +948,7 @@ impl Kernel {
                 self.goal_turn_in_flight = false;
                 self.goal_turn_failed = false;
                 self.goal_turn_last_text = None;
+                self.goal_turn_call_kinds.clear();
                 self.emit_and_log(&EventMsg::Error { message: "已中断".into() })?;
             }
 
@@ -1055,6 +1061,7 @@ impl Kernel {
                 self.goal_turn_in_flight = true;
                 self.goal_turn_failed = false;
                 self.goal_turn_last_text = None;
+                self.goal_turn_call_kinds.clear();
                 self.begin_turn(prompt, Vec::new())?;
                 self.drive_steps()?;
             }
@@ -1712,6 +1719,12 @@ impl Kernel {
 
     /// 真正执行一个调用：经沙箱、落日志、进历史。
     fn execute_one(&mut self, call: &ToolInvocation) -> Result<(), KernelError> {
+        // 目标轮内记录调用类别（审查记账用；execute_one 是唯一执行点，
+        // 审批拒绝的调用也经过这里 —— 被拒的只读探测同样不算失败）
+        if self.goal_turn_in_flight {
+            let kind = self.classify(call);
+            self.goal_turn_call_kinds.insert(call.id.clone(), kind);
+        }
         // 改动预览必须在**执行前**取。执行后文件内容已等于目标，
         // `preview` 会返回 None（"没有改动"），统计就永远为空 ——
         // 这个顺序错误只会在真实工具上暴露：假工具的 preview 是无条件返回的。
@@ -1800,8 +1813,19 @@ impl Kernel {
         if self.goal_turn_in_flight {
             match ev {
                 EventMsg::Error { .. } => self.goal_turn_failed = true,
-                EventMsg::ToolCallEnd { exit_code, .. } if *exit_code != 0 => {
-                    self.goal_turn_failed = true;
+                EventMsg::ToolCallEnd { id, exit_code, .. } if *exit_code != 0 => {
+                    // 只读调用失败 = 探测失败（模型核验时 cat 一个不存在的
+                    // 路径很正常），不判死整轮审查；写入/网络失败才算。
+                    // 真机回归（智谱）里一次无害的探测失败曾多花一轮
+                    // Code→Review（约 40% 预算）—— 就是这条边界要修的。
+                    let is_read_probe = self
+                        .goal_turn_call_kinds
+                        .get(id)
+                        .map(|k| *k == CallKind::Read)
+                        .unwrap_or(false);
+                    if !is_read_probe {
+                        self.goal_turn_failed = true;
+                    }
                 }
                 // 多步轮会有多条 AgentMessageDone：最后一条 = 模型的最终结论
                 EventMsg::AgentMessageDone { text } => {

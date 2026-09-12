@@ -10,7 +10,7 @@ use neo_core::{
     SandboxOutcome, SessionPersistence, Tool, ToolCtx, ToolRegistry,
 };
 use neo_mock::{
-    tool_call, CountingTool, InMemoryPersistence, MockTool, ScriptedModelProvider,
+    tool_call, CountingTool, FailingTool, InMemoryPersistence, MockTool, ScriptedModelProvider,
     TamperingPersistence,
 };
 use neo_protocol::{Decision, EventMsg, ExecMode, Op, SandboxMode, ToolOutput};
@@ -1701,6 +1701,69 @@ fn goal_advance_runs_a_full_subtask_turn_and_advances_the_engine() {
     let sh = shared.lock().unwrap();
     assert_eq!(sh.completes, 1, "编排器的 on_turn_complete 应被调用一次");
     assert_eq!(sh.last_failed, Some(false), "本轮无失败，审查判据应为通过");
+}
+
+#[test]
+fn goal_review_survives_a_failed_read_probe() {
+    // 审查轮里模型用只读工具核验（cat 一个不存在的路径很正常）——
+    // 只读失败是探测失败，不判死整轮审查（真机回归抓到的预算浪费点）。
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(FailingTool::new("probe", neo_core::CallKind::Read, "无此路径")));
+    let script = vec![
+        vec![tool_call("p1", "probe", serde_json::json!({}))],
+        vec![ModelDelta::Text("审查通过".into())],
+    ];
+    let shared = Arc::new(std::sync::Mutex::new(GoalShared::default()));
+    let orch = ScriptedOrchestrator {
+        shared: shared.clone(),
+        prompts: std::collections::VecDeque::from(["审查一下".to_string()]),
+        paused: false,
+    };
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        r,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    )
+    .with_goal_orchestrator(Box::new(orch));
+    k.submit(Op::GoalSet { goal: "x".into() }).unwrap();
+    k.submit(Op::GoalAdvance).unwrap();
+    let sh = shared.lock().unwrap();
+    assert_eq!(
+        sh.last_failed,
+        Some(false),
+        "只读探测失败不得判死审查轮"
+    );
+}
+
+#[test]
+fn goal_review_still_fails_on_a_failed_write() {
+    // 对照组：写入/网络类失败仍是硬失败信号（探测豁免不放宽到全部）
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(FailingTool::new("fixup", neo_core::CallKind::Write, "写坏了")));
+    let script = vec![
+        vec![tool_call("w1", "fixup", serde_json::json!({}))],
+        vec![ModelDelta::Text("x".into())],
+    ];
+    let shared = Arc::new(std::sync::Mutex::new(GoalShared::default()));
+    let orch = ScriptedOrchestrator {
+        shared: shared.clone(),
+        prompts: std::collections::VecDeque::from(["改一下".to_string()]),
+        paused: false,
+    };
+    // FullAccess：审批 Never、文件编辑 Auto —— 写入直达执行
+    // （default 档下写入会先挂审批，轮次根本跑不到记账那一步）
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        r,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::FullAccess,
+    )
+    .with_goal_orchestrator(Box::new(orch));
+    k.submit(Op::GoalSet { goal: "x".into() }).unwrap();
+    k.submit(Op::GoalAdvance).unwrap();
+    let sh = shared.lock().unwrap();
+    assert_eq!(sh.last_failed, Some(true), "写入失败必须判死该轮");
 }
 
 #[test]
