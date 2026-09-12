@@ -1,0 +1,28 @@
+# Rust 全门禁:verify.sh = cargo test --workspace + 零 warning +
+# 架构/协议/会话/配置/SPI/Python 守卫 + 执行效率审计。
+# 工具链版本由 rust-toolchain.toml 钉定(1.83.0)—— 桌面窗口层的
+# 依赖树钉在 1.83 兼容版本,CI 必须用同一把尺子。
+name: rust
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # 全量测试编译+运行,给足余量;卡住的 job 不白占配额
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.83.0"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # 缓存 target 目录:全量编译从 ~10 分钟降到增量秒级
+      - uses: Swatinem/rust-cache@v2
+      - name: 全门禁
+        run: bash scripts/verify.sh
