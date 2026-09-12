@@ -251,10 +251,11 @@ impl Notify for SystemNotify {
 
     fn notify(&self, kind: Attention, detail: &str) -> Result<(), String> {
         if !self.available() {
-            return Err(format!(
-                "本平台 ({}) 无可用提醒后端（macOS 需 osascript，Linux 需 notify-send）",
-                std::env::consts::OS
-            ));
+            // 不可用 = 安静地不做。契约（notify.rs conformance）：提醒不可用
+            // 只是"少个便利"，报错会打断主流程 —— Linux CI/容器/SSH 里没有
+            // notify-send 是常态，返回 Err 曾让 conformance 的"不可用不报错"
+            // 分支在 CI 上失败（macOS 上 osascript 恒存在，本地测不出）。
+            return Ok(());
         }
         if cfg!(target_os = "macos") {
             // 通知文案里的引号必须转义，否则 AppleScript 语法错

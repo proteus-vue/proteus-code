@@ -2118,6 +2118,19 @@ MCP prompts 是服务器提供的参数化消息模板,语义是"用户挑选并
    prompts"的需求时,先在 issue 里对齐交互设计(动态命令 vs 子命令
    vs 表单),再动手 —— 不闷头写。
 
+### CI Linux 测试失败:Notify 不可用分支的契约违反(已修)
+
+Rust CI 首跑在 ubuntu 上失败于 notify conformance:`SystemNotify::notify`
+在 `!available()` 时返回 Err("无可用提醒后端"),而契约要求**两种情况
+都返回 Ok** —— 不可用时报错会打断主流程(提醒常在 CI/容器/SSH 里被
+调用,那里没有 notify-send 是常态)。macOS 上 osascript 恒存在,
+本地永远测不到这个分支 —— 又一次"只有真实环境能暴露"。
+
+修法:不可用时安静返回 Ok(与 NoopNotify 同语义)。顺带更正 4.31
+的一处记录:conformance 的语义是"自称可用就必须成功,**不可用也
+必须 Ok**"(提醒的失败永远不打扰主流程),不是"不可用就必须 Err"。
+剪贴板才是不对称的那一半(不可用 → Err,用户操作没生效必须报)。
+
 ### Web / Desktop × 真实模型回归（补完四宿主覆盖）
 
 此前 Web/Desktop 只用 mock 验证过交互。补上真实模型（智谱）：
