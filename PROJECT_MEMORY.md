@@ -2131,6 +2131,12 @@ Rust CI 首跑在 ubuntu 上失败于 notify conformance:`SystemNotify::notify`
 必须 Ok**"(提醒的失败永远不打扰主流程),不是"不可用就必须 Err"。
 剪贴板才是不对称的那一半(不可用 → Err,用户操作没生效必须报)。
 
+**修复后发现还有一个同款钉子**:lib 内嵌单元测试
+`system_notify_reports_unavailable_platforms_instead_of_pretending`
+钉着旧语义(不可用 → unwrap_err)。它在 macOS 上走 available 分支,
+**条件分支让本地永远测不到它** —— 这类"平台条件门控的旧断言"
+只有跨平台 CI 能抓。已改为与契约一致的静默降级断言。
+
 ### Web / Desktop × 真实模型回归（补完四宿主覆盖）
 
 此前 Web/Desktop 只用 mock 验证过交互。补上真实模型（智谱）：

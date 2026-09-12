@@ -413,15 +413,14 @@ mod tests {
     }
 
     #[test]
-    fn system_notify_reports_unavailable_platforms_instead_of_pretending() {
+    fn system_notify_degrades_silently_when_unavailable() {
+        // 契约（与 conformance 一致）：不可用 = 安静地不做，**不是错误**。
+        // 这里只测"自称可用却失败"的分支；不可用分支在 Linux CI 上
+        // （无 notify-send）由 conformance 的"不可用不报错"分支覆盖。
         let n = SystemNotify::new(true);
         if n.available() {
-            // 可用平台上不该返回"不可用"的错误
             let r = n.notify(Attention::TurnComplete, "neo 提醒自检");
             assert!(r.is_ok(), "自称可用却失败：{:?}", r.err());
-        } else {
-            let err = n.notify(Attention::TurnComplete, "x").unwrap_err();
-            assert!(!err.trim().is_empty(), "不可用时必须给出原因");
         }
     }
 
