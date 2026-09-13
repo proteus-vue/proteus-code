@@ -6155,7 +6155,10 @@ custom_bg.is_some(),
                 diff_viewer: diff_viewer.as_ref(),
                 whichkey: whichkey_groups.as_deref(),
                 display,
-                thought_view: ThoughtView::default(),
+                // 主帧必须带**真实**的思考块视图状态：点击逐块展开改的是
+                // thought_view.open，这里若用默认值，重绘会把它渲染回
+                // 折叠态 —— 点击"看起来没反应"。
+                thought_view: thought_view.clone(),
                 settings: settings_state.as_ref(),
                 settings_cursor,
                 settings_category,
