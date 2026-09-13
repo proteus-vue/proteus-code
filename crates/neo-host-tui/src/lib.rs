@@ -4215,7 +4215,7 @@ const THINKING_LINES: usize = 12;
 fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<Vec<Seg>> {
     let inner = body_cols.saturating_sub(4);
     let mut out: Vec<Vec<Seg>> = Vec::new();
-    for f in facts {
+    for (fi, f) in facts.iter().enumerate() {
         match f {
             Fact::UserSaid(text) => {
                 // 用户消息也按 Markdown 渲染（经常粘贴代码/清单），
@@ -4257,8 +4257,21 @@ fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<V
                 if !disp.thinking {
                     continue;
                 }
-                out.push(vec![(2, "⋯ 思考".to_string(), Tone::Border)]);
                 let all: Vec<&str> = text.lines().collect();
+                // 生命周期对齐 opencode：**流式进行中**实时滚动最新尾部；
+                // 本轮收尾（其后出现过 TurnFinished）后折叠成一行摘要，
+                // `/details` 展开回看。已完成的思考长铺在对话里会把
+                // 真正的答复挤走，而滚动中的思考正是"活动反馈"本身。
+                let turn_done = facts[fi..].iter().any(|f| matches!(f, Fact::TurnFinished { .. }));
+                if turn_done && !disp.expanded {
+                    out.push(vec![(
+                        2,
+                        format!("⋯ 思考 · {} 行（/details 展开）", all.len()),
+                        Tone::Dim,
+                    )]);
+                    continue;
+                }
+                out.push(vec![(2, "⋯ 思考".to_string(), Tone::Border)]);
                 // 显示**最新尾部**而不是开头：思考是过程流，最新内容才承载
                 // "正在想什么"。只显示开头的话，长思考期间画面完全静止，
                 // 毫无"正在思考"的观感（opencode 同款滚动行为）。
@@ -8398,6 +8411,31 @@ mod tests {
         assert!(text.contains("思路19"), "应显示最新尾部：{text}");
         assert!(!text.contains("思路0\n"), "开头应被滚出：{text}");
         assert!(text.contains("已滚过"), "省略量要如实标注：{text}");
+    }
+
+    #[test]
+    fn finished_thinking_collapses_until_details_expands() {
+        // opencode 行为：思考完成后折叠成一行摘要（长铺会把答复挤走），
+        // /details 展开回看；流式进行中的思考则始终滚动显示（无 TurnFinished）。
+        let facts = vec![
+            Fact::AssistantThought("想了很多\n很多行".into()),
+            Fact::AssistantSaid("答复".into()),
+            Fact::TurnFinished { input_tokens: 1, output_tokens: 1 },
+        ];
+        let collapsed = plain(&render_with_display(
+            &facts,
+            ToolDisplay { expanded: false, thinking: true },
+        ))
+        .join("\n");
+        assert!(collapsed.contains("思考 · 2 行"), "完成态应折叠成一行：{collapsed}");
+        assert!(!collapsed.contains("想了很多"), "折叠后不铺开内容：{collapsed}");
+
+        let expanded = plain(&render_with_display(
+            &facts,
+            ToolDisplay { expanded: true, thinking: true },
+        ))
+        .join("\n");
+        assert!(expanded.contains("想了很多"), "/details 展开后应可见：{expanded}");
     }
 
     // ── which-key ────────────────────────────────────────────────────
