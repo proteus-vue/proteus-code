@@ -99,7 +99,10 @@ fn main() {
 /// 否则这一轮事件会发给零个订阅者。这是有界广播的必然结果，见 PROJECT_MEMORY §4.9。
 fn cmd_serve(args: &[String]) -> i32 {
     let mut workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut provider = "deepseek".to_string();
+    // 默认空 = 自动选择：设置页配置的注册表服务商优先，其次 env deepseek
+    // （选择逻辑见 build_models）。硬编码 "deepseek" 会让只配了智谱的用户
+    // 直接 `neo` 时被要求 DEEPSEEK_API_KEY（真实反馈）。
+    let mut provider = String::new();
     let mut bind = "127.0.0.1:8787".to_string();
     let mut mode = ExecMode::Default;
 
@@ -161,6 +164,8 @@ fn cmd_serve(args: &[String]) -> i32 {
     let Some(models) = build_models(&provider) else {
         return 2;
     };
+    // 横幅在内核装配（models 被移走）之后才打印，先取下实际选中的名字
+    let model_name = models.current_provider().name().to_string();
     let sandbox = Arc::new(neo_sandbox_local::LocalSandbox::new(&workspace));
     let persistence = Box::new(neo_session_local::JsonlPersistence::new(
         workspace.join(".neo/sessions/neo-web.jsonl"),
@@ -183,7 +188,7 @@ fn cmd_serve(args: &[String]) -> i32 {
 
     eprintln!("[neo] 工作区 {}", workspace.display());
     eprintln!("[neo] 模式   {}", describe_mode(mode));
-    eprintln!("[neo] 模型   {provider}");
+    eprintln!("[neo] 模型   {model_name}");
     eprintln!("[neo] Web 宿主 http://{}  （Ctrl-C 退出）", server.addr);
     eprintln!("       注意：事件流不重放，浏览器页面会先自动连上 SSE 再提交任务");
     // 内核线程在 op 通道关闭前不会退出，join 即"服务于请求直到进程结束"。
@@ -199,7 +204,10 @@ fn cmd_serve(args: &[String]) -> i32 {
 /// 内核线程停机）。
 fn cmd_desktop(args: &[String]) -> i32 {
     let mut workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut provider = "deepseek".to_string();
+    // 默认空 = 自动选择：设置页配置的注册表服务商优先，其次 env deepseek
+    // （选择逻辑见 build_models）。硬编码 "deepseek" 会让只配了智谱的用户
+    // 直接 `neo` 时被要求 DEEPSEEK_API_KEY（真实反馈）。
+    let mut provider = String::new();
     let mut mode = ExecMode::Default;
 
     let mut i = 0;
@@ -250,6 +258,8 @@ fn cmd_desktop(args: &[String]) -> i32 {
     let Some(models) = build_models(&provider) else {
         return 2;
     };
+    // 横幅在内核装配（models 被移走）之后才打印，先取下实际选中的名字
+    let model_name = models.current_provider().name().to_string();
     let sandbox = Arc::new(neo_sandbox_local::LocalSandbox::new(&workspace));
     let persistence = Box::new(neo_session_local::JsonlPersistence::new(
         workspace.join(".neo/sessions/neo-desktop.jsonl"),
@@ -274,7 +284,7 @@ fn cmd_desktop(args: &[String]) -> i32 {
 
     eprintln!("[neo] 工作区 {}", workspace.display());
     eprintln!("[neo] 模式   {}", describe_mode(mode));
-    eprintln!("[neo] 模型   {provider}");
+    eprintln!("[neo] 模型   {model_name}");
     eprintln!("[neo] 桌面窗口 {url}（关闭窗口即退出）");
 
     // 事件流不重放：窗口先连上 SSE 再提交任务 —— 页面加载即建连，
@@ -293,7 +303,10 @@ fn cmd_desktop(args: &[String]) -> i32 {
 fn cmd_exec(args: &[String]) -> i32 {
     let mut opts = ExecOptions::default();
     let mut workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut provider = "deepseek".to_string();
+    // 默认空 = 自动选择：设置页配置的注册表服务商优先，其次 env deepseek
+    // （选择逻辑见 build_models）。硬编码 "deepseek" 会让只配了智谱的用户
+    // 直接 `neo` 时被要求 DEEPSEEK_API_KEY（真实反馈）。
+    let mut provider = String::new();
     let mut task_parts: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -377,6 +390,8 @@ fn cmd_exec(args: &[String]) -> i32 {
     let Some(models) = build_models(&provider) else {
         return 2;
     };
+    // 横幅在内核装配（models 被移走）之后才打印，先取下实际选中的名字
+    let model_name = models.current_provider().name().to_string();
 
     let sandbox = Arc::new(neo_sandbox_local::LocalSandbox::new(&workspace));
     let persistence = Box::new(neo_session_local::JsonlPersistence::new(
@@ -394,7 +409,7 @@ fn cmd_exec(args: &[String]) -> i32 {
                 "本平台无实现 → 受限档位将被拒绝（fail-closed）"
             }
         );
-        eprintln!("[neo] 模型   {provider}\n");
+        eprintln!("[neo] 模型   {model_name}\n");
     }
 
     let kernel = build_kernel(
@@ -425,7 +440,10 @@ fn cmd_tui(args: &[String]) -> i32 {
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // 与 exec 一样支持 --provider 与 --mode：TUI 也必须能离线用（无 key）。
-    let mut provider = "deepseek".to_string();
+    // 默认空 = 自动选择：设置页配置的注册表服务商优先，其次 env deepseek
+    // （选择逻辑见 build_models）。硬编码 "deepseek" 会让只配了智谱的用户
+    // 直接 `neo` 时被要求 DEEPSEEK_API_KEY（真实反馈）。
+    let mut provider = String::new();
     let mut mode = ExecMode::Default;
     let mut i = 0;
     while i < args.len() {
@@ -908,6 +926,7 @@ fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
     // 静默忽略会让用户对着"配了却不生效"想不通。
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let key_store = neo_providers::load_keys();
+    let mut registry_names: Vec<String> = Vec::new();
     match neo_providers::load(&cwd) {
         neo_providers::LoadOutcome::Loaded(reg) => {
             for e in &reg.providers {
@@ -923,8 +942,9 @@ fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
                     continue;
                 };
                 // 构造逻辑与"设置页新增时热加载"共用 provider_of，
-                // 避免两处漂移（比如一处规范化 base_url、另一处忘了）。
+                // 避免两处漂移（比如一处规范化 base_url、另一边忘了）。
                 let (info, p) = provider_of(e, &key);
+                registry_names.push(info.name.clone());
                 entries.push((info, p));
             }
         }
@@ -934,19 +954,41 @@ fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
         }
     }
 
+    // 未指定 --provider（空串）时自动选择：**设置页配置的注册表服务商
+    // 优先**（用户在设置页配置是显式意图），其次 env deepseek，
+    // 都没有则给出可操作的指引。
+    let provider_name: String = if provider.is_empty() {
+        let pick = entries
+            .iter()
+            .find(|(i, _)| i.production && registry_names.contains(&i.name))
+            .or_else(|| entries.iter().find(|(i, _)| i.production))
+            .map(|(i, _)| i.name.clone());
+        let Some(picked) = pick else {
+            eprintln!("[neo] 没有可用的真实模型：先配置服务商再启动");
+            eprintln!("       TUI 内 /settings → 服务商：填 base_url 与密钥（如智谱 open.bigmodel.cn/api/paas/v4）");
+            eprintln!("       或 export DEEPSEEK_API_KEY=sk-... 后直接启动");
+            eprintln!("       或离线试用：--provider mock | selftest");
+            return None;
+        };
+        eprintln!("[neo] 未指定 --provider，默认使用 {picked}（/models 可切换）");
+        picked
+    } else {
+        provider.to_string()
+    };
+
     // 校验默认项存在
-    if !entries.iter().any(|(i, _)| i.name == provider) {
+    if !entries.iter().any(|(i, _)| i.name == provider_name) {
         let mut names: Vec<&str> = entries.iter().map(|(i, _)| i.name.as_str()).collect();
         names.sort();
         eprintln!(
-            "[neo] 未知 provider：{provider}（可选 {}）{}",
+            "[neo] 未知 provider：{provider_name}（可选 {}）{}",
             names.join(" | "),
             if !deepseek_ok { "；deepseek 需要 DEEPSEEK_API_KEY" } else { "" }
         );
         return None;
     }
 
-    match ModelRegistry::new(provider, entries) {
+    match ModelRegistry::new(&provider_name, entries) {
         Ok(r) => Some(r),
         Err(e) => {
             eprintln!("[neo] 模型注册表构造失败：{e}");
