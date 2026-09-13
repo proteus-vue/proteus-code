@@ -7178,7 +7178,11 @@ custom_bg.is_some(),
                         continue;
                     };
                     outstanding = None;
-                    let op = neo_protocol::Op::Approve {
+                    // 用 `ApproveStep`（只执行本步剩余调用）而**不是** `Approve`：
+                    // 后者在一次调用里把整轮剩下的模型往返全跑完 —— 界面冻到
+                    // 结束。剩余步骤由下面的泵循环流式推进（与提问路径同一架构，
+                    // 也与模态应答路径一致）。
+                    let op = neo_protocol::Op::ApproveStep {
                         id,
                         decision: match ans {
                             ApprovalAnswer::Allow => neo_protocol::Decision::Allow,
@@ -7192,6 +7196,18 @@ custom_bg.is_some(),
                         Ok(produced) => {
                             outstanding = latest_approval_id(&produced);
                             events.extend(produced);
+                            if outstanding.is_none() {
+                                // 没有待审批了 → 泵循环推进本轮剩余步骤（每步重绘）
+                                pump_until_boundary(
+                                    &mut submit, &mut events, &mut outstanding,
+                                    &about, &empty_input, &view_state, display,
+                                    &mut thought_view,
+                                    sidebar_open, theme_name, current_appearance,
+                                    custom_bg.as_ref(), &mut stdout, &mut stdin,
+                                    cols, rows,
+                                )?;
+                                thought_view.live = None;
+                            }
                             // 还有下一个审批就重新开框（换内容）
                             approval = if outstanding.is_some() {
                                 build_approval_prompt(&events)

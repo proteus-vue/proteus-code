@@ -121,6 +121,12 @@ pub fn spawn(
                     if matches!(op, Op::Pump) && !driving {
                         continue;
                     }
+                    // 审批应答恢复推进：ApprovalRequest 会把 driving 置假，
+                    // 应答（含 Deny —— 拒绝后模型还要再来一轮）之后必须
+                    // 重新放行 Pump，否则批准后轮次卡死在"运行中"。
+                    if matches!(op, Op::Approve { .. } | Op::ApproveStep { .. }) {
+                        driving = true;
+                    }
                     let events = kernel
                         .submit(op)
                         .unwrap_or_else(|e| vec![EventMsg::Error { message: e.to_string() }]);
@@ -215,6 +221,57 @@ mod tests {
         assert!(
             got.iter().any(|e| matches!(e, EventMsg::ReasoningDelta { .. })),
             "增量到达后应产出事件批：{got:?}"
+        );
+    }
+
+    #[test]
+    fn pumps_resume_after_an_approval_step() {
+        // 回归：ApprovalRequest 把 driving 置假；应答（ApproveStep）后必须
+        // 重新放行 Pump —— 否则批准后所有 Pump 被越界防护丢弃，
+        // 轮次永远停在"运行中"。
+        let cfg = Config { exec_mode: ExecMode::Default, ..Config::default() };
+        let mut tools = neo_core::ToolRegistry::new();
+        // Write 类别在 Default 档必 Ask —— 稳定触发审批挂起
+        tools.register(Arc::new(neo_mock::MockTool::writing("write")));
+        let script = vec![
+            vec![neo_mock::tool_call("c1", "write", serde_json::json!({}))],
+            vec![ModelDelta::Text("done".into())],
+        ];
+        let models = ModelRegistry::single(Arc::new(
+            neo_llm_deepseek::ScriptedProvider::scripted(script, "tail"),
+        ));
+        let kernel = Kernel::new(
+            "s-appr",
+            cfg,
+            tools,
+            models,
+            Arc::new(neo_sandbox_local::LocalSandbox::new(std::path::Path::new("/tmp"))),
+            Box::new(InMemoryPersistence::new()),
+            "/tmp",
+        );
+        let (handle, cmd_rx, batch_tx) = channel();
+        spawn(kernel, cmd_rx, batch_tx);
+
+        handle.call(Op::BeginTurn { text: "hi".into(), refs: vec![] });
+        // 第一步要 read 工具 → Default 档 Ask → 挂起审批
+        let got = handle.pump_collect().unwrap();
+        let appr_id = got.iter().find_map(|e| match e {
+            EventMsg::ApprovalRequest { id, .. } => Some(id.clone()),
+            _ => None,
+        });
+        let Some(appr_id) = appr_id else {
+            panic!("应有审批请求：{got:?}");
+        };
+        // 应答（单步通过）→ driving 恢复 → 后续 Pump 推进到本轮结束
+        handle.call(Op::ApproveStep {
+            id: appr_id,
+            decision: neo_protocol::Decision::Allow,
+            reason: None,
+        });
+        let got = handle.pump_collect().unwrap();
+        assert!(
+            got.iter().any(|e| matches!(e, EventMsg::TurnComplete { .. })),
+            "批准后 Pump 必须能推进到本轮结束（driving 防护不得拦截）：{got:?}"
         );
     }
 
