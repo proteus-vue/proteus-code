@@ -11,13 +11,25 @@
 //! TLS 由系统 `openssl` 命令承担（进程级，不改链接），这样既不引 crate
 //! 也不自己做密码学 —— 自己实现 TLS 是明确的反模式。
 //!
+//! # 流式（SSE）
+//!
+//! 请求带 `stream: true`，响应按 **SSE 逐事件**解析：`data:` 行 →
+//! `choices[0].delta` 的 `reasoning_content` / `content` / `tool_calls` 分片，
+//! `data: [DONE]` 结束。迭代器是**惰性**的：每个 `ModelDelta` 在网络字节到达时
+//! 才产出 —— 内核据此把思考过程实时交给宿主显示。
+//!
+//! 任何 OpenAI 兼容网关都走这一条实现（智谱 glm 系列与 DeepSeek 共用），
+//! 字段按两家都用的 OpenAI 形态读取（`reasoning_content`、`stream_options.include_usage`）。
+//!
+//! 兼容兜底：响应体以 `{` 开头（网关忽略 `stream` 标志回了整段 JSON，或
+//! 本地桩服务器）时退回 `parse_completion` 一次性解析 —— 流式实现**对
+//! 不配合的网关保持可用**，只是失去实时性。
+//!
 //! # 诚实边界
 //!
-//! - **非流式**：等待完整响应后一次性产出增量。真实流式（SSE 增量解析）**未实现**。
-//!   内核的 `ModelStream` 契约本就是流式形状，所以接入真流式时内核无需改动。
 //! - **每次请求一个进程**：`openssl s_client` 走进程，有进程启动开销。
 //!   生产实现应改用常驻连接 —— 当前优先"能跑通且可调试"。
-//! - **未处理**：重试、超时细分、代理、SSE 多事件、tool_choice 强制。
+//! - **未处理**：重试、超时细分、代理、tool_choice 强制。
 
 use neo_core::{Message, ModelDelta, ModelProvider, ModelRequest, ModelStream, ToolInvocation};
 use std::io::{Read, Write};
@@ -173,22 +185,17 @@ impl DeepSeekProvider {
             "model": self.model,
             "messages": self.encode_messages(req),
             "temperature": self.temperature,
+            // **真流式**：缺了它整条响应是一次性 JSON，思考过程就只能在
+            // 全部生成完后才可见（真实反馈："运行中转圈到最后一次性出结果"）。
+            "stream": true,
+            // 用量随流返回（OpenAI 规范字段；DeepSeek 与智谱的兼容端点都支持）。
+            // 开了它最终会有一个 `choices` 为空数组、只带 usage 的 chunk。
+            "stream_options": { "include_usage": true },
         });
         if let Some(tools) = self.encode_tools(req) {
             body["tools"] = tools;
         }
         body
-    }
-
-    /// 发一次请求，返回响应体字符串。
-    ///
-    /// TLS 走系统 `openssl s_client` 进程：不引 crate、不自写密码学。
-    fn post(&self, body: &str) -> Result<String, String> {
-        let (status, body) = self.post_raw(body)?;
-        if !(200..300).contains(&status) {
-            return Err(format!("HTTP {status}：{}", body.trim()));
-        }
-        Ok(body)
     }
 
     /// 发一次请求，返回（状态码, 响应体）。**不做状态码判断** ——
@@ -197,20 +204,31 @@ impl DeepSeekProvider {
     ///
     /// 独立成方法是为了**可单测**：有些头不发就会出问题，但它们的效果
     /// 只在真机才显现（例如压缩）。抽出来才能在单测里断言"这个头确实在"。
-    fn build_request(&self, body: &str) -> String {
+    fn build_request_with(&self, body: &str, accept: &str) -> String {
         // `Accept-Encoding: identity` 是**显式要求不压缩**。
         //
         // 不发它时，有些网关仍会 gzip 响应体 —— 而响应是按文本解析的，
         // 收到 gzip 字节就变成"响应不是合法 UTF-8"（用户真机报过这个错）。
         // 在请求侧声明 identity 比在客户端解压简单，也少一个失败点。
         format!(
-            "POST {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {key}\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {key}\r\nContent-Type: application/json\r\nAccept: {accept}\r\nAccept-Encoding: identity\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
             path = self.path,
             host = self.endpoint,
             key = self.api_key,
+            accept = accept,
             len = body.as_bytes().len(),
             body = body,
         )
+    }
+
+    /// 非流式请求帧（`post_raw` / probe 集成测试用）。
+    pub fn build_request(&self, body: &str) -> String {
+        self.build_request_with(body, "application/json")
+    }
+
+    /// 流式请求帧：`Accept: text/event-stream` 声明我们按 SSE 读响应。
+    fn build_stream_request(&self, body: &str) -> String {
+        self.build_request_with(body, "text/event-stream")
     }
 
     pub fn post_raw(&self, body: &str) -> Result<(u16, String), String> {
@@ -350,6 +368,457 @@ pub fn decode_chunked(body: &str) -> Result<String, String> {
     }
 }
 
+// ─────────────── 流式响应（SSE 增量解析）───────────────
+//
+// 与上面的整段路径（post_raw + decode_chunked + parse_completion）并存：
+// 流式路径**不等完整响应**，字节到达即产出增量 —— "实时显示思考过程"
+// 依赖这一点。帧解析逻辑与整段版一致，只是从"一次吃完"改成"逐字节状态机"。
+
+/// SSE 单行上限。正常事件只有几百字节；超限说明对端不是 SSE，
+/// 继续缓冲只会吃内存（内存有界性是内核义务）。
+const MAX_SSE_LINE: usize = 1024 * 1024;
+/// JSON 兜底模式的整段缓冲上限（与 chunked 单块上限同级）。
+const MAX_FALLBACK_BODY: usize = 16 * 1024 * 1024;
+/// HTTP 响应头读取上限。
+const MAX_HEAD: usize = 64 * 1024;
+/// 错误响应体的读取上限（只用于拼错误消息）。
+const MAX_ERROR_BODY: usize = 256 * 1024;
+
+/// 从流里读出 HTTP 响应头（到 `\r\n\r\n`），返回 (状态码, 是否 chunked)。
+///
+/// 逐字节读经 `BufReader` 摊薄系统调用；多读进缓冲区的体字节不会丢 ——
+/// 后续从同一个 `BufReader` 继续读。
+fn read_response_head<R: Read>(r: &mut R) -> Result<(u16, bool), String> {
+    let mut head: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let n = r.read(&mut byte).map_err(|e| format!("读取响应失败：{e}"))?;
+        if n == 0 {
+            return Err("未收到 HTTP 响应（连接提前关闭）".into());
+        }
+        head.push(byte[0]);
+        if head.len() > MAX_HEAD {
+            return Err("HTTP 响应头超过上限".into());
+        }
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let head = String::from_utf8_lossy(&head).into_owned();
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| format!("无法解析 HTTP 状态行：{}", preview_text(&head)))?;
+    let chunked = head.to_ascii_lowercase().lines().any(|l| {
+        l.starts_with("transfer-encoding") && l.contains("chunked")
+    });
+    Ok((status, chunked))
+}
+
+/// 增量负载读取器：从任意 `Read` 拉原始字节，产出**已剥掉 chunked 帧**的负载。
+///
+/// 与 `decode_chunked`（整段、一次性）同一套帧规则，改成逐字节状态机：
+/// 流式路径不能等全部数据到齐。分块模式下每读到一个负载字节就返回，
+/// 保证低延迟（思考文本到一笔显一笔）。
+struct PayloadReader<R: Read> {
+    inner: R,
+    chunked: bool,
+    /// 块长行累积（块与块之间的字节）
+    size_line: String,
+    /// 当前块剩余字节数（0 = 不在块数据中）
+    remaining: usize,
+    /// 终止块（长度 0）已收到
+    finished: bool,
+}
+
+impl<R: Read> PayloadReader<R> {
+    fn new(inner: R, chunked: bool) -> Self {
+        Self { inner, chunked, size_line: String::new(), remaining: 0, finished: false }
+    }
+
+    /// 读出至少一个负载字节（阻塞直到有数据或流结束）。`Ok(false)` = 流到头。
+    fn read_payload(&mut self, out: &mut Vec<u8>) -> Result<bool, String> {
+        if self.finished {
+            return Ok(false);
+        }
+        if !self.chunked {
+            // 非分块（Content-Length / 连接关闭定界）：整段透传
+            let mut buf = [0u8; 8192];
+            let n = self.inner.read(&mut buf).map_err(|e| format!("读取响应失败：{e}"))?;
+            if n == 0 {
+                self.finished = true;
+                return Ok(false);
+            }
+            out.extend_from_slice(&buf[..n]);
+            return Ok(true);
+        }
+        let mut byte = [0u8; 1];
+        loop {
+            let n = self.inner.read(&mut byte).map_err(|e| format!("读取响应失败：{e}"))?;
+            if n == 0 {
+                // 连接关闭：在块长行等待中（无半截数据）算正常结束；
+                // 其余位置断开 = 数据不完整，必须报错而不是静默截断
+                return if self.remaining > 0 || !self.size_line.is_empty() {
+                    Err("chunked 数据不完整：连接提前关闭".into())
+                } else {
+                    self.finished = true;
+                    Ok(false)
+                };
+            }
+            let b = byte[0];
+            if self.remaining > 0 {
+                out.push(b);
+                self.remaining -= 1;
+                return Ok(true); // 有负载即返回，别为凑批牺牲延迟
+            }
+            // 块外字节：累积成块长行（空行 = 数据块后的 CRLF，跳过）
+            if b == b'\n' {
+                let line = std::mem::take(&mut self.size_line);
+                let line = line.trim_end_matches('\r');
+                if line.is_empty() {
+                    continue;
+                }
+                let hex = line.split(';').next().unwrap_or("").trim();
+                let size = usize::from_str_radix(hex, 16)
+                    .map_err(|_| format!("chunked 块长度不是合法十六进制：{hex:?}"))?;
+                const MAX_CHUNK: usize = 16 * 1024 * 1024; // 与 decode_chunked 同一上限
+                if size > MAX_CHUNK {
+                    return Err(format!("chunked 单块长度 {size} 超出上限 {MAX_CHUNK}"));
+                }
+                if size == 0 {
+                    self.finished = true; // 终止块；trailer 随连接关闭一起丢弃
+                    return Ok(false);
+                }
+                self.remaining = size;
+            } else {
+                if self.size_line.len() >= 64 {
+                    return Err("chunked 块长行异常过长".into());
+                }
+                self.size_line.push(b as char);
+            }
+        }
+    }
+}
+
+/// 流式 tool_calls 的分片累积。参数按 OpenAI 规范**分片字符串**到达，
+/// 按 `index` 拼接；`finish_reason` 出现时才算收齐。
+struct ToolAcc {
+    id: String,
+    name: String,
+    args: String,
+}
+
+/// 响应体形态。首个非空白字节判定：`{` = 整段 JSON（兜底），否则按 SSE。
+#[derive(PartialEq)]
+enum BodyMode {
+    Undecided,
+    Sse,
+    Json,
+}
+
+/// SSE 流 → [`ModelDelta`] 迭代器（惰性：字节到达才产出）。
+///
+/// 生产路径 `R = BufReader<ChildStdout>`（openssl s_client 管道），
+/// 测试路径 `R = Cursor<Vec<u8>>` —— 同一套解析代码，不联网可测。
+/// 构造**不读网络**：响应头在首个 `next()` 时解析，配置错误（非 2xx、
+/// 非 HTTP）以 `[provider 错误] …` 文本增量透出，与旧路径同形。
+struct SseDeltaStream<R: Read + Send + 'static> {
+    /// 生产路径持有子进程；Drop（或终结）时 kill，中断后不留 openssl 残留。
+    child: Option<std::process::Child>,
+    state: StreamState<R>,
+    /// SSE 行缓冲（≤ MAX_SSE_LINE）
+    line: Vec<u8>,
+    mode: BodyMode,
+    /// JSON 兜底的整段缓冲
+    json_buf: Vec<u8>,
+    tools: std::collections::BTreeMap<usize, ToolAcc>,
+    tools_flushed: bool,
+    /// 是否收到过任何 data 事件（区分"空响应"与"半途断开"）
+    received_any: bool,
+    /// 是否见过 finish_reason（没有 [DONE] 但见到它也算完整收尾）
+    saw_finish: bool,
+    pending: std::collections::VecDeque<ModelDelta>,
+    done: bool,
+    err: Option<String>,
+}
+
+enum StreamState<R: Read> {
+    /// 响应头未读（首个 next() 时解析）
+    Head(R),
+    /// 头已解析，按 chunked/identity 出负载
+    Body(PayloadReader<R>),
+    /// 已终结，不再碰网络
+    Closed,
+}
+
+impl<R: Read + Send + 'static> SseDeltaStream<R> {
+    fn new(child: Option<std::process::Child>, reader: R) -> Self {
+        Self {
+            child,
+            state: StreamState::Head(reader),
+            line: Vec::new(),
+            mode: BodyMode::Undecided,
+            json_buf: Vec::new(),
+            tools: Default::default(),
+            tools_flushed: false,
+            received_any: false,
+            saw_finish: false,
+            pending: Default::default(),
+            done: false,
+            err: None,
+        }
+    }
+
+    /// 终结：关闭网络端并 kill 子进程。
+    fn close(&mut self) {
+        self.state = StreamState::Closed;
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    /// 解析响应头；非 2xx 时读错误体并返回可读错误。
+    fn open_body(r: &mut R) -> Result<bool, String> {
+        let (status, chunked) = read_response_head(r)?;
+        if !(200..300).contains(&status) {
+            let mut rest = Vec::new();
+            let _ = r.by_ref().take(MAX_ERROR_BODY as u64).read_to_end(&mut rest);
+            let text = String::from_utf8_lossy(&rest).into_owned();
+            let body = if chunked { decode_chunked(&text).unwrap_or(text) } else { text };
+            return Err(format!("HTTP {status}：{}", body.trim()));
+        }
+        Ok(chunked)
+    }
+
+    /// 从网络拉一批字节并推进解析。`Ok(false)` = 流到头。
+    fn pull(&mut self, p: &mut PayloadReader<R>) -> Result<bool, String> {
+        let mut raw = Vec::new();
+        if !p.read_payload(&mut raw)? {
+            return Ok(false);
+        }
+        self.ingest(&raw)?;
+        Ok(true)
+    }
+
+    fn ingest(&mut self, raw: &[u8]) -> Result<(), String> {
+        if self.mode == BodyMode::Undecided {
+            let first = raw.iter().copied().find(|b| !b.is_ascii_whitespace());
+            match first {
+                Some(b'{') => self.mode = BodyMode::Json,
+                Some(_) => self.mode = BodyMode::Sse,
+                // 还全是空白，形态未定，等下一批
+                None => return Ok(()),
+            }
+        }
+        match self.mode {
+            BodyMode::Json => {
+                self.json_buf.extend_from_slice(raw);
+                if self.json_buf.len() > MAX_FALLBACK_BODY {
+                    return Err("响应体超出上限（16 MiB）".into());
+                }
+            }
+            BodyMode::Sse => {
+                for &b in raw {
+                    if self.done || self.err.is_some() {
+                        break; // 已终结：剩余字节没有意义了
+                    }
+                    if b == b'\n' {
+                        let line = std::mem::take(&mut self.line);
+                        self.handle_line(&line);
+                    } else {
+                        if self.line.len() >= MAX_SSE_LINE {
+                            return Err("SSE 单行超过上限".into());
+                        }
+                        self.line.push(b);
+                    }
+                }
+            }
+            BodyMode::Undecided => {}
+        }
+        Ok(())
+    }
+
+    fn handle_line(&mut self, raw_line: &[u8]) {
+        let line = if raw_line.ends_with(b"\r") { &raw_line[..raw_line.len() - 1] } else { raw_line };
+        let Some(rest) = line.strip_prefix(b"data:".as_slice()) else {
+            return; // event:/id:/retry:/注释/空行都与增量无关
+        };
+        let text = String::from_utf8_lossy(rest);
+        let payload = text.strip_prefix(' ').unwrap_or(&text);
+        self.received_any = true;
+        if payload.trim() == "[DONE]" {
+            self.flush_tools();
+            self.done = true;
+            return;
+        }
+        self.handle_event(payload);
+    }
+
+    fn handle_event(&mut self, payload: &str) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+            self.err = Some(format!("SSE 事件不是合法 JSON：{}", preview_text(payload)));
+            return;
+        };
+        if let Some(err) = v.get("error") {
+            let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+            self.err = Some(format!("模型返回错误：{msg}"));
+            return;
+        }
+        if let Some(choice) = v.get("choices").and_then(|c| c.get(0)) {
+            if let Some(d) = choice.get("delta") {
+                // 推理过程先于正文（模型先想后说），这里按到达顺序产出，
+                // 与整段版"先 Reasoning 后 Text"的顺序约定一致。
+                if let Some(r) = d.get("reasoning_content").and_then(|c| c.as_str()) {
+                    if !r.is_empty() {
+                        self.pending.push_back(ModelDelta::Reasoning(r.to_string()));
+                    }
+                }
+                if let Some(t) = d.get("content").and_then(|c| c.as_str()) {
+                    if !t.is_empty() {
+                        self.pending.push_back(ModelDelta::Text(t.to_string()));
+                    }
+                }
+                if let Some(fragments) = d.get("tool_calls").and_then(|c| c.as_array()) {
+                    for f in fragments {
+                        let idx = f.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                        let acc = self
+                            .tools
+                            .entry(idx)
+                            .or_insert_with(|| ToolAcc { id: String::new(), name: String::new(), args: String::new() });
+                        if let Some(id) = f.get("id").and_then(|i| i.as_str()) {
+                            if !id.is_empty() {
+                                acc.id = id.to_string();
+                            }
+                        }
+                        if let Some(func) = f.get("function") {
+                            if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                                if !name.is_empty() {
+                                    acc.name = name.to_string();
+                                }
+                            }
+                            if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                                acc.args.push_str(args);
+                                if acc.args.len() > MAX_FALLBACK_BODY {
+                                    self.err = Some("工具调用参数超出上限（16 MiB）".into());
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // finish_reason 出现：参数分片已收齐，冲刷成完整工具调用
+            if choice.get("finish_reason").and_then(|f| f.as_str()).is_some() {
+                self.saw_finish = true;
+                self.flush_tools();
+            }
+        }
+        if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
+            self.pending.push_back(ModelDelta::Usage {
+                input_tokens: usage.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0),
+                output_tokens: usage.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0),
+            });
+        }
+    }
+
+    /// 把分片累积的工具调用落成完整 `ToolCall` 增量（按 index 序）。
+    fn flush_tools(&mut self) {
+        if self.tools_flushed {
+            return;
+        }
+        self.tools_flushed = true;
+        for (_, acc) in std::mem::take(&mut self.tools) {
+            // arguments 是字符串形式的 JSON（OpenAI 规范），需二次解析；
+            // 解析失败按空参数处理，与整段版 parse_completion 同一策略
+            let arguments: serde_json::Value =
+                serde_json::from_str(&acc.args).unwrap_or_else(|_| serde_json::json!({}));
+            self.pending.push_back(ModelDelta::ToolCall(ToolInvocation {
+                id: if acc.id.is_empty() { "call-unknown".to_string() } else { acc.id },
+                name: acc.name,
+                arguments,
+            }));
+        }
+    }
+
+    /// 流到头（EOF）时的收尾。
+    fn finish_stream(&mut self) {
+        match self.mode {
+            BodyMode::Json => {
+                let text = String::from_utf8_lossy(&self.json_buf).into_owned();
+                match parse_completion(&text) {
+                    Ok(deltas) => self.pending.extend(deltas),
+                    Err(e) => self.err = Some(e),
+                }
+            }
+            _ => {
+                self.flush_tools();
+                if !self.received_any {
+                    self.err = Some("响应为空（未收到任何数据）".into());
+                } else if !self.saw_finish {
+                    // 既没 [DONE] 也没 finish_reason 就断了：内容不完整，
+                    // 如实报错而不是把半截回答当完整答案
+                    self.err = Some("连接在响应完成前关闭".into());
+                }
+            }
+        }
+        self.done = true;
+    }
+}
+
+impl<R: Read + Send + 'static> Iterator for SseDeltaStream<R> {
+    type Item = ModelDelta;
+
+    fn next(&mut self) -> Option<ModelDelta> {
+        loop {
+            if let Some(d) = self.pending.pop_front() {
+                return Some(d);
+            }
+            // err 先于 done：收尾路径（finish_stream）可能同时置两者，
+            // 错误增量必须先透出，然后才允许流终结
+            if let Some(e) = self.err.take() {
+                self.done = true;
+                return Some(ModelDelta::Text(format!("[provider 错误] {e}")));
+            }
+            if self.done {
+                self.close();
+                return None;
+            }
+            match std::mem::replace(&mut self.state, StreamState::Closed) {
+                StreamState::Head(mut r) => match Self::open_body(&mut r) {
+                    Ok(chunked) => {
+                        self.state = StreamState::Body(PayloadReader::new(r, chunked));
+                    }
+                    Err(e) => {
+                        // r 在此丢弃：管道关闭，openssl 随 Drop 清理
+                        self.err = Some(e);
+                    }
+                },
+                StreamState::Body(mut p) => match self.pull(&mut p) {
+                    Ok(true) => self.state = StreamState::Body(p),
+                    Ok(false) => {
+                        self.state = StreamState::Body(p);
+                        self.finish_stream();
+                    }
+                    Err(e) => {
+                        self.state = StreamState::Body(p);
+                        self.err = Some(e);
+                    }
+                },
+                StreamState::Closed => self.done = true,
+            }
+        }
+    }
+}
+
+impl<R: Read + Send + 'static> Drop for SseDeltaStream<R> {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// 把一次响应 JSON 解析成内核增量序列。
 ///
 /// 抽成自由函数是为了**可单测**：不联网也能验证解析正确（含工具调用与错误形态）。
@@ -418,12 +887,34 @@ impl ModelProvider for DeepSeekProvider {
     fn name(&self) -> &str { &self.label }
 
     fn stream(&self, request: &ModelRequest<'_>) -> ModelStream {
+        // 组装即发请求（写 openssl 管道）；响应头与首个增量在迭代器
+        // 首次被消费时才读 —— 组装失败（起不了进程）在此就地转错误增量，
+        // 其余错误（非 2xx、断流）由迭代器以同一形态透出。
         let body = self.build_body(request).to_string();
-        let deltas = match self.post(&body).and_then(|r| parse_completion(&r)) {
-            Ok(d) => d,
-            Err(e) => vec![ModelDelta::Text(format!("[provider 错误] {e}"))],
-        };
-        Box::new(deltas.into_iter())
+        let req = self.build_stream_request(&body);
+        let opened = (|| -> Result<SseDeltaStream<std::io::BufReader<std::process::ChildStdout>>, String> {
+            let mut child = Command::new("openssl")
+                .args(["s_client", "-quiet", "-connect", &format!("{}:443", self.endpoint), "-servername", &self.endpoint])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("无法启动 openssl（HTTPS 必需）：{e}"))?;
+            child
+                .stdin
+                .as_mut()
+                .ok_or("openssl stdin 不可用")?
+                .write_all(req.as_bytes())
+                .map_err(|e| format!("写入请求失败：{e}"))?;
+            // 关闭 stdin 让 s_client 发完即读
+            drop(child.stdin.take());
+            let stdout = child.stdout.take().ok_or("openssl stdout 不可用")?;
+            Ok(SseDeltaStream::new(Some(child), std::io::BufReader::with_capacity(64 * 1024, stdout)))
+        })();
+        match opened {
+            Ok(s) => Box::new(s),
+            Err(e) => Box::new(std::iter::once(ModelDelta::Text(format!("[provider 错误] {e}")))),
+        }
     }
 }
 
@@ -517,6 +1008,169 @@ mod tests {
     #[test]
     fn empty_body_is_an_empty_chunk_stream() {
         assert_eq!(decode_chunked("0\r\n\r\n").unwrap(), "");
+    }
+
+    // ── SSE 流式解析 ──────────────────────────────────────────────────
+    //
+    // 用例照着 DeepSeek / 智谱两家真实流式响应的字节形态写：
+    // chunked 帧边界与 SSE 事件边界**不对齐**（真实网关如此），
+    // 解析器必须按字节状态机工作，而不是按行整读。
+
+    /// 把 body 按给定切点切成 chunked 帧（帧边界故意与事件边界错开）。
+    fn chunked_response(body: &str, sizes: &[usize]) -> Vec<u8> {
+        let mut raw = String::from(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        );
+        let mut rest = body;
+        let mut i = 0;
+        while !rest.is_empty() {
+            let mut n = sizes[i % sizes.len()].min(rest.len());
+            // 帧边界不能落在多字节字符中间（借来的字节切不动）
+            while n < rest.len() && !rest.is_char_boundary(n) {
+                n += 1;
+            }
+            i += 1;
+            raw.push_str(&format!("{:x}\r\n{}\r\n", n, &rest[..n]));
+            rest = &rest[n..];
+        }
+        raw.push_str("0\r\n\r\n");
+        raw.into_bytes()
+    }
+
+    fn stream_deltas(raw: Vec<u8>) -> Vec<ModelDelta> {
+        SseDeltaStream::new(None, std::io::Cursor::new(raw)).collect()
+    }
+
+    fn sse_body(events: &[&str]) -> String {
+        events
+            .iter()
+            .map(|e| format!("data: {e}\n\n"))
+            .collect()
+    }
+
+    #[test]
+    fn sse_stream_yields_reasoning_then_text_deltas() {
+        let body = &sse_body(&[
+            r#"{"id":"1","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"先看"}}]}"#,
+            r#"{"id":"1","choices":[{"index":0,"delta":{"reasoning_content":"依赖方向。"}}]}"#,
+            r#"{"id":"1","choices":[{"index":0,"delta":{"content":"结论："}}]}"#,
+            r#"{"id":"1","choices":[{"index":0,"delta":{"content":"合法。"},"finish_reason":"stop"}]}"#,
+            // include_usage 的收尾 chunk：choices 为空数组、只带 usage
+            r#"{"id":"1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#,
+            "[DONE]",
+        ]);
+        let d = stream_deltas(chunked_response(body, &[13]));
+        assert_eq!(
+            d,
+            vec![
+                ModelDelta::Reasoning("先看".into()),
+                ModelDelta::Reasoning("依赖方向。".into()),
+                ModelDelta::Text("结论：".into()),
+                ModelDelta::Text("合法。".into()),
+                ModelDelta::Usage { input_tokens: 3, output_tokens: 2 },
+            ],
+            "增量必须按到达顺序实时产出：{d:?}"
+        );
+    }
+
+    #[test]
+    fn sse_tool_call_fragments_are_accumulated_by_index() {
+        // 流式 tool_calls：arguments 按分片字符串到达，finish_reason 时收齐
+        let body = &sse_body(&[
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":"}}]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+            "[DONE]",
+        ]);
+        let d = stream_deltas(chunked_response(body, &[29]));
+        assert_eq!(d.len(), 2, "分片应聚合成一次完整工具调用：{d:?}");
+        match &d[0] {
+            ModelDelta::ToolCall(c) => {
+                assert_eq!(c.id, "c1");
+                assert_eq!(c.name, "bash");
+                assert_eq!(c.arguments["cmd"], "ls");
+            }
+            other => panic!("应解析出工具调用，实际 {other:?}"),
+        }
+        assert!(matches!(&d[1], ModelDelta::Usage { input_tokens: 1, output_tokens: 1 }));
+    }
+
+    #[test]
+    fn sse_ignores_comment_and_event_lines() {
+        let body = ": keep-alive\nevent: ping\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"}}]}\n\ndata: [DONE]\n\n";
+        let d = stream_deltas(chunked_response(body, &[11]));
+        assert_eq!(d, vec![ModelDelta::Text("好".into())], "{d:?}");
+    }
+
+    #[test]
+    fn json_fallback_when_gateway_ignores_stream_flag() {
+        // 网关/桩服务器无视 stream:true 回整段 JSON：必须仍可用（失去实时性但不出错）
+        let raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"choices\":[{\"message\":{\"reasoning_content\":\"想\",\"content\":\"答\"}}]}".as_bytes().to_vec();
+        let d = stream_deltas(raw);
+        assert_eq!(d, vec![ModelDelta::Reasoning("想".into()), ModelDelta::Text("答".into())], "{d:?}");
+    }
+
+    #[test]
+    fn http_error_surfaces_as_provider_error_text() {
+        let raw = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{\"error\":{\"message\":\"invalid api key\"}}".as_bytes().to_vec();
+        let d = stream_deltas(raw);
+        assert_eq!(d.len(), 1);
+        match &d[0] {
+            ModelDelta::Text(t) => {
+                assert!(t.contains("[provider 错误] HTTP 401"), "{t}");
+                assert!(t.contains("invalid api key"), "错误原因必须可见：{t}");
+            }
+            other => panic!("应透出错误增量，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_stream_is_an_error_not_silent_partial() {
+        // 既没 [DONE] 也没 finish_reason 就断流：已到的增量照常产出，
+        // 但必须跟着一条错误 —— 把半截回答当完整答案是撒谎
+        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"写了一半\"}}]}\n\n";
+        let d = stream_deltas(chunked_response(body, &[9]));
+        assert!(matches!(&d[0], ModelDelta::Text(t) if t == "写了一半"), "{d:?}");
+        let last = d.last().expect("应有错误增量");
+        assert!(
+            matches!(last, ModelDelta::Text(t) if t.contains("连接在响应完成前关闭")),
+            "断流必须显式报错：{d:?}"
+        );
+    }
+
+    #[test]
+    fn empty_response_is_an_error_like_the_batched_path() {
+        let d = stream_deltas(chunked_response("", &[1]));
+        assert!(
+            matches!(&d[0], ModelDelta::Text(t) if t.contains("响应为空")),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn body_declares_stream_and_usage_options() {
+        let p = DeepSeekProvider {
+            api_key: "k".into(), endpoint: "e".into(), path: "/p".into(),
+            model: "m".into(), temperature: 0.0, label: DEFAULT_LABEL.into(),
+        };
+        let msgs = vec![Message::User("hi".into())];
+        let tools: Vec<neo_core::ToolSchema> = Vec::new();
+        let req = ModelRequest { system: "sys", messages: &msgs, tools: &tools };
+        let body = p.build_body(&req);
+        assert_eq!(body["stream"], true, "必须请求流式");
+        assert_eq!(body["stream_options"]["include_usage"], true, "用量必须随流返回");
+    }
+
+    #[test]
+    fn stream_request_declares_event_stream_accept() {
+        let p = DeepSeekProvider {
+            api_key: "k".into(), endpoint: "e.invalid".into(), path: "/p".into(),
+            model: "m".into(), temperature: 0.0, label: DEFAULT_LABEL.into(),
+        };
+        let req = p.build_stream_request("{}");
+        assert!(req.contains("Accept: text/event-stream"), "流式请求要声明 SSE：{req}");
     }
 
     #[test]
