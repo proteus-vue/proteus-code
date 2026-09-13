@@ -3427,6 +3427,21 @@ fn refresh_popup(p: &mut popup::Popup, kind: popup::Kind, files: &mut Option<Vec
     }
 }
 
+
+/// 主题选择器的实时预览：光标移动即整窗换肤（mimo code 同款）。
+/// 只改运行态，不落盘 —— 落盘只发生在回车确认（apply_popup_item）；
+/// 未确认的关闭路径由主循环守卫还原打开时的主题。
+fn preview_theme_at_selection(p: &popup::Popup, theme_name: &mut theme::ThemeName) {
+    if p.kind != popup::Kind::Theme {
+        return;
+    }
+    if let Some(item) = p.selected_item() {
+        if let popup::ItemAction::SetTheme(t) = &item.action {
+            *theme_name = *t;
+        }
+    }
+}
+
 /// 刚输入 `@` 或 `/` 时打开弹窗。
 fn open_popup_for(
     input: &str,
@@ -5405,6 +5420,10 @@ where
     let mut approval: Option<ApprovalPrompt> = None;
     // 弹窗（@ / / / 主题 / 面板）
     let mut popup_state: Option<popup::Popup> = None;
+    // 主题实时预览：打开选择器时的主题快照。光标移动即整窗换肤（不落盘）；
+    // 回车确认时清除快照（apply_popup_item 落盘），其余任何关闭路径由
+    // 主循环顶部的守卫统一还原 —— 关闭路径多，逐个还原必漏。
+    let mut theme_preview_base: Option<theme::ThemeName> = None;
     // 只读信息屏（/help、/keys）：显示到用户按任意键
     let mut info_screen: Option<String> = None;
     // 由命令/弹窗设置：请求退出主循环
@@ -6260,6 +6279,15 @@ custom_bg.is_some(),
             }
         }
 
+        // 主题预览守卫：弹窗已关且快照仍在 = 非确认路径关闭（Esc/输入变化/
+        // 点击等），还原打开时的主题。确认路径在 Enter 臂清除快照。
+        if popup_state.is_none() {
+            if let Some(t) = theme_preview_base.take() {
+                theme_name = t;
+                dirty = true;
+            }
+        }
+
         if dirty {
             let facts = facts_of(&events);
             // 提醒：扫"新出现"的完成/出错/审批信号。用 set 记住已提醒过的，
@@ -6412,11 +6440,13 @@ custom_bg.is_some(),
                 Key::Up => {
                     if let Some(p) = popup_state.as_mut() {
                         p.move_selection(-1);
+                        preview_theme_at_selection(p, &mut theme_name);
                     }
                 }
                 Key::Down => {
                     if let Some(p) = popup_state.as_mut() {
                         p.move_selection(1);
+                        preview_theme_at_selection(p, &mut theme_name);
                     }
                 }
                 Key::Backspace => {
@@ -6448,6 +6478,7 @@ custom_bg.is_some(),
                 Key::Enter => {
                     let chosen = popup_state.as_ref().and_then(|p| p.selected_item().cloned());
                     popup_state = None;
+                    theme_preview_base = None; // 确认路径：保留预览中的主题并落盘
                     if let Some(item) = chosen {
                         let eff = apply_popup_item(
                             &item,
@@ -6523,6 +6554,7 @@ custom_bg.is_some(),
                             Effect::OpenThemePicker => {
                                 let mut tp = popup::Popup::new(popup::Kind::Theme, "");
                                 tp.set_items(popup::theme_items(""), false);
+                                theme_preview_base = Some(theme_name);
                                 status = "主题 · ↑↓ 选择，回车应用".to_string();
                                 popup_state = Some(tp);
                             }
@@ -6770,6 +6802,7 @@ sessions,
                                         let mut tp =
                                             popup::Popup::new(popup::Kind::Theme, "");
                                         tp.set_items(popup::theme_items(""), false);
+                                theme_preview_base = Some(theme_name);
                                         popup_state = Some(tp);
                                     }
                                     Effect::ShowDiff => {
@@ -7396,6 +7429,7 @@ sessions,
                                 Effect::OpenThemePicker => {
                                     let mut tp = popup::Popup::new(popup::Kind::Theme, "");
                                     tp.set_items(popup::theme_items(""), false);
+                                theme_preview_base = Some(theme_name);
                                     status = "主题 · ↑↓ 选择，回车应用".to_string();
                                     popup_state = Some(tp);
                                 }
@@ -8677,6 +8711,27 @@ mod tests {
         // 无活动帧（如审批挂起间隙）退化为静态标记，布局不变
         let idle = plain(&render_with_view(&facts, disp, &ThoughtView::default())).join("\n");
         assert!(idle.contains("⋯ 思考中…"), "{idle}");
+    }
+
+    #[test]
+    fn theme_picker_previews_selection_without_saving() {
+        // 实时预览：光标移动即换肤（运行态），但不落盘——
+        // 落盘只发生在回车确认；非主题弹窗不得误改主题。
+        let mut p = popup::Popup::new(popup::Kind::Theme, "");
+        p.set_items(popup::theme_items(""), false);
+        // all() 顺序：[Neo, OpenCode, Nord, ...] —— 初始选中 Neo，
+        // 初始主题是 OpenCode；移两格选中 Nord，预览应随之切换
+        let mut cur = theme::ThemeName::OpenCode;
+        p.move_selection(2);
+        preview_theme_at_selection(&p, &mut cur);
+        assert_eq!(cur, theme::ThemeName::Nord, "光标所在主题应被预览：{cur:?}");
+
+        let mut p2 = popup::Popup::new(popup::Kind::Palette, "");
+        p2.set_items(popup::palette_items(""), false);
+        p2.move_selection(1);
+        let before = cur;
+        preview_theme_at_selection(&p2, &mut cur);
+        assert_eq!(cur, before, "非主题弹窗不得改主题");
     }
 
     #[test]
