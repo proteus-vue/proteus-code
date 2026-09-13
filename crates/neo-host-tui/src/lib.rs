@@ -965,8 +965,8 @@ impl Pal {
 /// 上限是必要的：输入框不能吃掉整个屏幕 —— 正文才是主体。
 const MAX_INPUT_ROWS: usize = 6;
 
-/// 底部固定区块行数（单行输入时）：输入框(3) + 提示行(1) + 状态行(1) + 边框(1)
-const CHROME_ROWS: usize = 6;
+/// 底部固定区块行数（单行输入时）：输入行(1) + 状态行(1) + 提示行(1) + 底部状态行(1)
+const CHROME_ROWS: usize = 4;
 
 /// 按输入行数算出 chrome 实际占用行数。
 ///
@@ -974,8 +974,8 @@ const CHROME_ROWS: usize = 6;
 /// 布局里凡是"正文可用行数"的地方都必须走这个函数。
 fn chrome_rows(input_rows: usize) -> usize {
     let shown = input_rows.clamp(1, MAX_INPUT_ROWS);
-    // 上边框 + 输入行(shown) + 状态行 + 下边框 + 提示行 + 底部状态行
-    2 + shown + 1 + 1 + 1
+    // 输入行(shown) + 状态行 + 提示行 + 底部状态行（现代风格无边框行）
+    shown + 1 + 1 + 1
 }
 
 /// 侧栏宽度（对齐 opencode 的 42 列；我们窄一些，因为终端普遍没它宽）。
@@ -1156,9 +1156,13 @@ impl Grid {
     }
 
     /// 居中一段多色调文本（列由总宽度算出，逐个片段顺序摆放）。
-    fn put_centered_styled(&mut self, row: usize, segs: &[Styled]) {
+    /// `area` = 居中基准宽度（调用方传正文区宽度 —— 与输入块同一基准，
+    /// 两个元素各按不同基准居中会互相错位，用户截图里 logo 与输入框没对齐）。
+    fn put_centered_styled(&mut self, row: usize, segs: &[Styled], area: usize) {
         let total: usize = segs.iter().map(|(t, _)| width::display_width(t)).sum();
-        let mut c = self.cols.saturating_sub(total) / 2;
+        // 与输入块同一居中基准（正文区，扣除侧栏）：两个元素各按不同
+        // 基准居中会互相错位 —— 用户截图里"logo 与输入框没对齐"的根源。
+        let mut c = area.saturating_sub(total) / 2;
         for (text, tone) in segs {
             c = self.put(row, c, text, *tone);
         }
@@ -1266,11 +1270,20 @@ impl Grid {
                 let mut cur = Tone::None;
                 let mut cur_bg: Option<Bg> = None;
                 let mut started = false;
+                // 视觉列预算：格子里只要有一个宽字符（占 2 列），96 格的行
+                // 视觉宽度就会到 97 —— 终端行装不下，**整行折行**，全屏错位
+                // （满宽侧栏 + 行内宽字符时必现）。宁可少画最后一列。
+                let mut visual = 0usize;
                 for c in 0..self.cols {
                     let i = r * self.cols + c;
                     if self.skip[i] {
                         continue;
                     }
+                    let cw = width::char_width(self.ch[i]);
+                    if visual + cw > self.cols {
+                        continue;
+                    }
+                    visual += cw;
                     let t = self.tone[i];
                     let b = self.bg[i];
                     // 前景或背景任一变化都要重发 SGR。顺序固定：
@@ -1609,7 +1622,7 @@ impl Screen<'_> {
         let group = chosen.len() + chrome_rows(self.input.line_count());
         let group_top = self.rows.saturating_sub(group) / 2;
         for (i, segs) in chosen.iter().enumerate() {
-            g.put_centered_styled(group_top + i, std::slice::from_ref(segs));
+            g.put_centered_styled(group_top + i, std::slice::from_ref(segs), self.body_cols());
         }
         let top = group_top + chosen.len();
         (top, self.draw_chrome(g, top))
@@ -2774,13 +2787,10 @@ impl Screen<'_> {
         // 用户看到的是一堆重复提示，反而不知道在哪答。
         let modal = self.approval.is_some();
         let awaiting = self.awaiting_input && !modal;
-        let border = if awaiting { Tone::Warning } else { Tone::BorderActive };
-        let bar = "─".repeat(box_w.saturating_sub(2));
 
-        let corners = theme::get(self.theme).corners();
-        g.put(top, left, corners.0, border);
-        g.put(top, left + 1, &bar, border);
-        g.put(top, left + box_w - 1, corners.1, border);
+        // 输入块（对齐 MiMo 的现代风格）：无四面线框，左侧一条强调
+        // 竖条 + 整块面板底。待审批时竖条转警告色（余光可见"该你了"）。
+        let accent_bar = if awaiting { Tone::Warning } else { Tone::Primary };
 
         // ── 输入区：最多 MAX_INPUT_ROWS 行，超出则显示末尾并提示 ──
         let total = self.input.line_count();
@@ -2788,15 +2798,17 @@ impl Screen<'_> {
         let first = total - shown; // 显示最后 N 行（光标总在可见区内）
         let (crow, ccol) = self.input.cursor();
 
-        // 先把输入区整片填空，避免星场渗进框里
-        let area_bottom = top + 1 + shown + 1;
-        for r in (top + 1)..area_bottom.min(self.rows) {
+        // 输入块 = 输入行 + 状态行：先填空（避免星场渗进面板）再铺底色，
+        // 每行左侧画强调竖条
+        let area_bottom = top + shown + 1;
+        for r in top..area_bottom.min(self.rows) {
             g.blank(r, left + 1, left + box_w - 1, Tone::Text);
+            g.fill_bg(r, r + 1, left, left + box_w, Bg::Element);
+            g.put(r, left, "▌", accent_bar);
         }
 
         for (i, line) in self.input.lines().iter().enumerate().skip(first).take(shown) {
-            let r = top + 1 + (i - first);
-            g.put(r, left, "│", border);
+            let r = top + (i - first);
             if line.is_empty() && total == 1 && !awaiting {
                 // 空输入：给占位提示 + 示例（否则光标处一片空白，不知道能打什么）
                 let ex = match self.about {
@@ -2822,21 +2834,22 @@ impl Screen<'_> {
                 let text = width::truncate_to_width(&text, inner_w).to_string();
                 g.put(r, left + 2, &text, Tone::Text);
             }
-            g.put(r, left + box_w - 1, "│", border);
         }
         // 行数超上限：在最后一行右侧标注（不静默）
         if total > shown {
             let more = format!("… 共 {total} 行 ");
             let mw = width::display_width(&more);
-            let r = top + shown;
+            let r = top + shown - 1; // 最后一个**输入**行（top+shown 已是状态行）
             if left + box_w > mw + 4 {
                 g.put(r, left + box_w - mw - 2, &more, Tone::Muted);
             }
         }
 
         // 内层状态行（对标 MiMo 输入框内的 "Build ⏵ 模型"）
-        let stat_row = top + 1 + shown;
-        g.put(stat_row, left, "│", border);
+        let stat_row = top + shown;
+        g.blank(stat_row, left + 1, left + box_w - 1, Tone::Text);
+        g.fill_bg(stat_row, stat_row + 1, left, left + box_w, Bg::Element);
+        g.put(stat_row, left, "▌", accent_bar);
         let inner = match self.about {
             // 用 `current_model`（实时）而不是 `model`（启动快照）——
             // 否则切换模型后输入框下方一直显示启动时那个名字。
@@ -2854,15 +2867,9 @@ impl Screen<'_> {
             &width::truncate_to_width(&inner, inner_w).to_string(),
             Tone::Muted,
         );
-        g.put(stat_row, left + box_w - 1, "│", border);
 
-        let bottom = stat_row + 1;
-        g.put(bottom, left, corners.2, border);
-        g.put(bottom, left + 1, &bar, border);
-        g.put(bottom, left + box_w - 1, corners.3, border);
-
-        // 提示行：与输入框左右对齐
-        let hint_row = bottom + 1;
+        // 提示行：与输入块左右对齐
+        let hint_row = stat_row + 1;
         if hint_row < self.rows {
             g.put(hint_row, left + 2, HINT_LEFT, Tone::Border);
             let hw = width::display_width(HINT_RIGHT);
@@ -2918,7 +2925,7 @@ impl Screen<'_> {
             // 不夹的话光标会跑到右边框外面（比位置偏一点更糟）。
             let max_w = inner_w.saturating_sub(prefix_w);
             let ccol_w = ccol_w.min(max_w);
-            Some((top + 2 + vis_row, left + 3 + prefix_w + ccol_w))
+            Some((top + 1 + vis_row, left + 3 + prefix_w + ccol_w))
         } else {
             None
         }
@@ -8749,23 +8756,23 @@ mod tests {
         let facts: Vec<Fact> = Vec::new();
         let a = About { context_limit: 128_000, ..about() };
         let ed = editor::Editor::new();
-        let grid_of = |theme_name: theme::ThemeName| {
-            let screen = Screen {
-                cols: 100, rows: 24, facts: &facts, input: &ed, status: "",
-                awaiting_input: false, show_cursor: false, approval: None,
-                about: Some(&a), trust: None, theme: theme_name,
-                popup: None, preformatted: None, sidebar: false, view: None,
-                diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), thought_view: ThoughtView::default(),
-                settings: None, settings_cursor: 0, settings_category: 0,
-                settings_form: None, settings_confirm: None, settings_picker: None,
-                appearance: appearance::Appearance::default(), custom_background: None,
-            };
-            let (out, regions) = screen.render_with_regions();
-            (out, regions)
+        // CRT 的方角体现在**弹窗**上（输入块是无角的现代风格）：
+        // 渲染一个主题选择弹窗来断言角部字形
+        let mut theme_popup = popup::Popup::new(popup::Kind::Theme, "");
+        theme_popup.set_items(popup::theme_items(""), false);
+        let with_popup = Screen {
+            cols: 100, rows: 24, facts: &facts, input: &ed, status: "",
+            awaiting_input: false, show_cursor: false, approval: None,
+            about: Some(&a), trust: None, theme: theme::ThemeName::Terminal,
+            popup: Some(&theme_popup), preformatted: None, sidebar: false, view: None,
+            diff_viewer: None, whichkey: None,
+            display: ToolDisplay::default(), thought_view: ThoughtView::default(),
+            settings: None, settings_cursor: 0, settings_category: 0,
+            settings_form: None, settings_confirm: None, settings_picker: None,
+            appearance: appearance::Appearance::default(), custom_background: None,
         };
-        let (crt, _) = grid_of(theme::ThemeName::Terminal);
-        assert!(crt.contains('┌'), "CRT 主题应为方角边框");
+        let crt = with_popup.render();
+        assert!(crt.contains('┌'), "CRT 主题弹窗应为方角边框");
         // 亮色主题整屏铺 Bg::Base；暗色主题保持终端默认底（无 Base 单元）
         let count_base = |theme_name| {
             let mut g = Grid::new(60, 12);
@@ -9509,6 +9516,47 @@ mod tests {
         let text = plain(&out).join("\n");
         assert!(text.contains("正在输入的任务"), "输入内容必须仍可见：{text}");
         assert!(text.contains("default ⏵"), "输入框状态行必须仍可见：{text}");
+    }
+
+    #[test]
+    fn scratch_whichkey_line18() {
+        let a = about();
+        let ed = editor::Editor::new();
+        let groups = whichkey::groups_for(whichkey::Context::Input, true);
+        let cols = 96usize;
+        let out = Screen {
+                cols, rows: 34, facts: &[], input: &ed, status: "",
+                awaiting_input: false, show_cursor: true,
+                approval: None,
+                about: Some(&a), trust: None,
+                theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+                sidebar: cols >= 96, view: None, diff_viewer: None,
+                whichkey: Some(&groups),
+                display: ToolDisplay::default(),
+                thought_view: ThoughtView::default(),
+                settings: None,
+                settings_cursor: 0,
+                settings_category: 0,
+            settings_form: None, settings_confirm: None,
+                settings_picker: None,
+                appearance: appearance::Appearance::default(),
+                custom_background: None,
+            }
+            .render();
+        for (i, l) in plain(&out).iter().enumerate() {
+            let w = width::display_width(l);
+            if w > cols {
+                println!("LINE {i} width {w}");
+                let mut col = 0;
+                for ch in l.chars() {
+                    let cw = width::char_width(ch);
+                    if col >= 58 {
+                        println!("col {col}: {ch:?} w={cw}");
+                    }
+                    col += cw;
+                }
+            }
+        }
     }
 
     #[test]
@@ -10368,7 +10416,7 @@ mod tests {
     #[test]
     fn chrome_height_is_dynamic_not_constant() {
         // 布局必须按输入行数算高度：用固定常量会让多行输入盖住正文
-        assert_eq!(chrome_rows(1), 6, "单行时 chrome 应为 6 行");
+        assert_eq!(chrome_rows(1), 4, "单行时 chrome 应为 4 行（现代输入块无边框行）");
         assert!(chrome_rows(3) > chrome_rows(1), "多行时 chrome 必须更高");
         // 上限：输入框不能吃掉整屏
         assert_eq!(chrome_rows(100), chrome_rows(MAX_INPUT_ROWS));
@@ -10662,12 +10710,12 @@ mod tests {
 
     #[test]
     fn welcome_includes_an_input_box() {
-        // 输入框是首页的主体，必须有边框与占位提示
+        // 输入块是首页的主体：现代风格 = 左强调条（▌）+ 占位提示 + 状态行
         let text = plain(&welcome(90, 30)).join("\n");
-        assert!(text.contains('╭'), "应有输入框上边框：{text}");
+        assert!(text.contains('▌'), "应有输入块强调条：{text}");
         assert!(text.contains("输入任务"), "应有占位提示：{text}");
         assert!(text.contains("修一下代码里的 TODO"), "占位应带一个具体示例：{text}");
-        assert!(text.contains("default ⏵ mock"), "输入框内应有模式/模型状态行：{text}");
+        assert!(text.contains("default ⏵ mock"), "输入块内应有模式/模型状态行：{text}");
     }
 
     #[test]
@@ -10695,8 +10743,8 @@ mod tests {
         assert!(text.contains('·') || text.contains('+'), "应出现星场：{text}");
         assert!(text.contains("正文内容"), "星场不得覆盖正文：{text}");
         assert!(text.contains("我的输入"), "星场不得覆盖输入：{text}");
-        // 输入框边框必须完整可见
-        assert!(text.contains('╭') && text.contains('╯'), "输入框边框应完整：{text}");
+        // 输入块必须完整可见（现代风格：左强调条 + 面板底）
+        assert!(text.contains('▌'), "输入块强调条应可见：{text}");
     }
 
     #[test]
