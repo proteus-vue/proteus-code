@@ -3671,10 +3671,16 @@ fn pump_until_boundary<F>(
 where
     F: FnMut(neo_protocol::Op) -> Result<Vec<EventMsg>, String>,
 {
+    // 活动反馈：spinner 逐帧轮换，阶段名跟随事件流切换（思考/回复/工具）。
+    // 没有它，长思考期间唯一可见的就是一块不动的"运行中"，
+    // 观感等同卡死（真实反馈：opencode/mimo 都有这类动画）。
+    const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let mut frame = 0usize;
+    let mut phase = "思考中";
     loop {
         // 推进一步之前先看有没有 ctrl+c：**运行中 ctrl+c = 中断本轮**，
         // 不是退出应用（opencode 的语义）。清空缓冲区里的其它按键，
-        // 免得它们在回合结束后被当成"退出/提交"。
+        // 免得它们在回合结束后被逐个处理，误触退出。
         if poll_interrupt(stdin) {
             match submit(neo_protocol::Op::Interrupt) {
                 Ok(produced) => events.extend(produced),
@@ -3689,6 +3695,15 @@ where
                 let done = produced
                     .iter()
                     .any(|e| matches!(e, EventMsg::TurnComplete { .. }));
+                // 阶段跟随本批事件里**最新**的增量类型：模型此刻在干什么
+                for ev in produced.iter() {
+                    match ev {
+                        EventMsg::ReasoningDelta { .. } => phase = "思考中",
+                        EventMsg::AgentMessageDelta { .. } => phase = "回复中",
+                        EventMsg::ToolCallBegin { .. } => phase = "执行工具",
+                        _ => {}
+                    }
+                }
                 events.extend(produced);
                 // 重绘：这是"不冻结"的关键。
                 //
@@ -3696,12 +3711,14 @@ where
                 // 传空会让渲染器认为"还没有任何事实"，于是弹出**欢迎首屏**：
                 // 用户看到自己的对话凭空消失、只剩一个 "运行中…"（真实反馈）。
                 let facts = facts_of(events);
+                let running = format!("{} {}…", SPINNER[frame % SPINNER.len()], phase);
+                frame += 1;
                 let screen = Screen {
                     cols,
                     rows,
                     facts: &facts,
                     input: empty_input,
-                    status: "运行中…",
+                    status: &running,
                     awaiting_input: false,
                     approval: None,
                     show_cursor: false,
@@ -4242,15 +4259,19 @@ fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<V
                 }
                 out.push(vec![(2, "⋯ 思考".to_string(), Tone::Border)]);
                 let all: Vec<&str> = text.lines().collect();
-                for l in all.iter().take(THINKING_LINES) {
+                // 显示**最新尾部**而不是开头：思考是过程流，最新内容才承载
+                // "正在想什么"。只显示开头的话，长思考期间画面完全静止，
+                // 毫无"正在思考"的观感（opencode 同款滚动行为）。
+                let hidden = all.len().saturating_sub(THINKING_LINES);
+                for l in all.iter().skip(hidden) {
                     for w in width::wrap_to_width(l, inner.saturating_sub(6)) {
                         out.push(vec![(4, "│ ".to_string(), Tone::Border), (6, w, Tone::Muted)]);
                     }
                 }
-                if all.len() > THINKING_LINES {
+                if hidden > 0 {
                     out.push(vec![(
                         6,
-                        format!("… 另有 {} 行思考未显示", all.len() - THINKING_LINES),
+                        format!("… 前 {hidden} 行思考已滚过"),
                         Tone::Border,
                     )]);
                 }
@@ -8364,6 +8385,19 @@ mod tests {
         let text = plain(&render_with_display(&facts, disp)).join("\n");
         assert!(text.contains("答复"), "{text}");
         assert!(!text.contains("推理"), "展开工具输出不该连带显示推理：{text}");
+    }
+
+    #[test]
+    fn long_thinking_shows_the_latest_tail_not_the_head() {
+        // 思考是过程流：只显示开头的话，长思考期间画面完全静止，
+        // 毫无"正在思考"的观感。必须滚动显示最新尾部（opencode 同款）。
+        let lines: Vec<String> = (0..20).map(|i| format!("思路{i}")).collect();
+        let facts = vec![Fact::AssistantThought(lines.join("\n"))];
+        let disp = ToolDisplay { expanded: false, thinking: true };
+        let text = plain(&render_with_display(&facts, disp)).join("\n");
+        assert!(text.contains("思路19"), "应显示最新尾部：{text}");
+        assert!(!text.contains("思路0\n"), "开头应被滚出：{text}");
+        assert!(text.contains("已滚过"), "省略量要如实标注：{text}");
     }
 
     // ── which-key ────────────────────────────────────────────────────
