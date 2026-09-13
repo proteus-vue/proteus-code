@@ -643,6 +643,8 @@ pub struct Screen<'a> {
     pub whichkey: Option<&'a [whichkey::Group]>,
     /// 工具输出与推理的显示方式
     pub display: ToolDisplay,
+    /// 思考块视图状态：逐块展开集合 + 流式活动指示（spinner/阶段）
+    pub thought_view: ThoughtView,
     /// 设置视图（`Some` = 占满屏幕）
     pub settings: Option<&'a Vec<SettingSection>>,
     /// 设置视图当前选中的可操作行（用于高亮）
@@ -990,6 +992,8 @@ pub struct Regions {
     pub popup_items: Vec<((usize, usize, usize), usize)>,
     /// 状态行上的"下方还有 N 行"提示（点击即到底）
     pub scroll_hint_rows: Vec<usize>,
+    /// 思考块头部行：(网格行号 0 基, 思考块下标)。点击 = 单独展开/折叠该块。
+    pub thought_headers: Vec<(usize, usize)>,
     /// 侧栏收起时的"把手"格子（列, 行，1 基）—— 点它展开侧栏。
     /// 没有它的话，鼠标用户一旦点收起就再也点不开了（陷阱）。
     pub sidebar_grip: Option<(usize, usize)>,
@@ -1356,7 +1360,7 @@ impl Screen<'_> {
         } else if self.facts.is_empty() && self.about.is_some() {
             self.layout_welcome(&mut g, &p, self.about.unwrap())
         } else {
-            self.layout_transcript(&mut g)
+            self.layout_transcript(&mut g, &mut regions)
         };
         // 弹窗画在内容之上、输入框之上（紧贴输入框顶边）——
         // 覆盖部分正文是下拉菜单的正常行为，比把正文挤走更不打扰
@@ -1446,8 +1450,9 @@ impl Screen<'_> {
     }
 
     // ── 对话模式：正文在下、输入区钉在底部 ────────────────────────────
-    fn layout_transcript(&self, g: &mut Grid) -> (usize, Option<(usize, usize)>) {
-        let lines = self.fact_lines();
+    fn layout_transcript(&self, g: &mut Grid, regions: &mut Regions) -> (usize, Option<(usize, usize)>) {
+        let fl = self.fact_lines();
+        let lines = &fl.lines;
         let body = self.rows.saturating_sub(chrome_rows(self.input.line_count()));
         let total = lines.len();
 
@@ -1456,7 +1461,8 @@ impl Screen<'_> {
             Some(v) => v.window(total, body),
             None => (total.saturating_sub(body), total),
         };
-        let shown = &lines[start..end.min(total)];
+        let end = end.min(total);
+        let shown = &lines[start..end];
         // 内容不足时：跟随则贴底，否则贴顶（保持阅读位置稳定）
         let follow = self.view.map(|v| v.follow()).unwrap_or(true);
         let top = if follow { body.saturating_sub(shown.len()) } else { 0 };
@@ -1511,6 +1517,15 @@ impl Screen<'_> {
                 g.put(body - 1, 2, &msg, Tone::Muted);
             }
         }
+
+        // 思考块头部行：点击 = 逐块展开/折叠。行号随滚动窗口平移，
+        // 与滚动指示同用**网格行号（0 基）**；hit_test 统一 +1 转 1 基。
+        regions.thought_headers = fl
+            .thought_headers
+            .iter()
+            .filter(|(li, _)| *li >= start && *li < end)
+            .map(|(li, idx)| (top + (li - start), *idx))
+            .collect();
 
         let top = self.rows - chrome_rows(self.input.line_count());
         (top, self.draw_chrome(g, top))
@@ -2874,8 +2889,8 @@ impl Screen<'_> {
     ///   - 元信息一律 muted，不抢正文
     /// 把事实渲染成"行 → 片段"。实现见同名的自由函数 ——
     /// **渲染与搜索必须共用同一份行生成**，否则命中行号会与实际渲染错位。
-    fn fact_lines(&self) -> Vec<Vec<Seg>> {
-        fact_lines_with(self.facts, self.body_cols(), self.display)
+    fn fact_lines(&self) -> FactLines {
+        fact_lines_with(self.facts, self.body_cols(), self.display, &self.thought_view)
     }
 }
 
@@ -3604,8 +3619,8 @@ fn accept_trust(ws: &std::path::Path) {
 ///
 /// **这是行生成的唯一事实源**：渲染、搜索、行数估算都走它。
 /// 各算一次的话行号必然对不上（搜索高亮会标在无关的行上）。
-fn fact_lines(facts: &[Fact], body_cols: usize) -> Vec<Vec<Seg>> {
-    fact_lines_with(facts, body_cols, ToolDisplay::default())
+fn fact_lines(facts: &[Fact], body_cols: usize, tv: &ThoughtView) -> Vec<Vec<Seg>> {
+    fact_lines_with(facts, body_cols, ToolDisplay::default(), tv).lines
 }
 
 /// 会话控制契据 —— 由调用方（CLI）实现，宿主只调用。
@@ -3659,6 +3674,7 @@ fn pump_until_boundary<F>(
     empty_input: &editor::Editor,
     view_state: &view::View,
     display: ToolDisplay,
+    thought_view: &mut ThoughtView,
     sidebar_open: bool,
     theme_name: theme::ThemeName,
     appearance: appearance::Appearance,
@@ -3713,12 +3729,17 @@ where
                 let facts = facts_of(events);
                 let running = format!("{} {}…", SPINNER[frame % SPINNER.len()], phase);
                 frame += 1;
+                // 活动指示同时挂到**进行中的思考块头部**（opencode 同款）：
+                // 动画长在内容旁边，而不是只在右下角状态栏。
+                let spin_ch = SPINNER[frame % SPINNER.len()].chars().next().unwrap_or('⋯');
+                thought_view.live = Some((spin_ch, phase));
                 let screen = Screen {
                     cols,
                     rows,
                     facts: &facts,
                     input: empty_input,
                     status: &running,
+                    thought_view: thought_view.clone(),
                     awaiting_input: false,
                     approval: None,
                     show_cursor: false,
@@ -4212,9 +4233,44 @@ const TOOL_OUT_LINES: usize = 40;
 /// 推理过程的展示上限（行）。
 const THINKING_LINES: usize = 12;
 
-fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<Vec<Seg>> {
+/// 思考块的视图状态（随每帧传入渲染，非持久偏好）。
+#[derive(Debug, Clone, Default)]
+pub struct ThoughtView {
+    /// 被**单独**展开的完成态思考块（下标 = 转录中第 N 个思考块）。
+    /// 点击块头部切换；`/details` 是全局展开，这里是逐块的（opencode 同款）。
+    pub open: std::collections::BTreeSet<usize>,
+    /// 流式活动指示：`Some((spinner 字符, 阶段名))` 时，进行中的思考块
+    /// 头部显示 `{spin} {phase}…` —— 动画长在块上，而不是只在右下角。
+    pub live: Option<(char, &'static str)>,
+}
+
+/// 事实渲染结果：行 + 思考块头部的行号标注（供鼠标点击命中）。
+///
+/// 渲染、搜索、行数估算都走同一套行生成；头部标注只多不占 ——
+/// 不需要的调用方丢弃即可。
+pub struct FactLines {
+    pub lines: Vec<Vec<Seg>>,
+    /// (行下标, 思考块下标)：每行的行号是 `lines` 里的下标。
+    pub thought_headers: Vec<(usize, usize)>,
+}
+
+impl FactLines {
+    /// 只取行（丢弃头部标注）。
+    pub fn lines(self) -> Vec<Vec<Seg>> {
+        self.lines
+    }
+}
+
+fn fact_lines_with(
+    facts: &[Fact],
+    body_cols: usize,
+    disp: ToolDisplay,
+    tv: &ThoughtView,
+) -> FactLines {
     let inner = body_cols.saturating_sub(4);
     let mut out: Vec<Vec<Seg>> = Vec::new();
+    let mut headers: Vec<(usize, usize)> = Vec::new();
+    let mut thought_idx = 0usize;
     for (fi, f) in facts.iter().enumerate() {
         match f {
             Fact::UserSaid(text) => {
@@ -4254,24 +4310,38 @@ fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<V
                 // 推理默认**不显示**（`/thinking` 打开）：它常常很长且是过程性
                 // 内容，默认铺开会把答复挤下去。但必须可选可见 —— 排查模型
                 // 为什么做错时，看推理往往比看答复有用。
+                // 下标按转录里的第 N 个思考块计（与是否显示无关），逐块
+                // 折叠状态靠它定位 —— 切换 /thinking 不会错位。
+                let idx = thought_idx;
+                thought_idx += 1;
                 if !disp.thinking {
                     continue;
                 }
                 let all: Vec<&str> = text.lines().collect();
-                // 生命周期对齐 opencode：**流式进行中**实时滚动最新尾部；
-                // 本轮收尾（其后出现过 TurnFinished）后折叠成一行摘要，
-                // `/details` 展开回看。已完成的思考长铺在对话里会把
-                // 真正的答复挤走，而滚动中的思考正是"活动反馈"本身。
+                // 生命周期对齐 opencode：**流式进行中**实时滚动最新尾部
+                // （动画长在块头部）；本轮收尾后默认折叠成一行摘要，
+                // 点头部单独展开（`/details` 仍是全局展开）。
                 let turn_done = facts[fi..].iter().any(|f| matches!(f, Fact::TurnFinished { .. }));
-                if turn_done && !disp.expanded {
-                    out.push(vec![(
-                        2,
-                        format!("⋯ 思考 · {} 行（/details 展开）", all.len()),
-                        Tone::Dim,
-                    )]);
-                    continue;
+                let header_row = out.len();
+                if turn_done {
+                    let open = disp.expanded || tv.open.contains(&idx);
+                    if !open {
+                        out.push(vec![(
+                            2,
+                            format!("▸ 思考 · {} 行（点击展开）", all.len()),
+                            Tone::Dim,
+                        )]);
+                        headers.push((header_row, idx));
+                        continue;
+                    }
+                    out.push(vec![(2, "▾ 思考".to_string(), Tone::Border)]);
+                    headers.push((header_row, idx));
+                } else {
+                    // 进行中：spinner 挂在块头部（泵循环逐帧传入字符）；
+                    // 没有活动帧时退化为静态标记，布局不变。
+                    let (spin, phase) = tv.live.unwrap_or(('⋯', "思考中"));
+                    out.push(vec![(2, format!("{spin} {phase}…"), Tone::Border)]);
                 }
-                out.push(vec![(2, "⋯ 思考".to_string(), Tone::Border)]);
                 // 显示**最新尾部**而不是开头：思考是过程流，最新内容才承载
                 // "正在想什么"。只显示开头的话，长思考期间画面完全静止，
                 // 毫无"正在思考"的观感（opencode 同款滚动行为）。
@@ -4463,16 +4533,17 @@ fn fact_lines_with(facts: &[Fact], body_cols: usize, disp: ToolDisplay) -> Vec<V
             }
         }
     }
-    out
+    FactLines { lines: out, thought_headers: headers }
 }
 
 /// 转录渲染后的行数（滚动边界用）。
 ///
 /// 与 `fact_lines` 的换行结果保持一致：用同一个 Markdown 渲染与宽度预算，
 /// 否则滚动上限会与实际可滚范围不符（表现：滚不到底或滚出空白）。
-fn transcript_line_count(events: &[EventMsg], body_cols: usize) -> usize {
-    // 与渲染同源：直接数 fact_lines 的行数
-    fact_lines(&facts_of(events), body_cols).len()
+fn transcript_line_count(events: &[EventMsg], body_cols: usize, tv: &ThoughtView) -> usize {
+    // 与渲染同源：直接数 fact_lines 的行数（含逐块展开状态 ——
+    // 折叠/展开改变行数，滚动上限必须跟着变）
+    fact_lines(&facts_of(events), body_cols, tv).len()
 }
 
 /// 把事实渲染成可搜索的纯文本行。
@@ -4480,9 +4551,9 @@ fn transcript_line_count(events: &[EventMsg], body_cols: usize) -> usize {
 /// **直接复用 `fact_lines`**：搜索命中行号必须与渲染行号一致。
 /// 也不能用 `format!("{f:?}")` —— 那会把枚举名纳入匹配，
 /// 用户搜 "Assistant" 会命中每一行（屏幕上根本没这个词）。
-fn searchable_lines(facts: &[Fact], body_cols: usize) -> Vec<String> {
+fn searchable_lines(facts: &[Fact], body_cols: usize, tv: &ThoughtView) -> Vec<String> {
     // 直接复用 fact_lines：搜索命中行号必须与渲染行号一致
-    fact_lines(facts, body_cols)
+    fact_lines(facts, body_cols, tv)
         .into_iter()
         .map(|segs| segs.into_iter().map(|(_, t, _)| t).collect::<String>())
         .collect()
@@ -4559,6 +4630,8 @@ enum MouseAction {
     SettingsRow(usize),
     /// 点到设置页左列第 N 个分类（切换右侧内容）
     SettingsCategory(usize),
+    /// 点到思考块头部（单独展开/折叠该块；对齐 opencode 的逐块操作）
+    ToggleThought(usize),
 }
 
 /// 从当前事件流里的 PatchPreview 打开 diff 查看器。
@@ -4610,13 +4683,16 @@ fn handle_session_effect(
     sessions: &mut dyn SessionControl,
     events: &mut Vec<EventMsg>,
     view: &mut view::View,
+    thought_open: &mut std::collections::BTreeSet<usize>,
 ) -> Option<String> {
     match eff {
         Effect::SwitchSession(id) => {
             match sessions.switch(id) {
                 Ok(history) => {
-                    // 用重建出的历史**替换**当前转录，并把视图滚到底
+                    // 用重建出的历史**替换**当前转录，并把视图滚到底。
+                    // 逐块展开状态按新转录重置（下标语义换了会话就变了）。
                     *events = history;
+                    thought_open.clear();
                     view.to_bottom();
                     Some(format!("已切换到会话 {id}"))
                 }
@@ -4627,6 +4703,7 @@ fn handle_session_effect(
             Ok(id) => {
                 // 新会话 = 空转录；旧会话已在磁盘上，可 /sessions 切回
                 events.clear();
+                thought_open.clear();
                 view.to_bottom();
                 Some(format!("已新建会话 {id}（旧会话保留，/sessions 可切回）"))
             }
@@ -5065,6 +5142,13 @@ fn hit_test(
         }
     }
 
+    // 思考块头部：点击 = 单独展开/折叠该块（同一 0 基 → 1 基约定）
+    for (y, idx) in &r.thought_headers {
+        if ev.y == *y + 1 {
+            return Some(MouseAction::ToggleThought(*idx));
+        }
+    }
+
     // 侧栏把手（收起状态下唯一能展开的鼠标入口）
     if let Some((gx, gy)) = r.sidebar_grip {
         if ev.x == gx && ev.y == gy {
@@ -5180,6 +5264,8 @@ where
     let mut sidebar_open = true;
     // 转录滚动/搜索状态
     let mut view_state = view::View::new();
+    // 思考块视图状态：逐块展开集合 + 流式活动指示（见 ThoughtView）
+    let mut thought_view = ThoughtView::default();
     // 全屏 diff 查看器（`/diff` 或审批时按 d 打开）
     let mut diff_viewer: Option<diffview::Viewer> = None;
     // which-key 提示（`ctrl+/`）：任意键关闭
@@ -5302,6 +5388,7 @@ where
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                thought_view: ThoughtView::default(),
                 settings: None,
                 settings_cursor: 0,
                 settings_category: 0,
@@ -5376,6 +5463,7 @@ where
                 diff_viewer: None,
                 whichkey: None,
                 display,
+                thought_view: ThoughtView::default(),
                 settings: Some(sections),
                 settings_cursor,
                 settings_category,
@@ -5428,6 +5516,7 @@ where
                             sessions,
                             &mut events,
                             &mut view_state,
+                            &mut thought_view.open,
                         ) {
                             status = msg;
                         }
@@ -5724,6 +5813,7 @@ where
                                     }
                                     SettingAction::NewSession => {
                                         events.clear();
+                                        thought_view.open.clear();
                                         status = "新对话（已清空转录；文件改动不受影响）"
                                             .to_string();
                                     }
@@ -5735,6 +5825,7 @@ where
                                             sessions,
                                             &mut events,
                                             &mut view_state,
+                                            &mut thought_view.open,
                                         ) {
                                             status = msg;
                                         }
@@ -5910,6 +6001,7 @@ custom_bg.is_some(),
                 diff_viewer: Some(v),
                 whichkey: None,
                 display: ToolDisplay::default(),
+                thought_view: ThoughtView::default(),
                 settings: None,
                 settings_cursor: 0,
                 settings_category: 0,
@@ -5997,6 +6089,7 @@ custom_bg.is_some(),
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                thought_view: ThoughtView::default(),
                 settings: None,
                 settings_cursor: 0,
                 settings_category: 0,
@@ -6054,6 +6147,7 @@ custom_bg.is_some(),
                 diff_viewer: diff_viewer.as_ref(),
                 whichkey: whichkey_groups.as_deref(),
                 display,
+                thought_view: ThoughtView::default(),
                 settings: settings_state.as_ref(),
                 settings_cursor,
                 settings_category,
@@ -6127,6 +6221,7 @@ custom_bg.is_some(),
                             &empty_input,
                             &view_state,
                             display,
+                            &mut thought_view,
                             sidebar_open,
                             theme_name,
                             current_appearance,
@@ -6136,6 +6231,7 @@ custom_bg.is_some(),
                             cols,
                             rows,
                         )?;
+                        thought_view.live = None;
                         approval = if outstanding.is_some() {
                             build_approval_prompt(&events)
                         } else {
@@ -6269,6 +6365,7 @@ custom_bg.is_some(),
                             }
                             Effect::ClearTranscript => {
                                 events.clear();
+                                thought_view.open.clear();
                                 status = "新对话（已清空转录；文件改动不受影响）".to_string();
                             }
                             Effect::OpenThemePicker => {
@@ -6299,6 +6396,7 @@ custom_bg.is_some(),
                                     sessions,
                                     &mut events,
                                     &mut view_state,
+                                    &mut thought_view.open,
                                 ) {
                                     status = m;
                                 } else if let Effect::SwitchModel(name) = &other {
@@ -6387,7 +6485,7 @@ custom_bg.is_some(),
                         outstanding.is_some(),
                         false,
                         view_state.clamped_offset(
-                            transcript_line_count(&events, self_body_cols(cols, sidebar_open)),
+                            transcript_line_count(&events, self_body_cols(cols, sidebar_open), &thought_view),
                             rows.saturating_sub(chrome_rows(input.line_count())),
                         ) > 0,
                         sidebar_open && cols >= SIDEBAR_MIN_COLS,
@@ -6426,7 +6524,7 @@ custom_bg.is_some(),
                         MouseAction::ScrollTranscript(up) => {
                             let body = rows
                                 .saturating_sub(chrome_rows(input.line_count()));
-                            let total = transcript_line_count(&events, self_body_cols(cols, sidebar_open));
+                            let total = transcript_line_count(&events, self_body_cols(cols, sidebar_open), &thought_view);
                             if up {
                                 view_state.scroll_up(3, total, body);
                             } else {
@@ -6509,7 +6607,7 @@ sessions,
                                         notify_sound = !notify_sound;
                                         status = if notify_sound { "提醒声音：开".into() } else { "提醒声音：关".into() };
                                     }
-                                    Effect::ClearTranscript => events.clear(),
+                                    Effect::ClearTranscript => { events.clear(); thought_view.open.clear(); }
                                     Effect::ShowStatus => {
                                         info_screen = Some(commands::status_text(
                                             &about,
@@ -6540,6 +6638,7 @@ sessions,
                                         sessions,
                                         &mut events,
                                         &mut view_state,
+                                        &mut thought_view.open,
                                     ) {
                                         status = m;
                                     } else if let Effect::SwitchModel(name) = &other {
@@ -6583,24 +6682,30 @@ sessions,
                             }
                             .to_string();
                         }
+                        MouseAction::ToggleThought(idx) => {
+                            // 单独展开/折叠该思考块（对齐 opencode 的逐块操作）
+                            if !thought_view.open.remove(&idx) {
+                                thought_view.open.insert(idx);
+                            }
+                        }
                     }
                 }
             }
             Key::PageUp => {
                 let body = rows.saturating_sub(chrome_rows(input.line_count()));
-                let total = transcript_line_count(&events, cols);
+                let total = transcript_line_count(&events, cols, &thought_view);
                 let half = body / 2;
                 view_state.scroll_up(half.max(1), total, body);
             }
             Key::PageDown => {
                 let body = rows.saturating_sub(chrome_rows(input.line_count()));
-                let total = transcript_line_count(&events, cols);
+                let total = transcript_line_count(&events, cols, &thought_view);
                 let half = body / 2;
                 view_state.scroll_down(half.max(1), total, body);
             }
             Key::ScrollToTop => {
                 let body = rows.saturating_sub(chrome_rows(input.line_count()));
-                let total = transcript_line_count(&events, cols);
+                let total = transcript_line_count(&events, cols, &thought_view);
                 view_state.to_top(total, body);
             }
             Key::ScrollToBottom => view_state.to_bottom(),
@@ -6611,12 +6716,12 @@ sessions,
             }
             Key::SearchNext => {
                 let body = rows.saturating_sub(chrome_rows(input.line_count()));
-                let total = transcript_line_count(&events, cols);
+                let total = transcript_line_count(&events, cols, &thought_view);
                 view_state.search_step(true, total, body);
             }
             Key::SearchPrev => {
                 let body = rows.saturating_sub(chrome_rows(input.line_count()));
-                let total = transcript_line_count(&events, cols);
+                let total = transcript_line_count(&events, cols, &thought_view);
                 view_state.search_step(false, total, body);
             }
             Key::DeleteToLineEnd if searching => {
@@ -6667,7 +6772,7 @@ sessions,
                 input.backspace();
                 browsing = false;
                 if searching {
-                    let ls = searchable_lines(&facts_of(&events), cols);
+                    let ls = searchable_lines(&facts_of(&events), cols, &thought_view);
                     let q = input.text();
                     view_state.set_search(&ls, &q);
                     let n = view_state.search().map(|s| s.hits.len()).unwrap_or(0);
@@ -6682,7 +6787,7 @@ sessions,
             Key::Char(c) if searching => {
                 input.insert_char(c);
                 // 实时把查询应用到转录（所见即所得）
-                let ls = searchable_lines(&facts_of(&events), cols);
+                let ls = searchable_lines(&facts_of(&events), cols, &thought_view);
                 let q = input.text();
                 view_state.set_search(&ls, &q);
                 let n = view_state.search().map(|s| s.hits.len()).unwrap_or(0);
@@ -6828,7 +6933,7 @@ custom_bg.is_some(),
                                 notify_sound = !notify_sound;
                                 status = if notify_sound { "提醒声音：开".into() } else { "提醒声音：关".into() };
                             }
-                            Effect::ClearTranscript => events.clear(),
+                            Effect::ClearTranscript => { events.clear(); thought_view.open.clear(); }
                             Effect::ShowStatus => {
                                 info_screen = Some(commands::status_text(
                                     &about,
@@ -6855,6 +6960,7 @@ custom_bg.is_some(),
                                     sessions,
                                     &mut events,
                                     &mut view_state,
+                                    &mut thought_view.open,
                                 ) {
                                     status = m;
                                 } else if let Some(m) = handle_ui_effect(
@@ -6903,7 +7009,7 @@ custom_bg.is_some(),
                     status = format!("搜索「{q}」无匹配");
                 } else {
                     let body = rows.saturating_sub(chrome_rows(1));
-                    let total = transcript_line_count(&events, cols);
+                    let total = transcript_line_count(&events, cols, &thought_view);
                     view_state.search_step(false, total, body);
                     status = format!("搜索「{q}」：{n} 处（ctrl+n 下一个 / ctrl+p 上一个）");
                 }
@@ -6965,10 +7071,12 @@ custom_bg.is_some(),
                                             pump_until_boundary(
                                                 &mut submit, &mut events, &mut outstanding,
                                                 &about, &empty_input, &view_state, display,
+                                                &mut thought_view,
                                                 sidebar_open, theme_name, current_appearance,
                                                 custom_bg.as_ref(), &mut stdout, &mut stdin,
                                                 cols, rows,
                                             )?;
+                                            thought_view.live = None;
                                         }
                                         Err(e) => status = format!("目标已设定，但启动失败：{e}"),
                                     }
@@ -7001,10 +7109,12 @@ custom_bg.is_some(),
                                                 pump_until_boundary(
                                                     &mut submit, &mut events, &mut outstanding,
                                                     &about, &empty_input, &view_state, display,
+                                                    &mut thought_view,
                                                     sidebar_open, theme_name, current_appearance,
                                                     custom_bg.as_ref(), &mut stdout, &mut stdin,
                                                     cols, rows,
                                                 )?;
+                                                thought_view.live = None;
                                             }
                                             Err(e) => status = e,
                                         }
@@ -7111,6 +7221,7 @@ sessions,
                                 }
                                 Effect::ClearTranscript => {
                                     events.clear();
+                                    thought_view.open.clear();
                                     status =
                                         "新对话（已清空转录；文件改动不受影响）".to_string();
                                 }
@@ -7141,6 +7252,7 @@ sessions,
                                         sessions,
                                         &mut events,
                                         &mut view_state,
+                                        &mut thought_view.open,
                                     ) {
                                         status = m;
                                     } else if let Effect::SwitchModel(name) = &other {
@@ -7208,6 +7320,7 @@ sessions,
                             diff_viewer: None,
                             whichkey: None,
                             display,
+                            thought_view: ThoughtView::default(),
                             settings: None,
                             settings_cursor: 0,
                             settings_category: 0,
@@ -7260,6 +7373,7 @@ sessions,
                         diff_viewer: None,
                         whichkey: None,
                         display,
+                        thought_view: ThoughtView::default(),
                         settings: None,
                         settings_cursor: 0,
                         settings_category: 0,
@@ -7300,6 +7414,7 @@ sessions,
                     &empty_input,
                     &view_state,
                     display,
+                    &mut thought_view,
                     sidebar_open,
                     theme_name,
                     current_appearance,
@@ -7309,6 +7424,7 @@ sessions,
                     cols,
                     rows,
                 )?;
+                thought_view.live = None;
                 // 有审批请求就**弹模态框**（而不是只把输入框变黄）——
                 // 用户明确反馈"不是那种对话框形式，和 opencode/mimo 差很远"。
                 approval = if outstanding.is_some() {
@@ -7357,6 +7473,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -7405,6 +7522,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -7520,6 +7638,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -7630,6 +7749,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -7662,6 +7782,7 @@ mod tests {
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                thought_view: ThoughtView::default(),
                 settings: None,
                 settings_cursor: 0,
                 settings_category: 0,
@@ -7716,6 +7837,7 @@ mod tests {
                     diff_viewer: None,
                     whichkey: None,
                     display: ToolDisplay::default(),
+                    thought_view: ThoughtView::default(),
                     settings: None,
                     settings_cursor: 0,
                     settings_category: 0,
@@ -7754,6 +7876,7 @@ mod tests {
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                thought_view: ThoughtView::default(),
                 settings: None,
                 settings_cursor: 0,
                 settings_category: 0,
@@ -7792,6 +7915,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -7854,6 +7978,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -7882,6 +8007,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -7951,6 +8077,7 @@ mod tests {
                     diff_viewer: None,
                     whichkey: None,
                     display: ToolDisplay::default(),
+                    thought_view: ThoughtView::default(),
                     settings: None,
                     settings_cursor: 0,
                     settings_category: 0,
@@ -7984,7 +8111,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
         let text = plain(&out).join("\n");
@@ -8004,7 +8131,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None,
+            display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None,
             appearance: ap, custom_background: None,
         }.render()).join("\n")
     }
@@ -8087,7 +8214,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None,
+            display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance {
                 background: appearance::Background::Stars,
                 logo: appearance::LogoStyle::Hidden,
@@ -8302,6 +8429,7 @@ mod tests {
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
             display: disp,
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -8311,6 +8439,90 @@ mod tests {
             custom_background: None,
         }
         .render()
+    }
+
+    /// 带 ThoughtView 的渲染（逐块折叠 / 活动指示的用例用）。
+    fn render_with_view(facts: &[Fact], disp: ToolDisplay, tv: &ThoughtView) -> String {
+        let a = about();
+        let ed = editor::Editor::new();
+        Screen {
+            cols: 100, rows: 30, facts, input: &ed, status: "",
+            awaiting_input: false, show_cursor: false,
+            approval: None,
+            about: Some(&a), trust: None,
+            theme: theme::ThemeName::Neo, popup: None, preformatted: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None,
+            display: disp,
+            thought_view: tv.clone(),
+            settings: None,
+            settings_cursor: 0,
+            settings_category: 0,
+            settings_form: None, settings_confirm: None,
+            settings_picker: None,
+            appearance: appearance::Appearance::default(),
+            custom_background: None,
+        }
+        .render()
+    }
+
+    #[test]
+    fn finished_thinking_expands_per_block_by_click_state() {
+        // 逐块折叠：/thinking 开、/details 关时，完成态默认折叠；
+        // 单独点开第 0 块只影响第 0 块（opencode 同款逐块操作）。
+        let facts = vec![
+            Fact::AssistantThought("第一块的想法".into()),
+            Fact::AssistantThought("第二块的想法".into()),
+            Fact::AssistantSaid("答复".into()),
+            Fact::TurnFinished { input_tokens: 1, output_tokens: 1 },
+        ];
+        let disp = ToolDisplay { expanded: false, thinking: true };
+        let collapsed = plain(&render_with_view(&facts, disp, &ThoughtView::default())).join("\n");
+        assert!(collapsed.contains("▸ 思考 · 1 行"), "完成态默认折叠：{collapsed}");
+        assert!(!collapsed.contains("第一块的想法"), "折叠态不铺内容：{collapsed}");
+
+        let mut tv = ThoughtView::default();
+        tv.open.insert(0); // 只点开第 0 块
+        let opened = plain(&render_with_view(&facts, disp, &tv)).join("\n");
+        assert!(opened.contains("第一块的想法"), "点开的块应展开：{opened}");
+        assert!(!opened.contains("第二块的想法"), "未点开的块仍折叠：{opened}");
+        assert!(opened.contains("▾ 思考"), "展开块有展开标记：{opened}");
+    }
+
+    #[test]
+    fn live_thinking_header_carries_the_activity_spinner() {
+        // 动画长在块头部（而非只在右下角）：进行中的思考块头部显示 spinner 与阶段
+        let facts = vec![Fact::AssistantThought("正在想的事情".into())];
+        let disp = ToolDisplay { expanded: false, thinking: true };
+        let mut tv = ThoughtView::default();
+        tv.live = Some(('⠹', "思考中"));
+        let text = plain(&render_with_view(&facts, disp, &tv)).join("\n");
+        assert!(text.contains("⠹ 思考中…"), "活动头部应显示 spinner 与阶段：{text}");
+        assert!(text.contains("正在想的事情"), "进行中思考始终滚动可见：{text}");
+
+        // 无活动帧（如审批挂起间隙）退化为静态标记，布局不变
+        let idle = plain(&render_with_view(&facts, disp, &ThoughtView::default())).join("\n");
+        assert!(idle.contains("⋯ 思考中…"), "{idle}");
+    }
+
+    #[test]
+    fn thought_index_is_stable_when_thinking_display_is_off() {
+        // 逐块下标按转录里的第 N 个思考块计，与 /thinking 显隐无关：
+        // 下标不能因显隐切换而错位。
+        let facts = vec![
+            Fact::AssistantThought("甲块".into()),
+            Fact::AssistantThought("乙块".into()),
+            Fact::TurnFinished { input_tokens: 0, output_tokens: 0 },
+        ];
+        let off = ToolDisplay { expanded: false, thinking: false };
+        let text = plain(&render_with_view(&facts, off, &ThoughtView::default())).join("\n");
+        assert!(!text.contains("甲块"), "{text}");
+
+        let on = ToolDisplay { expanded: false, thinking: true };
+        let mut tv = ThoughtView::default();
+        tv.open.insert(1); // 乙块
+        let text = plain(&render_with_view(&facts, on, &tv)).join("\n");
+        assert!(text.contains("乙块"), "点开的是乙块：{text}");
+        assert!(!text.contains("甲块"), "甲块仍折叠：{text}");
     }
 
     #[test]
@@ -8457,7 +8669,7 @@ mod tests {
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+                display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render();
             let lines = plain(&out);
@@ -8509,7 +8721,7 @@ mod tests {
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: Some(&p), preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         let text = plain(&out).join("\n");
@@ -8600,7 +8812,7 @@ mod tests {
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: Some(&secs), settings_cursor: 0,
                 settings_category: 0,
                 settings_picker: None,
             settings_form: None, settings_confirm: None,
@@ -8633,7 +8845,7 @@ mod tests {
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+                display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0,
                 settings_category: 0,
                 settings_picker: None,
             settings_form: None, settings_confirm: None,
@@ -8704,7 +8916,7 @@ mod tests {
                     about: None, trust: None,
                     theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                     sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                    display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: cursor,
+                    display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: Some(&secs), settings_cursor: cursor,
                     settings_category: cat,
                     settings_picker: None,
                     settings_form: None, settings_confirm: None,
@@ -8771,7 +8983,7 @@ mod tests {
             about: Some(&about()), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: Some(&secs), settings_cursor: 0,
                 settings_category: 0,
             settings_picker: None,
             settings_form: None, settings_confirm: None,
@@ -8810,7 +9022,7 @@ mod tests {
                 about: Some(&about()), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: Some(&secs), settings_cursor: 0,
                 settings_category: 0,
                 settings_picker: None,
             settings_form: None, settings_confirm: None,
@@ -8872,6 +9084,7 @@ mod tests {
             sidebar: false, view: None, diff_viewer: None,
             whichkey: Some(&groups),
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -8902,6 +9115,7 @@ mod tests {
             sidebar: false, view: None, diff_viewer: None,
             whichkey: Some(&groups),
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -8931,6 +9145,7 @@ mod tests {
                 sidebar: cols >= 96, view: None, diff_viewer: None,
                 whichkey: Some(&groups),
                 display: ToolDisplay::default(),
+                thought_view: ThoughtView::default(),
                 settings: None,
                 settings_cursor: 0,
                 settings_category: 0,
@@ -8967,7 +9182,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: Some(v), whichkey: None, display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render()
     }
@@ -9094,7 +9309,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup, preformatted: None,
-            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: true, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions()
         .1
@@ -9163,7 +9378,7 @@ mod tests {
                 about: Some(&about()), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: Some(&secs), settings_cursor: 0,
                 settings_category: cat,
                 settings_picker: None,
                 settings_form: None, settings_confirm: None,
@@ -9222,7 +9437,7 @@ mod tests {
             about: Some(&about()), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: Some(&secs), settings_cursor: 0,
             settings_category: 0,
             settings_picker: None,
             settings_form: None, settings_confirm: None,
@@ -9289,7 +9504,7 @@ mod tests {
                 about: Some(&about()), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
                 sidebar: false, view: None, diff_viewer: None, whichkey: None,
-                display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+                display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: Some(&secs), settings_cursor: 0,
                 settings_category: 0,
                 settings_picker: None,
             settings_form: None, settings_confirm: None,
@@ -9485,7 +9700,7 @@ mod tests {
             about: Some(&about()), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: Some(&secs), settings_cursor: 0,
                 settings_category: 0,
             settings_picker: None, settings_form: Some(&pk), settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
@@ -9553,7 +9768,7 @@ mod tests {
             about: Some(&about()), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: Some(&secs), settings_cursor: 0,
+            display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: Some(&secs), settings_cursor: 0,
                 settings_category: 0,
             settings_picker: Some(&pk), settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
@@ -9588,7 +9803,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: None, diff_viewer: None, whichkey: None, display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render_with_regions();
         let (gx, gy) = r.sidebar_grip.expect("侧栏收起时应留一个把手");
@@ -9660,7 +9875,7 @@ mod tests {
                 approval: None,
                 about: Some(&a), trust: None,
                 theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+                sidebar: false, view: Some(v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
             }
             .render()
         };
@@ -9687,7 +9902,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         assert!(plain(&out).join("\n").contains("下方还有"), "应提示下方还有内容");
@@ -9699,7 +9914,7 @@ mod tests {
             (0..50).map(|i| Fact::AssistantSaid(format!("第{i}条"))).collect();
         let a = about();
         let mut v = view::View::new();
-        let ls = searchable_lines(&facts, 100);
+        let ls = searchable_lines(&facts, 100, &ThoughtView::default());
         v.set_search(&ls, "第7条");
         let n = v.search().map(|s| s.hits.len()).unwrap_or(0);
         assert_eq!(n, 1, "「第7条」应恰好命中一条");
@@ -9710,7 +9925,7 @@ mod tests {
             approval: None,
             about: Some(&a), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
-            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
+            sidebar: false, view: Some(&v), diff_viewer: None, whichkey: None, display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0, settings_category: 0, settings_picker: None, settings_form: None, settings_confirm: None, appearance: appearance::Appearance::default(), custom_background: None,
         }
         .render();
         let t = plain(&out).join("\n");
@@ -9722,7 +9937,7 @@ mod tests {
     fn searchable_lines_reflect_what_is_on_screen() {
         // 搜索必须匹配**屏幕上可见的文字**，而不是 Debug 输出里的枚举名
         let facts = vec![Fact::AssistantSaid("代码里有个函数 foo_bar".into())];
-        let ls = searchable_lines(&facts, 80).join("\n");
+        let ls = searchable_lines(&facts, 80, &ThoughtView::default()).join("\n");
         assert!(ls.contains("foo_bar"), "应能搜到正文内容");
         assert!(!ls.contains("AssistantSaid"), "不该把枚举名纳入搜索：{ls}");
     }
@@ -9730,7 +9945,7 @@ mod tests {
     #[test]
     fn transcript_line_count_is_nonzero_and_bounded() {
         let evs = vec![EventMsg::AgentMessageDone { text: "a\nb\nc".into() }];
-        let n = transcript_line_count(&evs, 80);
+        let n = transcript_line_count(&evs, 80, &ThoughtView::default());
         assert!(n >= 3, "三行文本至少算 3 行，实际 {n}");
         assert!(n < 1000, "估算不该失控");
     }
@@ -9753,6 +9968,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -9794,6 +10010,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -9826,6 +10043,7 @@ mod tests {
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                thought_view: ThoughtView::default(),
                 settings: None,
                 settings_cursor: 0,
                 settings_category: 0,
@@ -9862,6 +10080,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -9971,6 +10190,7 @@ mod tests {
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                thought_view: ThoughtView::default(),
                 settings: None,
                 settings_cursor: 0,
                 settings_category: 0,
@@ -10142,6 +10362,7 @@ mod tests {
             diff_viewer: None,
             whichkey: None,
             display: ToolDisplay::default(),
+            thought_view: ThoughtView::default(),
             settings: None,
             settings_cursor: 0,
             settings_category: 0,
@@ -10173,6 +10394,7 @@ mod tests {
                 diff_viewer: None,
                 whichkey: None,
                 display: ToolDisplay::default(),
+                thought_view: ThoughtView::default(),
                 settings: None,
                 settings_cursor: 0,
                 settings_category: 0,
@@ -10363,7 +10585,7 @@ mod tests {
             about: Some(&about()), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0,
                 settings_category: 0,
             settings_picker: None, settings_form: None, settings_confirm: None,
             appearance: ap_state, custom_background: None,
@@ -10402,7 +10624,7 @@ mod tests {
             about: Some(&about()), trust: None,
             theme: theme::ThemeName::Neo, popup: None, preformatted: None,
             sidebar: false, view: None, diff_viewer: None, whichkey: None,
-            display: ToolDisplay::default(), settings: None, settings_cursor: 0,
+            display: ToolDisplay::default(), thought_view: ThoughtView::default(), settings: None, settings_cursor: 0,
                 settings_category: 0,
             settings_picker: None, settings_form: None, settings_confirm: None,
             appearance: appearance::Appearance::default(), custom_background: None,
@@ -10584,6 +10806,7 @@ mod tests {
                     diff_viewer: None,
                     whichkey: None,
                     display: ToolDisplay::default(),
+                    thought_view: ThoughtView::default(),
                     settings: None,
                     settings_cursor: 0,
                     settings_category: 0,
