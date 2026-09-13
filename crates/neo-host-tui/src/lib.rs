@@ -4319,11 +4319,19 @@ fn fact_lines_with(
                 }
                 let all: Vec<&str> = text.lines().collect();
                 // 生命周期对齐 opencode：**流式进行中**实时滚动最新尾部
-                // （动画长在块头部）；本轮收尾后默认折叠成一行摘要，
+                // （动画长在块头部）；结束后默认折叠成一行摘要，
                 // 点头部单独展开（`/details` 仍是全局展开）。
-                let turn_done = facts[fi..].iter().any(|f| matches!(f, Fact::TurnFinished { .. }));
+                //
+                // "已结束"的判据有两条，缺一不可：
+                // - 其后出现过 TurnFinished（本轮收尾）；或
+                // - 其后还有**更新的思考块**（多步轮次里，工具之后的下一步
+                //   思考开始时，上一步的思考早已结束 —— 若只看 TurnComplete
+                //   （整轮才发一次），同轮早期思考会被永远误判成"进行中"，
+                //   表现为全部展开、点头部也没反应（进行中块不登记点击））。
+                let settled = facts[fi + 1..].iter().any(|f| matches!(f, Fact::AssistantThought(_)))
+                    || facts[fi..].iter().any(|f| matches!(f, Fact::TurnFinished { .. }));
                 let header_row = out.len();
-                if turn_done {
+                if settled {
                     let open = disp.expanded || tv.open.contains(&idx);
                     if !open {
                         out.push(vec![(
@@ -8502,6 +8510,32 @@ mod tests {
         // 无活动帧（如审批挂起间隙）退化为静态标记，布局不变
         let idle = plain(&render_with_view(&facts, disp, &ThoughtView::default())).join("\n");
         assert!(idle.contains("⋯ 思考中…"), "{idle}");
+    }
+
+    #[test]
+    fn earlier_thoughts_of_the_same_turn_are_collapsible() {
+        // 多步轮次：第 1 步的思考早已结束（后面是工具与下一步思考），
+        // 只有**最后一个**思考块是进行中的 —— 早期思考不能被误判成
+        // live 而永远展开（表现为全部展开、点击也没反应）。
+        let facts = vec![
+            Fact::AssistantThought("第一步的想法".into()),
+            Fact::ToolFinished {
+                name: "bash".into(),
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+            },
+            Fact::AssistantThought("第二步还在想".into()),
+        ];
+        let disp = ToolDisplay { expanded: false, thinking: true };
+        let mut tv = ThoughtView::default();
+        tv.live = Some(('⠹', "思考中"));
+        let text = plain(&render_with_view(&facts, disp, &tv)).join("\n");
+        assert!(text.contains("▸ 思考 · 1 行"), "第一步的思考应可折叠：{text}");
+        assert!(!text.contains("第一步的想法"), "第一步思考默认折叠：{text}");
+        assert!(text.contains("第二步还在想"), "当前思考仍滚动可见：{text}");
+        assert!(text.contains("⠹ 思考中…"), "进行中的仍是最后一块：{text}");
     }
 
     #[test]
