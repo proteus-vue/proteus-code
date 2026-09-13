@@ -1873,3 +1873,159 @@ fn replay_feeds_every_event_to_the_orchestrator() {
         sh.seen_kinds
     );
 }
+
+// ─────────────── 流式分帧（Op::Pump 的时间片消费）───────────────
+
+/// 会**阻塞**的 provider：增量从通道逐个送出，未送达前 `stream.next()` 等待。
+/// 用来证明分帧消费 —— 事件在整步结束前就能被宿主逐帧看到。
+/// （真实等价物是 SSE：`neo-llm-deepseek` 的迭代器在网络字节到达时才产出。）
+struct DripProvider {
+    rx: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ModelDelta>>>,
+}
+
+impl ModelProvider for DripProvider {
+    fn name(&self) -> &str { "drip" }
+    fn stream(&self, _req: &neo_core::ModelRequest<'_>) -> neo_core::ModelStream {
+        let rx = Arc::clone(&self.rx);
+        Box::new(std::iter::from_fn(move || rx.lock().unwrap().recv().ok()))
+    }
+}
+
+fn drip_kernel(rx: std::sync::mpsc::Receiver<ModelDelta>) -> Kernel {
+    kernel_with(
+        Box::new(DripProvider { rx: Arc::new(std::sync::Mutex::new(rx)) }),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    )
+}
+
+#[test]
+fn a_pump_consumes_a_bounded_batch_not_the_whole_step() {
+    // 300 个思考增量 > MAX_DELTAS_PER_PUMP：第一次 Pump 必须在上限处
+    // 截断返回（增量已可见），而不是整步吃完 —— 这是无时序依赖的确定性证明。
+    let script = vec![(0..300)
+        .map(|i| ModelDelta::Reasoning(format!("t{i}")))
+        .collect::<Vec<ModelDelta>>()];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    k.submit(Op::BeginTurn { text: "hi".into(), refs: vec![] }).unwrap();
+
+    let events = k.submit(Op::Pump).unwrap();
+    let seen = events
+        .iter()
+        .filter(|e| matches!(e, EventMsg::ReasoningDelta { .. }))
+        .count();
+    assert_eq!(seen, neo_core::MAX_DELTAS_PER_PUMP, "单帧必须有界：{seen}");
+    assert!(
+        !events.iter().any(|e| matches!(e, EventMsg::AgentMessageDone { .. })),
+        "流未耗尽不该有 Done：{events:?}"
+    );
+
+    // 第二帧消费剩余增量并收尾
+    let events = k.submit(Op::Pump).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(e, EventMsg::AgentMessageDone { .. })),
+        "剩余增量应在本帧收尾：{events:?}"
+    );
+    assert!(matches!(events.last(), Some(EventMsg::TurnComplete { .. })));
+}
+
+#[test]
+fn streaming_deltas_are_visible_before_the_step_finishes() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut k = drip_kernel(rx);
+    k.submit(Op::BeginTurn { text: "hi".into(), refs: vec![] }).unwrap();
+
+    // 发送线程：两笔思考增量间隔 500ms（远大于 80ms 时间片），
+    // 中间是"流在飞"的窗口；收流发生在第二个 500ms 之后。
+    // 这里的 sleep 是发送节奏（同步信号），不是盲等。
+    let sender = std::thread::spawn(move || {
+        tx.send(ModelDelta::Reasoning("思考A".into())).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        tx.send(ModelDelta::Reasoning("思考B".into())).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    });
+
+    // 第一帧：拿到思考增量，但整步尚未结束（无 Done）
+    let events = k.submit(Op::Pump).unwrap();
+    let has_thought = events
+        .iter()
+        .any(|e| matches!(e, EventMsg::ReasoningDelta { delta } if delta.starts_with("思考")));
+    assert!(has_thought, "思考增量必须在整步结束前就能被宿主看到：{events:?}");
+    assert!(
+        !events.iter().any(|e| matches!(e, EventMsg::AgentMessageDone { .. })),
+        "流未耗尽不该有 Done：{events:?}"
+    );
+
+    // 逐帧推进到收尾：Done 出现前必须已见过思考增量
+    for _ in 0..50 {
+        let events = k.submit(Op::Pump).unwrap();
+        if events.iter().any(|e| matches!(e, EventMsg::AgentMessageDone { .. })) {
+            assert!(matches!(events.last(), Some(EventMsg::TurnComplete { .. })));
+            sender.join().unwrap();
+            return;
+        }
+    }
+    panic!("50 帧内没有收尾 —— 分帧消费疑似卡死");
+}
+
+#[test]
+fn foreign_ops_are_rejected_while_stream_is_in_flight() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut k = drip_kernel(rx);
+    k.submit(Op::BeginTurn { text: "hi".into(), refs: vec![] }).unwrap();
+    let sender = std::thread::spawn(move || {
+        tx.send(ModelDelta::Text("答".into())).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        tx.send(ModelDelta::Text("案".into())).unwrap();
+        // tx 故意晚收：Shell/Interrupt 断言发生在"流在飞"的窗口内
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    });
+
+    // 消费到第一笔增量后，流仍在飞（tx 未收）
+    k.submit(Op::Pump).unwrap();
+    let err = k
+        .submit(Op::Shell { command: "ls".into() })
+        .expect_err("流式进行中提交 Shell 必须被拒");
+    assert!(err.to_string().contains("流式推进"), "{err}");
+
+    k.submit(Op::Interrupt).unwrap(); // 收场：作废在飞流
+    sender.join().unwrap();
+}
+
+#[test]
+fn interrupt_mid_stream_discards_the_in_flight_step() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut k = drip_kernel(rx);
+    k.submit(Op::BeginTurn { text: "hi".into(), refs: vec![] }).unwrap();
+    let sender = std::thread::spawn(move || {
+        tx.send(ModelDelta::Reasoning("想了半截".into())).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        tx.send(ModelDelta::Reasoning("还在想".into())).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    });
+
+    let events = k.submit(Op::Pump).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(e, EventMsg::ReasoningDelta { delta } if delta == "想了半截")),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, EventMsg::AgentMessageDone { .. })),
+        "中断前流必须仍在飞（否则测的是收尾后中断）：{events:?}"
+    );
+
+    // 中断：在飞流作废，状态回 Idle —— 不需要等流自然结束
+    let events = k.submit(Op::Interrupt).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(e, EventMsg::Error { message } if message == "已中断")),
+        "{events:?}"
+    );
+    assert_eq!(*k.state(), KernelState::Idle);
+    sender.join().unwrap();
+}

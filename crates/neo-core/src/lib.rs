@@ -46,6 +46,16 @@ pub const DEFAULT_MAX_STEPS: usize = 64;
 /// 压缩本身是 L4 orchestration 的职责（`Compact` Op），当前**未实现**。
 pub const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 4096;
 
+/// 一次 `Op::Pump` 消费流式增量的时间片。
+///
+/// 逐帧宿主按 Pump 重绘：切片让重绘频率有界（约 10 帧/秒），
+/// 又不至于整步等完才返回 —— 那会让思考型模型的长推理期间界面
+/// 全程"运行中"却看不到任何内容（真实反馈）。
+/// 切片只影响**同一事件序列的分段方式**，不改变事件本身（T2 不受影响）。
+const PUMP_SLICE: std::time::Duration = std::time::Duration::from_millis(80);
+/// 单次 Pump 消费的增量上限（内存与日志有界；输出爆炸的兜底）。
+pub const MAX_DELTAS_PER_PUMP: usize = 256;
+
 // ══════════════════════════════════════════════════════════════════════
 // 会话消息：模型可见的内容
 // ══════════════════════════════════════════════════════════════════════
@@ -116,8 +126,10 @@ pub enum ModelDelta {
 
 /// 一次模型响应的增量序列。
 ///
-/// 用迭代器而非 `Vec` 是为了**保留流式语义**：真实 provider 边收边 yield，
-/// 内核也边收边发 `AgentMessageDelta`。换成真实流式实现时内核循环不变。
+/// 用迭代器而非 `Vec` 是为了**保留流式语义**：真实 provider（SSE）边收边
+/// yield，内核也边收边发 `AgentMessageDelta` / `ReasoningDelta`。
+/// 迭代器由内核**跨 Op 存活**（见 `Kernel::in_flight`）——
+/// 一次 `Op::Pump` 只消费一个时间片，宿主据此逐帧看到思考与正文。
 pub type ModelStream = Box<dyn Iterator<Item = ModelDelta> + Send>;
 
 /// 扩展点：换模型。
@@ -654,6 +666,11 @@ pub enum KernelError {
     /// 单独变体：让 "没配策略" 与 "目标此刻不可推进" 有各自的措辞，
     /// 用户才知道下一步是"换宿主配置"还是"先 /goal resume"。
     GoalUnavailable(String),
+    /// 在飞模型流还没消费完就提交了不合法的 Op。
+    ///
+    /// 流式进行中只允许 `Pump`（继续消费）与 `Interrupt`（作废整步）；
+    /// 其余 op 会与在飞步的历史操作交错，破坏"一步 = 一次模型请求 + 其工具"的原子性。
+    TurnInFlight,
 }
 
 impl std::fmt::Display for KernelError {
@@ -673,6 +690,10 @@ impl std::fmt::Display for KernelError {
                 "上下文超上限（{messages} > {limit} 条），需压缩后再继续；压缩属 L4 职责，当前未实现"
             ),
             Self::GoalUnavailable(msg) => write!(f, "目标编排不可用：{msg}"),
+            Self::TurnInFlight => write!(
+                f,
+                "本轮仍在流式推进中：等待 Pump 到边界，或 Interrupt 中断"
+            ),
         }
     }
 }
@@ -696,6 +717,17 @@ pub enum KernelState {
 struct PendingApproval {
     calls: Vec<ToolInvocation>,
     index: usize,
+}
+
+/// 一步中尚未消费完的模型流（跨 `Op::Pump` 存活）。
+///
+/// 流存内核而非步骤局部变量，是"逐帧"的前提：一次 Pump 只消费一个
+/// 时间片的增量就返回，宿主立即重绘 —— 思考文本到一笔显一笔。
+/// 宿主拿到的事件序列与整步消费**完全一致**，切片只是分段方式。
+struct InFlightStep {
+    stream: ModelStream,
+    text: String,
+    calls: Vec<ToolInvocation>,
 }
 
 pub struct Kernel {
@@ -747,6 +779,8 @@ pub struct Kernel {
     usage_in: u64,
     usage_out: u64,
     pending: Option<PendingApproval>,
+    /// 在飞的模型流（`Op::Pump` 分帧消费；整步结束后为 None）。
+    in_flight: Option<InFlightStep>,
     /// 本会话内**永久放行**的调用类别（`Decision::AllowAlways` 的结果）。
     ///
     /// # 为什么需要它
@@ -812,6 +846,7 @@ impl Kernel {
             usage_in: 0,
             usage_out: 0,
             pending: None,
+            in_flight: None,
             granted: std::collections::BTreeSet::new(),
             skills: crate::skills::SkillRegistry::new(),
             instructions: crate::instructions::Instructions::default(),
@@ -886,6 +921,11 @@ impl Kernel {
     ///
     /// 确定性契约：同一 Op 序列 + 同一 mock provider ⇒ 同一 EventMsg 序列（T2）。
     pub fn submit(&mut self, op: Op) -> Result<Vec<EventMsg>, KernelError> {
+        // 流式进行中只接受 Pump/Interrupt：其余 op 会与在飞步的消息/工具
+        // 操作交错（历史被改、审批凭空出现），必须整步完成后才可提交。
+        if self.in_flight.is_some() && !matches!(op, Op::Pump | Op::Interrupt) {
+            return Err(KernelError::TurnInFlight);
+        }
         self.outbox.clear();
         self.log("op", &op)?;
         // 指令组成系统提示词（模型可见），必须在**第一次**请求前落盘。
@@ -975,7 +1015,11 @@ impl Kernel {
             }
 
             Op::Interrupt => {
-                // 中断只在**工具调用边界**生效（安全点），杜绝半写状态。
+                // 中断只在**安全点**生效，杜绝半写状态：工具调用边界，或
+                // 流式增量的分片边界。在飞流直接作废 —— 增量尚未落成
+                // 消息/工具调用，历史不会被污染；SSE 连接随迭代器 Drop
+                // 一起终止（openssl 子进程被 kill，不留残留）。
+                self.in_flight = None;
                 self.pending = None;
                 self.state = KernelState::Idle;
                 // 被中断的目标子任务轮不再有 TurnComplete —— 必须同步作废
@@ -1171,9 +1215,18 @@ impl Kernel {
 
     /// 推进**一步**：一次模型请求 + 它要求的工具执行。
     ///
-    /// 拆出来是为了让宿主能逐帧推进（每步之后重绘），而不是等整轮结束 ——
+    /// 拆出来是为了让宿主能逐帧推进（每帧重绘），而不是等整轮结束 ——
     /// 整轮可能包含多次网络往返，期间界面完全冻结（真实反馈："像卡死"）。
+    /// 帧的粒度是**时间片**而非整步：有在飞流时只消费一个切片的增量就返回，
+    /// 流耗尽才落消息、执行工具 —— 思考型模型的长推理期间宿主也能持续重绘，
+    /// 而不是全程"运行中"到最后一次性出结果（真实反馈）。
+    ///
+    /// 确定性不受影响：事件序列只由 provider 的产出顺序决定，
+    /// 时间片只是**同一序列的分段方式**（T2 断言的是序列，不是分段）。
     fn step_once(&mut self) -> Result<StepOutcome, KernelError> {
+        if self.in_flight.is_some() {
+            return self.consume_stream_slice();
+        }
         if self.steps_this_turn >= self.max_steps {
             let msg = EventMsg::Error {
                 message: format!(
@@ -1190,20 +1243,91 @@ impl Kernel {
         self.steps_this_turn += 1;
         self.step_counter += 1;
 
-        let (text, calls) = self.model_step()?;
-        self.messages.push(Message::Assistant { text, tool_calls: calls.clone() });
+        // 开流：历史临时移出组装请求（零拷贝 —— 每步克隆整份历史会让一轮
+        // 退化到 O(N²)，长会话下是主要热点）。请求体被迭代器自持后立即放回，
+        // 后续 Pump 只消费流，不再需要历史。
+        let stream = {
+            let messages = std::mem::take(&mut self.messages);
+            let request = ModelRequest {
+                system: &self.system_prompt,
+                messages: &messages,
+                tools: &self.tool_schemas,
+            };
+            let stream = self.models.current_provider().stream(&request);
+            self.messages = messages;
+            stream
+        };
+        self.in_flight = Some(InFlightStep { stream, text: String::new(), calls: Vec::new() });
+        self.consume_stream_slice()
+    }
 
-        if calls.is_empty() {
+    /// 消费在飞流的一个时间片；流耗尽时收尾这一步（落消息 / 执行工具）。
+    ///
+    /// 事件在增量到达时**立即**进 outbox：宿主下一次 Pump 返回就能看到，
+    /// 思考与正文因此逐帧生长。流半途被丢弃（中断/落盘失败）时，
+    /// SSE 连接随迭代器 Drop 一起终止，不留残留进程。
+    fn consume_stream_slice(&mut self) -> Result<StepOutcome, KernelError> {
+        let Some(mut inf) = self.in_flight.take() else {
+            return Ok(StepOutcome::Done);
+        };
+        let deadline = std::time::Instant::now() + PUMP_SLICE;
+        let mut consumed = 0usize;
+        let mut finished = false;
+        while consumed < MAX_DELTAS_PER_PUMP {
+            match inf.stream.next() {
+                None => {
+                    finished = true;
+                    break;
+                }
+                Some(ModelDelta::Text(chunk)) => {
+                    inf.text.push_str(&chunk);
+                    self.emit_and_log(&EventMsg::AgentMessageDelta { delta: chunk })?;
+                    consumed += 1;
+                }
+                Some(ModelDelta::Reasoning(chunk)) => {
+                    // 推理也要落盘：它同样是**模型可见内容**（下一轮请求
+                    // 会带上 assistant 的 reasoning），不落日志回放就缺一块。
+                    self.emit_and_log(&EventMsg::ReasoningDelta { delta: chunk })?;
+                    consumed += 1;
+                }
+                Some(ModelDelta::ToolCall(call)) => {
+                    let ev = EventMsg::ToolCallBegin {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    };
+                    self.emit_and_log(&ev)?;
+                    inf.calls.push(call);
+                    consumed += 1;
+                }
+                Some(ModelDelta::Usage { input_tokens, output_tokens }) => {
+                    self.usage_in += input_tokens;
+                    self.usage_out += output_tokens;
+                    consumed += 1;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        if !finished {
+            self.in_flight = Some(inf);
+            return Ok(StepOutcome::More);
+        }
+        // 流耗尽：收尾与整步消费完全一致（AgentMessageDone → 落消息 → 工具）
+        self.emit_and_log(&EventMsg::AgentMessageDone { text: inf.text.clone() })?;
+        self.messages.push(Message::Assistant { text: inf.text, tool_calls: inf.calls.clone() });
+        if inf.calls.is_empty() {
             return Ok(StepOutcome::Done); // 模型不再要工具 → 本轮结束
         }
-        if calls.len() > MAX_TOOL_CALLS_PER_STEP {
+        if inf.calls.len() > MAX_TOOL_CALLS_PER_STEP {
             let msg = EventMsg::Error {
-                message: format!("单步工具调用过多（{} > {}）", calls.len(), MAX_TOOL_CALLS_PER_STEP),
+                message: format!("单步工具调用过多（{} > {}）", inf.calls.len(), MAX_TOOL_CALLS_PER_STEP),
             };
             self.emit_and_log(&msg)?;
             return Ok(StepOutcome::Done);
         }
-        match self.execute_from(&calls, 0)? {
+        match self.execute_from(&inf.calls, 0)? {
             ExecOutcome::Done => Ok(StepOutcome::More), // 工具欠一次请求 → 下一步
             ExecOutcome::Suspended => Ok(StepOutcome::Suspended),
         }
@@ -1236,71 +1360,7 @@ impl Kernel {
         Ok(())
     }
 
-    /// 一次模型请求：组装 → 流式消费 → 返回（文本, 工具调用）。
-    ///
-    /// **零拷贝**：历史用 `mem::take` 临时移出，而不是 `clone` ——
-    /// 每步克隆整份历史会让一轮退化到 O(N²)，长会话下是主要热点。
-    /// 移出后 `self` 可自由可变借用（落盘/入队），跑完再放回。
-    fn model_step(&mut self) -> Result<(String, Vec<ToolInvocation>), KernelError> {
-        let messages = std::mem::take(&mut self.messages);
-
-        let (text, calls, result) = {
-            let request = ModelRequest {
-                system: &self.system_prompt,
-                messages: &messages,
-                tools: &self.tool_schemas,
-            };
-
-            let mut text = String::new();
-            let mut calls = Vec::new();
-            let mut result: Result<(), KernelError> = Ok(());
-
-            for delta in self.models.current_provider().stream(&request) {
-                match delta {
-                    ModelDelta::Text(chunk) => {
-                        text.push_str(&chunk);
-                        let ev = EventMsg::AgentMessageDelta { delta: chunk };
-                        if let Err(e) = self.emit_and_log(&ev) {
-                            result = Err(e);
-                            break;
-                        }
-                    }
-                    ModelDelta::Reasoning(chunk) => {
-                        // 推理也要落盘：它同样是**模型可见内容**（下一轮请求
-                        // 会带上 assistant 的 reasoning），不落日志回放就缺一块。
-                        let ev = EventMsg::ReasoningDelta { delta: chunk };
-                        if let Err(e) = self.emit_and_log(&ev) {
-                            result = Err(e);
-                            break;
-                        }
-                    }
-                    ModelDelta::ToolCall(call) => {
-                        let ev = EventMsg::ToolCallBegin {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            arguments: call.arguments.clone(),
-                        };
-                        if let Err(e) = self.emit_and_log(&ev) {
-                            result = Err(e);
-                            break;
-                        }
-                        calls.push(call);
-                    }
-                    ModelDelta::Usage { input_tokens, output_tokens } => {
-                        self.usage_in += input_tokens;
-                        self.usage_out += output_tokens;
-                    }
-                }
-            }
-            (text, calls, result)
-        };
-
-        self.messages = messages; // 放回
-        result?;
-        self.emit_and_log(&EventMsg::AgentMessageDone { text: text.clone() })?;
-        Ok((text, calls))
-    }
-
+    /// 执行一步产生的工具调用（从 `start` 起；审批恢复后从断点继续）。
     fn execute_from(&mut self, calls: &[ToolInvocation], start: usize) -> Result<ExecOutcome, KernelError> {
         for index in start..calls.len() {
             let call = calls[index].clone();
