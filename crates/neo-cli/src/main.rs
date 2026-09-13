@@ -16,6 +16,9 @@ use neo_protocol::ExecMode;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod tui_driver;
+use tui_driver::KernelHandle;
+
 const USAGE: &str = r#"neo —— 用 Rust 重构的编程 Agent 内核
 
 用法：
@@ -544,15 +547,22 @@ fn cmd_tui(args: &[String]) -> i32 {
     // 主题偏好从用户目录读（首次用默认）；由 CLI 注入，宿主不自己读配置
     let theme_name = neo_host_tui::theme::load_preference();
 
-    // 会话控制：宿主调契据，CLI 执行（含内核换会话与历史重建）。
-    // 内核用 Rc<RefCell> 与 submit 闭包共享 —— TUI 单线程，无需锁。
-    let kernel = std::rc::Rc::new(std::cell::RefCell::new(kernel));
-    let mut sessions = TuiSessions::new(kernel.clone(), store);
-    let submit_kernel = kernel.clone();
-    // 注入 submit：TUI 只认契据，业务在 kernel
-    let mut providers = TuiProviders::new(kernel.clone());
+    // 内核挪到**驱动线程**（独占）：TUI 的 submit(Pump) 变成
+    // "发出 op + 最多等一个时间片收事件批"，工具执行 / 首字延迟期间
+    // 主线程照常按时间片重绘（spinner 转）—— 不再冻结（真实反馈）。
+    // Kernel: Send 由 Web 宿主（内核跑在线程里）既有代码证明。
+    let (kernel_handle, cmd_rx, batch_tx) = tui_driver::channel();
+    tui_driver::spawn(kernel, cmd_rx, batch_tx);
+
+    // 会话控制：宿主调契据，CLI 经句柄在驱动线程上执行（含换内核与历史重建）。
+    let mut sessions = TuiSessions::new(kernel_handle.clone(), store);
+    let mut providers = TuiProviders::new(kernel_handle.clone());
     let result = neo_host_tui::run(about, gate, theme_name, &mut sessions, &mut providers, move |op| {
-        submit_kernel.borrow_mut().submit(op).map_err(|e| e.to_string())
+        match op {
+            // Pump：最多等一个时间片，批没到返回空批 —— 泵循环照常重绘
+            neo_protocol::Op::Pump => kernel_handle.pump_collect(),
+            other => Ok(kernel_handle.call(other)),
+        }
     });
     match result {
         Ok(()) => 0,
@@ -569,23 +579,29 @@ fn cmd_tui(args: &[String]) -> i32 {
 /// 它活在 CLI 层而不是宿主里，因为**只有 CLI 知道内核怎么装配** ——
 /// 宿主只调用契据（`SessionControl`），不碰内核类型。
 struct TuiSessions {
-    /// 与 submit 闭包共享同一内核（TUI 是单线程，`Rc<RefCell>` 足够且无锁）
-    kernel: std::rc::Rc<std::cell::RefCell<neo_core::Kernel>>,
+    /// 内核在驱动线程上，经句柄通信（见 tui_driver 模块注释）
+    k: KernelHandle,
     /// 会话库：会话的列举/新建/删除都在这里（日志路径由它给出）
     store: neo_session_store::SessionStore,
 }
 
 impl TuiSessions {
-    fn new(
-        kernel: std::rc::Rc<std::cell::RefCell<neo_core::Kernel>>,
-        store: neo_session_store::SessionStore,
-    ) -> Self {
-        Self { kernel, store }
+    fn new(k: KernelHandle, store: neo_session_store::SessionStore) -> Self {
+        Self { k, store }
     }
 
     /// 为某个会话 id 造一个 JSONL 持久化（指向该会话自己的文件）。
     fn persistence_for(&self, id: &str) -> Box<dyn neo_core::SessionPersistence> {
         Box::new(neo_session_local::JsonlPersistence::new(self.store.path_for(id)))
+    }
+
+    /// 从落盘日志重建历史事件流（宿主重画转录用）。
+    fn history_of(k: &mut neo_core::Kernel) -> Vec<neo_protocol::EventMsg> {
+        k.log_for_test()
+            .into_iter()
+            .filter(|rec| rec.kind == "event")
+            .filter_map(|rec| serde_json::from_value::<neo_protocol::EventMsg>(rec.payload).ok())
+            .collect()
     }
 }
 
@@ -642,11 +658,12 @@ struct TuiProviders {
     keys: std::collections::BTreeMap<String, String>,
     /// 内核句柄：新增/删除服务商后**立刻**把 provider 装进内核，
     /// 这样不必重启进程（"重启后生效"对正在跑的会话等于不可用）。
-    kernel: std::rc::Rc<std::cell::RefCell<neo_core::Kernel>>,
+    /// 内核在驱动线程上，经句柄通信（见 tui_driver 模块注释）。
+    k: KernelHandle,
 }
 
 impl TuiProviders {
-    fn new(kernel: std::rc::Rc<std::cell::RefCell<neo_core::Kernel>>) -> Self {
+    fn new(k: KernelHandle) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let registry = match neo_providers::load(&cwd) {
             neo_providers::LoadOutcome::Loaded(r) => r,
@@ -654,7 +671,7 @@ impl TuiProviders {
             // 但**不会**在保存前把它写掉（保存是显式动作）。
             _ => neo_providers::ProviderRegistry::default(),
         };
-        Self { registry, keys: neo_providers::load_keys(), kernel }
+        Self { registry, keys: neo_providers::load_keys(), k }
     }
 
     /// 把某个服务商装进内核（若有可用密钥）。没密钥就只是"存了配置"，
@@ -667,9 +684,9 @@ impl TuiProviders {
             return Ok(()); // 只有配置、还没密钥：不算错误
         };
         let (info, p) = provider_of(&entry, &key);
-        self.kernel
-            .borrow_mut()
-            .add_model(info, p)
+        self.k
+            .query(move |k| k.add_model(info, p))
+            .ok_or_else(|| "内核线程已退出".to_string())?
     }
 
     fn save(&self) -> Result<(), String> {
@@ -693,16 +710,20 @@ impl neo_host_tui::ProviderControl for TuiProviders {
     }
 
     fn models(&self) -> Vec<(String, String, bool)> {
-        self.kernel
-            .borrow()
-            .available_models()
-            .into_iter()
-            .map(|m| (m.name, m.description, m.production))
-            .collect()
+        self.k
+            .query(|k| {
+                k.available_models()
+                    .into_iter()
+                    .map(|m| (m.name, m.description, m.production))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn current_model(&self) -> String {
-        self.kernel.borrow().current_model().to_string()
+        self.k
+            .query(|k| k.current_model().to_string())
+            .unwrap_or_default()
     }
 
     fn get(&self, name: &str) -> Option<(String, String, String, u64)> {
@@ -758,7 +779,8 @@ impl neo_host_tui::ProviderControl for TuiProviders {
         if removed || had_key {
             self.save()?;
             // 从内核里摘掉（正在使用的那个会被拒绝 —— 如实报给用户）
-            if let Err(e) = self.kernel.borrow_mut().remove_model(name) {
+            let name = name.to_string();
+            if let Some(Err(e)) = self.k.query(move |k| k.remove_model(&name)) {
                 return Err(e);
             }
         }
@@ -782,42 +804,42 @@ impl neo_host_tui::SessionControl for TuiSessions {
             return Err(format!("会话 {id} 不存在"));
         }
         let p = self.persistence_for(id);
-        // 内核换会话并重建历史
-        let mut k = self.kernel.borrow_mut();
-        k.switch_session(id, p);
-        // 把重建出的历史**转回事件流**给宿主重画转录。
-        // 从落盘日志直接取 event 记录，保持与原始流一致。
-        let logs = k.log_for_test();
-        drop(k);
-        let mut history = Vec::new();
-        for rec in logs {
-            if rec.kind == "event" {
-                if let Ok(ev) =
-                    serde_json::from_value::<neo_protocol::EventMsg>(rec.payload.clone())
-                {
-                    history.push(ev);
-                }
-            }
-        }
-        Ok(history)
+        let id = id.to_string();
+        // 内核换会话并重建历史；历史**转回事件流**给宿主重画转录
+        // （从落盘日志直接取 event 记录，保持与原始流一致）。
+        self.k
+            .query(move |k| {
+                k.switch_session(id, p);
+                TuiSessions::history_of(k)
+            })
+            .ok_or_else(|| "内核线程已退出".to_string())
     }
 
     fn create(&mut self) -> Result<String, String> {
         let id = self.store.new_id();
         let p = self.persistence_for(&id);
-        self.kernel.borrow_mut().switch_session(id.clone(), p);
+        let new_id = id.clone();
+        self.k
+            .query(move |k| k.switch_session(new_id, p))
+            .ok_or_else(|| "内核线程已退出".to_string())?;
         Ok(id)
     }
 
     fn delete(&mut self, id: &str) -> Result<bool, String> {
-        if id == self.kernel.borrow().session_id() {
+        let current = self
+            .k
+            .query(|k| k.session_id().to_string())
+            .ok_or_else(|| "内核线程已退出".to_string())?;
+        if id == current {
             return Err("不能删除当前正在使用的会话（先切换到别的会话）".into());
         }
         self.store.delete(id).map_err(|e| e.to_string())
     }
 
     fn current(&self) -> String {
-        self.kernel.borrow().session_id().to_string()
+        self.k
+            .query(|k| k.session_id().to_string())
+            .unwrap_or_default()
     }
 }
 

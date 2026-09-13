@@ -26,3 +26,7 @@ neo-session-local = { path = "../neo-session-local" }
 neo-session-store = { path = "../neo-session-store" }
 neo-providers = { path = "../neo-providers" }
 serde_json = { workspace = true }
+
+# 驱动线程的单测用离线桩（内存持久化 / 确定性断言）
+[dev-dependencies]
+neo-mock = { path = "../neo-mock" }
