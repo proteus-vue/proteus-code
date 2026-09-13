@@ -1275,6 +1275,19 @@ impl Grid {
     }
 }
 
+/// 千分位：45201 → "45,201"。侧栏数字不加分隔符，四位数以上很难读。
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 impl Screen<'_> {
     /// 兼容旧调用：只要渲染结果。
     pub fn render(&self) -> String {
@@ -1663,7 +1676,7 @@ impl Screen<'_> {
 
         // ── Session：模型 / 模式 / 会话（对标 opencode 侧栏的信息区）──
         if let Some(a) = self.about {
-            section(g, &mut row, "Session", Tone::Text);
+            section(g, &mut row, "SESSION", Tone::Text);
             let head = width::truncate_to_width(
                 &format!("{} · {}", a.current_model, a.mode_short),
                 inner,
@@ -1674,9 +1687,12 @@ impl Screen<'_> {
             let sess = width::truncate_to_width(&format!("会话 {}", a.session), inner).to_string();
             g.put(row, x0 + 2, &sess, Tone::Muted);
             row += 1;
+            if row < self.rows {
+                row += 1; // 区块间留白：没有它整栏糊成一片
+            }
         }
 
-        // ── Context：token 用量（本轮 + 会话累计 + 占用条）──
+        // ── Context：占用条 + 已用/上限 + 本轮用量 + 会话累计 ──
         let turns: Vec<(u64, u64)> = self
             .facts
             .iter()
@@ -1691,28 +1707,16 @@ impl Screen<'_> {
         let (last_in, last_out) = turns.last().copied().unwrap_or((0, 0));
         // 会话累计：当前转录里所有轮次之和（切换会话后从零起算，与转录一致）
         let (sum_in, sum_out) = turns.iter().fold((0u64, 0u64), |a, b| (a.0 + b.0, a.1 + b.1));
-        section(g, &mut row, "Context", Tone::Text);
-        g.put(row, x0 + 2, &format!("{last_in} in / {last_out} out"), Tone::Muted);
-        row += 1;
-        if turns.len() > 1 {
-            let total = sum_in + sum_out;
-            let line = width::truncate_to_width(
-                &format!("会话累计 {total} tok · {} 轮", turns.len()),
-                inner,
-            )
-            .to_string();
-            g.put(row, x0 + 2, &line, Tone::Muted);
-            row += 1;
-        }
+        section(g, &mut row, "CONTEXT", Tone::Text);
         match self.about.map(|a| a.context_limit).unwrap_or(0) {
-            // 上限未知时**不显示百分比** —— 宁可不给，也不给假数字
+            // 上限未知时**不显示百分比与占用条** —— 宁可不给，也不给假数字
             0 => {
                 g.put(row, x0 + 2, "上限未知", Tone::Muted);
                 row += 1;
             }
             limit => {
-                let used = last_in + last_out;
-                let pct = if limit == 0 { 0 } else { (used * 100 / limit).min(999) };
+                let used = sum_in + sum_out;
+                let pct = (used * 100 / limit).min(999) as usize;
                 let tone = if pct >= 90 {
                     Tone::Error
                 } else if pct >= 70 {
@@ -1720,13 +1724,42 @@ impl Screen<'_> {
                 } else {
                     Tone::Muted
                 };
-                // 10 格占用条：一眼看出余量，数字是辅助
-                let filled = (pct as usize).min(100) * 10 / 100;
-                let bar = format!("{}{}", "▰".repeat(filled), "▱".repeat(10 - filled));
-                let line = width::truncate_to_width(&format!("{bar} {pct}%"), inner).to_string();
-                g.put(row, x0 + 2, &line, tone);
+                // 20 格占用条：█░ 是 Block Elements，几乎所有等宽字体都有
+                // （▰▱ 会被不少字体回退成斜杠，实测很难看）。5%/格 粒度足够。
+                let filled = pct.min(100) * 20 / 100;
+                let bar = format!("{}{}", "█".repeat(filled), "░".repeat(20 - filled));
+                g.put(row, x0 + 2, &bar, tone);
+                let px = x0 + 2 + 21;
+                g.put(row, px, &format!("{pct:>3}%"), tone);
+                row += 1;
+                let used_line = width::truncate_to_width(
+                    &format!("{} / {} tok", thousands(used), thousands(limit)),
+                    inner,
+                )
+                .to_string();
+                g.put(row, x0 + 2, &used_line, Tone::Muted);
                 row += 1;
             }
+        }
+        g.put(
+            row,
+            x0 + 2,
+            &format!("本轮 {} in · {} out", thousands(last_in), thousands(last_out)),
+            Tone::Muted,
+        );
+        row += 1;
+        if turns.len() > 1 && row < self.rows {
+            let total = sum_in + sum_out;
+            let line = width::truncate_to_width(
+                &format!("会话累计 {} · {} 轮", thousands(total), turns.len()),
+                inner,
+            )
+            .to_string();
+            g.put(row, x0 + 2, &line, Tone::Muted);
+            row += 1;
+        }
+        if row < self.rows {
+            row += 1; // 区块间留白
         }
 
         // ── Todo：任务清单（最近一次）──
@@ -1739,7 +1772,7 @@ impl Screen<'_> {
                 .filter(|i| matches!(i.status, neo_protocol::TodoStatus::Completed))
                 .count();
             row += 1;
-            section(g, &mut row, &format!("Todo {done}/{}", items.len()), Tone::Text);
+            section(g, &mut row, &format!("TODO {done}/{}", items.len()), Tone::Text);
             for it in items.iter().take(12) {
                 if row >= self.rows {
                     break;
@@ -1770,7 +1803,7 @@ impl Screen<'_> {
             let _ = (adds, dels);
             row += 1;
             // 标题只写名字：每个文件自带 +N -N，标题再写一次是冗余
-            section(g, &mut row, "Modified Files", Tone::Text);
+            section(g, &mut row, "FILES", Tone::Text);
             for f in files.iter().take(10) {
                 if row >= self.rows {
                     break;
@@ -7979,9 +8012,9 @@ mod tests {
             ]),
         ];
         let text = plain(&sidebar_screen(120, &facts, true)).join("\n");
-        assert!(text.contains("Todo 1/3"), "应有清单进度：{text}");
+        assert!(text.contains("TODO 1/3"), "应有清单进度：{text}");
         assert!(text.contains("写测试"), "应列出清单项：{text}");
-        assert!(text.contains("Modified Files"), "应有已修改文件面板：{text}");
+        assert!(text.contains("FILES"), "应有已修改文件面板：{text}");
         assert!(text.contains("src/main.rs"), "应列出文件名：{text}");
         assert!(text.contains("+12"), "应显示新增行数：{text}");
     }
@@ -8054,11 +8087,11 @@ mod tests {
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }.render();
-        // 占用条 + 百分比：一眼可辨的余量展示
-        assert!(
-            plain(&out).join("\n").contains("▰▰▰▰▰▰▰▰▰▱ 90%"),
-            "占用率应为 90%（带占用条）"
-        );
+        // 占用条 + 百分比：一眼可辨的余量展示（█░ 通用字形 + 右对齐百分比）
+        let t = plain(&out).join("\n");
+        assert!(t.contains("██████████████████░░"), "占用条 90% 应为 18 格：{t}");
+        assert!(t.contains(" 90%"), "占用率应为 90%：{t}");
+        assert!(t.contains("900 / 1,000 tok"), "应显示已用/上限：{t}");
     }
 
     #[test]
@@ -10892,4 +10925,3 @@ mod tests {
         assert!(pending.contains("38;2;245;167;66"), "审批边框应为 warning 色");
     }
 }
-
