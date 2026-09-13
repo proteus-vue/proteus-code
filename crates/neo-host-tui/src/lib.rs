@@ -566,17 +566,29 @@ impl Pal {
         }
     }
 
+    /// 角部字形随主题：圆角（默认）或方角（CRT 终端风）。方角是
+    /// "整风格不同"的一部分 —— 形状与配色共同构成主题观感。
+    fn corners(&self) -> (&'static str, &'static str, &'static str, &'static str) {
+        if self.theme.square {
+            ("┌", "┐", "└", "┘")
+        } else {
+            ("╭", "╮", "╰", "╯")
+        }
+    }
+
     /// 背景色的 SGR。主题里三档层次必须**可区分但都不抢戏**：
     /// 面板最接近底色，表面稍亮（卡片要"浮起来"），选中是低饱和强调色。
     fn bg(&self, b: Bg) -> String {
         let t = &self.theme;
         let (r, g, bl) = match b {
+            Bg::Base => t.base,
             Bg::Panel => t.bg_panel,
             Bg::Selected => t.bg_selected,
             Bg::Element => t.bg_element,
             Bg::Menu => t.bg_menu,
-            // 遮罩：三档都取很暗的值，压出"背景退后"的效果
-            Bg::Backdrop => (0x0a, 0x0a, 0x0c),
+            // 遮罩色随主题：暗色取近黑压暗背景；亮色取浅灰（黑遮罩在
+            // 亮底上是刺眼的洞）
+            Bg::Backdrop => t.backdrop,
         };
         Color::Rgb(r, g, bl).bg(self.mode, t)
     }
@@ -1044,6 +1056,10 @@ const HINT_RIGHT: &str = "@ 引用  pgup/pgdn 滚动  ctrl+c 退出";
 /// 面板（侧栏/设置页底）→ 表面（模态卡片）→ 选中（列表高亮条）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Bg {
+    /// 整屏底色：暗色主题保持终端默认底（此值不会出现在格子上），
+    /// 亮色主题铺主题的 base 色 —— 这是"亮色主题"与"暗色主题"在
+    /// 观感上的分界线。
+    Base,
     /// 面板（对话框、侧栏）—— 对应 opencode backgroundPanel
     Panel,
     Selected,
@@ -1175,7 +1191,16 @@ impl Grid {
     ///
     /// 自定义字符画（`rows` 非空时）优先：它按行给出字符，
     /// 超出画布尺寸时按取模重复，形成平铺效果。
-    fn fill_background(&mut self, bg: appearance::Background, custom: Option<&Vec<String>>) {
+    fn fill_background(&mut self, theme: &theme::Theme, bg: appearance::Background, custom: Option<&Vec<String>>) {
+        // 亮色主题：整屏铺主题底色（暗色主题保持终端默认底）
+        if theme.light {
+            self.fill_bg(0, self.rows, 0, self.cols, Bg::Base);
+        }
+        // 纹理随主题开关：亮色/CRT 主题没有星场（亮底上星点不可见、
+        // CRT 风格本来就不该有装饰）
+        if !theme.stars {
+            return;
+        }
         if let Some(art) = custom {
             let ar = art.len();
             for r in 0..self.rows {
@@ -1324,7 +1349,7 @@ impl Screen<'_> {
         // 全屏 diff 查看器：占满整屏，不画输入框/侧栏/状态栏。
         if let Some(v) = self.diff_viewer {
             self.draw_diff_viewer(&mut g, &p, v);
-            g.fill_background(appearance::Background::None, None);
+            g.fill_background(&p.theme, appearance::Background::None, None);
             let mut out = format!("{ESC}[H{ESC}[2J");
             out.push_str(&g.lines(&p).join("\r\n"));
             out.push_str(&format!("{ESC}[?25l"));
@@ -1341,7 +1366,7 @@ impl Screen<'_> {
             // 所以必须在内容之前调用：反过来的话整屏都已有内容，
             // 纹理会一个格子都画不出来（表现为"点了背景只换了名字、画面没变"）。
             // 主界面几处渲染都是这个顺序，设置页曾写反。
-            g.fill_background(self.appearance.background, self.custom_background);
+            g.fill_background(&p.theme, self.appearance.background, self.custom_background);
             let cur = self.draw_settings(&mut g, sections, &mut regions);
             let mut out = format!("{ESC}[H{ESC}[2J");
             out.push_str(&g.lines(&p).join("\r\n"));
@@ -1435,7 +1460,7 @@ impl Screen<'_> {
         if self.approval.is_some() {
             g.fill_bg(0, self.rows, 0, self.cols, Bg::Backdrop);
         } else {
-            g.fill_background(self.appearance.background, self.custom_background);
+            g.fill_background(&p.theme, self.appearance.background, self.custom_background);
         }
         let mut out = format!("{ESC}[H{ESC}[2J");
         out.push_str(&g.lines(&p).join("\r\n"));
@@ -2107,9 +2132,10 @@ impl Screen<'_> {
             g.blank(r, left, (left + w).min(self.cols - 1), Tone::Text);
         }
         let bar = "─".repeat(w.saturating_sub(2));
-        g.put(top, left, "╭", Tone::Border);
+        let corners = theme::get(self.theme).corners();
+        g.put(top, left, corners.0, Tone::Border);
         g.put(top, left + 1, &bar, Tone::Border);
-        g.put(top, left + w - 1, "╮", Tone::Border);
+        g.put(top, left + w - 1, corners.1, Tone::Border);
         let title = width::truncate_to_width(&form.title, w.saturating_sub(4)).to_string();
         g.put(top, left + 2, &title, Tone::Accent);
 
@@ -2153,9 +2179,9 @@ impl Screen<'_> {
             }
         }
         let br = top + 1 + fields;
-        g.put(br, left, "╰", Tone::Border);
+        g.put(br, left, corners.2, Tone::Border);
         g.put(br, left + 1, &bar, Tone::Border);
-        g.put(br, left + w - 1, "╯", Tone::Border);
+        g.put(br, left + w - 1, corners.3, Tone::Border);
         cursor
     }
 
@@ -2355,9 +2381,10 @@ impl Screen<'_> {
             g.blank(r, x0, x0 + card_w, Tone::Text);
         }
         let bar = "─".repeat(card_w.saturating_sub(2));
-        g.put(y0, x0, "╭", Tone::BorderActive);
+        let corners = theme::get(self.theme).corners();
+        g.put(y0, x0, corners.0, Tone::BorderActive);
         g.put(y0, x0 + 1, &bar, Tone::BorderActive);
-        g.put(y0, x0 + card_w - 1, "╮", Tone::BorderActive);
+        g.put(y0, x0 + card_w - 1, corners.1, Tone::BorderActive);
 
         let mut row = y0 + 1;
         let bottom = y0 + card_h - 1;
@@ -2387,9 +2414,9 @@ impl Screen<'_> {
         }
         // 底部：补一条提示（说明这是 which-key 以及怎么关）
         if bottom > y0 {
-            g.put(bottom, x0, "╰", Tone::BorderActive);
+            g.put(bottom, x0, corners.2, Tone::BorderActive);
             g.put(bottom, x0 + 1, &bar, Tone::BorderActive);
-            g.put(bottom, x0 + card_w - 1, "╯", Tone::BorderActive);
+            g.put(bottom, x0 + card_w - 1, corners.3, Tone::BorderActive);
         }
     }
 
@@ -2594,17 +2621,17 @@ impl Screen<'_> {
                 g.blank(r, left, left + box_w, Tone::Text);
             }
             let bar = "─".repeat(box_w.saturating_sub(2));
-            g.put(top, left, "╭", Tone::BorderActive);
+            g.put(top, left, p.corners().0, Tone::BorderActive);
             g.put(top, left + 1, &bar, Tone::BorderActive);
-            g.put(top, left + box_w - 1, "╮", Tone::BorderActive);
+            g.put(top, left + box_w - 1, p.corners().1, Tone::BorderActive);
             g.put(top + 1, left, "│", Tone::BorderActive);
             let title = format!("{} · {}", pop.kind.title(), pop.query);
             let t = width::truncate_to_width(&title, box_w.saturating_sub(4)).to_string();
             g.put(top + 1, left + 2, &t, Tone::Muted);
             g.put(top + 1, left + box_w - 1, "│", Tone::BorderActive);
-            g.put(top + 2, left, "╰", Tone::BorderActive);
+            g.put(top + 2, left, p.corners().2, Tone::BorderActive);
             g.put(top + 2, left + 1, &bar, Tone::BorderActive);
-            g.put(top + 2, left + box_w - 1, "╯", Tone::BorderActive);
+            g.put(top + 2, left + box_w - 1, p.corners().3, Tone::BorderActive);
             return;
         }
         let headers = if show_group { group_headers(&pop.items, visible) } else { 0 };
@@ -2622,9 +2649,9 @@ impl Screen<'_> {
         }
 
         let bar = "─".repeat(box_w.saturating_sub(2));
-        g.put(top, left, "╭", Tone::BorderActive);
+        g.put(top, left, p.corners().0, Tone::BorderActive);
         g.put(top, left + 1, &bar, Tone::BorderActive);
-        g.put(top, left + box_w - 1, "╮", Tone::BorderActive);
+        g.put(top, left + box_w - 1, p.corners().1, Tone::BorderActive);
 
         // 标题行：类型 + 当前过滤词（让用户知道"我在过滤什么"）
         let title = if pop.query.is_empty() {
@@ -2722,9 +2749,9 @@ impl Screen<'_> {
             row += 1;
         }
 
-        g.put(top + row, left, "╰", Tone::BorderActive);
+        g.put(top + row, left, p.corners().2, Tone::BorderActive);
         g.put(top + row, left + 1, &bar, Tone::BorderActive);
-        g.put(top + row, left + box_w - 1, "╯", Tone::BorderActive);
+        g.put(top + row, left + box_w - 1, p.corners().3, Tone::BorderActive);
 
         // 提示行：这一行告诉用户怎么操作（否则新用户不知道 Enter 会怎样）
         if top + row + 1 < chrome_top {
@@ -2750,9 +2777,10 @@ impl Screen<'_> {
         let border = if awaiting { Tone::Warning } else { Tone::BorderActive };
         let bar = "─".repeat(box_w.saturating_sub(2));
 
-        g.put(top, left, "╭", border);
+        let corners = theme::get(self.theme).corners();
+        g.put(top, left, corners.0, border);
         g.put(top, left + 1, &bar, border);
-        g.put(top, left + box_w - 1, "╮", border);
+        g.put(top, left + box_w - 1, corners.1, border);
 
         // ── 输入区：最多 MAX_INPUT_ROWS 行，超出则显示末尾并提示 ──
         let total = self.input.line_count();
@@ -2829,9 +2857,9 @@ impl Screen<'_> {
         g.put(stat_row, left + box_w - 1, "│", border);
 
         let bottom = stat_row + 1;
-        g.put(bottom, left, "╰", border);
+        g.put(bottom, left, corners.2, border);
         g.put(bottom, left + 1, &bar, border);
-        g.put(bottom, left + box_w - 1, "╯", border);
+        g.put(bottom, left + box_w - 1, corners.3, border);
 
         // 提示行：与输入框左右对齐
         let hint_row = bottom + 1;
@@ -8711,6 +8739,41 @@ mod tests {
         // 无活动帧（如审批挂起间隙）退化为静态标记，布局不变
         let idle = plain(&render_with_view(&facts, disp, &ThoughtView::default())).join("\n");
         assert!(idle.contains("⋯ 思考中…"), "{idle}");
+    }
+
+    #[test]
+    fn themes_change_style_not_just_colors() {
+        // 风格包：主题之间是**观感**差异 —— CRT 方角边框、亮色主题整屏
+        // 铺亮底。断言在 **Grid 底色单元**层而非 ANSI 输出层：输出色码
+        // 随终端能力（NO_COLOR/TERM）漂移，单元状态不随环境变。
+        let facts: Vec<Fact> = Vec::new();
+        let a = About { context_limit: 128_000, ..about() };
+        let ed = editor::Editor::new();
+        let grid_of = |theme_name: theme::ThemeName| {
+            let screen = Screen {
+                cols: 100, rows: 24, facts: &facts, input: &ed, status: "",
+                awaiting_input: false, show_cursor: false, approval: None,
+                about: Some(&a), trust: None, theme: theme_name,
+                popup: None, preformatted: None, sidebar: false, view: None,
+                diff_viewer: None, whichkey: None,
+                display: ToolDisplay::default(), thought_view: ThoughtView::default(),
+                settings: None, settings_cursor: 0, settings_category: 0,
+                settings_form: None, settings_confirm: None, settings_picker: None,
+                appearance: appearance::Appearance::default(), custom_background: None,
+            };
+            let (out, regions) = screen.render_with_regions();
+            (out, regions)
+        };
+        let (crt, _) = grid_of(theme::ThemeName::Terminal);
+        assert!(crt.contains('┌'), "CRT 主题应为方角边框");
+        // 亮色主题整屏铺 Bg::Base；暗色主题保持终端默认底（无 Base 单元）
+        let count_base = |theme_name| {
+            let mut g = Grid::new(60, 12);
+            g.fill_background(&theme::get(theme_name), appearance::Background::None, None);
+            g.bg.iter().filter(|b| matches!(b, Some(Bg::Base))).count()
+        };
+        assert_eq!(count_base(theme::ThemeName::Light), 60 * 12, "亮色主题应整屏铺亮底");
+        assert_eq!(count_base(theme::ThemeName::OpenCode), 0, "暗色主题保持终端默认底");
     }
 
     #[test]

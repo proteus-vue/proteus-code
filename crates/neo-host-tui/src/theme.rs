@@ -48,6 +48,17 @@ pub struct Theme {
     pub bg_element: (u8, u8, u8),
     /// 菜单项底色（未选中的药丸）。比 element 略暗，让选中项能"跳出来"。
     pub bg_menu: (u8, u8, u8),
+    /// 模态遮罩色：压暗背景用。亮色主题给浅灰（黑遮罩在亮底上是刺眼的洞）。
+    pub backdrop: (u8, u8, u8),
+    /// 整屏底色：**亮色主题**用它铺满全屏（暗色主题保持终端默认底，
+    /// 此值不使用）。
+    pub base: (u8, u8, u8),
+    /// 亮色主题：整屏铺亮底、文字用深色调（与暗色主题是两种观感，不是换色）。
+    pub light: bool,
+    /// 是否渲染背景纹理（星场等）。亮色/CRT 主题关闭。
+    pub stars: bool,
+    /// 方角边框（┌┐└┘）：CRT 终端风的招牌特征；默认圆角（╭╮╰╯）。
+    pub square: bool,
 }
 
 /// 主题名就是用户可见的标识，也是持久化的键。
@@ -62,11 +73,26 @@ pub enum ThemeName {
     RosePine,
     Tokyonight,
     Catppuccin,
+    /// 亮色主题：整屏亮底 + 深色文字（风格而非配色）
+    Light,
+    /// CRT 绿磷终端风：方角边框、无纹理、通体磷绿
+    Terminal,
 }
 
 impl Default for ThemeName {
     fn default() -> Self {
         Self::Neo
+    }
+}
+
+impl Theme {
+    /// 角部字形：圆角（默认）或方角（CRT 风）。(TL, TR, BL, BR)。
+    pub fn corners(self) -> (&'static str, &'static str, &'static str, &'static str) {
+        if self.square {
+            ("┌", "┐", "└", "┘")
+        } else {
+            ("╭", "╮", "╰", "╯")
+        }
     }
 }
 
@@ -80,6 +106,8 @@ impl ThemeName {
             Self::RosePine => "rosepine",
             Self::Tokyonight => "tokyonight",
             Self::Catppuccin => "catppuccin",
+            Self::Light => "light",
+            Self::Terminal => "terminal",
         }
     }
 
@@ -94,12 +122,14 @@ impl ThemeName {
             "rosepine" | "rose-pine" => Self::RosePine,
             "tokyonight" | "tokyo-night" => Self::Tokyonight,
             "catppuccin" | "catppuccin-mocha" => Self::Catppuccin,
+            "light" | "亮色" => Self::Light,
+            "terminal" | "crt" | "green" => Self::Terminal,
             _ => return None,
         })
     }
 
     /// 按名字顺序列出（切换键遍历用；顺序稳定，用户能习惯）。
-    pub fn all() -> [ThemeName; 7] {
+    pub fn all() -> [ThemeName; 9] {
         [
             Self::Neo,
             Self::OpenCode,
@@ -108,6 +138,8 @@ impl ThemeName {
             Self::RosePine,
             Self::Tokyonight,
             Self::Catppuccin,
+            Self::Light,
+            Self::Terminal,
         ]
     }
 
@@ -147,6 +179,11 @@ pub fn get(name: ThemeName) -> Theme {
             bg_selected: (0x33, 0x2f, 0x45),
             bg_element: (0x2a, 0x27, 0x36),
             bg_menu: (0x26, 0x23, 0x30),
+            backdrop: (0x0a, 0x0a, 0x0c),
+            base: (0x00, 0x00, 0x00),
+            light: false,
+            stars: true,
+            square: false,
         },
         // 参考主题：opencode 官方暗色（暖橙主色 #fab283 + 紫强调 #9d7cd8）。
         // 保留它是为了可对照 —— 但 NEO 的默认是自己的紫。
@@ -168,6 +205,11 @@ pub fn get(name: ThemeName) -> Theme {
             bg_selected: (0x3a, 0x35, 0x32),
             bg_element: (0x2e, 0x2b, 0x29),
             bg_menu: (0x2a, 0x27, 0x26),
+            backdrop: (0x0a, 0x0a, 0x0c),
+            base: (0x00, 0x00, 0x00),
+            light: false,
+            stars: true,
+            square: false,
         },
         ThemeName::Nord => Theme {
             name: "nord",
@@ -187,6 +229,11 @@ pub fn get(name: ThemeName) -> Theme {
             bg_selected: (0x3b, 0x42, 0x52),
             bg_element: (0x2e, 0x35, 0x40),
             bg_menu: (0x2a, 0x30, 0x3a),
+            backdrop: (0x0a, 0x0a, 0x0c),
+            base: (0x00, 0x00, 0x00),
+            light: false,
+            stars: true,
+            square: false,
         },
         ThemeName::Gruvbox => Theme {
             name: "gruvbox",
@@ -206,6 +253,11 @@ pub fn get(name: ThemeName) -> Theme {
             bg_selected: (0x3f, 0x38, 0x33),
             bg_element: (0x33, 0x2d, 0x28),
             bg_menu: (0x2e, 0x29, 0x25),
+            backdrop: (0x0a, 0x0a, 0x0c),
+            base: (0x00, 0x00, 0x00),
+            light: false,
+            stars: true,
+            square: false,
         },
         ThemeName::RosePine => Theme {
             name: "rosepine",
@@ -225,6 +277,11 @@ pub fn get(name: ThemeName) -> Theme {
             bg_selected: (0x31, 0x2e, 0x40),
             bg_element: (0x2a, 0x26, 0x36),
             bg_menu: (0x25, 0x22, 0x2f),
+            backdrop: (0x0a, 0x0a, 0x0c),
+            base: (0x00, 0x00, 0x00),
+            light: false,
+            stars: true,
+            square: false,
         },
         ThemeName::Tokyonight => Theme {
             name: "tokyonight",
@@ -244,6 +301,11 @@ pub fn get(name: ThemeName) -> Theme {
             bg_selected: (0x2f, 0x33, 0x4a),
             bg_element: (0x25, 0x29, 0x3c),
             bg_menu: (0x21, 0x25, 0x36),
+            backdrop: (0x0a, 0x0a, 0x0c),
+            base: (0x00, 0x00, 0x00),
+            light: false,
+            stars: true,
+            square: false,
         },
         ThemeName::Catppuccin => Theme {
             name: "catppuccin",
@@ -263,6 +325,63 @@ pub fn get(name: ThemeName) -> Theme {
             bg_selected: (0x31, 0x31, 0x40),
             bg_element: (0x28, 0x28, 0x34),
             bg_menu: (0x24, 0x24, 0x2d),
+            backdrop: (0x06, 0x09, 0x11),
+            base: (0x00, 0x00, 0x00),
+            light: false,
+            stars: true,
+            square: false,
+        },
+        // 亮色主题：整屏亮底 + 深色文字 + 无纹理 —— 与暗色主题是两种
+        // 观感而非换色。遮罩用浅灰（黑遮罩在亮底上是刺眼的洞）。
+        ThemeName::Light => Theme {
+            name: "light",
+            primary: (0x4c, 0x60, 0xd4),
+            accent: (0x9d, 0x5c, 0xd8),
+            success: (0x1a, 0x7f, 0x37),
+            error: (0xc6, 0x28, 0x28),
+            warning: (0xb2, 0x6a, 0x00),
+            info: (0x02, 0x77, 0xbd),
+            text: (0x2a, 0x2c, 0x32),
+            muted: (0x6e, 0x72, 0x7a),
+            border: (0xd4, 0xd4, 0xd0),
+            border_active: (0xb0, 0xb4, 0xc0),
+            star_dim: (0xc0, 0xc0, 0xbc),
+            star_bright: (0xcc, 0xcc, 0xc8),
+            bg_panel: (0xf0, 0xf0, 0xee),
+            bg_selected: (0xe2, 0xe6, 0xf6),
+            bg_element: (0xea, 0xea, 0xe8),
+            bg_menu: (0xe6, 0xe6, 0xe4),
+            backdrop: (0xe6, 0xe6, 0xe4),
+            base: (0xfa, 0xfa, 0xf8),
+            light: true,
+            stars: false,
+            square: false,
+        },
+        // CRT 绿磷终端风：方角边框、无纹理、通体磷绿 —— 风格来自
+        // 形状（方角）与单色系，而不是又一组和谐配色。
+        ThemeName::Terminal => Theme {
+            name: "terminal",
+            primary: (0x53, 0xff, 0x9c),
+            accent: (0xa8, 0xff, 0xc8),
+            success: (0x53, 0xff, 0x9c),
+            error: (0xff, 0x5c, 0x5c),
+            warning: (0xe8, 0xd4, 0x5c),
+            info: (0x5c, 0xd4, 0xe8),
+            text: (0x2e, 0xe5, 0x74),
+            muted: (0x1d, 0x9a, 0x52),
+            border: (0x14, 0x66, 0x38),
+            border_active: (0x1e, 0x8f, 0x50),
+            star_dim: (0x0a, 0x2a, 0x16),
+            star_bright: (0x12, 0x42, 0x24),
+            bg_panel: (0x07, 0x1a, 0x0e),
+            bg_selected: (0x0d, 0x2a, 0x18),
+            bg_element: (0x0a, 0x20, 0x12),
+            bg_menu: (0x09, 0x1c, 0x10),
+            backdrop: (0x01, 0x05, 0x03),
+            base: (0x03, 0x09, 0x05),
+            light: false,
+            stars: false,
+            square: true,
         },
     }
 }
@@ -307,9 +426,13 @@ mod tests {
 
     #[test]
     fn starfield_is_dimmer_than_the_border() {
-        // 星场是背景：两档都必须比边框暗，否则会跟正文抢注意力
+        // 星场是背景：两档都必须比边框暗，否则会跟正文抢注意力。
+        // 无纹理主题（light/terminal）不渲染星场，亮度次序不适用。
         for n in ThemeName::all() {
             let t = get(n);
+            if !t.stars {
+                continue;
+            }
             let lum = |c: (u8, u8, u8)| c.0 as u32 + c.1 as u32 + c.2 as u32;
             assert!(
                 lum(t.star_bright) < lum(t.border),
@@ -325,12 +448,18 @@ mod tests {
     }
 
     #[test]
-    fn text_is_brighter_than_muted_in_every_theme() {
-        // 正文与次要文字的层次不能反，否则"哪个是重点"会看错
+    fn text_contrasts_more_than_muted_in_every_theme() {
+        // 正文与次要文字的层次不能反，否则"哪个是重点"会看错。
+        // "层次"以**与底色的对比**度量：暗色主题比谁更亮，亮色主题
+        // 比谁更深 —— 对亮色主题断言"更亮"等于允许次要不清晰。
         for n in ThemeName::all() {
             let t = get(n);
             let lum = |c: (u8, u8, u8)| c.0 as u32 + c.1 as u32 + c.2 as u32;
-            assert!(lum(t.text) > lum(t.muted), "{} 正文应比次要文字亮", t.name);
+            if t.light {
+                assert!(lum(t.text) < lum(t.muted), "{} 亮色正文应比次要文字更深", t.name);
+            } else {
+                assert!(lum(t.text) > lum(t.muted), "{} 正文应比次要文字亮", t.name);
+            }
         }
     }
 

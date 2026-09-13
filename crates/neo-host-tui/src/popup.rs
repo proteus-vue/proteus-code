@@ -258,6 +258,8 @@ pub fn theme_items(query: &str) -> Vec<Item> {
                 crate::theme::ThemeName::RosePine => "柔和玫瑰",
                 crate::theme::ThemeName::Tokyonight => "霓虹夜蓝",
                 crate::theme::ThemeName::Catppuccin => "柔和马卡龙",
+                crate::theme::ThemeName::Light => "亮色（整屏亮底）",
+                crate::theme::ThemeName::Terminal => "CRT 绿磷（方角）",
             };
             Item::plain(t.as_str().to_string(), d.to_string(), ItemAction::SetTheme(t))
         })
