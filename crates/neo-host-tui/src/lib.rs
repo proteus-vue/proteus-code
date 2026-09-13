@@ -3775,6 +3775,16 @@ where
                         EventMsg::ReasoningDelta { .. } => phase = "思考中",
                         EventMsg::AgentMessageDelta { .. } => phase = "回复中",
                         EventMsg::ToolCallBegin { .. } => phase = "执行工具",
+                        // 轮耗时：TurnStarted 开表、TurnComplete 收表。
+                        // 内核事件不带时钟（确定性），耗时由宿主量、只做展示。
+                        EventMsg::TurnStarted { .. } => {
+                            thought_view.turn_start = Some(std::time::Instant::now());
+                        }
+                        EventMsg::TurnComplete { .. } => {
+                            if let Some(t) = thought_view.turn_start.take() {
+                                thought_view.turn_durations.push(t.elapsed());
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -4306,6 +4316,30 @@ pub struct ThoughtView {
     /// 流式活动指示：`Some((spinner 字符, 阶段名))` 时，进行中的思考块
     /// 头部显示 `{spin} {phase}…` —— 动画长在块上，而不是只在右下角。
     pub live: Option<(char, &'static str)>,
+    /// 正在进行的轮次开表时刻（TurnStarted 置位 / TurnComplete 收表）。
+    pub turn_start: Option<std::time::Instant>,
+    /// 每轮耗时（第 N 项 ↔ 转录里第 N 个 TurnFinished）。
+    /// 内核事件不携带时钟（确定性契约），耗时由宿主自己量、只做展示。
+    pub turn_durations: Vec<std::time::Duration>,
+}
+
+impl ThoughtView {
+    /// 转录被替换/清空时调用：逐块展开与轮耗时都随旧转录作废。
+    pub fn reset(&mut self) {
+        self.open.clear();
+        self.turn_start = None;
+        self.turn_durations.clear();
+    }
+}
+
+/// 耗时展示：<60s 显示 "14.2s"，否则 "2m05s"。
+fn fmt_duration(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{:.1}s", d.as_secs_f32())
+    } else {
+        format!("{}m{:02}s", s / 60, s % 60)
+    }
 }
 
 /// 事实渲染结果：行 + 思考块头部的行号标注（供鼠标点击命中）。
@@ -4335,6 +4369,7 @@ fn fact_lines_with(
     let mut out: Vec<Vec<Seg>> = Vec::new();
     let mut headers: Vec<(usize, usize)> = Vec::new();
     let mut thought_idx = 0usize;
+    let mut turn_idx = 0usize;
     for (fi, f) in facts.iter().enumerate() {
         match f {
             Fact::UserSaid(text) => {
@@ -4542,16 +4577,9 @@ fn fact_lines_with(
                     }
                 }
             }
-            Fact::FilesChanged(files) => {
-                // 正文里只给一行汇总；明细在右侧面板（避免刷屏）
-                let adds: usize = files.iter().map(|f| f.additions).sum();
-                let dels: usize = files.iter().map(|f| f.deletions).sum();
-                out.push(vec![(
-                    2,
-                    format!("◆ 已修改 {} 个文件（+{adds} -{dels}）", files.len()),
-                    Tone::Info,
-                )]);
-            }
+            // 已修改文件不进转录：明细在侧栏 FILES 面板（对齐 opencode：
+            // 任务清单在转录、文件改动只在侧栏），重复展示只增噪声。
+            Fact::FilesChanged(_) => {}
             Fact::ApprovalNeeded { detail } => {
                 out.push(vec![(2, format!("△ 需要审批：{detail}"), Tone::Warning)]);
             }
@@ -4578,11 +4606,24 @@ fn fact_lines_with(
                 }
             }
             Fact::Failed(msg) => out.push(vec![(2, format!("✗ {msg}"), Tone::Error)]),
-            Fact::TurnFinished { input_tokens, output_tokens } => out.push(vec![(
-                2,
-                format!("· {input_tokens} in / {output_tokens} out"),
-                Tone::Muted,
-            )]),
+            Fact::TurnFinished { input_tokens, output_tokens } => {
+                let turn_no = turn_idx;
+                turn_idx += 1;
+                let dur = tv
+                    .turn_durations
+                    .get(turn_no)
+                    .map(|d| format!(" · {}", fmt_duration(*d)))
+                    .unwrap_or_default();
+                out.push(vec![(
+                    2,
+                    format!(
+                        "· {} in / {} out{dur}",
+                        thousands(*input_tokens),
+                        thousands(*output_tokens)
+                    ),
+                    Tone::Muted,
+                )]);
+            }
             Fact::SessionReady { session_id } => {
                 out.push(vec![(2, format!("· 会话 {session_id}"), Tone::Muted)]);
             }
@@ -4755,7 +4796,7 @@ fn handle_session_effect(
     sessions: &mut dyn SessionControl,
     events: &mut Vec<EventMsg>,
     view: &mut view::View,
-    thought_open: &mut std::collections::BTreeSet<usize>,
+    tv: &mut ThoughtView,
 ) -> Option<String> {
     match eff {
         Effect::SwitchSession(id) => {
@@ -4764,7 +4805,7 @@ fn handle_session_effect(
                     // 用重建出的历史**替换**当前转录，并把视图滚到底。
                     // 逐块展开状态按新转录重置（下标语义换了会话就变了）。
                     *events = history;
-                    thought_open.clear();
+                    tv.reset();
                     view.to_bottom();
                     Some(format!("已切换到会话 {id}"))
                 }
@@ -4775,7 +4816,7 @@ fn handle_session_effect(
             Ok(id) => {
                 // 新会话 = 空转录；旧会话已在磁盘上，可 /sessions 切回
                 events.clear();
-                thought_open.clear();
+                tv.reset();
                 view.to_bottom();
                 Some(format!("已新建会话 {id}（旧会话保留，/sessions 可切回）"))
             }
@@ -5588,7 +5629,7 @@ where
                             sessions,
                             &mut events,
                             &mut view_state,
-                            &mut thought_view.open,
+                            &mut thought_view,
                         ) {
                             status = msg;
                         }
@@ -5885,7 +5926,7 @@ where
                                     }
                                     SettingAction::NewSession => {
                                         events.clear();
-                                        thought_view.open.clear();
+                                        thought_view.reset();
                                         status = "新对话（已清空转录；文件改动不受影响）"
                                             .to_string();
                                     }
@@ -5897,7 +5938,7 @@ where
                                             sessions,
                                             &mut events,
                                             &mut view_state,
-                                            &mut thought_view.open,
+                                            &mut thought_view,
                                         ) {
                                             status = msg;
                                         }
@@ -6440,7 +6481,7 @@ custom_bg.is_some(),
                             }
                             Effect::ClearTranscript => {
                                 events.clear();
-                                thought_view.open.clear();
+                                thought_view.reset();
                                 status = "新对话（已清空转录；文件改动不受影响）".to_string();
                             }
                             Effect::OpenThemePicker => {
@@ -6471,7 +6512,7 @@ custom_bg.is_some(),
                                     sessions,
                                     &mut events,
                                     &mut view_state,
-                                    &mut thought_view.open,
+                                    &mut thought_view,
                                 ) {
                                     status = m;
                                 } else if let Effect::SwitchModel(name) = &other {
@@ -6682,7 +6723,7 @@ sessions,
                                         notify_sound = !notify_sound;
                                         status = if notify_sound { "提醒声音：开".into() } else { "提醒声音：关".into() };
                                     }
-                                    Effect::ClearTranscript => { events.clear(); thought_view.open.clear(); }
+                                    Effect::ClearTranscript => { events.clear(); thought_view.reset(); }
                                     Effect::ShowStatus => {
                                         info_screen = Some(commands::status_text(
                                             &about,
@@ -6713,7 +6754,7 @@ sessions,
                                         sessions,
                                         &mut events,
                                         &mut view_state,
-                                        &mut thought_view.open,
+                                        &mut thought_view,
                                     ) {
                                         status = m;
                                     } else if let Effect::SwitchModel(name) = &other {
@@ -7008,7 +7049,7 @@ custom_bg.is_some(),
                                 notify_sound = !notify_sound;
                                 status = if notify_sound { "提醒声音：开".into() } else { "提醒声音：关".into() };
                             }
-                            Effect::ClearTranscript => { events.clear(); thought_view.open.clear(); }
+                            Effect::ClearTranscript => { events.clear(); thought_view.reset(); }
                             Effect::ShowStatus => {
                                 info_screen = Some(commands::status_text(
                                     &about,
@@ -7035,7 +7076,7 @@ custom_bg.is_some(),
                                     sessions,
                                     &mut events,
                                     &mut view_state,
-                                    &mut thought_view.open,
+                                    &mut thought_view,
                                 ) {
                                     status = m;
                                 } else if let Some(m) = handle_ui_effect(
@@ -7296,7 +7337,7 @@ sessions,
                                 }
                                 Effect::ClearTranscript => {
                                     events.clear();
-                                    thought_view.open.clear();
+                                    thought_view.reset();
                                     status =
                                         "新对话（已清空转录；文件改动不受影响）".to_string();
                                 }
@@ -7327,7 +7368,7 @@ sessions,
                                         sessions,
                                         &mut events,
                                         &mut view_state,
-                                        &mut thought_view.open,
+                                        &mut thought_view,
                                     ) {
                                         status = m;
                                     } else if let Effect::SwitchModel(name) = &other {
@@ -8581,6 +8622,30 @@ mod tests {
         // 无活动帧（如审批挂起间隙）退化为静态标记，布局不变
         let idle = plain(&render_with_view(&facts, disp, &ThoughtView::default())).join("\n");
         assert!(idle.contains("⋯ 思考中…"), "{idle}");
+    }
+
+    #[test]
+    fn turn_finished_line_shows_tokens_with_duration() {
+        // 元信息行：千分位 token 数 + 本轮耗时（第 N 条耗时 ↔ 第 N 个
+        // TurnFinished）；没量到耗时的轮（旧转录/中断）不显示时长。
+        let facts = vec![
+            Fact::TurnFinished { input_tokens: 2_081, output_tokens: 492 },
+            Fact::TurnFinished { input_tokens: 15_360, output_tokens: 1_820 },
+        ];
+        let mut tv = ThoughtView::default();
+        tv.turn_durations = vec![
+            std::time::Duration::from_millis(14_200),
+            std::time::Duration::from_secs(125),
+        ];
+        let text = plain(&render_with_view(&facts, ToolDisplay::default(), &tv)).join("\n");
+        assert!(
+            text.contains("· 2,081 in / 492 out · 14.2s"),
+            "千分位 + 秒：{text}"
+        );
+        assert!(
+            text.contains("· 15,360 in / 1,820 out · 2m05s"),
+            "分钟格式：{text}"
+        );
     }
 
     #[test]
