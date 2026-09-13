@@ -529,8 +529,15 @@ fn cmd_tui(args: &[String]) -> i32 {
         current_model: kernel.current_model().to_string(),
         // 每次启动换一个示例（不需要真随机：只要别每次都一样）
         example: neo_host_tui::pick_example(),
-        // deepseek-chat 的上下文窗口。写错不如不写：侧栏在 0 时显示"上限未知"。
-        context_limit: 64_000,
+        // 上下文窗口取**当前模型注册的真实值**（用户配置的 providers.json
+        // 条目带 context_limit）。写死会把智谱 128k 标成 64k，侧栏占用条
+        // 直接翻倍失真。取不到（0）时侧栏显示"上限未知"，宁可不给假数字。
+        context_limit: kernel
+            .available_models()
+            .into_iter()
+            .find(|m| m.name == kernel.current_model())
+            .map(|m| m.context_limit)
+            .unwrap_or(0),
         session: session_id.to_string(),
     };
 

@@ -1724,13 +1724,17 @@ impl Screen<'_> {
                 } else {
                     Tone::Muted
                 };
-                // 20 格占用条：█░ 是 Block Elements，几乎所有等宽字体都有
-                // （▰▱ 会被不少字体回退成斜杠，实测很难看）。5%/格 粒度足够。
-                let filled = pct.min(100) * 20 / 100;
-                let bar = format!("{}{}", "█".repeat(filled), "░".repeat(20 - filled));
-                g.put(row, x0 + 2, &bar, tone);
-                let px = x0 + 2 + 21;
-                g.put(row, px, &format!("{pct:>3}%"), tone);
+                // 14 格占用条，**双色**渲染：已用亮、剩余暗。低百分比时
+                // 整条 ░（浅 shade）在灰调下看起来就是一整条实心灰块
+                // （用户实测截图），填充/空白必须靠颜色对比区分。
+                // pct>0 时至少画 1 格，否则 1-7% 全是空条，像坏了。
+                const BAR: usize = 14;
+                let filled = ((pct.min(100) * BAR / 100).max(if pct > 0 { 1 } else { 0 })).min(BAR);
+                let used_s = "█".repeat(filled);
+                let rest_s = "░".repeat(BAR - filled);
+                g.put(row, x0 + 2, &used_s, tone);
+                g.put(row, x0 + 2 + filled, &rest_s, Tone::Border);
+                g.put(row, x0 + 2 + BAR + 1, &format!("{pct:>3}%"), tone);
                 row += 1;
                 let used_line = width::truncate_to_width(
                     &format!("{} / {} tok", thousands(used), thousands(limit)),
@@ -8089,7 +8093,7 @@ mod tests {
         }.render();
         // 占用条 + 百分比：一眼可辨的余量展示（█░ 通用字形 + 右对齐百分比）
         let t = plain(&out).join("\n");
-        assert!(t.contains("██████████████████░░"), "占用条 90% 应为 18 格：{t}");
+        assert!(t.contains("████████████░░"), "占用条 90% 应为 14 格中 12 格填充：{t}");
         assert!(t.contains(" 90%"), "占用率应为 90%：{t}");
         assert!(t.contains("900 / 1,000 tok"), "应显示已用/上限：{t}");
     }
