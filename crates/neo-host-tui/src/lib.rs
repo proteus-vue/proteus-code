@@ -1661,8 +1661,23 @@ impl Screen<'_> {
             *row += 1;
         };
 
-        // ── Context：token 用量 ──
-        let (tin, tout) = self
+        // ── Session：模型 / 模式 / 会话（对标 opencode 侧栏的信息区）──
+        if let Some(a) = self.about {
+            section(g, &mut row, "Session", Tone::Text);
+            let head = width::truncate_to_width(
+                &format!("{} · {}", a.current_model, a.mode_short),
+                inner,
+            )
+            .to_string();
+            g.put(row, x0 + 2, &head, Tone::Muted);
+            row += 1;
+            let sess = width::truncate_to_width(&format!("会话 {}", a.session), inner).to_string();
+            g.put(row, x0 + 2, &sess, Tone::Muted);
+            row += 1;
+        }
+
+        // ── Context：token 用量（本轮 + 会话累计 + 占用条）──
+        let turns: Vec<(u64, u64)> = self
             .facts
             .iter()
             .filter_map(|f| match f {
@@ -1671,23 +1686,24 @@ impl Screen<'_> {
                 }
                 _ => None,
             })
-            .fold((0u64, 0u64), |a, b| (a.0.max(b.0), a.1.max(b.1)));
-        // 取最近一轮的用量（每轮都是独立统计，累加没有意义）
-        let (last_in, last_out) = self
-            .facts
-            .iter()
-            .rev()
-            .find_map(|f| match f {
-                Fact::TurnFinished { input_tokens, output_tokens } => {
-                    Some((*input_tokens, *output_tokens))
-                }
-                _ => None,
-            })
-            .unwrap_or((0, 0));
-        let _ = (tin, tout);
+            .collect();
+        // 取最近一轮的用量（每轮都是独立统计）
+        let (last_in, last_out) = turns.last().copied().unwrap_or((0, 0));
+        // 会话累计：当前转录里所有轮次之和（切换会话后从零起算，与转录一致）
+        let (sum_in, sum_out) = turns.iter().fold((0u64, 0u64), |a, b| (a.0 + b.0, a.1 + b.1));
         section(g, &mut row, "Context", Tone::Text);
         g.put(row, x0 + 2, &format!("{last_in} in / {last_out} out"), Tone::Muted);
         row += 1;
+        if turns.len() > 1 {
+            let total = sum_in + sum_out;
+            let line = width::truncate_to_width(
+                &format!("会话累计 {total} tok · {} 轮", turns.len()),
+                inner,
+            )
+            .to_string();
+            g.put(row, x0 + 2, &line, Tone::Muted);
+            row += 1;
+        }
         match self.about.map(|a| a.context_limit).unwrap_or(0) {
             // 上限未知时**不显示百分比** —— 宁可不给，也不给假数字
             0 => {
@@ -1704,7 +1720,11 @@ impl Screen<'_> {
                 } else {
                     Tone::Muted
                 };
-                g.put(row, x0 + 2, &format!("{pct}% of {limit}"), tone);
+                // 10 格占用条：一眼看出余量，数字是辅助
+                let filled = (pct as usize).min(100) * 10 / 100;
+                let bar = format!("{}{}", "▰".repeat(filled), "▱".repeat(10 - filled));
+                let line = width::truncate_to_width(&format!("{bar} {pct}%"), inner).to_string();
+                g.put(row, x0 + 2, &line, tone);
                 row += 1;
             }
         }
@@ -3693,6 +3713,7 @@ where
     const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let mut frame = 0usize;
     let mut phase = "思考中";
+    let turn_started = std::time::Instant::now();
     loop {
         // 推进一步之前先看有没有 ctrl+c：**运行中 ctrl+c = 中断本轮**，
         // 不是退出应用（opencode 的语义）。清空缓冲区里的其它按键，
@@ -3727,7 +3748,13 @@ where
                 // 传空会让渲染器认为"还没有任何事实"，于是弹出**欢迎首屏**：
                 // 用户看到自己的对话凭空消失、只剩一个 "运行中…"（真实反馈）。
                 let facts = facts_of(events);
-                let running = format!("{} {}…", SPINNER[frame % SPINNER.len()], phase);
+                // 运行满 1 秒后附上已用时：长任务"到底在不在跑"一眼可辨
+                let secs = turn_started.elapsed().as_secs();
+                let running = if secs >= 1 {
+                    format!("{} {}… {secs}s", SPINNER[frame % SPINNER.len()], phase)
+                } else {
+                    format!("{} {}…", SPINNER[frame % SPINNER.len()], phase)
+                };
                 frame += 1;
                 // 活动指示同时挂到**进行中的思考块头部**（opencode 同款）：
                 // 动画长在内容旁边，而不是只在右下角状态栏。
@@ -8027,7 +8054,11 @@ mod tests {
             appearance: appearance::Appearance::default(),
             custom_background: None,
         }.render();
-        assert!(plain(&out).join("\n").contains("90% of 1000"), "占用率应为 90%");
+        // 占用条 + 百分比：一眼可辨的余量展示
+        assert!(
+            plain(&out).join("\n").contains("▰▰▰▰▰▰▰▰▰▱ 90%"),
+            "占用率应为 90%（带占用条）"
+        );
     }
 
     #[test]
@@ -10861,3 +10892,4 @@ mod tests {
         assert!(pending.contains("38;2;245;167;66"), "审批边框应为 warning 色");
     }
 }
+
