@@ -357,7 +357,7 @@ mod tests {
             h.facts(),
             vec![
                 Fact::AssistantSaid("hi".into()),
-                Fact::ToolFinished { name: "bash".into(), exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false },
+                Fact::ToolFinished { name: "bash".into(), exit_code: 0, stdout: String::new(), stderr: String::new(), truncated: false, args: None },
             ]
         );
     }

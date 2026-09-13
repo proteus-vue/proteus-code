@@ -463,6 +463,10 @@ pub enum Fact {
         stdout: String,
         stderr: String,
         truncated: bool,
+        /// 调用参数原文（来自 ToolCallBegin.arguments 的 JSON 文本）。
+        /// 宿主据此在工具行上显示"执行了什么"（如 bash 的命令），
+        /// 不用展开详情。派生视图，非事件流内容。
+        args: Option<String>,
     },
     /// 需要用户审批。
     ApprovalNeeded { detail: String },
@@ -514,6 +518,8 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
     let mut pending_thought = String::new();
     // ToolCallEnd 只带 id，名字来自对应的 ToolCallBegin —— 需逐个关联。
     let mut tool_names: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    // Begin 的调用参数（JSON 文本）：End 只带 id，参数靠这里关联
+    let mut tool_args: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
 
     for e in events {
         match e {
@@ -533,8 +539,12 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
                     out.push(Fact::AssistantSaid(text.clone()));
                 }
             }
-            EventMsg::ToolCallBegin { id, name, .. } => {
+            EventMsg::ToolCallBegin { id, name, arguments, .. } => {
                 tool_names.insert(id.as_str(), name.as_str());
+                // 无参调用（arguments 为 null）不记摘要，否则渲染成 "null"
+                if !arguments.is_null() {
+                    tool_args.insert(id.as_str(), arguments.to_string());
+                }
             }
             EventMsg::ToolCallEnd { id, exit_code, stdout, stderr, truncated } => {
                 let name = tool_names
@@ -548,6 +558,7 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
                     stdout: stdout.clone(),
                     stderr: stderr.clone(),
                     truncated: *truncated,
+                    args: tool_args.get(id.as_str()).cloned(),
                 })
             }
             EventMsg::PatchProposed { path, diff } => {

@@ -1275,6 +1275,17 @@ impl Grid {
     }
 }
 
+/// 工具行参数摘要：`{"cmd":"ls -la"}` 直接取命令本身（最高频的识别
+/// 需求就是"执行了什么命令"）；其余工具显示参数 JSON 原文，由渲染截断。
+fn args_summary(args: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+        if let Some(c) = v.get("cmd").and_then(|s| s.as_str()) {
+            return c.to_string();
+        }
+    }
+    args.to_string()
+}
+
 /// 千分位：45201 → "45,201"。侧栏数字不加分隔符，四位数以上很难读。
 fn thousands(n: u64) -> String {
     let s = n.to_string();
@@ -4473,7 +4484,7 @@ fn fact_lines_with(
                 out.extend(markdown::render(text, inner));
                 out.push(Vec::new());
             }
-            Fact::ToolFinished { name, exit_code, stdout, stderr, truncated } => {
+            Fact::ToolFinished { name, exit_code, stdout, stderr, truncated, args } => {
                 let ok = *exit_code == 0;
                 let (icon, tone) =
                     if ok { ("✓", Tone::Success) } else { ("✗", Tone::Error) };
@@ -4489,11 +4500,36 @@ fn fact_lines_with(
                 } else {
                     format!("exit {exit_code}")
                 };
+                // 参数摘要（bash 的命令等）：让"执行了什么"不用展开就能看到。
+                // 预算 = 行宽 − 缩进 − 图标 − 工具名 − exit 后缀；挤不下就整体
+                // 省略（截一半的命令比不显示更误导）。
+                let mut summary = String::new();
+                let mut sum_col = after + 1;
+                if let Some(a) = args.as_deref() {
+                    let s = args_summary(a);
+                    if !s.trim().is_empty() {
+                        let budget = inner
+                            .saturating_sub(4 + width::display_width(name) + 3 + suffix.len() + 4);
+                        if budget >= 8 {
+                            summary = width::truncate_to_width(&s, budget).to_string();
+                            sum_col = after + 3;
+                        }
+                    }
+                }
                 out.push(vec![
                     (2, format!("{icon} "), tone),
                     (4, name.clone(), Tone::Text),
-                    (after + 1, suffix, Tone::Muted),
                 ]);
+                let sum_w = width::display_width(&summary);
+                let tail_col = if sum_w == 0 {
+                    after + 1
+                } else {
+                    4 + width::display_width(name) + 3 + sum_w + 2
+                };
+                if sum_w > 0 {
+                    out.last_mut().unwrap().push((sum_col, summary, Tone::Muted));
+                }
+                out.last_mut().unwrap().push((tail_col, suffix, Tone::Muted));
                 // 展示输出：展开时全给，未展开时**失败也强制给** ——
                 // 出错还把原因藏起来，用户只能靠猜。
                 let show = disp.expanded || !ok;
@@ -8409,6 +8445,7 @@ mod tests {
             Fact::ToolFinished {
                 name: "bash".into(), exit_code: 0,
                 stdout: String::new(), stderr: String::new(), truncated: false,
+                args: None,
             },
             Fact::FilesChanged(vec![]),
             Fact::TodoList(vec![]),
@@ -8429,6 +8466,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 truncated: false,
+                args: None,
             },
             Fact::TurnFinished { input_tokens: 100, output_tokens: 20 },
         ];
@@ -8535,6 +8573,7 @@ mod tests {
             stdout: out.into(),
             stderr: String::new(),
             truncated: false,
+            args: None,
         }]
     }
 
@@ -8661,6 +8700,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 truncated: false,
+                args: None,
             },
             Fact::AssistantThought("第二步还在想".into()),
         ];
@@ -8716,6 +8756,42 @@ mod tests {
     }
 
     #[test]
+    fn tool_line_shows_command_summary_without_expanding() {
+        // bash 的命令直接上工具行：想知道"执行了什么"不该被迫展开详情
+        let facts = vec![Fact::ToolFinished {
+            name: "bash".into(),
+            exit_code: 0,
+            stdout: "src/lib.rs".into(),
+            stderr: String::new(),
+            truncated: false,
+            args: Some(r#"{"cmd":"ls -la src/"}"#.into()),
+        }];
+        let text = plain(&render_with_display(&facts, ToolDisplay::default())).join("\n");
+        assert!(text.contains("ls -la src/"), "命令摘要应上工具行：{text}");
+        assert!(text.contains("exit 0"), "退出码仍在：{text}");
+    }
+
+    #[test]
+    fn tool_line_handles_null_and_long_args() {
+        // 无参工具不出摘要（更不能显示 "null"）；超长命令显示开头部分
+        let facts = vec![
+            Fact::ToolFinished {
+                name: "bash".into(), exit_code: 0, stdout: String::new(),
+                stderr: String::new(), truncated: false, args: None,
+            },
+            Fact::ToolFinished {
+                name: "bash".into(), exit_code: 0, stdout: String::new(),
+                stderr: String::new(), truncated: false,
+                args: Some(
+                    r#"{"cmd":"cargo test --all-features --all-targets -- --include-ignored --nocapture"}"#.into(),
+                ),
+            },
+        ];
+        let text = plain(&render_with_display(&facts, ToolDisplay::default())).join("\n");
+        assert!(text.contains("cargo test"), "长命令应显示开头：{text}");
+    }
+
+    #[test]
     fn failed_tool_output_is_shown_even_when_collapsed() {
         // 关键：失败时**强制展示** —— 出错还把原因藏起来，用户只能靠猜。
         let facts = tool_fact(false, "错误详情：找不到文件");
@@ -8744,6 +8820,7 @@ mod tests {
             stdout: "部分输出".into(),
             stderr: String::new(),
             truncated: true,
+            args: None,
         }];
         let disp = ToolDisplay { expanded: true, thinking: false };
         let text = plain(&render_with_display(&facts, disp)).join("\n");
@@ -10349,6 +10426,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 truncated: false,
+                args: None,
             },
             ];
             let out = Screen {
@@ -10409,6 +10487,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 truncated: false,
+                args: None,
             }];
         let bad = [Fact::ToolFinished {
                 name: "bash".into(),
@@ -10416,6 +10495,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 truncated: false,
+                args: None,
             }];
         let a = plain(&screen(60, 12, &ok, "", "s")).join("\n");
         let b = plain(&screen(60, 12, &bad, "", "s")).join("\n");
@@ -10954,6 +11034,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 truncated: false,
+                args: None,
             },
             ]
         );
