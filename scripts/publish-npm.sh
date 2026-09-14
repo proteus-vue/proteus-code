@@ -45,6 +45,23 @@ die() { say "❌ $*"; exit 1; }
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] \
   || die "版本不是合法 semver：$VERSION"
 
+# 版本一致性（防漂移）：npm 包版本来自 git tag，而二进制里 `neo --version`
+# 报的版本来自 Cargo.toml。两者不一致会产出"包是 0.1.0、程序自称 0.2.0"
+# 这种极难察觉的错配 —— 在发布出口处硬校验，别等用户发现。
+CARGO_VERSION="$(python3 - "$ROOT/Cargo.toml" <<'PY'
+import re, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    m = re.match(r'\s*version\s*=\s*"([^"]+)"', line)
+    if m:
+        print(m.group(1)); break
+PY
+)"
+[ -n "$CARGO_VERSION" ] || die "无法从 Cargo.toml 读出版本"
+[ "$CARGO_VERSION" = "$VERSION" ] || die \
+"版本漂移：Cargo.toml 的 [workspace.package] version = \"${CARGO_VERSION}\"，但本次发布版本是 ${VERSION}。
+ 二者必须相同 —— 二进制自报版本取自 Cargo.toml，npm 包版本取自 git tag。
+ 修法：把 Cargo.toml 的版本改成 ${VERSION} 再重打 tag；或让 tag（去掉 v 前缀）等于 ${CARGO_VERSION}。"
+
 command -v npm >/dev/null 2>&1 || die "未找到 npm"
 [ -f "$ROOT/npm/neo-code/package.json" ] || die "未找到 npm/neo-code"
 

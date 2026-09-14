@@ -177,11 +177,15 @@ cargo check --workspace    # 23 个 crate，零 unsafe、零 warning
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试
 ```
 
-发布（维护者）：打 tag 即触发 `.github/workflows/release.yml` 出多平台二进制。
+发布（维护者）：打 tag 即触发 `.github/workflows/release.yml`，出多平台二进制并
+（配置了 npm 凭证时）发 npm 包。
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
 ```
+
+完整步骤（含首次发布、npm 凭证、撤销版本、排错）见
+**[docs/RELEASE.md](docs/RELEASE.md)**。
 
 ## 仓库结构
 
@@ -273,6 +277,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 | [docs/neo-plan/04-落地计划/](docs/neo-plan/04-落地计划/) | M0–M6 里程碑与验收标准 |
 | [docs/spi-first-methodology/](docs/spi-first-methodology/) | SPI-First 方法论原文与自检清单 |
 | [PROJECT_MEMORY.md](PROJECT_MEMORY.md) | 项目记忆：决策依据、踩过的坑、被证伪的方案 |
+| [docs/RELEASE.md](docs/RELEASE.md) | **发布检查清单**：首次发布 / npm 凭证 / 撤销与排错 |
 | [AGENTS.md](AGENTS.md) | 在本仓库工作的约定（效率标准 + Rust 约束） |
 | [docs/ai-efficiency-rules/](docs/ai-efficiency-rules/) | **强制技能**：AI 执行效率规范（六类低效行为 / 三条总则 / 可跑脚本 / CI 审计） |
 
