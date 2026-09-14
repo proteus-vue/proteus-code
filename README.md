@@ -127,12 +127,12 @@ neo exec "用一句话回答 1+1" --mode plan
 ## 快速开始
 
 ```bash
-# 需要 Rust（stable）
+# 需要 Rust —— 版本由 rust-toolchain.toml 钉定（1.83.0），rustup 会自动选用
 cargo run -p neo-cli -- tui --provider mock    # 不装 PATH，直接用 cargo 跑 TUI
 cargo install --path crates/neo-cli --locked   # 或装成全局命令 neo
 
-cargo test --workspace     # 497 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
-cargo check --workspace    # 21 个 crate，零 unsafe、零 warning
+cargo test --workspace     # 617 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
+cargo check --workspace    # 23 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试
 ```
@@ -141,7 +141,7 @@ bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 
 
 ```
 proteus-code/                  ← 项目本体是 Rust 内核
-├── Cargo.toml                 workspace（17 crates）
+├── Cargo.toml                 workspace（23 crates）
 ├── crates/                    ★ 内核与宿主
 │   ├── neo-protocol/          L0 线协议（Op / EventMsg / 双轴枚举），零业务依赖
 │   ├── neo-sandbox/           L1 平台（命令包裹：Seatbelt / Landlock+bwrap / ACL）

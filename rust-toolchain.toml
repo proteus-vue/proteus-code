@@ -4,4 +4,10 @@
 # num_enum / dlopen2_derive,见 PROJECT_MEMORY §4.56 与桌面窗口层
 # 的提交说明);再钉住工具链,防止一次 `cargo update` 把树漂移到
 # 本工具链无法解析的状态。
-1.83.0
+#
+# 注意：本文件必须是**合法 TOML**。写成裸文本 `1.83.0` 会让 rustup 拒绝
+# 解析 override，本仓库内每一条 cargo 命令都会在编译前直接失败
+# （"could not parse override file"）—— 纯文本钉版只有无扩展名的
+# `rust-toolchain` 才支持，带 `.toml` 后缀必须用 [toolchain] 表。
+[toolchain]
+channel = "1.83.0"

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # NEO 全套门禁入口。
 #
-# 三部分：
+# 四部分：
+#   0. 预检：cargo 是否可执行（工具链钉版文件解析失败会让后续门禁失去意义）
 #   1. Rust 工程门禁：cargo test（含内核 conformance、内存有界性、SPI conformance）
 #   2. 架构与协议守卫：docs/neo-plan/05-验证/ 的 Python 检查（依赖方向、协议确定性、
 #      会话格式、配置层叠、模式矩阵、SPI 合规）
 #   3. 工具链卫生：零 warning（warning 是未来错误的温床）
+#   4. 执行效率规范：固定盲等 / 重复拉取 / 无退出轮询（ai-efficiency-rules）
 #
 # 用法：bash scripts/verify.sh
 set -uo pipefail
@@ -23,25 +25,56 @@ hr() { printf '%s\n' "##########################################################
 
 hr; echo "#  NEO 门禁"; echo "#  仓库: $ROOT"; hr
 
+# ── 0. 预检：cargo 能不能跑 ─────────────────────────────────────────────
+#
+# 区分「环境坏了」与「代码没过」。典型环境故障是 rust-toolchain.toml 不是
+# 合法 TOML：rustup 会让本仓库内每一条 cargo 命令都直接失败。此时若不预检，
+# 第 2 段「零 warning」会因为输出里没有 warning 而报「✅ 无 warning」——
+# 那是假通过（只有编译真的跑起来，warning 计数才有意义）。
+CARGO_OK=0
+if command -v cargo >/dev/null 2>&1; then
+  if ( cd "$ROOT" && cargo --version ) >/tmp/neo-cargo-ver.log 2>&1; then
+    CARGO_OK=1
+  else
+    echo "  ⚠️  cargo 无法执行 —— Rust 门禁整体判失败（是工具链/环境问题，非代码问题）："
+    head -6 /tmp/neo-cargo-ver.log | sed 's/^/     /'
+  fi
+fi
+
 # ── 1. Rust 测试（内核 conformance 是主门禁）────────────────────────────
 hr; echo "#  Rust: cargo test --workspace（内核 / 内存 / SPI conformance）"; hr
-if command -v cargo >/dev/null 2>&1; then
+if [ "$CARGO_OK" -eq 1 ]; then
   ( cd "$ROOT" && cargo test --workspace ) || fail=$((fail+1))
 else
-  echo "  [SKIP] 未找到 cargo —— Rust 门禁未执行。请安装 Rust 后重跑。"
+  echo "  [SKIP] cargo 不可用 —— Rust 门禁未执行（见上方预检信息）。"
   fail=$((fail+1))
 fi
 
 # ── 2. 警告即错误（工具链卫生）──────────────────────────────────────────
+#
+# 关键：cargo 必须**成功退出**才有资格谈 warning 计数。编译都没跑起来时
+# 输出里自然没有 warning，直接数 0 会把「没编译」误判成「零 warning」。
 hr; echo "#  Rust: 零 warning 检查"; hr
-if command -v cargo >/dev/null 2>&1; then
-  warn_out="$(cd "$ROOT" && cargo check --workspace --all-targets 2>&1 | grep -c '^warning' || true)"
-  if [ "${warn_out:-0}" -eq 0 ]; then
-    echo "  ✅ 无 warning"
-  else
-    echo "  ❌ 有 $warn_out 条 warning —— warning 是未来错误的温床，请清零"
+if [ "$CARGO_OK" -eq 1 ]; then
+  ( cd "$ROOT" && cargo check --workspace --all-targets ) >/tmp/neo-check.log 2>&1
+  check_rc=$?
+  if [ "$check_rc" -ne 0 ]; then
+    echo "  ❌ cargo check 未成功（exit $check_rc）—— 无法判定 warning，按失败处理"
+    head -20 /tmp/neo-check.log | sed 's/^/     /'
     fail=$((fail+1))
+  else
+    warn_out="$(grep -c '^warning' /tmp/neo-check.log || true)"
+    if [ "${warn_out:-0}" -eq 0 ]; then
+      echo "  ✅ 无 warning"
+    else
+      echo "  ❌ 有 $warn_out 条 warning —— warning 是未来错误的温床，请清零"
+      grep -A4 '^warning' /tmp/neo-check.log | head -40 | sed 's/^/     /'
+      fail=$((fail+1))
+    fi
   fi
+else
+  echo "  [SKIP] cargo 不可用 —— 零 warning 检查未执行（见上方预检信息）。"
+  fail=$((fail+1))
 fi
 
 # ── 3. 架构 / 协议 / 会话 / 配置 / 模式 / SPI 守卫 ───────────────────────

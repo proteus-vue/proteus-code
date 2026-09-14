@@ -35,7 +35,9 @@
   新增模型可见输入必须同时落盘，否则回放（T2）与审计失效。
 - **依赖只能向下**：`L0 protocol → L1 platform → L2 core → L3 capability → L4 → L5 host`。
   由 `docs/neo-plan/05-验证/checks/check_architecture.py` 强制。
-- **零 `unsafe`**（当前 21 crate 全零）。确需引入必须在提交信息里说明理由与安全论证。
+- **零 `unsafe`**（当前 23 crate 的生产代码全零；唯一例外在
+  `neo-core/tests/memory.rs` 的计数分配器，测试基建所必需）。
+  确需引入必须在提交信息里说明理由与安全论证。
 - **零 warning**：`scripts/verify.sh` 会把 warning 判为失败。
 - **每个 SPI 必须 ≥2 真实后端 + conformance**，否则是假 SPI（AP-01/AP-03）。
   门禁 `check_spi_conformance.py` 会拒。

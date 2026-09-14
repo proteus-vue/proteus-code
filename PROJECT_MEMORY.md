@@ -40,7 +40,7 @@
 
 ## 1.5 crate 命名：全部 `neo-`，以及两处**必须**保留 `dsh`
 
-21 个 crate 一律 `neo-`（`neo-protocol` / `neo-core` / `neo-host-web` …），
+23 个 crate 一律 `neo-`（`neo-protocol` / `neo-core` / `neo-host-web` …），
 不再用 `dsh-` 前缀 —— 内核对 DSH 的借鉴是**思想**，不是包名延续。
 
 两处**刻意不动**（动了反而是错的）：
@@ -89,7 +89,8 @@
 - **实测**：计数分配器测同一步在历史 20 条 vs 400 条下的额外分配差 < 16 KB
 
 ### 目标二：内存安全
-- **21 crate 零 `unsafe`**（`cargo check` 全绿）
+- **23 crate 生产代码零 `unsafe`**（`cargo check` 全绿；`neo-core/tests/memory.rs`
+  的计数分配器是唯一例外，测试基建所必需）
 - `Send`/`Sync` 由编译器强制 → 类型层面无数据竞争
 - 无悬垂/双重释放（所有权 + 生命周期）
 
@@ -2235,6 +2236,17 @@ provider 流式后,内核仍在一步内消费完整条流才把 outbox 交给�
    而契约用例的输入是 `{"a":1}`，导致负向用例自身失败。
    这恰好**证明负向用例在起作用**（它真的能抓住违规）。已改为无条件违规。
 
+4. **"零 warning"门禁在编译没跑起来时报了假绿**：`verify.sh` 第 2 段原本是
+   `cargo check ... 2>&1 | grep -c '^warning'`，只要计数为 0 就报 ✅。但
+   `rust-toolchain.toml` 当时被写成了**裸文本 `1.83.0`**（`.toml` 后缀必须是合法
+   TOML，纯文本只有无扩展名的 `rust-toolchain` 才支持），rustup 因此拒绝解析
+   override，本仓库内每条 `cargo` 命令都在编译前直接失败 —— **没有编译就没有
+   warning，计数自然是 0，于是"没编译"被当成了"零 warning"**。
+   修法有二，缺一不可：① 钉版文件改回 `[toolchain]` 表；② 门禁加预检，
+   `cargo` 不能成功执行时整体判失败，且 warning 计数必须建立在 `cargo check`
+   **成功退出**之上。教训与第 1 条同源：**计数类门禁必须先证明"被计数的东西真的
+   跑过"**，否则 0 是"干净"还是"没跑"根本分不出来。
+
 ---
 
 ## 6. 旧实现（legacy/）里哪些经验仍然有效
@@ -2253,8 +2265,8 @@ provider 流式后,内核仍在一步内消费完整条流才把 outbox 交给�
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 497 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
-bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫）
+cargo test --workspace      # 617 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web）
+bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫 + 执行效率）
 ```
 
 **验证套件在 `docs/neo-plan/05-验证/`**（Python + golden 用例），
