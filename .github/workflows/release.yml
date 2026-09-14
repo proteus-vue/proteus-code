@@ -136,13 +136,14 @@ jobs:
       id-token: write   # OIDC Trusted Publishing + npm provenance 都靠它
     steps:
       - uses: actions/checkout@v4
-      # Node 24：Trusted Publishing 要求 npm CLI >= 11.5.1（Node 22.14+/24 才带得动）。
-      # package-manager-cache: false 是 npm 官方对可信发布的建议（避免缓存干扰）。
-      - uses: actions/setup-node@v4
+      # 用 setup-node@v6（而非仓库其它 workflow 用的 v4）：npm 官方可信发布
+      # 文档就指定 v6，且 v6 才支持下面这个输入。v4 会报
+      # "Unexpected input(s) 'package-manager-cache'" 并附带 Node 20 弃用警告。
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-          package-manager-cache: false
+          package-manager-cache: false   # npm 官方对可信发布的建议：别让缓存干扰
       - uses: actions/download-artifact@v4
         with:
           path: dist
