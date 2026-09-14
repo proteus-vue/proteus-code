@@ -2,8 +2,13 @@
 //!
 //! 铁律：不含业务逻辑。**不含 Electron、不捆绑 Chromium/Node。**
 //!
-//! 技术选择：`wry`（系统 webview）而非纯 Rust GUI，理由见
-//! `03-模块规格/L5-host.md` 第一节 —— 保住现有 React + 液态玻璃界面零改动。
+//! 技术选择：`wry`（系统 webview）而非纯 Rust GUI。
+//! ⚠️ 当年选它的理由是"保住现有 React + 液态玻璃界面零改动"（见
+//! `03-模块规格/L5-host.md` 第一节）——**该前提已不成立**：那个 React 界面在
+//! `legacy/`，本 crate 实际加载的是 `neo-host-web` 那份 184 行内联页面
+//! （无 React、无液态玻璃），`crates/` 里对 `legacy/` 的引用数为 0。
+//! 因此本项目已决定**新增 Rust 原生 GUI 宿主**，webview 保留为第二后端，
+//! 理由与代价见 `ADR-0006-桌面原生GUI.md` 与 `docs/desktop-plan.md`。
 //!
 //! 平台矩阵（诚实边界，不得声称三平台视觉一致）：
 //! - macOS   : WKWebView，系统自带

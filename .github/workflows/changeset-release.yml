@@ -41,7 +41,7 @@ jobs:
       # 与 rust.yml / release.yml 同一把尺子。
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: "1.83.0"
+          toolchain: "1.95.0"
 
       - name: 当前版本与待发碎片
         id: st

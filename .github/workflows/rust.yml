@@ -1,7 +1,6 @@
 # Rust 全门禁:verify.sh = cargo test --workspace + 零 warning +
 # 架构/协议/会话/配置/SPI/Python 守卫 + 执行效率审计。
-# 工具链版本由 rust-toolchain.toml 钉定(1.83.0)—— 桌面窗口层的
-# 依赖树钉在 1.83 兼容版本,CI 必须用同一把尺子。
+# 工具链版本由 rust-toolchain.toml 钉定(1.95.0),CI 必须用同一把尺子。
 name: rust
 
 on:
@@ -18,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: "1.83.0"
+          toolchain: "1.95.0"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

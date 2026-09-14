@@ -22,15 +22,25 @@
 
 ### 为什么选系统 webview 而不是纯原生 GUI
 
-**为了保住已有投资**：现有 React + 液态玻璃界面在 webview 里**原样可用**（同一引擎，`backdrop-filter` 照常工作）。
+> ⚠️ **本节的前提已失效（2026-09-14 核查）**：原文的理由是"**保住已有投资**：现有
+> React + 液态玻璃界面在 webview 里原样可用"。但那套 React 界面在 `legacy/`，
+> **本 crate 实际加载的是 `neo-host-web` 那份 184 行内联页面**（无 React、
+> 无液态玻璃），`crates/` 里对 `legacy/` 的引用数为 **0**。
+> 也就是说 wry 的"保住已有 UI"收益实际为 0，而"重写 UI"的代价早已发生。
+>
+> **现行决策见 [`ADR-0006-桌面原生GUI.md`](../02-架构设计/ADR/ADR-0006-桌面原生GUI.md)**：
+> 新增 Rust 原生 GUI 宿主，wry/webview **保留为第二 `HostBackend`**（不押注单一方案）。
+> 实现计划见 [`docs/desktop-plan.md`](../../desktop-plan.md)。
+> 下表保留原始权衡记录，供追溯。
 
 | 方案 | 壳重 | 保住现有 UI | 代价 |
 |---|---|---|---|
-| **wry（系统 webview）** | ~1/10 | ✅ **零改动** | 依赖 OS webview；三平台有差异 |
-| egui / iced（纯 Rust GUI） | 最小 | ❌ **须用 Rust 重写 UI** | 液态玻璃要自己写着色器 |
-| gpui（Zed 的 GPU UI） | 最小 | ❌ 同样重写 | 生态较新 |
+| **wry（系统 webview）** | ~1/10 | ✅ 零改动（**前提已失效**，见上） | 依赖 OS webview；三平台有差异 |
+| egui / iced（纯 Rust GUI） | 最小 | ❌ 须用 Rust 重写 UI | 液态玻璃要自己写着色器 |
+| gpui（Zed 的 GPU UI） | 最小 | ❌ 同样重写 | 生态较新；组件为 GPL 不可复用 |
 
-**推荐 wry 作主入口，egui 作**未来**的第二个 `HostBackend` 后端**——不押注单一方案，正是 Proteus 方法论。
+**原推荐**（wry 作主入口、egui 作未来第二后端）**已成为现行方案**，只是主次对调：
+原生 GUI 作主入口，webview 作第二后端。
 
 ---
 

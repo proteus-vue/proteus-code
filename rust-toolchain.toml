@@ -1,13 +1,21 @@
-# 工具链钉版。原因:桌面窗口层(wry/tao)的传递依赖树里,若干包的
-# 最新版已使用 edition2024(需要 cargo >= 1.85)。Cargo.lock 里已把
-# 这些依赖钉在 1.83 兼容版本(idna_adapter / hashbrown / indexmap /
-# num_enum / dlopen2_derive,见 PROJECT_MEMORY §4.56 与桌面窗口层
-# 的提交说明);再钉住工具链,防止一次 `cargo update` 把树漂移到
-# 本工具链无法解析的状态。
+# 工具链钉版。
 #
-# 注意：本文件必须是**合法 TOML**。写成裸文本 `1.83.0` 会让 rustup 拒绝
+# 为什么钉住而不是用 `stable`：可复现。漂移的编译器会让"CI 绿、本地红"
+# 或反之，而那种差异排查起来很贵。钉住之后 rustup 自动选用该版本，
+# 本地与 CI 用同一把尺子。
+#
+# 历史沿革（值得留着，因为它是"为什么升级"的答案）：
+#   1.83.0 —— 曾长期钉在这里，原因是桌面窗口层（wry/tao）的传递依赖树里
+#             若干包已用 edition2024（需 cargo ≥ 1.85），于是 Cargo.lock 把
+#             5 个依赖钉回 1.83 兼容版本（idna_adapter / hashbrown / indexmap /
+#             num_enum / dlopen2_derive，见 PROJECT_MEMORY §4.56）。
+#   1.95.0 —— 为桌面宿主转向 Rust 原生 GUI 而升级（egui 0.36 声明的 MSRV
+#             恰为 1.95）。升级后原先那批钉版多数可自然解开，不再需要
+#             "为了让旧编译器能解析依赖树"而额外维护版本。
+#
+# 注意：本文件必须是**合法 TOML**。写成裸文本 `1.95.0` 会让 rustup 拒绝
 # 解析 override，本仓库内每一条 cargo 命令都会在编译前直接失败
 # （"could not parse override file"）—— 纯文本钉版只有无扩展名的
 # `rust-toolchain` 才支持，带 `.toml` 后缀必须用 [toolchain] 表。
 [toolchain]
-channel = "1.83.0"
+channel = "1.95.0"

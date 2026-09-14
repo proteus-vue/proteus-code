@@ -18,7 +18,7 @@
 #                             故 Linux 产物不含桌面（用法提示会说清）。
 #                             需要 Linux 桌面窗口的用户自行 cargo install（含默认 feature）。
 #
-# 工具链版本由 rust-toolchain.toml 钉定（1.83.0），与 rust.yml 同一把尺子。
+# 工具链版本由 rust-toolchain.toml 钉定（1.95.0），与 rust.yml 同一把尺子。
 name: release
 
 on:
@@ -112,7 +112,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: "1.83.0"
+          toolchain: "1.95.0"
           target: ${{ matrix.target }}
       # Linux 精简构建**仍**需要少量系统包（TUI 用 stty，无 GUI 依赖）；
       # 这里显式不装 webkit —— 正是为验证精简路径。

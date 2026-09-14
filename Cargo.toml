@@ -34,7 +34,7 @@ repository = "https://github.com/proteus-vue/proteus-code"
 homepage = "https://github.com/proteus-vue/proteus-code"
 authors = ["Proteus Contributors"]
 # 与 rust-toolchain.toml 的钉版一致；crates.io 上会作为最低 Rust 版本展示。
-rust-version = "1.83"
+rust-version = "1.95"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
