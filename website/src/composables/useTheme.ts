@@ -42,11 +42,13 @@ function apply() {
   el.dataset.neoSquare = t.square ? '1' : '0'
   el.dataset.neoLight = t.light ? '1' : '0'
 
-  // 亮度相关的派生量：亮色主题下需要不同的透明度（深色底上的白光是「辉光」，
-  // 亮色底上会变成「脏印」）。
+  // 亮度相关的派生量：亮色主题下需要不同的强度（深色底上的点光是"星场"，
+  // 亮色底上对比度天然更高，要压低，否则显得脏）。
   el.style.setProperty('--neo-glow-strength', t.light ? '0.06' : '0.3')
   el.style.setProperty('--neo-grid-alpha', t.light ? '0.1' : '0.055')
-  el.style.setProperty('--neo-star-alpha', t.light ? '0.18' : '0.5')
+  // 纹理强度：这是 **draw 时会相乘的系数**（1 = 全强度）。深色主题用满，
+  // 亮色主题压到约 4 成 —— 数值由截图实测确定，不是拍脑袋。
+  el.style.setProperty('--neo-star-alpha', t.light ? '0.45' : '1')
 
   // 通知需要重绘的组件（canvas 背景的颜色来自 CSS 变量，改变量不会自动重画）。
   // 用事件而不是 provide/inject：背景组件与主题状态是弱耦合，一处派发一处监听最简单。
