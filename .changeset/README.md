@@ -30,7 +30,7 @@ python3 scripts/changeset.py new --bump minor --note "新增 npm 分发"
 bump: minor
 ---
 
-新增 npm 分发：`npm install -g neo-code`。
+新增 npm 分发：`npm install -g @proteus-vue/neo-code`。
 ```
 
 正文会**原样**进 `CHANGELOG.md`，所以写给用户看，不要写"修改了 xxx 函数"。

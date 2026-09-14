@@ -1,9 +1,9 @@
-# neo-code (npm)
+# @proteus-vue/neo-code (npm)
 
 以 npm 方式安装 [NEO](https://github.com/proteus-vue/proteus-code) 的命令行 `neo`。
 
 ```bash
-npm install -g neo-code
+npm install -g @proteus-vue/neo-code
 neo --help
 ```
 
@@ -13,9 +13,9 @@ neo --help
 
 | 平台 | 平台包 |
 |---|---|
-| macOS (Apple Silicon) | `neo-code-darwin-arm64` |
-| macOS (Intel) | `neo-code-darwin-x64` |
-| Linux x86_64 | `neo-code-linux-x64` |
+| macOS (Apple Silicon) | `@proteus-vue/neo-code-darwin-arm64` |
+| macOS (Intel) | `@proteus-vue/neo-code-darwin-x64` |
+| Linux x86_64 | `@proteus-vue/neo-code-linux-x64` |
 
 npm 依据平台包的 `os` / `cpu` 字段自动只装匹配项。**安装期不执行脚本、
 不联网**（不走 postinstall 下载），离线与内网环境同样可用。

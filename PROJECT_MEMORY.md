@@ -15,7 +15,7 @@
 | 路径 | 用户侧 | 何时用 |
 |---|---|---|
 | `scripts/install.sh` + GitHub Releases | `curl \| sh`，无需 Node/Rust | 推荐 |
-| `npm install -g neo-code` | 需 Node | 有 Node 环境时最省事 |
+| `npm install -g @proteus-vue/neo-code` | 需 Node | 有 Node 环境时最省事 |
 | `cargo install --git ... -p neo-code-cli` | 需 Rust | 全平台 / 自定义 feature |
 
 三者共用一件事：**包名与命令名分离**。crates.io 上 `neo-cli` 与 `neo`
@@ -49,12 +49,22 @@ CI 另跑 `-p neo-code-cli --no-default-features` 验证精简组合仍有产物
 
 ### (b2) npm 包：平台包 + 主包，安装期零脚本
 
-npm 侧是**两个层次**：
+npm 侧是**两个层次**（包名统一在 **`@proteus-vue`** scope 下 —— 发布凭证是
+该组织的）：
 
 | 包 | 内容 |
 |---|---|
-| `neo-code` | 只有 `bin/neo.js`（约 2 KB）+ `optionalDependencies` |
-| `neo-code-darwin-arm64` / `-darwin-x64` / `-linux-x64` | 各自的 `bin/neo` 二进制 + `os`/`cpu` 字段 |
+| `@proteus-vue/neo-code` | 只有 `bin/neo.js`（约 2 KB）+ `optionalDependencies` |
+| `@proteus-vue/neo-code-darwin-arm64` / `-darwin-x64` / `-linux-x64` | 各自的 `bin/neo` 二进制 + `os`/`cpu` 字段 |
+
+**scoped 包发布必须带 `--access public`**：npm 对 scoped 包默认按 restricted
+处理，首次发布不带这个标志会失败。已固化在 `publish-npm.sh` 的
+`publish_or_pack`，不要去掉。
+
+另两个 scoped 特有的细节：① 包名含 `/`，**不能直接当工作目录名**（脚本用
+`slug()` 转成 `_scope_name`）；② `node_modules` 下确实是嵌套布局
+（`@scope/name`），故 dry-run 冒烟时拼 `$nm/$pkg` 是对的，但要先
+`mkdir -p "$nm/@scope"`。
 
 npm 按 `os`/`cpu` 只装匹配的平台包；主包的 wrapper 用
 `require.resolve('<平台包>/package.json')` 定位真二进制并**原样转发**

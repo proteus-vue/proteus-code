@@ -80,7 +80,13 @@ Automation token 已于 2025-11 被 npm 移除，只有 Granular。
 
 5. **Packages and scopes** → 选 **Read and write**
    （不要选 "stage only"，它不能直接发布）
-6. **Select Packages** → All Packages
+6. **Select Packages** → 选 **All Packages**，或至少勾上 `@proteus-vue`
+   这个 scope
+
+   > 包在 **`@proteus-vue`** scope 下，所以 token 必须对该 scope 有
+   > publish 权限。用自己的**个人**账号建 token 时，前提是你本人是该组织
+   > 成员且有发布权 —— 否则会报 `E403`。这也是最省事的做法：一个 token
+   > 覆盖 scope 下全部 4 个包。
 7. **Expiration** → 选一个期限（至少 1 天后）
 8. Generate Token → **立刻复制**（只显示一次）
 
@@ -115,8 +121,8 @@ git push origin v0.1.0
 
 ```bash
 # npm 上应有 4 个包（1 个主包 + 3 个平台包）
-npm view neo-code version
-npm view neo-code-darwin-arm64 version
+npm view @proteus-vue/neo-code version
+npm view @proteus-vue/neo-code-darwin-arm64 version
 
 # 真装一遍（注意用临时 prefix，别污染本机）
 npm install -g --prefix /tmp/neo-check neo-code
@@ -133,8 +139,8 @@ OIDC 可信发布**不需要任何长期凭证**，且 npm 计划 2027-01 移除
 
 ### 2.1 npm 侧：给 4 个包各配一次
 
-对 **`neo-code`、`neo-code-darwin-arm64`、`neo-code-darwin-x64`、
-`neo-code-linux-x64`** 逐个操作：
+对 **`@proteus-vue/neo-code`、`@proteus-vue/neo-code-darwin-arm64`、
+`@proteus-vue/neo-code-darwin-x64`、`@proteus-vue/neo-code-linux-x64`** 逐个操作：
 
 进入包页面 → **Settings** → **Trusted Publisher** → 选 **GitHub Actions**，填：
 
@@ -145,6 +151,11 @@ OIDC 可信发布**不需要任何长期凭证**，且 npm 计划 2027-01 移除
 | Workflow filename | `release.yml` |
 | Environment | **留空** |
 
+> 包在 **`@proteus-vue`** scope 下，包页面是
+> `https://www.npmjs.com/package/@proteus-vue/neo-code`。
+> Trusted Publisher 只能在**已存在的包**上配置 —— 若 scope 下看不到包，
+> 说明还没发布成功，先走 §1 的 bootstrap。
+>
 > 文件名**大小写敏感**且必须与 `.github/workflows/` 下的完全一致。
 > Environment 留空是因为 `publish-npm` job 没有声明 environment；
 > 若在 npm 侧填了，job 就必须加 `environment:`，否则认证失败。
@@ -265,10 +276,12 @@ job，npm 那一步可能被跳过而整体仍显示绿色。
 | **Release 全绿但 npm 上什么都没有** | `publish-npm` job 判定无凭证而跳过了发布 | 现在这一步会**直接失败**并打印诊断表（见下方"最常踩的坑"）。看该 job 的日志 |
 | 日志说"没有任何可用的 npm 凭证" | token 加成 Variable 而非 Secret（最常见） | Settings → Secrets and variables → Actions → **Secrets** 页放 `NPM_TOKEN`；仅用无密钥方案则改用 §2 |
 | `EOTP` / 要求 OTP | granular token 没勾 Bypass 2FA | 重建 token 并勾选；或改用 Trusted Publishing |
-| `E403` 无权限发布 | token 权限不是 "Read and write"，或已过期 | 重建 token |
+| `E403` 无权限发布 | token 权限不是 "Read and write"、已过期，**或该 token 不属于 `@proteus-vue` 组织** | 重建 token 并确认它对 `@proteus-vue` 有 publish 权限 |
+| `E402` / 要求付费 | scoped 包被当成 private（缺 `--access public`） | 脚本已带该标志；若手发务必加 `--access public` |
 | `ENEEDAUTH` | 凭证没传到 npm | 核对 secret 名恰为 `NPM_TOKEN` |
 | `E404` 找不到包 | 首次发布时平台包尚未存在 | 正常——脚本先发平台包再发主包，按序即可 |
 | `E409` 版本已存在 | 该版本发过了 | 幂等处理：脚本会跳过；要重发就升版本 |
+| 发布成功但用户装不到 | 包名漏了 scope | 用户命令是 `npm install -g @proteus-vue/neo-code`（不是 `neo-code`） |
 | 版本漂移报错 | 传入版本与 `Cargo.toml` 不符 | 按报错提示统一两者（正常流程不会发生） |
 | Trusted Publishing 认证失败 | workflow 文件名不符 / Environment 不一致 / 自托管 runner | 逐项核对 §2.1；自托管 runner 不支持 |
 | 加了凭证但不想在本次发 | —— | 把仓库变量 `NPM_SKIP_PUBLISH` 设为 `true` 可显式跳过 |
@@ -306,13 +319,13 @@ npm 的规则很硬：**已被任何项目安装过的版本不能 `unpublish`**
 
 ```bash
 # 方案 A：废弃（推荐）—— 包仍在，但安装时告警
-npm deprecate neo-code@0.1.0 "该版本有严重缺陷，请升级到 0.1.1"
+npm deprecate @proteus-vue/neo-code@0.1.0 "该版本有严重缺陷，请升级到 0.1.1"
 
 # 方案 B：发布修复版（正路）
 #   改版本 → 打新 tag → 正常发布
 
 # 方案 C：72 小时内且无人依赖，才可能删掉
-npm unpublish neo-code@0.1.0
+npm unpublish @proteus-vue/neo-code@0.1.0
 ```
 
 发布前跑一遍 §4 的演练，比发布后补救便宜得多。

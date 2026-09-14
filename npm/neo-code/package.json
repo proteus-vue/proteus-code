@@ -1,5 +1,5 @@
 {
-  "name": "neo-code",
+  "name": "@proteus-vue/neo-code",
   "version": "0.1.0",
   "description": "NEO —— 用 Rust 重写的编程 Agent 内核（TUI / Web / Desktop / exec 四宿主共享同一内核）",
   "license": "MIT",
@@ -28,8 +28,8 @@
     "cli"
   ],
   "optionalDependencies": {
-    "neo-code-darwin-arm64": "0.1.0",
-    "neo-code-darwin-x64": "0.1.0",
-    "neo-code-linux-x64": "0.1.0"
+    "@proteus-vue/neo-code-darwin-arm64": "0.1.0",
+    "@proteus-vue/neo-code-darwin-x64": "0.1.0",
+    "@proteus-vue/neo-code-linux-x64": "0.1.0"
   }
 }

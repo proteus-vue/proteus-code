@@ -16,9 +16,9 @@ const fs = require('node:fs');
 
 // 平台 → 平台包名。新增平台时这里与 release.yml 的产物矩阵要一起改。
 const PKG_BY_PLATFORM = {
-  'darwin-arm64': 'neo-code-darwin-arm64',
-  'darwin-x64': 'neo-code-darwin-x64',
-  'linux-x64': 'neo-code-linux-x64',
+  'darwin-arm64': '@proteus-vue/neo-code-darwin-arm64',
+  'darwin-x64': '@proteus-vue/neo-code-darwin-x64',
+  'linux-x64': '@proteus-vue/neo-code-linux-x64',
 };
 
 function fail(message) {
@@ -47,7 +47,7 @@ try {
   fail(
     `缺少平台包 ${pkgName}。常见原因：安装时跳过了可选依赖\n` +
       `（--no-optional / --ignore-scripts / 离线且未预取），或该平台包发布失败。\n` +
-      `  可重装试试：npm i -g neo-code`
+      `  可重装试试：npm i -g @proteus-vue/neo-code`
   );
 }
 

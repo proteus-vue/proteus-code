@@ -3,9 +3,13 @@
 # 把 GitHub Release 的预编译二进制打成 npm 包并发布。
 #
 # 产物是两个层次：
-#   1. 平台包 neo-code-<os>-<arch> —— 内含该平台的 neo 二进制（os/cpu 字段
-#      让 npm 只装匹配项）
-#   2. 主包 neo-code —— 只有 bin/neo.js，通过 optionalDependencies 拽平台包
+#   1. 平台包 @proteus-vue/neo-code-<os>-<arch> —— 内含该平台的 neo 二进制
+#      （os/cpu 字段让 npm 只装匹配项）
+#   2. 主包 @proteus-vue/neo-code —— 只有 bin/neo.js，通过 optionalDependencies
+#      拽平台包
+#
+# 包名统一在 **@proteus-vue** scope 下（发布凭证是该组织的）。scoped 包发布
+# 必须带 `--access public`，否则 npm 按 restricted 处理（见 publish_or_pack）。
 #
 # 为什么这样拆（而不是单个包 + postinstall 下载）：安装期不执行脚本、
 # 不联网。postinstall 里下载可执行文件是供应链注入的典型入口，本项目
@@ -65,17 +69,27 @@ PY
 command -v npm >/dev/null 2>&1 || die "未找到 npm"
 [ -f "$ROOT/npm/neo-code/package.json" ] || die "未找到 npm/neo-code"
 
+# 包名统一放在 @proteus-vue scope 下（发布凭证是该组织的）。
+# scoped 包发布**必须带 --access public**：npm 对 scoped 包默认 restricted，
+# 首次发布不带这个标志会失败（或要求组织是付费的私有包组织）。见 publish_or_pack。
+SCOPE="@proteus-vue"
+
 # rust target : npm 平台包名 : os : cpu
 TARGETS=(
-  "aarch64-apple-darwin:neo-code-darwin-arm64:darwin:arm64"
-  "x86_64-apple-darwin:neo-code-darwin-x64:darwin:x64"
-  "x86_64-unknown-linux-gnu:neo-code-linux-x64:linux:x64"
+  "aarch64-apple-darwin:${SCOPE}/neo-code-darwin-arm64:darwin:arm64"
+  "x86_64-apple-darwin:${SCOPE}/neo-code-darwin-x64:darwin:x64"
+  "x86_64-unknown-linux-gnu:${SCOPE}/neo-code-linux-x64:linux:x64"
 )
+MAIN_PKG="${SCOPE}/neo-code"
+
+# 包名含 `/`（scope），不能直接拼进文件系统路径 —— 统一转成安全 slug。
+slug() { printf '%s' "$1" | sed 's|[@/]|_|g'; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 already_published() { # $1=name  —— 已发布该版本则跳过（幂等）
+  # scoped 名的 `/` 要编码成 %2f 才能查 registry
   local code
   code="$(curl -fsS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 20 \
           "https://registry.npmjs.org/$(printf '%s' "$1" | sed 's|/|%2f|')/$VERSION" 2>/dev/null || true)"
@@ -87,7 +101,8 @@ publish_or_pack() { # $1=包目录
     npm pack --pack-destination "$WORK/packed" --silent "$1" >/dev/null
     return 0
   fi
-  local flags=()
+  # --access public 是 scoped 包首次发布的**必需**参数（默认 restricted）。
+  local flags=(--access public)
   # CI 里带 provenance（签名证明 tarball 出自这次构建）——公开仓库才有意义
   [ "${GITHUB_ACTIONS:-}" = "true" ] && flags+=(--provenance)
   npm publish "${flags[@]}" "$1"
@@ -103,7 +118,8 @@ for entry in "${TARGETS[@]}"; do
   tarball="$(ls "$DIST"/neo-*-"$target".tar.gz 2>/dev/null | head -1 || true)"
   [ -n "$tarball" ] || { say "⏭  ${pkg}：${DIST} 里没有 $target 的产物，跳过"; continue; }
 
-  dir="$WORK/pkg-$pkg"
+  # 包名含 `/`，用 slug 做**工作目录名**（目录名不能带 scope）
+  dir="$WORK/pkg-$(slug "$pkg")"
   mkdir -p "$dir/bin"
   tar -xzf "$tarball" -C "$WORK"
   src="$(ls "$WORK"/neo-*/neo 2>/dev/null | head -1 || true)"
@@ -146,8 +162,8 @@ done
 
 # ── 2. 主包（版本 + optionalDependencies 对齐）────────────────────────
 say ""
-say "== 主包 neo-code =="
-main="$WORK/pkg-neo-code"
+say "== 主包 ${MAIN_PKG} =="
+main="$WORK/pkg-$(slug "$MAIN_PKG")"
 mkdir -p "$main"
 cp -R "$ROOT/npm/neo-code/." "$main/"
 python3 - "$main/package.json" "$VERSION" "${platform_names[@]}" <<'PY'
@@ -162,8 +178,8 @@ open(path, "a").write("\n")
 print("  optionalDependencies:", ", ".join(sorted(platforms)), file=sys.stderr)
 PY
 
-if already_published "neo-code"; then
-  say "⏭  neo-code@$VERSION 已发布，跳过"
+if already_published "$MAIN_PKG"; then
+  say "⏭  ${MAIN_PKG}@${VERSION} 已发布，跳过"
 else
   publish_or_pack "$main"
 fi
@@ -175,13 +191,15 @@ if [ "$DRY" -eq 1 ]; then
   host_key="$(node -p 'process.platform + "-" + process.arch')"
   say "主机平台：$host_key"
   smoke="$WORK/smoke"
-  mkdir -p "$smoke/node_modules"
-  cp -R "$main" "$smoke/node_modules/neo-code"
-  # 把**本机对应**的平台包放进 node_modules（模拟 npm 装好后的布局）
+  nm="$smoke/node_modules"
+  # scoped 包在 node_modules 下是**嵌套目录**（@scope/name），
+  # 所以这里直接拼 `$nm/$pkg` 是对的，只是父目录要先建好。
+  mkdir -p "$nm/@${SCOPE#@}"
+  cp -R "$main" "$nm/$MAIN_PKG"
   for pkg in "${platform_names[@]}"; do
-    cp -R "$WORK/pkg-$pkg" "$smoke/node_modules/$pkg"
+    cp -R "$WORK/pkg-$(slug "$pkg")" "$nm/$pkg"
   done
-  if node "$smoke/node_modules/neo-code/bin/neo.js" --version; then
+  if node "$nm/$MAIN_PKG/bin/neo.js" --version; then
     say "✅ wrapper 冒烟通过（--version 由真二进制输出）"
   else
     die "wrapper 冒烟失败 —— 本机平台包不在产物里？看上面 host 平台是否匹配"
@@ -195,6 +213,6 @@ say ""
 if [ "$DRY" -eq 1 ]; then
   say "✅ 演练完成（未发布）。去掉 --dry-run 即真发布。"
 else
-  say "✅ 已发布：${platform_names[*]} + neo-code（版本 ${VERSION}）"
-  say "   用户安装：npm install -g neo-code"
+  say "✅ 已发布：${platform_names[*]} + ${MAIN_PKG}（版本 ${VERSION}）"
+  say "   用户安装：npm install -g ${MAIN_PKG}"
 fi

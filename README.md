@@ -88,11 +88,11 @@ macOS（Apple Silicon / Intel）与 Linux x86_64；脚本会校验 SHA-256。
 **② npm（有 Node 环境时最省事）**：
 
 ```bash
-npm install -g neo-code
+npm install -g @proteus-vue/neo-code
 ```
 
 安装期**不执行脚本、不联网**：二进制放在按平台拆分的可选依赖里
-（`neo-code-darwin-arm64` / `-darwin-x64` / `-linux-x64`），npm 只装匹配的
+（`@proteus-vue/neo-code-darwin-arm64` / `-darwin-x64` / `-linux-x64`），npm 只装匹配的
 那一个。平台边界与方式 ① 相同（Linux 包不含桌面宿主）。
 
 **③ cargo install（需 Rust）** —— 覆盖所有平台与 feature 组合：
