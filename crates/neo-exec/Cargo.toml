@@ -3,19 +3,24 @@ name = "neo-exec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L5 宿主：无头 / CI（事件 → 文本）"
 
 # L5 HOST: 无头 / CI 宿主。不含业务逻辑，只做"事件 → 文本"渲染。
 [dependencies]
-neo-protocol = { path = "../neo-protocol" }
-neo-core = { path = "../neo-core" }
-neo-config = { path = "../neo-config" }
-neo-capability = { path = "../neo-capability" }
-neo-orchestration = { path = "../neo-orchestration" }
-neo-skill-loader = { path = "../neo-skill-loader" }
-neo-instructions = { path = "../neo-instructions" }
-neo-mcp = { path = "../neo-mcp" }
-neo-agent-loader = { path = "../neo-agent-loader" }
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-config = { path = "../neo-config", version = "0.1.0" }
+neo-capability = { path = "../neo-capability", version = "0.1.0" }
+neo-orchestration = { path = "../neo-orchestration", version = "0.1.0" }
+neo-skill-loader = { path = "../neo-skill-loader", version = "0.1.0" }
+neo-instructions = { path = "../neo-instructions", version = "0.1.0" }
+neo-mcp = { path = "../neo-mcp", version = "0.1.0" }
+neo-agent-loader = { path = "../neo-agent-loader", version = "0.1.0" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-neo-mock = { path = "../neo-mock" }
+neo-mock = { path = "../neo-mock", version = "0.1.0" }

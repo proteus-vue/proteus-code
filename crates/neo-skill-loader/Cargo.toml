@@ -3,7 +3,12 @@ name = "neo-skill-loader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L3 PROVIDER：技能目录发现与加载（SKILL.md → SkillRegistry）"
 
 # L3 PROVIDER —— 技能目录发现与加载（把磁盘上的 SKILL.md 变成 SkillRegistry）
 [dependencies]
-neo-core = { path = "../neo-core" }
+neo-core = { path = "../neo-core", version = "0.1.0" }

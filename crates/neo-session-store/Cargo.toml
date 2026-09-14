@@ -3,9 +3,14 @@ name = "neo-session-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L3 PROVIDER：多会话库（列举 / 新建 / 删除 / 标题）"
 
 # L3 PROVIDER —— 多会话的目录管理与元信息（会话库）
 [dependencies]
-neo-protocol = { path = "../neo-protocol" }
-neo-session = { path = "../neo-session" }
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-session = { path = "../neo-session", version = "0.1.0" }
 serde_json = { workspace = true }

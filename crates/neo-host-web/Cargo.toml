@@ -3,12 +3,17 @@ name = "neo-host-web"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L5 宿主：浏览器（零依赖 HTTP + SSE，含内置页面）"
 
 # L5 HOST: 不含业务逻辑，只做渲染 + 输入解析 + 消费事件流
 [dependencies]
-neo-protocol = { path = "../neo-protocol" }
-neo-core = { path = "../neo-core" }
-neo-orchestration = { path = "../neo-orchestration" }
-neo-config = { path = "../neo-config" }
-neo-capability = { path = "../neo-capability" }
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-orchestration = { path = "../neo-orchestration", version = "0.1.0" }
+neo-config = { path = "../neo-config", version = "0.1.0" }
+neo-capability = { path = "../neo-capability", version = "0.1.0" }
 serde_json = { workspace = true }

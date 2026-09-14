@@ -73,7 +73,14 @@ fn main() {
         Some("exec") => cmd_exec(&args[1..]),
         Some("tui") => cmd_tui(&args[1..]),
         Some("serve") => cmd_serve(&args[1..]),
+        #[cfg(feature = "desktop")]
         Some("desktop") => cmd_desktop(&args[1..]),
+        #[cfg(not(feature = "desktop"))]
+        Some("desktop") => {
+            eprintln!("[neo] 本二进制未编译桌面宿主（构建时用了 --no-default-features）。");
+            eprintln!("      需要桌面窗口请重装并保留默认 feature：cargo install neo-code-cli");
+            2
+        }
         Some("help") | Some("--help") | Some("-h") => {
             println!("{USAGE}");
             0
@@ -205,6 +212,10 @@ fn cmd_serve(args: &[String]) -> i32 {
 /// T6 宿主等价因此天然成立 —— 桌面跑的就是 Web 宿主，没有第三套
 /// 事件消费逻辑要证明等价。窗口关闭 = 退出应用（随 op 通道关闭，
 /// 内核线程停机）。
+///
+/// 仅在 `desktop` feature 开启时编译（默认开启）；精简构建下
+/// `neo desktop` 由 `main` 里的占位分支给出明确提示，而非静默不存在。
+#[cfg(feature = "desktop")]
 fn cmd_desktop(args: &[String]) -> i32 {
     let mut workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // 默认空 = 自动选择：设置页配置的注册表服务商优先，其次 env deepseek

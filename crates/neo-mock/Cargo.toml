@@ -3,17 +3,22 @@ name = "neo-mock"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "test-support：为每个 SPI 提供 Mock/Headless 后端与反例后端"
 
 # 旁挂（test-support）：为每个 SPI 提供 Mock/Headless 后端。
 #
 # 存在理由（SPI-First Step 2）：单后端 SPI = 假 SPI（AP-01），可替换性从未被验证。
 # Mock 是**强制项**，不是可选项 —— 它同时是 conformance 的第二个被试对象。
 [dependencies]
-neo-protocol = { path = "../neo-protocol" }
-neo-core = { path = "../neo-core" }
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-neo-host-desktop = { path = "../neo-host-desktop" }
-neo-host-tui = { path = "../neo-host-tui" }
-neo-host-web = { path = "../neo-host-web" }
+neo-host-desktop = { path = "../neo-host-desktop", version = "0.1.0" }
+neo-host-tui = { path = "../neo-host-tui", version = "0.1.0" }
+neo-host-web = { path = "../neo-host-web", version = "0.1.0" }

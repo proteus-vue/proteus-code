@@ -3,17 +3,22 @@ name = "neo-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L2 内核：turn/step 主循环 + 三维闸门 + 五个 SPI 契据"
 
 # L2 CORE: 禁止依赖 L3(capability) / L4(orchestration) / L5(host*)
 [dependencies]
-neo-protocol = { path = "../neo-protocol" }
-neo-sandbox = { path = "../neo-sandbox" }
-neo-platform = { path = "../neo-platform" }
-neo-session = { path = "../neo-session" }
-neo-config = { path = "../neo-config" }
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-sandbox = { path = "../neo-sandbox", version = "0.1.0" }
+neo-platform = { path = "../neo-platform", version = "0.1.0" }
+neo-session = { path = "../neo-session", version = "0.1.0" }
+neo-config = { path = "../neo-config", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-neo-mock = { path = "../neo-mock" }
-neo-capability = { path = "../neo-capability" }
+neo-mock = { path = "../neo-mock", version = "0.1.0" }
+neo-capability = { path = "../neo-capability", version = "0.1.0" }

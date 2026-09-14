@@ -3,8 +3,13 @@ name = "neo-instructions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L3 PROVIDER：项目指令级联加载（AGENTS.md → 系统提示词）"
 
 # L3 PROVIDER —— 项目指令（AGENTS.md）级联发现与加载
 [dependencies]
-neo-config = { path = "../neo-config" }
-neo-core = { path = "../neo-core" }
+neo-config = { path = "../neo-config", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }

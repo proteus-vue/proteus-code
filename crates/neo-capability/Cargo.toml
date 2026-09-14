@@ -3,14 +3,19 @@ name = "neo-capability"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L3 能力：Shell-First 工具集（bash / apply_patch / 提问）"
 
 # L3 CAPABILITY: Shell-First 工具集。只依赖 L2 core 的契据。
 [dependencies]
-neo-protocol = { path = "../neo-protocol" }
-neo-core = { path = "../neo-core" }
-neo-config = { path = "../neo-config" }
-neo-sandbox = { path = "../neo-sandbox" }
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-config = { path = "../neo-config", version = "0.1.0" }
+neo-sandbox = { path = "../neo-sandbox", version = "0.1.0" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-neo-sandbox-local = { path = "../neo-sandbox-local" }
+neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }

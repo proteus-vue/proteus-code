@@ -70,13 +70,46 @@ neo tui --provider demo        # Markdown 高亮 + 任务清单
 `AGENTS.md` 超 32 KiB 时**诚实截断**（标注"已截断"），尚未实现规划中的
 "让模型生成握手摘要"。
 
-### 亲测可用
+### 安装
 
-**先装到 PATH**（否则 `neo` 提示 command not found —— 它只在 `target/` 里）：
+三种方式，按「省事 → 可控」排列：
+
+**① 一键脚本（推荐，无需 Rust）** —— 下载预编译二进制：
 
 ```bash
-cargo install --path crates/neo-cli --locked   # 装到 ~/.cargo/bin/neo
+curl -fsSL https://raw.githubusercontent.com/proteus-vue/proteus-code/main/scripts/install.sh | sh
 ```
+
+装到 `~/.local/bin/neo`（可用 `NEO_INSTALL_DIR` 改）。预编译产物覆盖
+macOS（Apple Silicon / Intel）与 Linux x86_64；脚本会校验 SHA-256。
+**Linux 产物是精简版**（不含桌面窗口，因它需要 libwebkit2gtk）——
+需要 Linux 桌面窗口请用方式 ②。
+
+**② cargo install（需 Rust 工具链）** —— 覆盖所有平台与各种 feature 组合：
+
+```bash
+# 从 crates.io（包含桌面窗口，默认 feature）
+cargo install neo-code-cli --locked
+
+# 从源码仓库（等价）
+cargo install --git https://github.com/proteus-vue/proteus-code -p neo-code-cli --locked
+
+# 精简版：不要桌面窗口，Linux 上免装 libwebkit2gtk
+cargo install neo-code-cli --locked --no-default-features
+```
+
+> 包名是 `neo-code-cli`（crates.io 上 `neo-cli` 已被占用），但**命令名始终是 `neo`**。
+
+**③ 从源码构建**：
+
+```bash
+cargo build --release -p neo-code-cli   # 产物在 target/release/neo
+```
+
+装好后 `neo` 提示 command not found，是因为安装目录不在 `PATH` 里
+（`cargo install` 装到 `~/.cargo/bin`，脚本装到 `~/.local/bin`）。
+
+### 亲测可用
 
 ```bash
 # 交互式（TUI）：首次进入某目录会先问"是否信任"（落盘 ~/.neo/trusted.json）
@@ -124,17 +157,22 @@ export DEEPSEEK_API_KEY=sk-...
 neo exec "用一句话回答 1+1" --mode plan
 ```
 
-## 快速开始
+## 快速开始（开发仓库）
 
 ```bash
 # 需要 Rust —— 版本由 rust-toolchain.toml 钉定（1.83.0），rustup 会自动选用
-cargo run -p neo-cli -- tui --provider mock    # 不装 PATH，直接用 cargo 跑 TUI
-cargo install --path crates/neo-cli --locked   # 或装成全局命令 neo
+cargo run -p neo-code-cli -- tui --provider mock   # 不装 PATH，直接用 cargo 跑 TUI
 
 cargo test --workspace     # 617 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web）
 cargo check --workspace    # 23 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试
+```
+
+发布（维护者）：打 tag 即触发 `.github/workflows/release.yml` 出多平台二进制。
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
 ## 仓库结构
@@ -153,7 +191,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 │   ├── neo-host-desktop/      L5 宿主：系统 webview（替代 Electron）
 │   ├── neo-host-web/          L5 宿主：浏览器（零依赖 HTTP + SSE，含内置页面）
 │   ├── neo-exec/              L5 宿主：无头 / CI
-│   ├── neo-cli/               `neo` 入口（multitool）
+│   ├── neo-code-cli/          `neo` 入口（multitool）
 │   ├── neo-session/           会话真相源（append-only）
 │   ├── neo-session-store/     多会话库（列举 / 新建 / 删除 / 标题）
 │   ├── neo-skill-loader/      技能目录发现与加载（SKILL.md → SkillRegistry）
@@ -231,4 +269,5 @@ proteus-code/                  ← 项目本体是 Rust 内核
 
 ## 协议
 
-Apache-2.0。DSH 为 MIT。
+MIT，见 [LICENSE](LICENSE)。项目借鉴的 DSH 亦为 MIT —— 两者兼容，
+且本项目是对 DSH 的独立重写而非 fork（见 `PROJECT_MEMORY.md` 的方向变更记录）。

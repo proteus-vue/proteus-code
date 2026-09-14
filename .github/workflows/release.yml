@@ -1,0 +1,81 @@
+# 发布:打 tag（v*）时构建并上传预编译二进制到 GitHub Release。
+#
+# 用户不需要 Rust 工具链 —— 下载即用（见 scripts/install.sh）。
+#
+# 产物矩阵（诚实边界）：
+#   macOS  aarch64 + x86_64  —— 含桌面窗口（系统 WebKit，无额外依赖）
+#   Linux  x86_64            —— **精简版**（--no-default-features）：
+#                             桌面宿主在 Linux 要 libwebkit2gtk；预编译二进制
+#                             动态链接它会让纯 TUI 用户也被迫装 webkit，
+#                             故 Linux 产物不含 desktop（用法提示会说清）。
+#                             需要 Linux 桌面窗口的用户自行 cargo install（含默认 feature）。
+#
+# 工具链版本由 rust-toolchain.toml 钉定（1.83.0），与 rust.yml 同一把尺子。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # 允许手动触发以验证流水线（不发 Release，只出 artifact）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # Apple Silicon
+            target: aarch64-apple-darwin
+            features: ""          # 含桌面
+          - os: macos-14          # 交叉编出 Intel 产物
+            target: x86_64-apple-darwin
+            features: ""
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            features: "--no-default-features"   # 免 webkit 依赖
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.83.0"
+          target: ${{ matrix.target }}
+      # Linux 精简构建**仍**需要少量系统包（TUI 用 stty，无 GUI 依赖）；
+      # 这里显式不装 webkit —— 正是为验证精简路径。
+      - name: 构建
+        run: cargo build --release -p neo-code-cli ${{ matrix.features }} --target ${{ matrix.target }}
+      - name: 打包
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="neo-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
+          mkdir -p "dist/$NAME"
+          cp "target/${{ matrix.target }}/release/neo" "dist/$NAME/neo"
+          cp README.md LICENSE "dist/$NAME/"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          # 校验和（用户可用 shasum -c 验证）
+          ( cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neo-${{ matrix.target }}
+          path: dist/*.tar.gz*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz*
+          generate_release_notes: true

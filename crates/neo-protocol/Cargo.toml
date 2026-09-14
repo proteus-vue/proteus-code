@@ -3,6 +3,11 @@ name = "neo-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L0 线协议：Op / EventMsg / 双轴枚举（零业务依赖）"
 
 # L1 PROTOCOL: 只允许 serde。禁止依赖任何业务 crate。
 [dependencies]

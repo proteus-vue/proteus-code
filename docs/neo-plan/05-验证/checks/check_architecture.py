@@ -37,7 +37,7 @@ LAYER = {
     "neo-host-desktop":  5,  # L5
     "neo-host-web":      5,  # L5
     "neo-exec":          5,  # L5
-    "neo-cli":           5,  # L5
+    "neo-code-cli":      5,  # L5（bin 名 neo；crates.io 上 neo-cli 已被占用故包名加 code）
 }
 SIDE = {"neo-session", "neo-config"}   # 旁挂，任何层可用
 HOSTS = {"neo-host-tui", "neo-host-desktop", "neo-host-web", "neo-exec"}

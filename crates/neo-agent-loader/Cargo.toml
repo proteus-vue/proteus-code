@@ -3,7 +3,12 @@ name = "neo-agent-loader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L3 PROVIDER：子代理定义发现与加载（Markdown + frontmatter）"
 
 # L3 PROVIDER —— 子代理定义的发现与加载(Markdown + frontmatter)
 [dependencies]
-neo-core = { path = "../neo-core" }
+neo-core = { path = "../neo-core", version = "0.1.0" }

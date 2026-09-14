@@ -3,9 +3,14 @@ name = "neo-providers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L3 PROVIDER：服务商注册表（用户级 providers.json）"
 
 # L3 PROVIDER —— 服务商注册表：从**用户级** JSON 读出多个 OpenAI 兼容服务商
 [dependencies]
-neo-config = { path = "../neo-config" }
+neo-config = { path = "../neo-config", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -3,10 +3,15 @@ name = "neo-orchestration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L4 目标编排：Goal 引擎（Plan→Code→Review→Learn）"
 
 [dependencies]
-neo-protocol = { path = "../neo-protocol" }
-neo-core = { path = "../neo-core" }
-neo-capability = { path = "../neo-capability" }
-neo-session = { path = "../neo-session" }
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-capability = { path = "../neo-capability", version = "0.1.0" }
+neo-session = { path = "../neo-session", version = "0.1.0" }
 serde = { workspace = true }

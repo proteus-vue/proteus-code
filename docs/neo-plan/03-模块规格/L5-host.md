@@ -1,6 +1,6 @@
 # L5 · 宿主层规格
 
-**crates**：`neo-host-tui`、`neo-host-desktop`、`neo-host-web`、`neo-exec`、`neo-cli`
+**crates**：`neo-host-tui`、`neo-host-desktop`、`neo-host-web`、`neo-exec`、`neo-code-cli`
 **铁律**：**宿主不含任何业务逻辑，只做 渲染 + 输入解析 + 事件消费**
 
 ---

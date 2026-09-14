@@ -3,6 +3,11 @@ name = "neo-llm-deepseek"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L3 PROVIDER：ModelProvider 实现（OpenAI 兼容 chat-completions，真流式 SSE）"
 
 # L3 PROVIDER：`ModelProvider` SPI 的真实实现（DeepSeek chat-completions）。
 #
@@ -10,6 +15,6 @@ license.workspace = true
 # 理由：调试链保持浅（依赖越少，出错时能查的地方越少）；
 # 也避免了沙箱环境拉不到 crate 的问题。
 [dependencies]
-neo-protocol = { path = "../neo-protocol" }
-neo-core = { path = "../neo-core" }
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }
 serde_json = { workspace = true }

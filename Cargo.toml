@@ -13,7 +13,7 @@ members = [
   "crates/neo-host-web",
   "crates/neo-host-desktop",
   "crates/neo-exec",
-  "crates/neo-cli",
+  "crates/neo-code-cli",
   "crates/neo-mock",
   "crates/neo-sandbox-local",
   "crates/neo-llm-deepseek",
@@ -30,6 +30,11 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/proteus-vue/proteus-code"
+homepage = "https://github.com/proteus-vue/proteus-code"
+authors = ["Proteus Contributors"]
+# 与 rust-toolchain.toml 的钉版一致；crates.io 上会作为最低 Rust 版本展示。
+rust-version = "1.83"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

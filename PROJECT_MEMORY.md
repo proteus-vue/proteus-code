@@ -5,8 +5,81 @@
 
 ---
 
-## 0. 收尾快照(2026-09-13)
+## 0. 分发与发布（2026-09-14）
 
+从"只能自己 `cargo install --path`"到"别人能装"——三条分发路径全部打通。
+本节记录**为什么这样设计**与踩到的坑。
+
+### (a) 三条路径，各解决一类用户
+
+| 路径 | 用户侧 | 何时用 |
+|---|---|---|
+| `scripts/install.sh` + GitHub Releases | `curl \| sh`，无需 Rust | 默认推荐 |
+| `cargo install neo-code-cli`（crates.io）/ `--git` | 有 Rust 工具链 | 全平台 / 要自定义 feature |
+| `cargo build --release` | 开发者 | 改代码时 |
+
+三者共用一件事：**包名与命令名分离**。crates.io 上 `neo-cli` 与 `neo`
+都已被占用（NeoRust SDK / Neocities CLI），故包名取 `neo-code-cli`
+（`neo-code` 未被占），但 **bin 名始终是 `neo`** —— 用法文本、
+会话文件名、用户肌肉记忆都不必改。判据同 §1.5 的 `dsh` 那条：
+改的只是"发布标识"，不是"产品名"。
+
+### (b) 桌面宿主拆成可选 feature（Linux 用户的真痛点）
+
+`neo-host-desktop`（wry/tao）是**唯一引入平台图形依赖**的宿主：
+Linux 上要 `libwebkit2gtk` 才能编译。此前它被无条件链入 `neo`，
+于是**只想用 TUI 的 Linux 用户也得装一整套 webkit**。
+
+现在 `neo-code-cli` 有 `default = ["desktop"]`，另可
+`--no-default-features` 得到精简版。**实测证据**（`otool -L`）：
+默认构建链 WebKit + AppKit 两个框架，精简构建 **0 个** —— 不是"据说更小"，
+是链接层面确实没有。精简版下 `neo desktop` 由 `main` 的占位分支给出
+明确提示（退出码 2），不是静默失败。
+
+默认**开启** desktop 是为了让门控代码总被编译（不腐烂）；
+CI 另跑 `-p neo-code-cli --no-default-features` 验证精简组合仍有产物。
+
+### (c) 坑：含二进制目标的 crate，`cargo package` 会做完整依赖解析
+
+`cargo package` 对 22 个 lib crate 都成功，**唯独 `neo-code-cli` 失败**，
+报 `no matching package named 'neo-capability' found`。一度怀疑是
+feature 门控或 dev-dependency，逐一排除后做了对照实验：
+
+```
+给 neo-exec（纯 lib、打包正常）临时加一个 [[bin]]
+→ 它也失败了（报找不到 neo-agent-loader）
+```
+
+根因：**有二进制目标的 crate 在打包时要解析完整依赖图并对齐
+`Cargo.lock`**（bin 需要锁文件），纯 lib crate 不需要。而本地所有内部依赖
+都是 `path`，registry 里找不到，于是只有含 bin 的那个失败。
+
+**这不是缺陷，是本地打包的必然假象**：发布按拓扑序进行时，前面的依赖
+已经上传，它就能打包。验证方式——把依赖放进本地目录 registry 再打包，
+`neo-code-cli` 立刻成功（`Packaged 6 files`）。
+
+修法不是改代码，而是 `scripts/publish.sh`：用 `cargo metadata` 算拓扑序，
+逐个发布，每个之后用 `wait_for.sh` **有条件地**等索引收录（非盲等），
+且幂等可重跑。**dev-dependency 不参与排序** —— `neo-core` 的 dev-dep
+指向 `neo-capability`，而后者正常依赖 `neo-core`；把 dev 也算上会假报成环。
+
+### (d) 许可证三处不一致（发布前必须统一）
+
+`Cargo.toml` 写 MIT、README 写 Apache-2.0、`LICENSE` 正文是 Apache-2.0
+但**标题写着"Proteus（普罗透斯）Vue 跨端编译框架"**（像是从别的项目拷来的）。
+已统一为 **MIT**，并把 README 协议段改成指向该文件、说明与 DSH（MIT）兼容。
+
+### (e) 诚实边界
+
+- **Linux 预编译产物是精简版**（不含桌面），因为动态链接 webkit 会让
+  纯 TUI 用户被迫装它。要 Linux 桌面窗口得 `cargo install` 带默认 feature。
+- 预编译只覆盖 macOS（双架构）+ Linux x86_64。其它平台走 `cargo install`。
+- **未真正发布到 crates.io**（需要维护者 token，且不可逆）：本轮的验证
+  止于 `cargo package` 全部通过 + 拓扑序正确 + 本地 registry 复现成功。
+
+---
+
+## 0.1 收尾快照(2026-09-13)
 一天弧线:从"流式思考不实时"的用户反馈出发,打通**真流式全链路**(provider SSE → 内核分帧 → 驱动线程),再把 TUI 交互细节整体对齐 opencode/mimo code(18 个提交,617 测试,门禁全绿,真机智谱 glm-4.6 全程回归)。
 
 - **流式主战役**:provider 真 SSE(智谱/DeepSeek/任意 OpenAI 兼容网关共用一条实现)、内核 `Op::Pump` 按时间片分帧(80ms/256 条上限)、内核挪到驱动线程(工具执行/首字延迟期间界面零冻结)。真机验证签名:会话日志从"1 条大增量 + 1 次 pump"变为"52 条小增量 + 几十次 pump"。
@@ -2293,5 +2366,8 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 | **Goal 审查的模型自评是半程** | 模型能显式叫停（审查答复含「审查未通过」→ 回退重做），但"沉默"视为通过（离线桩友好、避免含糊模型烧光重试预算）；挂钟停止条件未实现（会破坏回放确定性） |
 | **`#session` / `/command` 引用不注入文本** | 刻意如此：它们是宿主动作而非模型上下文。宿主未实现时这两类引用是空操作 |
 | **Web 宿主无鉴权** | 默认只绑 `127.0.0.1`。若改成对外监听，必须先加鉴权 —— 它能让任何能访问端口的人在你的工作区执行写操作 |
+| **发行物未做代码签名** | `install.sh` 会校验 SHA-256（防损坏），但 macOS 产物未做 Apple 签名/公证、Windows 无 Authenticode。用户首次运行可能遇到 Gatekeeper 拦截；正式对外分发需签名证书（见 §0） |
+| **Windows 无预编译产物** | `release.yml` 只出 macOS（双架构）+ Linux x86_64；且 Windows 沙箱未实现，故未纳入。Windows 用户当前需 `cargo install`（受限档位仍 fail-closed） |
+| **crates.io 尚未真正发布** | 元数据、拓扑序、打包均已验证通过，但上传需维护者 token（不可逆外部动作）。跑 `bash scripts/publish.sh --dry-run` 演练，去掉 `--dry-run` 即真发 |
 
 **下一步优先级建议**：Desktop 的 webview 窗口层（需要平台图形栈与 GUI 验证，动手前先做窗口壳的设计决定）。
