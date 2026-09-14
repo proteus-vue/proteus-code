@@ -86,7 +86,7 @@ async function copyPrimary() {
   padding: 1.05rem 1.2rem;
   background: linear-gradient(180deg, var(--neo-element), var(--neo-panel));
   border: 1px solid var(--neo-border-active);
-  border-radius: var(--radius);
+  border-radius: var(--neo-radius);
   box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.05), 0 18px 50px -24px rgba(139, 92, 246, 0.4);
 }
 .prompt {
@@ -109,7 +109,7 @@ async function copyPrimary() {
   color: var(--neo-fg-dim);
   background: transparent;
   border: 1px solid var(--neo-border-active);
-  border-radius: var(--radius-sm);
+  border-radius: var(--neo-radius-sm);
   cursor: pointer;
   transition: color 0.16s ease, border-color 0.16s ease;
 }
@@ -138,7 +138,7 @@ async function copyPrimary() {
   padding: 1.1rem 1.2rem;
   background: var(--neo-panel);
   border: 1px solid var(--neo-border);
-  border-radius: var(--radius);
+  border-radius: var(--neo-radius);
   font-size: 0.82rem;
 }
 .next-list li {

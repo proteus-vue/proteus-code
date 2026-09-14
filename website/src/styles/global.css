@@ -1,39 +1,49 @@
 /* 全局样式与设计系统。
-   配色取自 TUI 真实主题（crates/neo-host-tui/src/theme.rs 的 ThemeName::Neo），
-   所以官网与产品是**同一套视觉语言**，不是另画一套。
+   ★ 本站的视觉语言**直接对齐 TUI 本体**（crates/neo-host-tui/）：
+     · 配色取自 theme.rs 的 9 套 ThemeName，由 useTheme 写成 CSS 变量（可实时切换）
+     · 分组用「底色 + `┃` 单边条」，不画四角框（TUI 全站如此）
+     · 条纹/状态栏/键位行都复刻 TUI 的首屏与底栏
+     · 方角主题（Terminal 的 CRT）通过 --neo-radius 归零实现 —— 这就是「风格包」
+       与「换色」的区别，与 TUI 的 square 标志同一机制
 
-   对标同行（Vercel / Linear / Bun 这类开发者工具的站点）后确立的几条原则：
-     1. 层级来自「底色阶梯 + 辉光」，不靠堆边框 —— 与 TUI 的处理方式一致
-     2. 类型尺度要拉开（h1 与 h2 差 2 倍以上），否则整页没有节奏
-     3. 每个区块的**进入方式**不同（辉光 / 数据带 / 卡片 / 图解 / 表格），
-        否则通篇 h2+网格 = 一张长表格
-     4. 动效克制且尊重 prefers-reduced-motion：滚动揭示 + 悬停响应 */
+   四条排版原则（对标同行后确立）：
+     1. 层级来自「底色阶梯 + 辉光」，不靠堆边框
+     2. 类型尺度要拉开（h1 与 h2 差 2 倍以上）
+     3. 每个区块的进入方式不同（首屏 / 数据带 / 卡片 / 图解 / 表格 / 大命令）
+     4. 动效克制且尊重 prefers-reduced-motion
+
+   变量默认值是 NEO 默认主题；运行时被 useTheme 覆盖。 */
 
 :root {
-  /* ── 色彩 ───────────────────────────────────────── */
-  --neo-primary: #a78bfa; /* violet 400 */
-  --neo-primary-strong: #8b5cf6;
-  --neo-accent: #e879f9; /* fuchsia 400 */
+  /* ── 色彩（useTheme 会覆盖这些）────────────────── */
+  --neo-primary: #a78bfa;
+  --neo-accent: #e879f9;
   --neo-success: #6ee7b7;
   --neo-warning: #fbbf24;
   --neo-error: #f87171;
   --neo-info: #7dd3fc;
 
-  /* 底色阶梯：越靠后越亮 */
-  --neo-backdrop: #08080a;
-  --neo-panel: #14131a;
-  --neo-element: #1c1a24;
-  --neo-menu: #221f2c;
-  --neo-selected: #2a2638;
-  --neo-border: #2e2b3a;
-  --neo-border-active: #454154;
+  --neo-backdrop: #0a0a0c;
+  --neo-panel: #201e2a;
+  --neo-element: #2a2736;
+  --neo-menu: #262330;
+  --neo-selected: #332f45;
+  --neo-border: #454552;
+  --neo-border-active: #5c5c6e;
 
-  --neo-fg: #f0eff4;
-  --neo-fg-dim: #9b98ab; /* 对底 7.1:1 */
-  /* ★ 三级文字必须仍过 WCAG AA(4.5:1)。原值 #6b6879 实测只有 3.7:1 —— 深色站
-     很容易在这一档偷懒（"反正只是辅助文字"），但它在 12–13px 上是真的读不清。
-     现值对底 5.2:1，且与 --neo-fg-dim 仍保持可见的层级差。 */
+  --neo-fg: #ededed;
+  /* 三级文字：实测对底 5.2:1，过 WCAG AA。深色站在这一档最容易偷懒，
+     但 12–13px 上确实读不清（原 #6b6879 只有 3.7:1）。 */
+  --neo-fg-dim: #9b98ab;
   --neo-fg-faint: #82808f;
+
+  /* 主题派生量（useTheme 按 light/square 覆盖）*/
+  --neo-glow-strength: 0.3;
+  --neo-grid-alpha: 0.055;
+  --neo-star-alpha: 0.5;
+  --neo-radius: 14px;
+  --neo-radius-sm: 8px;
+  --neo-radius-pill: 999px;
 
   /* ── 类型尺度（拉开差距，制造节奏）───────────────── */
   --fs-hero: clamp(2.6rem, 7vw, 4.6rem);
@@ -45,14 +55,8 @@
   --fs-stat: clamp(2rem, 4.4vw, 3rem);
 
   /* ── 间距节奏 ───────────────────────────────────── */
-  /* 上下各一份，故区块间距是这个值的两倍。9vw 在宽屏会到 130px+，
-     区块之间近 270px 太空、页面被拉散；7vw 上限 6rem 更紧凑。 */
   --sp-section: clamp(3.5rem, 7vw, 6rem);
   --wrap: 1120px;
-
-  --radius: 14px;
-  --radius-sm: 8px;
-  --radius-pill: 999px;
 
   --neo-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
@@ -68,6 +72,8 @@ html {
 
 body {
   margin: 0;
+  /* 底部给固定状态栏留出空间（对齐 TUI：状态栏常驻，内容不压它） */
+  padding-bottom: 1.7rem;
   background: var(--neo-backdrop);
   color: var(--neo-fg);
   font-size: var(--fs-body);
@@ -76,6 +82,7 @@ body {
   line-height: 1.7;
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
+  transition: background 0.25s ease, color 0.25s ease;
 }
 
 a {
@@ -106,6 +113,15 @@ h4 {
   max-width: var(--wrap);
   margin: 0 auto;
   padding: 0 1.5rem;
+}
+
+/* 内容层要压在 canvas 背景之上（background 是 fixed z-index:0） */
+main,
+.foot,
+.nav,
+.statusbar {
+  position: relative;
+  z-index: 1;
 }
 
 .section {
@@ -143,7 +159,7 @@ h4 {
 .panel {
   background: var(--neo-panel);
   border: 1px solid var(--neo-border);
-  border-radius: var(--radius);
+  border-radius: var(--neo-radius);
 }
 
 /* 卡片：静态时克制，悬停才亮（辉光而非阴影，深色底上阴影看不出来） */
@@ -152,7 +168,7 @@ h4 {
   padding: 1.5rem;
   background: var(--neo-panel);
   border: 1px solid var(--neo-border);
-  border-radius: var(--radius);
+  border-radius: var(--neo-radius);
   transition: border-color 0.22s ease, background 0.22s ease, transform 0.22s ease;
 }
 .card:hover {
@@ -166,7 +182,7 @@ h4 {
   position: absolute;
   inset: -1px -1px auto;
   height: 1px;
-  border-radius: var(--radius) var(--radius) 0 0;
+  border-radius: var(--neo-radius) var(--neo-radius) 0 0;
   background: linear-gradient(90deg, transparent, var(--neo-primary), transparent);
   opacity: 0;
   transition: opacity 0.22s ease;
@@ -188,7 +204,7 @@ h4 {
   color: var(--neo-fg);
   background: var(--neo-element);
   border: 1px solid var(--neo-border-active);
-  border-radius: var(--radius-sm);
+  border-radius: var(--neo-radius-sm);
   cursor: pointer;
   transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease,
     transform 0.18s ease;
@@ -201,14 +217,24 @@ h4 {
 .btn-primary {
   position: relative;
   height: 3rem;
-  background: linear-gradient(120deg, var(--neo-primary-strong), var(--neo-accent));
+  /* 用 primary → accent 的渐变（这两个变量在全部 9 套主题里都存在）。
+     早先引用了一个自定义的 --neo-primary-strong，重写 :root 时被删掉，
+     结果渐变失效、主按钮几乎看不见 —— 改用主题已有的变量就不会再出这种事。 */
+  background: linear-gradient(120deg, var(--neo-primary), var(--neo-accent));
   border-color: transparent;
   color: #14101f;
   font-weight: 700;
 }
+/* 亮色主题下渐变偏深，深色文字看不清 → 换白字 */
+html[data-neo-light='1'] .btn-primary {
+  color: #ffffff;
+}
 .btn-primary:hover {
   color: #14101f;
   filter: brightness(1.1);
+}
+html[data-neo-light='1'] .btn-primary:hover {
+  color: #ffffff;
 }
 
 /* 徽标药丸（版本 / 许可 / 统计之类的小信息） */
@@ -221,7 +247,7 @@ h4 {
   color: var(--neo-fg-dim);
   background: var(--neo-element);
   border: 1px solid var(--neo-border);
-  border-radius: var(--radius-pill);
+  border-radius: var(--neo-radius-pill);
 }
 .pill .dot {
   width: 0.42rem;
@@ -290,4 +316,11 @@ html.js .reveal.is-in {
     opacity: 1;
     transform: none;
   }
+}
+
+/* 区块底部的键位行：复刻 TUI 底栏的分隔感（细分隔线 + 等宽键位） */
+.krow {
+  margin-top: 1.6rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--neo-border);
 }

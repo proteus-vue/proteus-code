@@ -1,11 +1,19 @@
-<!-- src/components/HeroSection.vue —— 首屏
-     对标同行的做法：① 背后有辉光 + 网格（深色站没有这个就是"什么都没画"）；
-     ② 标题上方一行徽标（版本 / 许可 / 平台）传递可信度；
-     ③ 终端**进首屏**，因为它就是产品本体 —— 同行都让产品自己站 C 位。 -->
+<!-- src/components/HeroSection.vue —— 首屏 = 一帧真实的 TUI 首屏
+     布局严格照搬 TUI 的首屏（crates/neo-host-tui/src/lib.rs 的主界面）：
+       · 居中 ASCII 块字词标（LOGO_LARGE，6 行）
+       · 词标下方一行副标题 + 版本/会话号
+       · `▌` 左强调条的输入框（两行：提示 + 模式 ⏵ 模型）
+       · 底部键位行（tab 补全 / ctrl+/ 键位提示 …）
+       · 最底状态栏（左路径 / 右就绪）
+     这就把"产品是什么"直接摆出来，而不是用一段宣传语去描述它。 -->
 <script setup lang="ts">
+import { computed } from 'vue'
+import { LOGO_LARGE } from '../theme'
+import { useTheme } from '../composables/useTheme'
 import TerminalDemo from './TerminalDemo.vue'
 
 const REPO = 'https://github.com/proteus-vue/proteus-code'
+const { current } = useTheme()
 
 // 真实执行输出（离线桩 selftest provider 实跑，无需 API key，可复现）
 const demoLines = [
@@ -21,31 +29,55 @@ const demoLines = [
   { kind: 'ok' as const, text: '已写入 /workspace/selftest.txt（48 字节）' },
   { kind: 'dim' as const, text: '[turn] 完成（in 0 / out 0 tokens）' },
 ]
+
+// 词标逐行渐变（对齐 TUI 的 logo 渐变：主色 → 强调色）
+const logoLines = computed(() => LOGO_LARGE)
 </script>
 
 <template>
   <section id="top" class="hero">
-    <!-- 背景装饰：网格 + 两团辉光 -->
-    <div class="grid-bg" aria-hidden="true" />
-    <div class="glow g1" aria-hidden="true" />
-    <div class="glow g2" aria-hidden="true" />
-
     <div class="wrap inner">
-      <div class="badges">
-        <span class="pill"><i class="dot" />617 测试通过</span>
-        <span class="pill">23 crates</span>
-        <span class="pill">零 unsafe</span>
-        <span class="pill">MIT</span>
+      <!-- 词标：与 TUI 首屏同一个 ASCII 块字，逐行做紫→品红渐变 -->
+      <pre class="logo" aria-label="NEO"><span
+          v-for="(line, i) in logoLines"
+          :key="i"
+          class="logo-line"
+          :style="{ '--i': i / (logoLines.length - 1) }"
+        >{{ line }}
+</span></pre>
+
+      <p class="tagline">—— 编程 Agent 内核</p>
+      <p class="sub">Rust 内核 · TUI / Desktop / Web / Exec 共享同一内核</p>
+
+      <p class="meta">
+        <span class="v">v0.1.0</span>
+        <span class="sep">·</span>
+        <span>617 测试</span>
+        <span class="sep">·</span>
+        <span>零 unsafe</span>
+        <span class="sep">·</span>
+        <span>MIT</span>
+      </p>
+
+      <!-- 输入框：`▌` 左强调条 + 两行（提示 / 模式 ⏵ 模型），与 TUI 同构 -->
+      <div class="prompt">
+        <span class="caret" aria-hidden="true">▌</span>
+        <div class="prompt-body">
+          <p class="prompt-line">输入任务… 例：修一下代码里的 TODO</p>
+          <p class="prompt-modes">
+            <span class="mode">default</span>
+            <span class="arrow">⏵</span>
+            <span class="model">{{ current.label === 'Neo' ? 'mock' : 'mock' }}</span>
+          </p>
+        </div>
       </div>
 
-      <h1>
-        用 Rust 重写的<br />
-        <span class="grad">编程 Agent 内核</span>
-      </h1>
-
-      <p class="lede">
-        一套内核，四个宿主。真实 OS 级沙箱，沙箱与审批是<strong>正交双轴</strong>，
-        会话可完整回放 —— 不靠约定，全部由门禁机器校验。
+      <!-- 键位行：对齐 TUI 底部 `tab 补全 ctrl+/ 键位提示 …` -->
+      <p class="keys">
+        <kbd>tab</kbd><span>补全</span>
+        <kbd>ctrl+/</kbd><span>键位提示</span>
+        <kbd>ctrl+t</kbd><span>换主题</span>
+        <kbd>ctrl+c</kbd><span>退出</span>
       </p>
 
       <div class="cta">
@@ -61,7 +93,7 @@ const demoLines = [
 
       <p class="fine">无需 API key 也能试 —— 内置离线桩 provider。</p>
 
-      <!-- 产品本体进首屏 -->
+      <!-- 真实执行输出 -->
       <div class="stage">
         <TerminalDemo title="neo exec · 工具调用与真实落盘" :lines="demoLines" />
       </div>
@@ -72,62 +104,126 @@ const demoLines = [
 <style scoped>
 .hero {
   position: relative;
-  padding: 8.5rem 0 0;
-  overflow: hidden;
+  padding: 7.5rem 0 0;
 }
-
-/* subtle 网格与辉光（.grid-bg / .glow 定义在 global.css） */
-.g1 {
-  top: -14rem;
-  left: 50%;
-  width: 52rem;
-  height: 34rem;
-  margin-left: -26rem;
-  background: radial-gradient(closest-side, rgba(167, 139, 250, 0.3), transparent);
-}
-.g2 {
-  top: -6rem;
-  left: 50%;
-  width: 30rem;
-  height: 22rem;
-  margin-left: 4rem;
-  background: radial-gradient(closest-side, rgba(232, 121, 249, 0.2), transparent);
-}
-
 .inner {
-  position: relative;
-  z-index: 1;
   text-align: center;
 }
 
-.badges {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.5rem;
-  margin-bottom: 1.6rem;
+/* ── ASCII 词标 ─────────────────────────────────── */
+.logo {
+  margin: 0;
+  font-family: var(--neo-mono);
+  font-size: clamp(0.42rem, 1.62vw, 1.05rem);
+  line-height: 1.14;
+  letter-spacing: 0;
+  white-space: pre;
+  overflow-x: hidden;
+  /* 逐行渐变：每行一个色相步进，视觉上像 TUI 的 logo 渐变 */
+  color: var(--neo-primary);
 }
-
-h1 {
-  font-size: var(--fs-hero);
-  letter-spacing: -0.03em;
-  line-height: 1.08;
-}
-.grad {
-  background: linear-gradient(100deg, var(--neo-primary) 10%, var(--neo-accent) 70%);
+.logo-line {
+  display: block;
+  background: linear-gradient(
+    100deg,
+    var(--neo-primary) calc(var(--i) * 40%),
+    var(--neo-accent) calc(var(--i) * 40% + 60%)
+  );
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  /* 磷绿等主题下加一点字幕辉光，模拟 CRT */
+  filter: drop-shadow(0 0 18px color-mix(in srgb, var(--neo-primary) 32%, transparent));
 }
 
-.lede {
-  max-width: 40rem;
-  margin: 1.5rem auto 0;
-  font-size: 1.08rem;
+.tagline {
+  margin: 1.4rem 0 0;
+  font-size: 1.05rem;
+  color: var(--neo-fg);
+  letter-spacing: 0.02em;
+}
+.sub {
+  margin: 0.5rem 0 0;
+  font-size: var(--fs-sm);
   color: var(--neo-fg-dim);
 }
-.lede strong {
-  color: var(--neo-fg);
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 1.1rem 0 0;
+  font-family: var(--neo-mono);
+  font-size: var(--fs-xs);
+  color: var(--neo-fg-faint);
+}
+.meta .v {
+  color: var(--neo-primary);
+}
+.meta .sep {
+  color: var(--neo-border-active);
+}
+
+/* ── 输入框（对齐 TUI 的 ▌ 左强调条）─────────────── */
+.prompt {
+  display: flex;
+  gap: 0.7rem;
+  max-width: 40rem;
+  margin: 2.2rem auto 0;
+  padding: 0.85rem 1.05rem;
+  text-align: left;
+  background: color-mix(in srgb, var(--neo-element) 66%, transparent);
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+}
+.caret {
+  flex: 0 0 auto;
+  color: var(--neo-primary);
+  font-family: var(--neo-mono);
+}
+.prompt-body {
+  min-width: 0;
+}
+.prompt-line {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--neo-fg-dim);
+}
+.prompt-modes {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.3rem 0 0;
+  font-family: var(--neo-mono);
+  font-size: var(--fs-xs);
+}
+.mode {
+  color: var(--neo-fg-faint);
+}
+.arrow {
+  color: var(--neo-primary);
+}
+.model {
+  color: var(--neo-accent);
+}
+
+/* ── 键位行 ─────────────────────────────────────── */
+.keys {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.35rem 0.7rem;
+  max-width: 42rem;
+  margin: 1.6rem auto 0;
+  font-size: var(--fs-xs);
+  color: var(--neo-fg-faint);
+}
+.keys kbd {
+  font-family: var(--neo-mono);
+  color: var(--neo-primary);
 }
 
 .cta {
@@ -150,25 +246,24 @@ h1 {
 
 .stage {
   max-width: 54rem;
-  margin: clamp(3rem, 6vw, 4.5rem) auto 0;
+  margin: clamp(2.8rem, 5vw, 4rem) auto 0;
   text-align: left;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 700px) {
   .hero {
-    padding-top: 6.5rem;
+    padding-top: 6rem;
   }
-  .lede {
-    font-size: 1rem;
+  /* 词标在窄屏降到能完整放下 6 行的字号（不换行，块字换行就散了） */
+  .logo {
+    font-size: 0.44rem;
+    line-height: 1.2;
   }
-  /* 徽标行：4 个 pill 在 390px 下会「3 + 1」折行，末项孤立居中很失衡。
-     收窄字号与间距，让它们能均匀占两行。 */
-  .badges {
-    gap: 0.4rem;
+  .tagline {
+    font-size: var(--fs-sm);
   }
-  .badges :deep(.pill) {
-    font-size: 0.72rem;
-    padding: 0.24rem 0.6rem;
+  .stage {
+    margin-top: 2.4rem;
   }
 }
 </style>

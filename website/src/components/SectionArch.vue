@@ -116,7 +116,7 @@ const layers = [
   padding: 0.8rem 1.1rem 0.8rem 1.25rem;
   background: var(--neo-panel);
   border: 1px solid var(--neo-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--neo-radius-sm);
   font-size: var(--fs-sm);
   transition: border-color 0.2s ease, transform 0.2s ease;
   /* 越往下越靠近协议层（更深的主色），把"层深"编码成颜色 */

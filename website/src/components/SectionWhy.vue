@@ -243,7 +243,7 @@ tbody tr:hover {
     padding: 0.95rem 1.15rem;
     background: var(--neo-panel);
     border: 1px solid var(--neo-border);
-    border-radius: var(--radius);
+    border-radius: var(--neo-radius);
   }
   tbody tr:hover {
     background: var(--neo-panel);

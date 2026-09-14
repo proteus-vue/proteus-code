@@ -1,11 +1,11 @@
 <!-- src/pages/index.vue —— 站点首页（单页 landing）
-     内容原则（沿用本项目一贯风格）：
-       · 只讲**已落地可验证**的能力，"未实现/边界"如实列出（SectionBoundaries），不粉饰
-       · 数字给出来源：23 crate / 617 测试 / 零 unsafe / 零 warning 都能在仓库门禁里复现
+     ★ 站点本身就是一帧 TUI：星场背景常驻、底部常驻状态栏、分组一律用
+     `┃` 单边条面板（TuiPanel），键位提示行（TuiKeyHints）复刻 TUI 底栏。
+     外观（主题 / 背景纹理）可实时切换，与 TUI 的 ctrl+t / /background 同源。
 
-     结构：Hero（含终端）→ 数据带 → 四宿主 → 特性 → 架构 → 对比+FAQ → 安装 → 诚实边界 → 页脚
-     每个区块的"进入方式"都不同（辉光 / 数据带 / 卡片 / 图解 / 表格 / 大命令），
-     避免通篇 h2 + 网格变成一张长表。 -->
+     内容原则（沿用本项目一贯风格）：
+       · 只讲**已落地可验证**的能力，"未实现/边界"如实列出（SectionBoundaries）
+       · 数字给出来源：23 crate / 617 测试 / 零 unsafe / 零 warning 都能在门禁里复现 -->
 <route>
 {
   "meta": {
@@ -17,6 +17,9 @@
 
 <script setup lang="ts">
 import { useReveal } from '../composables/useReveal'
+import { useTheme } from '../composables/useTheme'
+
+import TuiBackdrop from '../components/TuiBackdrop.vue'
 import SiteNav from '../components/SiteNav.vue'
 import HeroSection from '../components/HeroSection.vue'
 import StatsBand from '../components/StatsBand.vue'
@@ -27,12 +30,16 @@ import SectionWhy from '../components/SectionWhy.vue'
 import SectionInstall from '../components/SectionInstall.vue'
 import SectionBoundaries from '../components/SectionBoundaries.vue'
 import SiteFooter from '../components/SiteFooter.vue'
+import TuiStatusBar from '../components/TuiStatusBar.vue'
 
-// 滚动揭示（IntersectionObserver；尊重 prefers-reduced-motion）
+const { bg, init } = useTheme()
+init() // 恢复本地保存的外观并写到 CSS 变量（同时会派发 neo-theme-changed）
+
 useReveal()
 </script>
 
 <template>
+  <TuiBackdrop :kind="bg" />
   <SiteNav />
   <main>
     <HeroSection />
@@ -45,4 +52,5 @@ useReveal()
     <SectionBoundaries />
   </main>
   <SiteFooter />
+  <TuiStatusBar />
 </template>

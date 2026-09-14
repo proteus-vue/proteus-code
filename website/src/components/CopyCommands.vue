@@ -53,7 +53,7 @@ async function copy(cmd: string, idx: number) {
   border: 1px solid var(--neo-border);
   /* 与安装区的其它代码块用同一档圆角（原来这里是 8px、别处 14px，
      相邻两块圆角不一致看着像两套组件）。 */
-  border-radius: var(--radius);
+  border-radius: var(--neo-radius);
 }
 
 .label {

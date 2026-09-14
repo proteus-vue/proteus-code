@@ -37,12 +37,19 @@ defineProps<{ title: string; lines: Line[] }>()
 .term {
   position: relative;
   margin: 0;
-  background: linear-gradient(180deg, var(--neo-panel), #100f16);
+  /* 颜色全部走主题变量：亮色主题下自动变亮底，不会成为一块"黑砖" */
+  background: linear-gradient(
+    180deg,
+    var(--neo-panel),
+    color-mix(in srgb, var(--neo-backdrop) 60%, var(--neo-panel))
+  );
   border: 1px solid var(--neo-border-active);
-  border-radius: var(--radius);
+  border-radius: var(--neo-radius);
   overflow: hidden;
-  /* 外发光：深色底上不用阴影（看不出来），用同色系光晕 */
-  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.06), 0 24px 70px -20px rgba(139, 92, 246, 0.35);
+  /* 深色底上阴影不可见，用同色系光晕；亮色主题由 --neo-glow-strength 压到近零 */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--neo-primary) 8%, transparent),
+    0 24px 70px -20px
+      color-mix(in srgb, var(--neo-primary) calc(var(--neo-glow-strength) * 100%), transparent);
 }
 
 /* 顶部一道高光边（同行截图常见，让"窗口"有玻璃感） */
@@ -51,7 +58,12 @@ defineProps<{ title: string; lines: Line[] }>()
   position: absolute;
   inset: 0 0 auto;
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(167, 139, 250, 0.6), transparent);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--neo-primary) 60%, transparent),
+    transparent
+  );
 }
 
 .bar {
@@ -94,7 +106,7 @@ defineProps<{ title: string; lines: Line[] }>()
   font-size: 0.68rem;
   color: var(--neo-warning);
   border: 1px solid color-mix(in srgb, var(--neo-warning) 55%, transparent);
-  border-radius: var(--radius-pill);
+  border-radius: var(--neo-radius-pill);
   opacity: 0.9;
 }
 

@@ -68,7 +68,7 @@ const boundaries = [
   color: var(--neo-warning);
   background: color-mix(in srgb, var(--neo-warning) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--neo-warning) 32%, transparent);
-  border-radius: var(--radius-pill);
+  border-radius: var(--neo-radius-pill);
 }
 
 .item {

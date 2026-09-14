@@ -2,6 +2,7 @@
      ★ 这一段的关键不是"列出四个名字"，而是说清**为什么四个宿主不是四份实现**：
      它们共享同一内核与同一事件流（T6 等价铁律，机器断言）。 -->
 <script setup lang="ts">
+import TuiKeyHints from './TuiKeyHints.vue'
 const hosts = [
   {
     name: 'TUI',
@@ -49,6 +50,17 @@ const hosts = [
           <p>{{ h.desc }}</p>
         </article>
       </div>
+
+      <TuiKeyHints
+        class="krow"
+        :hints="[
+          { key: 'neo', text: 'TUI' },
+          { key: 'neo desktop', text: '系统 webview' },
+          { key: 'neo serve', text: '浏览器' },
+          { key: 'neo exec', text: '无头 / CI' },
+        ]"
+        tail="同一事件流 → 四宿主事实等价"
+      />
     </div>
   </section>
 </template>
@@ -75,7 +87,7 @@ const hosts = [
   color: var(--neo-accent);
   background: color-mix(in srgb, var(--neo-accent) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--neo-accent) 40%, transparent);
-  border-radius: var(--radius-pill);
+  border-radius: var(--neo-radius-pill);
 }
 
 .cmd {
