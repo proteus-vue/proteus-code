@@ -1,0 +1,43 @@
+# changeset 门禁：产品面改动必须带一条 .changeset/ 碎片。
+#
+# 为什么单独一个 workflow：它不依赖 Rust 工具链，几秒出结论，所以能像
+# efficiency.yml 那样在每次 push 就给出反馈，不必等编译。
+#
+# 豁免：给 PR 打上 `no-changeset` 标签（纯重构 / CI / 文档类改动）。
+name: changeset
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    # 显式超时：规范要求 CI job 必须有上限
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 需要与 base 比较，取得到 base 的历史
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: 检查是否带了 changeset
+        run: |
+          # 打上 no-changeset 标签即豁免
+          if [ "${{ contains(github.event.pull_request.labels.*.name, 'no-changeset') }}" = "true" ]; then
+            echo "PR 带 no-changeset 标签 —— 豁免"
+            exit 0
+          fi
+          # 机器人开的 Version PR 本身就删碎片、改版本，不该被这条门禁拦
+          case "${{ github.head_ref }}" in
+            changeset-release/*)
+              echo "Version PR（${{ github.head_ref }}）—— 豁免"
+              exit 0 ;;
+          esac
+          python3 scripts/changeset.py check --base "origin/${GITHUB_BASE_REF}"

@@ -1,0 +1,130 @@
+# changeset 自动发布：合并到 main 后
+#   ① 有待发碎片 → 开/更新一个 Version PR（推进版本 + 汇总 CHANGELOG + 删碎片）
+#   ② 无待发碎片且当前版本还没打过 tag → 打 tag 并触发 release.yml
+#
+# **关键陷阱**（这是本文件设计的核心依据）：GitHub 规定
+#   "With the exception of `workflow_dispatch` and `repository_dispatch`,
+#    other `GITHUB_TOKEN`-triggered events do not create workflow runs at all."
+# 也就是说**本 job 用 GITHUB_TOKEN 推的 tag 不会触发 release.yml**。
+# 而 `workflow_dispatch` 正是该规则的两个例外之一 —— 所以推完 tag 后**显式
+# dispatch**，这是唯一 deterministic 的做法，且不需要额外 PAT。
+#
+# 幂等：v<version> 已存在的 tag 不会重复创建，重复 push main 是安全的。
+name: changeset release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write       # 推分支 / 打 tag
+  pull-requests: write  # 开、更新 Version PR
+  actions: write        # dispatch release.yml（例外规则允许）
+
+# 同分支串行，但**不取消进行中的** —— 发布链路被中途取消会留下半成品
+concurrency:
+  group: changeset-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 需要 tags 与完整历史
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      # version 子命令要跑 `cargo metadata` 刷新 Cargo.lock。用钉版工具链，
+      # 与 rust.yml / release.yml 同一把尺子。
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.83.0"
+
+      - name: 当前版本与待发碎片
+        id: st
+        run: python3 scripts/changeset.py status --machine >> "$GITHUB_OUTPUT"
+
+      # ── ① 有碎片：开/更新 Version PR ──────────────────────────────────
+      - name: 开或更新 Version PR
+        if: steps.st.outputs.PENDING != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          V="${{ steps.st.outputs.NEXT_VERSION }}"
+          BR="changeset-release/main"
+
+          # 每次从 main 重建分支：这样机器人 PR 始终等于"main + 一次版本推进"。
+          # 旧分支被 force 覆盖 —— 它只承载这一件事，不存在丢改动的风险。
+          git checkout -B "$BR"
+          python3 scripts/changeset.py version
+          git add -A
+          git commit -m "chore(release): v${V}"
+          git push -f origin "$BR"
+
+          # PR 正文：把将要进 CHANGELOG 的条目摆出来，方便 review
+          {
+            echo "本 PR 由 changeset 自动生成，**合并它才会真正发布**。"
+            echo
+            echo "合并后：打 tag \`v${V}\` → 构建三平台二进制 → GitHub Release → npm。"
+            echo
+            echo "改动文件："
+            echo
+            git show --stat --format= HEAD | sed 's/^/    /'
+            echo
+            echo "### 本次写入 CHANGELOG 的条目"
+            echo
+            # 取 CHANGELOG 顶部那个版本章节（从第一个 "## " 到下一个 "## " 之前）
+            awk '/^## /{n++} n==1' CHANGELOG.md
+          } > /tmp/pr-body.md
+
+          if gh pr view "$BR" --json number >/dev/null 2>&1; then
+            gh pr edit "$BR" --title "chore(release): v${V}" --body-file /tmp/pr-body.md
+            echo "已更新既有 Version PR"
+          else
+            gh pr create --base main --head "$BR" \
+              --title "chore(release): v${V}" \
+              --body-file /tmp/pr-body.md
+            echo "已创建 Version PR"
+          fi
+
+      # ── ② 无碎片：版本已推进就打 tag + 显式触发发布 ────────────────────
+      #
+      # 这条分支在 **Version PR 被合并** 时命中：那时碎片已被 ① 消费干净，
+      # 而 Cargo.toml 的版本已提高且尚未打 tag。
+      - name: 无碎片时打 tag 并触发发布
+        if: steps.st.outputs.PENDING == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.st.outputs.CURRENT_VERSION }}"
+
+          if git rev-parse "v${V}" >/dev/null 2>&1; then
+            echo "v${V} 已存在 —— 无需发布（幂等）"
+            exit 0
+          fi
+
+          # 只在"确有版本推进"时才打 tag。判定：CHANGELOG 顶部章节能对上当前版本。
+          # （避免在还没发过一次的仓库里凭空打 tag —— 那时没推进过任何版本。）
+          if ! grep -q "^## ${V}$" CHANGELOG.md 2>/dev/null; then
+            echo "CHANGELOG 里没有 $V 的章节 —— 说明版本还没被 Version PR 推进过，跳过"
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${V}"
+          git push origin "v${V}"
+          echo "已推送 tag v${V}"
+
+          # GITHUB_TOKEN 推的 tag 不会触发 release.yml（见文件顶部说明），
+          # 故显式 dispatch —— workflow_dispatch 是反递归规则的例外。
+          gh workflow run release.yml --ref "v${V}"
+          echo "已触发 release.yml（ref=v${V}）"

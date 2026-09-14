@@ -113,18 +113,58 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # 凭证自检。**失败必须响亮**：曾经这里只 ::warning 后静默跳过，
+      # 结果 tag 发布看起来全绿、npm 上却什么都没有（真实踩过）。
+      # 现在：把两个候选的就绪状态写进 step summary，且都不就绪时**报错**。
       - name: 检查 npm 认证
         id: creds
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          HAS_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
+          TRUSTED: ${{ vars.NPM_TRUSTED_PUBLISHING }}
+          SKIP: ${{ vars.NPM_SKIP_PUBLISH }}
         run: |
-          # 二选一即可：secret（granular token）或变量（已配置可信发布）
-          if [ -n "${NODE_AUTH_TOKEN:-}" ] || [ "${{ vars.NPM_TRUSTED_PUBLISHING }}" = "true" ]; then
+          {
+            echo "### npm 认证检查"
+            echo ""
+            echo "| 候选 | 状态 |"
+            echo "|---|---|"
+            echo "| Secret \`NPM_TOKEN\` | $([ "$HAS_TOKEN" = "true" ] && echo '✅ 已提供' || echo '❌ 为空/不存在') |"
+            echo "| Variable \`NPM_TRUSTED_PUBLISHING\` | $([ "$TRUSTED" = "true" ] && echo '✅ true' || echo "❌ 是 '${TRUSTED:-空}'") |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$HAS_TOKEN" = "true" ] || [ "$TRUSTED" = "true" ]; then
             echo "ok=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=0" >> "$GITHUB_OUTPUT"
-            echo "::warning::未配置 npm 认证 —— 跳过 npm 发布（GitHub Release 产物照常）。见 .github/workflows/release.yml 顶部说明"
+            exit 0
           fi
+
+          # 显式豁免（确实不想在本仓库发 npm 时）
+          if [ "$SKIP" = "true" ]; then
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            echo "::notice::NPM_SKIP_PUBLISH=true —— 按配置跳过 npm 发布"
+            exit 0
+          fi
+
+          echo "ok=0" >> "$GITHUB_OUTPUT"
+          cat <<'EOF'
+          ❌ 没有任何可用的 npm 凭证，而本仓库被配置为应发布 npm 包。
+
+          最常见的原因（按概率）：
+            1) token 加成了 **Variable** 而不是 **Secret**
+               → 检查 Settings → Secrets and variables → Actions：
+                 `NPM_TOKEN` 必须在 **Secrets** 标签页，不是 Variables。
+               → 若确实只想要无密钥的 OIDC 发布，请改用 Trusted Publishing：
+                 把 `NPM_TRUSTED_PUBLISHING` 变量设为 true，并在 npmjs.com
+                 给每个包配置 Trusted Publisher（注意：包尚不存在时无法配置，
+                 首次发布仍需要 token）。
+            2) secret 名不是 `NPM_TOKEN`（本 workflow 就找这个名字）
+            3) 加在了 Environment 而不是仓库级（本 job 未声明 environment）
+            4) 加在了 fork 或别的仓库
+            5) 添加时间晚于本次运行 —— 那就重跑本 run 即可
+
+          确认修好后：Actions → release → 选本次 run → "Re-run all jobs"。
+          EOF
+          exit 1
+
       - name: 发布到 npm
         if: steps.creds.outputs.ok == '1'
         env:

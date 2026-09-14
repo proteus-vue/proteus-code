@@ -86,7 +86,6 @@ feature 门控或 dev-dependency，逐一排除后做了对照实验：
 `neo-code-cli` 立刻成功（`Packaged 6 files`）。
 
 ### (c2) 坑：bash 3.2 把多字节字符吃进变量名
-
 macOS 自带的是 **bash 3.2**。写 `"版本 $VERSION）"` 时，它会把全角
 `）` 的字节也算作变量名的一部分，于是报 `VERSION）: unbound variable`。
 修法是**用花括号界定**：`"版本 ${VERSION}）"`。这类问题只在"变量后紧跟
@@ -127,6 +126,42 @@ runner（自托管不支持）、`id-token: write` 权限、workflow 文件必�
 `.github/workflows/` 且**文件名与 npm 侧填写的完全一致**（大小写敏感）。
 另：若同时存在 `NODE_AUTH_TOKEN`，npm 会优先用 token 而绕过 OIDC ——
 切到 ① 之后**记得把 secret 删掉**。
+
+### (d3) 发版改成 changeset 流程，但**不用 `@changesets/cli`**
+
+要求是"把发版改成 changeset 方式"。这里有个必须讲清的取舍：
+
+**没有用 `@changesets/cli`**，因为它只认 npm 工作区的 `package.json`，
+而本项目的版本真源是 `Cargo.toml` 的 `[workspace.package] version`。
+用它等于让工具去管**非权威**的那份版本号，再手写胶水把权威的那份同步过去
+—— 本末倒置；还会往纯 Rust 仓库塞一整套 Node 工具链（与项目一贯的零依赖
+立场相悖：TUI 零依赖、HTTP 手写、不引 reqwest/axum）。
+
+**只借了 changeset 的"精髓"并自己实现**（`scripts/changeset.py`，纯 Python 标准库）：
+每个改动写一条 `.changeset/*.md` 碎片，由机器聚合成版本号与 CHANGELOG。
+它是**单一版本工作区**，所以碎片只写 bump 级别、不写包名。
+
+| 角色 | 实现 |
+|---|---|
+| 碎片 | `.changeset/<时间戳>-<slug>.md`，前区 `bump: patch\|minor\|major` |
+| 聚合 | `changeset.py version`：推进版本 → 同步内部依赖 → 刷 Cargo.lock → 写 CHANGELOG → 删碎片 |
+| Version PR | `changeset-release.yml`：合并 main 后开/更新 `changeset/release` 分支的 PR |
+| 门禁 | `changeset.yml`：产品面（`crates/`、`npm/`）改动必须带碎片，`no-changeset` 标签豁免 |
+
+**两个非显然的实现点**（都是踩过才定的）：
+
+1. **内部依赖版本必须一起改**。crate 之间写的是
+   `neo-protocol = { path = "...", version = "0.1.0" }`，而 semver 里
+   `^0.1.0` **不匹配** `0.2.0`（0.x 有特殊规则）。只改工作区版本会让
+   cargo 直接失败（实测确认，不是推测）。故 `version` 子命令会同步所有
+   22 个 crate 清单里"带 path 且版本等于旧值"的行 —— 用这个条件保证
+   `serde = "1"`、`wry = "0.46.1"` 之类外部依赖绝不被误伤。
+
+2. **机器人推的 tag 不会触发 release workflow**。GitHub 规定
+   "用默认 `GITHUB_TOKEN` 做的事件不再创建 workflow run"，而
+   `workflow_dispatch` / `repository_dispatch` 是**唯二的例外**。
+   所以 `changeset-release.yml` 推完 tag 后**显式 dispatch** `release.yml`
+   —— 确定性做法，且不需要额外 PAT。若靠"tag push 自动触发"会静默卡住。
 
 ### (e) 诚实边界
 
@@ -2380,6 +2415,19 @@ provider 流式后,内核仍在一步内消费完整条流才把 outbox 交给�
    `cargo` 不能成功执行时整体判失败，且 warning 计数必须建立在 `cargo check`
    **成功退出**之上。教训与第 1 条同源：**计数类门禁必须先证明"被计数的东西真的
    跑过"**，否则 0 是"干净"还是"没跑"根本分不出来。
+
+5. **npm 发布在"无凭证"时跳过且报绿**：`publish-npm` job 里原本写的是
+   "没有凭证就 `::warning` 后跳过"，于是 tag 发布**看起来全绿**，npm 上却
+   空空如也。真实踩到：`NPM_TOKEN` 被加到了 **Variables** 页而非 **Secrets**
+   页，workflow 读 `secrets.NPM_TOKEN` 得到空值 → 安静跳过 → 无从察觉。
+   修法：**跳过不是正常路径，必须响亮失败**。现在该步骤会打印一张
+   "两个候选各是什么状态"的诊断表（写进 step summary），并在都不可用时
+   `exit 1`，附上"token 是不是加到 Variables 了"等排查项。
+   若确实想不发 npm，用仓库变量 `NPM_SKIP_PUBLISH=true` **显式**声明 ——
+   把"意外漏配"与"有意不发"区分开。
+   教训与第 1、4 条同源：**"条件不满足 → 跳过"如果没有留下可见证据，
+   它就和"成功"长得一模一样**。发布链路上的任何跳过都应当是响亮的或显式的，
+   不能是静默的。
 
 ---
 

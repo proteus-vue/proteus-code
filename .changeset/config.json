@@ -1,0 +1,9 @@
+{
+  "baseBranch": "main",
+  "changelog": true,
+  "note": "native 实现（scripts/changeset.py），非 @changesets/cli —— 见 .changeset/README.md 顶部说明。版本真源是 Cargo.toml 的 [workspace.package] version（单一版本工作区），故碎片只声明 bump 级别。",
+  "ignore": [
+    ".changeset/README.md",
+    ".changeset/config.json"
+  ]
+}
