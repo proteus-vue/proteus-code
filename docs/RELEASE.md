@@ -259,8 +259,21 @@ job，npm 那一步可能被跳过而整体仍显示绿色。
 **Variables** 页 —— 于是 job 判定无凭证、跳过发布，而整体仍是绿色，
 表现为"推送后没发布但不报错"。
 
-**修好后必须重跑那次 workflow**：种凭证不会自动应用到已经跑完的 run。
-Actions → release → 选那次 run → **Re-run all jobs**。
+**修好凭证后怎么重跑**（二选一）：
+
+```bash
+# 推荐：以 tag 为 ref 重新触发一次。版本从 Cargo.toml 读，不依赖 event ref，
+# 因此这条路径与 tag 推送等价（会建 Release、会发 npm）。
+gh workflow run release.yml --ref v0.1.0
+```
+
+或在网页上：**Actions → release → Run workflow**，把 "Use workflow from"
+选成 tag `v0.1.0`。
+
+> ⚠️ **不要用旧 run 的 "Re-run all jobs"**：它跑的是**该 tag 处那份旧
+> workflow 文件**（还带着静默跳过的 bug），且不会重新读取你刚补的凭证配置
+> —— 看起来重跑了一遍，其实什么都不会发生。必须在**包含修复的 main** 上
+> 以 tag 为 ref 重新触发。
 
 ---
 

@@ -18,14 +18,44 @@ name: release
 on:
   push:
     tags: ["v*"]
-  # 允许手动触发以验证流水线（不发 Release，只出 artifact）
+  # 手动触发。两个用途：
+  #   ① 用 ref=vX.Y.Z 重试一次失败/部分成功的发布（**推荐这条**）
+  #   ② 干跑验证流水线（不传 ref，只出 artifact，不发 Release/npm）
+  # 注意：手动触发时 GitHub 不会给 GITHUB_REF_NAME 一个 tag 名（是分支名），
+  # 所以**版本一律从 Cargo.toml 读**，不依赖 event ref —— 见 resolve-version。
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # 版本从 **Cargo.toml** 读，不从 event ref 推。
+  # 原因：workflow_dispatch 从分支触发时 GITHUB_REF_NAME 是分支名（如 main），
+  # 拿它当版本会得到 `--version main`。Cargo.toml 才是版本真源。
+  resolve-version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 读 Cargo.toml 的版本
+        id: v
+        run: |
+          V=$(python3 - <<'PY'
+          import re
+          src = open("Cargo.toml", encoding="utf-8").read()
+          m = re.search(r'\[workspace\.package\][^\[]*?^version\s*=\s*"([^"]+)"',
+                          src, re.M | re.S)
+          print(m.group(1) if m else "")
+          PY
+          )
+          [ -n "$V" ] || { echo "::error::无法从 Cargo.toml 读出 [workspace.package] version"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "版本（来自 Cargo.toml）：$V"
+
   build:
+    needs: resolve-version
     strategy:
       fail-fast: false
       matrix:
@@ -55,7 +85,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NAME="neo-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
+          # 产物名统一用 neo-v<版本>-<target>，与 install.sh 的期望一致
+          # （install.sh 下载的是 neo-$tag-$target.tar.gz，tag 含 v 前缀）
+          NAME="neo-v${{ needs.resolve-version.outputs.version }}-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
           cp "target/${{ matrix.target }}/release/neo" "dist/$NAME/neo"
           cp README.md LICENSE "dist/$NAME/"
@@ -68,7 +100,9 @@ jobs:
           path: dist/*.tar.gz*
 
   release:
-    needs: build
+    needs: [resolve-version, build]
+    # tag 触发、或用 ref=vX.Y.Z 手动触发时才建 Release；
+    # 从分支手动触发（干跑验证）只留 artifact，不建 Release。
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -93,7 +127,7 @@ jobs:
   #      注意 npm 计划 2027-01 起移除 granular 的直接发布权限，故 ① 是长期解。
   # 两者都未配置 → 告警跳过，不影响 GitHub Release 产物上传。
   publish-npm:
-    needs: build
+    needs: [resolve-version, build]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -170,6 +204,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          # tag 形如 v0.1.0 → 版本 0.1.0
-          # 配了 Trusted Publishing 时无需 NODE_AUTH_TOKEN，npm 自动走 OIDC。
-          bash scripts/publish-npm.sh --dist dist --version "${GITHUB_REF_NAME#v}"
+          # 版本来自 resolve-version（读 Cargo.toml），不依赖 event ref ——
+          # 这样手动重跑也能拿到正确版本。publish-npm.sh 还会再校验一次
+          # 它与 Cargo.toml 一致。
+          bash scripts/publish-npm.sh \
+            --dist dist \
+            --version "${{ needs.resolve-version.outputs.version }}"
