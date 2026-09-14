@@ -51,7 +51,9 @@ async function copy(cmd: string, idx: number) {
   padding: 0.7rem 0.9rem;
   background: var(--neo-element);
   border: 1px solid var(--neo-border);
-  border-radius: var(--neo-radius-sm);
+  /* 与安装区的其它代码块用同一档圆角（原来这里是 8px、别处 14px，
+     相邻两块圆角不一致看着像两套组件）。 */
+  border-radius: var(--radius);
 }
 
 .label {
@@ -93,9 +95,14 @@ async function copy(cmd: string, idx: number) {
   .label {
     min-width: auto;
   }
+  /* ★ 命令换行而非横向裁切 —— 它是给用户复制执行的，截断会误导。
+     按钮与标签留在第一行，命令独占整行拿到完整宽度。 */
   .code {
     order: 3;
     flex-basis: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow-x: visible;
   }
 }
 </style>

@@ -1,33 +1,60 @@
-/* 全局样式 —— 配色取自 TUI 的真实主题（crates/neo-host-tui/src/theme.rs 的 ThemeName::Neo），
+/* 全局样式与设计系统。
+   配色取自 TUI 真实主题（crates/neo-host-tui/src/theme.rs 的 ThemeName::Neo），
    所以官网与产品是**同一套视觉语言**，不是另画一套。
-   层级用"底色阶梯"（backend/panel/element）而非堆边框，与 TUI 的处理方式一致。 */
+
+   对标同行（Vercel / Linear / Bun 这类开发者工具的站点）后确立的几条原则：
+     1. 层级来自「底色阶梯 + 辉光」，不靠堆边框 —— 与 TUI 的处理方式一致
+     2. 类型尺度要拉开（h1 与 h2 差 2 倍以上），否则整页没有节奏
+     3. 每个区块的**进入方式**不同（辉光 / 数据带 / 卡片 / 图解 / 表格），
+        否则通篇 h2+网格 = 一张长表格
+     4. 动效克制且尊重 prefers-reduced-motion：滚动揭示 + 悬停响应 */
 
 :root {
-  /* 主色（violet 400 / fuchsia 400）—— 与 TUI 的 primary/accent 完全一致 */
-  --neo-primary: #a78bfa;
-  --neo-accent: #e879f9;
+  /* ── 色彩 ───────────────────────────────────────── */
+  --neo-primary: #a78bfa; /* violet 400 */
+  --neo-primary-strong: #8b5cf6;
+  --neo-accent: #e879f9; /* fuchsia 400 */
   --neo-success: #6ee7b7;
   --neo-warning: #fbbf24;
   --neo-error: #f87171;
   --neo-info: #7dd3fc;
 
-  /* 底色阶梯：越靠后越亮（TUI 的 backdrop/base → bg_panel → bg_element） */
-  --neo-backdrop: #0a0a0c;
-  --neo-panel: #201e2a;
-  --neo-element: #2a2736;
-  --neo-menu: #262330;
-  --neo-selected: #332f45;
-  --neo-border: #454552;
-  --neo-border-active: #5c5c6e;
+  /* 底色阶梯：越靠后越亮 */
+  --neo-backdrop: #08080a;
+  --neo-panel: #14131a;
+  --neo-element: #1c1a24;
+  --neo-menu: #221f2c;
+  --neo-selected: #2a2638;
+  --neo-border: #2e2b3a;
+  --neo-border-active: #454154;
 
-  --neo-fg: #ededed;
-  --neo-fg-dim: #8a8a94;
+  --neo-fg: #f0eff4;
+  --neo-fg-dim: #9b98ab; /* 对底 7.1:1 */
+  /* ★ 三级文字必须仍过 WCAG AA(4.5:1)。原值 #6b6879 实测只有 3.7:1 —— 深色站
+     很容易在这一档偷懒（"反正只是辅助文字"），但它在 12–13px 上是真的读不清。
+     现值对底 5.2:1，且与 --neo-fg-dim 仍保持可见的层级差。 */
+  --neo-fg-faint: #82808f;
 
-  --neo-radius: 10px;
-  --neo-radius-sm: 6px;
-  --neo-maxw: 1080px;
+  /* ── 类型尺度（拉开差距，制造节奏）───────────────── */
+  --fs-hero: clamp(2.6rem, 7vw, 4.6rem);
+  --fs-h2: clamp(1.7rem, 3.6vw, 2.5rem);
+  --fs-h3: 1.06rem;
+  --fs-body: 1rem;
+  --fs-sm: 0.9rem;
+  --fs-xs: 0.8rem;
+  --fs-stat: clamp(2rem, 4.4vw, 3rem);
 
-  --neo-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  /* ── 间距节奏 ───────────────────────────────────── */
+  /* 上下各一份，故区块间距是这个值的两倍。9vw 在宽屏会到 130px+，
+     区块之间近 270px 太空、页面被拉散；7vw 上限 6rem 更紧凑。 */
+  --sp-section: clamp(3.5rem, 7vw, 6rem);
+  --wrap: 1120px;
+
+  --radius: 14px;
+  --radius-sm: 8px;
+  --radius-pill: 999px;
+
+  --neo-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 * {
@@ -36,17 +63,19 @@
 
 html {
   scroll-behavior: smooth;
-  /* 锚点跳转时给 sticky 头部留出空间 */
-  scroll-padding-top: 5rem;
+  scroll-padding-top: 5.5rem;
 }
 
 body {
   margin: 0;
   background: var(--neo-backdrop);
   color: var(--neo-fg);
-  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: var(--fs-body);
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
   line-height: 1.7;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
 a {
@@ -64,52 +93,201 @@ pre {
 
 h1,
 h2,
-h3 {
-  line-height: 1.3;
+h3,
+h4 {
+  line-height: 1.25;
   margin: 0;
+  letter-spacing: -0.015em;
 }
 
-/* 复用原语：面板 = 底色 + 细边，不画四角框（与 TUI 一致） */
+/* ── 布局原语 ─────────────────────────────────────── */
+.wrap {
+  width: 100%;
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+.section {
+  padding: var(--sp-section) 0;
+}
+
+.section-head {
+  max-width: 46rem;
+  margin-bottom: 2.8rem;
+}
+.section-head h2 {
+  font-size: var(--fs-h2);
+}
+.section-head p {
+  margin: 1rem 0 0;
+  color: var(--neo-fg-dim);
+  font-size: 1.02rem;
+}
+.section-head strong {
+  color: var(--neo-fg);
+}
+
+/* 区块标题上方的分类标签（同行的惯用手法：给每个区块一个"种类"锚点） */
+.eyebrow {
+  display: inline-block;
+  margin-bottom: 0.85rem;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--neo-primary);
+}
+
+/* ── 面板 / 卡片 ──────────────────────────────────── */
 .panel {
   background: var(--neo-panel);
   border: 1px solid var(--neo-border);
-  border-radius: var(--neo-radius);
+  border-radius: var(--radius);
 }
 
-/* 主按钮 / 次按钮 */
+/* 卡片：静态时克制，悬停才亮（辉光而非阴影，深色底上阴影看不出来） */
+.card {
+  position: relative;
+  padding: 1.5rem;
+  background: var(--neo-panel);
+  border: 1px solid var(--neo-border);
+  border-radius: var(--radius);
+  transition: border-color 0.22s ease, background 0.22s ease, transform 0.22s ease;
+}
+.card:hover {
+  border-color: var(--neo-border-active);
+  background: var(--neo-element);
+  transform: translateY(-3px);
+}
+/* 悬停时顶部一道极细的主色光带 */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: -1px -1px auto;
+  height: 1px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: linear-gradient(90deg, transparent, var(--neo-primary), transparent);
+  opacity: 0;
+  transition: opacity 0.22s ease;
+}
+.card:hover::before {
+  opacity: 0.85;
+}
+
+/* ── 按钮 ─────────────────────────────────────────── */
 .btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 0.5rem;
-  padding: 0.6rem 1.15rem;
-  border-radius: var(--neo-radius-sm);
-  border: 1px solid var(--neo-border-active);
-  background: transparent;
-  color: var(--neo-fg);
+  padding: 0.72rem 1.4rem;
   font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--neo-fg);
+  background: var(--neo-element);
+  border: 1px solid var(--neo-border-active);
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease,
+    transform 0.18s ease;
 }
 .btn:hover {
+  color: var(--neo-fg);
   border-color: var(--neo-primary);
-  color: var(--neo-primary);
+  transform: translateY(-1px);
 }
 .btn-primary {
-  background: linear-gradient(135deg, var(--neo-primary), var(--neo-accent));
+  position: relative;
+  height: 3rem;
+  background: linear-gradient(120deg, var(--neo-primary-strong), var(--neo-accent));
   border-color: transparent;
   color: #14101f;
-  font-weight: 600;
+  font-weight: 700;
 }
 .btn-primary:hover {
   color: #14101f;
-  filter: brightness(1.08);
+  filter: brightness(1.1);
+}
+
+/* 徽标药丸（版本 / 许可 / 统计之类的小信息） */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.28rem 0.72rem;
+  font-size: var(--fs-xs);
+  color: var(--neo-fg-dim);
+  background: var(--neo-element);
+  border: 1px solid var(--neo-border);
+  border-radius: var(--radius-pill);
+}
+.pill .dot {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: var(--neo-success);
+}
+
+/* ── 背景装饰：网格 + 辉光 ────────────────────────── */
+/* 深色站的"空间感"几乎全靠这两样，纯黑会显得什么都没画 */
+.grid-bg {
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(rgba(167, 139, 250, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(167, 139, 250, 0.055) 1px, transparent 1px);
+  background-size: 56px 56px;
+  /* 向边缘淡出，避免网格把视线切死 */
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 20%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 20%, transparent 75%);
+  pointer-events: none;
+}
+
+.glow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  pointer-events: none;
+}
+
+/* ── 滚动揭示 ─────────────────────────────────────── */
+/* ★ 只在 JS 可用时隐藏（html.js 由页面 onMounted 打上标记）。
+   否则 JS 不可用 / 脚本出错时内容会永远 opacity:0 —— 那是"白屏"，
+   比"没有动效"糟得多。这条纪律在 TUI 侧也适用：降级必须是可见的降级。 */
+html.js .reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+html.js .reveal.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+/* 打印时强制显示：打印不会触发滚动，若仍隐藏会印出一片白页。
+   （全页截图同理 —— 这也是为什么验收截图要先滚动一圈再截。） */
+@media print {
+  html.js .reveal {
+    opacity: 1 !important;
+    transform: none !important;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
   }
-  * {
-    transition: none !important;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  html.js .reveal {
+    opacity: 1;
+    transform: none;
   }
 }
