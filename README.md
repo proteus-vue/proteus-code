@@ -291,6 +291,9 @@ proteus-code/                  ← 项目本体是 Rust 内核
 | [PROJECT_MEMORY.md](PROJECT_MEMORY.md) | 项目记忆：决策依据、踩过的坑、被证伪的方案 |
 | [docs/RELEASE.md](docs/RELEASE.md) | **发布检查清单**：首次发布 / npm 凭证 / 撤销与排错 |
 | [website/README.md](website/README.md) | **官网**源码与选型说明（用 Proteus 框架构建） |
+| [docs/desktop-plan.md](docs/desktop-plan.md) | **桌面版实现计划**（Rust 原生 GUI，阶段 A–E） |
+| [docs/desktop-parity.md](docs/desktop-parity.md) | **桌面版对标规格**：Codex / ZCode 桌面版逐条对照 |
+| [docs/opencode-parity.md](docs/opencode-parity.md) | TUI 对标规格（opencode / mimo，P1–P14） |
 | [AGENTS.md](AGENTS.md) | 在本仓库工作的约定（效率标准 + Rust 约束） |
 | [docs/ai-efficiency-rules/](docs/ai-efficiency-rules/) | **强制技能**：AI 执行效率规范（六类低效行为 / 三条总则 / 可跑脚本 / CI 审计） |
 

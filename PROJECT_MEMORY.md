@@ -339,6 +339,40 @@ CTA 渐变是否成立、square/light 标志、横向溢出），再对 Neo / Li
 我第一版写了"对齐 TUI 的确定性算法"，算法结构确实像，但密度/尺寸全是自己估的 ——
 结果是"结构对了、效果没有"。
 
+### (d9) 桌面版对标：先弄清对标目标自己是什么技术
+
+用户要求"桌面实现对标 Codex 桌面版和 ZCode 桌面版"。**第一件事不是抄界面，是查清它们是什么**——
+结果查出一个会误导整个选型的事实：
+
+| 目标 | GUI 技术 | 证据 |
+|---|---|---|
+| **ZCode 桌面** | **Electron + React 19 + Radix UI + node-pty** | 本机装有 `dev.zcode.app` v3.11.2；asar 里 `NSPrincipalClass = AtomApplication` |
+| **Codex 桌面** | 闭源，**不在 `openai/codex` 仓库内** | `codex-rs` 的 `Cargo.lock` **全文无任何 GUI 依赖**；仓库只有 TUI(`ratatui`) + 安装器/`codex://` 深链 + `app-server` RPC |
+| **Zed** | **GPUI（纯 Rust GPU 框架）** | 本机装有 `dev.zed.Zed` |
+
+**两个对标目标都不是 Rust 原生 GUI。** 所以：
+- "对标 Codex 桌面版"**只能对标 UX 与功能**，代码层面无从对标（GUI 闭源、仓库里没有）。
+- 两者架构都是「GUI 消费一个协议」——而**本项目已是同构形态**（内核 + `Op`/`EventMsg` + `neo-host-web`），
+  差的只是"谁来渲染"。
+- 于是有个必须讲明的错位：**"用 Rust 原生 GUI 对标两个 Web 技术的 GUI"，其可行性证据是
+  Zed/GPUI，不是 Codex/ZCode**。把两件事混在一起会得出错误的可行性结论。
+
+**本机两个应用都在跑，但我看不到界面**：ZCode 的辅助功能与屏幕录制权限未授予
+（授权对象是 `~/.zcode/computer-use/ZCode Computer Use.app`），Codex 桌面文档 403。
+故**结构层能对标**（ZCode 官方文档写得很细 + Codex 的 TUI 源码可读），**观感层需要真人补图**。
+这条如实写进了 `docs/desktop-parity.md` 末尾，不装作已对齐观感。
+
+**对标档案**：新增 `docs/desktop-parity.md`（照 `opencode-parity.md` 的路子——TUI 侧正是靠
+一份写下来的范式止住了"打地鼠"）。核心产出是**差距清单 D1–D12**，其中 **D2–D7 全是纯前端工作**：
+Markdown 正文 / 思考轨迹 / 工具卡片 / diff 渲染 / 轮摘要 / Goal 面板 —— 对应事件
+`AgentMessageDelta` / `ReasoningDelta` / `ToolCallBegin{arguments}` / `PatchProposed{path,diff}` /
+`TurnComplete` / `GoalUpdated`，**数据早就流在事件流里，只是那份 184 行页面全扔了**。
+
+最该照抄的一段是 **ZCode 的审批语义**（官方文档明确）：权限门触发 → **当前任务暂停 +
+composer 被阻塞**（防止误把下一步排进队列）→ 显示将执行的确切内容 → 三档
+Allow / Always Allow / Reject → **高风险或全自动模式下工具栏持续显示风险状态** →
+审批按任务作用域绑定。
+
 ### (d8) 星场重做：从"小方块点阵"到真正的星芒 + 流星
 
 用户反馈"现在看着完全不像星星矩阵，优化成视觉观感真正的星芒那种效果，还有流星滑落那种"。

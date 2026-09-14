@@ -31,6 +31,43 @@
 
 ---
 
+## 对标基准（Codex 桌面版 / ZCode 桌面版）
+
+逐条契约、差距清单、落地顺序见 **[`desktop-parity.md`](desktop-parity.md)**。这里只记三个影响全局的结论：
+
+### ① 两个对标目标都是「Web 技术的 GUI + 协议后端」，**不是 Rust 原生 GUI**
+
+| 目标 | GUI 技术 | 证据 |
+|---|---|---|
+| **ZCode 桌面** | Electron + React 19 + Radix UI + node-pty | 本机 `dev.zcode.app` v3.11.2；asar 内 `NSPrincipalClass = AtomApplication` |
+| **Codex 桌面** | 闭源，**不在 `openai/codex` 仓库内** | `codex-rs` 的 `Cargo.lock` **全文无任何 GUI 依赖**；仓库只有 TUI(`ratatui`) + 安装器/`codex://` 深链 + `app-server` RPC |
+| **Zed** | **GPUI（纯 Rust GPU 框架）** | 本机装有 `dev.zed.Zed`——**"Rust 原生能达到什么水准"的存在性证明** |
+
+**含义**：
+- "对标 Codex 桌面版"**只能对标 UX 与功能**，不能对标代码（GUI 闭源）。
+- 两者架构都是 **GUI 消费一个协议**（Codex：GUI ← `app-server`；ZCode：renderer ← `@zcode/rpc`）。
+- **本项目已是同构形态**（内核 + `Op`/`EventMsg` + `neo-host-web`），差别只在"谁来渲染"。
+- 因此"用 Rust 原生 GUI 对标两个 Web 技术的 GUI"这件事，**其可行性证据是 Zed/GPUI，而不是 Codex/ZCode**——这点必须在选型时认清，不能含糊。
+
+### ② 最该照抄的一段：审批语义（ZCode 官方文档）
+
+权限门触发 → **当前任务暂停 + composer 被阻塞**（防止误把下一步排进队列）→
+显示**将执行的确切内容**（命令/文件改动/工具动作）→ 三档 **Allow / Always Allow / Reject** →
+**高风险或全自动模式下工具栏持续显示风险状态** → 审批**按任务作用域绑定**（切走再回来仍在）。
+
+### ③ D2–D7 全是纯前端工作（数据已在事件流里，零后端改动）
+
+Markdown 正文 · 思考轨迹 · 工具卡片 · **diff 渲染** · 轮摘要 · Goal 面板 ——
+对应事件 `AgentMessageDelta` / `ReasoningDelta` / `ToolCallBegin{arguments}` /
+`PatchProposed{path,diff}` / `TurnComplete` / `GoalUpdated`。
+**这六个是投入产出比最高的一段。**
+
+> ⚠️ **视觉层目前对标不到观感**：ZCode 的真实界面截不到（本机辅助功能/屏幕录制权限未授予），
+> Codex 桌面文档 403。结构层面已够用（官方文档写得很细 + TUI 源码可读），
+> 但**观感需要真人补图**，否则只能对到"结构"而到不了"像不像"。
+
+---
+
 ## 阶段 A · 工具链升级（✅ 本轮已完成）
 
 - `rust-toolchain.toml` / `Cargo.toml` / 三个 CI workflow：1.83.0 → **1.95.0**。
@@ -109,7 +146,16 @@
 
 ### 界面（数据全部来自事件流，零后端改动）
 
-Markdown 正文 · 思考块（默认折叠，对齐 TUI `/thinking`）· 工具卡片（名称 + 参数摘要 + 退出码）· **diff 渲染**（`PatchProposed`）· 审批面板（diff + 允许一次 / 总是允许 / 拒绝，对齐 opencode 三段式）· 侧栏（Context 占用 / Todo / Modified Files `+N -N`）· 输入框 · 状态栏。
+**布局对标 ZCode 桌面版**（见 `desktop-parity.md` §1.1）：左侧任务/工作区栏 · 中央转录区 ·
+右侧 summary/Goal 面板 · 底部终端面板 · 覆盖式命令中心。
+
+**先做 D2–D7（纯前端、数据现成，投入产出比最高）**：
+Markdown 正文（`AgentMessageDelta`）· 思考轨迹可折叠可搜索（`ReasoningDelta`，**当前被扔掉**）·
+工具卡片含参数摘要（`ToolCallBegin{name,arguments}`）· **diff 渲染**（`PatchProposed{path,diff}`，
+**内核审批前已生成**）· 轮摘要（`TurnComplete`）· Goal 面板（`GoalUpdated{snapshot}`）。
+再照 ZCode 语义做 D10 审批（**阻塞 composer** + 三档 Allow/Always/Reject + 风险常驻）。
+D1/D9（任务栏/命令中心）与 D8/D11/D12（终端/模式切换/文件树）需新后端能力，排在后面。
+
 配色取自 `crates/neo-host-tui/src/theme.rs`，与 TUI 及官网同一视觉语言。
 
 ### 接线
