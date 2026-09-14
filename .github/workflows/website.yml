@@ -76,5 +76,40 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # 部署失败最常见的原因是**仓库还没启用 Pages**（报 404 "Ensure GitHub
+      # Pages has been enabled"），那是人工配置项而非代码问题。
+      #
+      # ★这里**刻意让它失败**（exit 1），不做"跳过并报绿"—— 因为"站点没上线"
+      #   是事实，绿了就是假通过（本项目 §5 记过的反模式：静默跳过与成功长得一样）。
+      #   要做的只是让红得**可操作**：先把人工步骤打清楚，再让 deploy-pages 报错。
+      - name: 检查 Pages 是否已启用
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pages")
+          echo "GET /repos/${{ github.repository }}/pages -> HTTP $code"
+          if [ "$code" = "200" ]; then
+            echo "✅ Pages 已启用，继续部署"
+            exit 0
+          fi
+          cat <<'EOF'
+          ❌ 站点构建成功，但**无法部署**：仓库尚未启用 GitHub Pages（HTTP 404）。
+
+          这是**一次性人工配置**，两步：
+
+            1. 仓库 Settings → Pages → Build and deployment
+               → Source 选 **GitHub Actions**（不是 "Deploy from a branch"）
+            2. 域名 neo.proteus-vue.cn 的 DNS 加一条 CNAME 记录：
+               neo.proteus-vue.cn  →  proteus-vue.github.io
+
+          配好后重跑本 workflow（Actions → website → Run workflow）即可上线。
+          **构建产物没有问题** —— 缺的只是"往哪儿发"这一项配置。
+          EOF
+          echo "::error::GitHub Pages 未启用，无法部署（构建已成功）。见上方两步人工配置。"
+          exit 1
+
       - id: deployment
         uses: actions/deploy-pages@v4
