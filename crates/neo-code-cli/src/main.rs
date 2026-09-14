@@ -25,6 +25,7 @@ const USAGE: &str = r#"neo —— 用 Rust 重构的编程 Agent 内核
   neo exec "<任务>" [选项]     无头跑一轮（真实模型 + 真实沙箱）
   neo serve [选项]             启动 Web 宿主（浏览器打开提示的地址）
   neo [选项]                   启动 TUI 宿主（需真终端）
+  neo --help | --version       查看用法 / 版本
 
 exec 选项：
   --mode <plan|confirm|default|auto-edit|full>   执行模式（默认 default）
@@ -83,6 +84,10 @@ fn main() {
         }
         Some("help") | Some("--help") | Some("-h") => {
             println!("{USAGE}");
+            0
+        }
+        Some("version") | Some("--version") | Some("-V") => {
+            println!("neo {}", env!("CARGO_PKG_VERSION"));
             0
         }
         // 无参数，或首参是选项（如 `neo --provider mock`）→ 默认进 TUI。

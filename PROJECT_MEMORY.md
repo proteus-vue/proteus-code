@@ -7,22 +7,30 @@
 
 ## 0. 分发与发布（2026-09-14）
 
-从"只能自己 `cargo install --path`"到"别人能装"——三条分发路径全部打通。
-本节记录**为什么这样设计**与踩到的坑。
+从"只能自己 `cargo install --path`"到"别人能装"。本节记录**为什么这样设计**
+与踩到的坑。
 
 ### (a) 三条路径，各解决一类用户
 
 | 路径 | 用户侧 | 何时用 |
 |---|---|---|
-| `scripts/install.sh` + GitHub Releases | `curl \| sh`，无需 Rust | 默认推荐 |
-| `cargo install neo-code-cli`（crates.io）/ `--git` | 有 Rust 工具链 | 全平台 / 要自定义 feature |
-| `cargo build --release` | 开发者 | 改代码时 |
+| `scripts/install.sh` + GitHub Releases | `curl \| sh`，无需 Node/Rust | 推荐 |
+| `npm install -g neo-code` | 需 Node | 有 Node 环境时最省事 |
+| `cargo install --git ... -p neo-code-cli` | 需 Rust | 全平台 / 自定义 feature |
 
 三者共用一件事：**包名与命令名分离**。crates.io 上 `neo-cli` 与 `neo`
-都已被占用（NeoRust SDK / Neocities CLI），故包名取 `neo-code-cli`
-（`neo-code` 未被占），但 **bin 名始终是 `neo`** —— 用法文本、
-会话文件名、用户肌肉记忆都不必改。判据同 §1.5 的 `dsh` 那条：
-改的只是"发布标识"，不是"产品名"。
+都已被占用（NeoRust SDK / Neocities CLI），故 Cargo 包名取 `neo-code-cli`；
+但 **bin 名始终是 `neo`** —— 用法文本、会话文件名、用户肌肉记忆都不必改。
+判据同 §1.5 的 `dsh` 那条：改的只是"发布标识"，不是"产品名"。
+
+### (a2) 为什么最终没走 crates.io（2026-09-14 决定）
+
+一度把 crates.io 也做成路径（23 个 crate 补了完整元数据、写了拓扑序发布
+脚本、`cargo package` 全部验证通过），随后决定**不发布**：价值有限 ——
+`cargo install --git` 已经覆盖"有 Rust 工具链"的用户，而 crates.io 相对它
+只省一次 clone，却要求长期维护 23 个包的版本同步。元数据与 `version` 字段
+**保留**（它们本身是正确性改进，也让 `--git` 安装更规范），只删掉发布脚本。
+取而代之补上 **npm**（见 b2），因为 Node 覆盖面比 Rust 广得多。
 
 ### (b) 桌面宿主拆成可选 feature（Linux 用户的真痛点）
 
@@ -39,6 +47,25 @@ Linux 上要 `libwebkit2gtk` 才能编译。此前它被无条件链入 `neo`，
 默认**开启** desktop 是为了让门控代码总被编译（不腐烂）；
 CI 另跑 `-p neo-code-cli --no-default-features` 验证精简组合仍有产物。
 
+### (b2) npm 包：平台包 + 主包，安装期零脚本
+
+npm 侧是**两个层次**：
+
+| 包 | 内容 |
+|---|---|
+| `neo-code` | 只有 `bin/neo.js`（约 2 KB）+ `optionalDependencies` |
+| `neo-code-darwin-arm64` / `-darwin-x64` / `-linux-x64` | 各自的 `bin/neo` 二进制 + `os`/`cpu` 字段 |
+
+npm 按 `os`/`cpu` 只装匹配的平台包；主包的 wrapper 用
+`require.resolve('<平台包>/package.json')` 定位真二进制并**原样转发**
+（参数、退出码、stdin/stdout/stderr、信号都不改写）。
+
+**为什么不用 postinstall 下载**（这是关键设计决定）：安装期执行脚本、
+联网抓可执行文件，正是**供应链注入的典型入口** —— 与 §0 里
+"可执行文件就是供应链注入"是同一条判据。平台包方案让 **install 期
+不执行任何脚本、不联网**，离线与内网也照常工作。代价是每个平台一个包，
+发布时 `scripts/publish-npm.sh` 一并处理。
+
 ### (c) 坑：含二进制目标的 crate，`cargo package` 会做完整依赖解析
 
 `cargo package` 对 22 个 lib crate 都成功，**唯独 `neo-code-cli` 失败**，
@@ -54,14 +81,17 @@ feature 门控或 dev-dependency，逐一排除后做了对照实验：
 `Cargo.lock`**（bin 需要锁文件），纯 lib crate 不需要。而本地所有内部依赖
 都是 `path`，registry 里找不到，于是只有含 bin 的那个失败。
 
-**这不是缺陷，是本地打包的必然假象**：发布按拓扑序进行时，前面的依赖
-已经上传，它就能打包。验证方式——把依赖放进本地目录 registry 再打包，
+**这不是缺陷，是本地打包的必然假象**：按拓扑序发布时前面的依赖已上传，
+它就能打包。验证方式——把依赖放进本地目录 registry 再打包，
 `neo-code-cli` 立刻成功（`Packaged 6 files`）。
 
-修法不是改代码，而是 `scripts/publish.sh`：用 `cargo metadata` 算拓扑序，
-逐个发布，每个之后用 `wait_for.sh` **有条件地**等索引收录（非盲等），
-且幂等可重跑。**dev-dependency 不参与排序** —— `neo-core` 的 dev-dep
-指向 `neo-capability`，而后者正常依赖 `neo-core`；把 dev 也算上会假报成环。
+### (c2) 坑：bash 3.2 把多字节字符吃进变量名
+
+macOS 自带的是 **bash 3.2**。写 `"版本 $VERSION）"` 时，它会把全角
+`）` 的字节也算作变量名的一部分，于是报 `VERSION）: unbound variable`。
+修法是**用花括号界定**：`"版本 ${VERSION}）"`。这类问题只在"变量后紧跟
+非 ASCII"时出现，`bash -n` 查不出来（语法合法），只有真跑才暴露 ——
+`scripts/` 里所有中文字符串都要注意。
 
 ### (d) 许可证三处不一致（发布前必须统一）
 
@@ -73,9 +103,11 @@ feature 门控或 dev-dependency，逐一排除后做了对照实验：
 
 - **Linux 预编译产物是精简版**（不含桌面），因为动态链接 webkit 会让
   纯 TUI 用户被迫装它。要 Linux 桌面窗口得 `cargo install` 带默认 feature。
-- 预编译只覆盖 macOS（双架构）+ Linux x86_64。其它平台走 `cargo install`。
-- **未真正发布到 crates.io**（需要维护者 token，且不可逆）：本轮的验证
-  止于 `cargo package` 全部通过 + 拓扑序正确 + 本地 registry 复现成功。
+- 预编译 / npm 产物只覆盖 macOS（双架构）+ Linux x86_64。其它平台走 `cargo install`。
+- **npm 包尚未真正发布**（需维护者 token）：验证止于
+  `scripts/publish-npm.sh --dry-run` + **真实 `npm install -g` 端到端跑通**
+  （wrapper 输出 `neo 0.1.0`）。
+- **crates.io 未发布**（决定见 a2）：元数据齐备，随时可发。
 
 ---
 
@@ -2368,6 +2400,7 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 | **Web 宿主无鉴权** | 默认只绑 `127.0.0.1`。若改成对外监听，必须先加鉴权 —— 它能让任何能访问端口的人在你的工作区执行写操作 |
 | **发行物未做代码签名** | `install.sh` 会校验 SHA-256（防损坏），但 macOS 产物未做 Apple 签名/公证、Windows 无 Authenticode。用户首次运行可能遇到 Gatekeeper 拦截；正式对外分发需签名证书（见 §0） |
 | **Windows 无预编译产物** | `release.yml` 只出 macOS（双架构）+ Linux x86_64；且 Windows 沙箱未实现，故未纳入。Windows 用户当前需 `cargo install`（受限档位仍 fail-closed） |
-| **crates.io 尚未真正发布** | 元数据、拓扑序、打包均已验证通过，但上传需维护者 token（不可逆外部动作）。跑 `bash scripts/publish.sh --dry-run` 演练，去掉 `--dry-run` 即真发 |
+| **npm 包尚未真正发布** | 包装层、平台包、`publish-npm` job 均已就绪并本地端到端验证（真实 `npm install -g` 跑通）。发布需仓库 secret `NPM_TOKEN`，打 tag 即自动发（见 §0） |
+| **crates.io 未发布（刻意不做）** | 元数据齐备、`cargo package` 全部通过，但决定不发布：`cargo install --git` 已覆盖该用户群，而 23 个包需长期版本同步。理由见 §0(a2) |
 
 **下一步优先级建议**：Desktop 的 webview 窗口层（需要平台图形栈与 GUI 验证，动手前先做窗口壳的设计决定）。

@@ -72,7 +72,7 @@ neo tui --provider demo        # Markdown 高亮 + 任务清单
 
 ### 安装
 
-三种方式，按「省事 → 可控」排列：
+四种方式，按「省事 → 可控」排列：
 
 **① 一键脚本（推荐，无需 Rust）** —— 下载预编译二进制：
 
@@ -83,31 +83,39 @@ curl -fsSL https://raw.githubusercontent.com/proteus-vue/proteus-code/main/scrip
 装到 `~/.local/bin/neo`（可用 `NEO_INSTALL_DIR` 改）。预编译产物覆盖
 macOS（Apple Silicon / Intel）与 Linux x86_64；脚本会校验 SHA-256。
 **Linux 产物是精简版**（不含桌面窗口，因它需要 libwebkit2gtk）——
-需要 Linux 桌面窗口请用方式 ②。
+需要 Linux 桌面窗口请用方式 ② 或 ③。
 
-**② cargo install（需 Rust 工具链）** —— 覆盖所有平台与各种 feature 组合：
+**② npm（有 Node 环境时最省事）**：
 
 ```bash
-# 从 crates.io（包含桌面窗口，默认 feature）
-cargo install neo-code-cli --locked
+npm install -g neo-code
+```
 
-# 从源码仓库（等价）
+安装期**不执行脚本、不联网**：二进制放在按平台拆分的可选依赖里
+（`neo-code-darwin-arm64` / `-darwin-x64` / `-linux-x64`），npm 只装匹配的
+那一个。平台边界与方式 ① 相同（Linux 包不含桌面宿主）。
+
+**③ cargo install（需 Rust）** —— 覆盖所有平台与 feature 组合：
+
+```bash
+# 从源码仓库（含桌面窗口，默认 feature）
 cargo install --git https://github.com/proteus-vue/proteus-code -p neo-code-cli --locked
 
 # 精简版：不要桌面窗口，Linux 上免装 libwebkit2gtk
-cargo install neo-code-cli --locked --no-default-features
+cargo install --git https://github.com/proteus-vue/proteus-code -p neo-code-cli --locked --no-default-features
 ```
 
-> 包名是 `neo-code-cli`（crates.io 上 `neo-cli` 已被占用），但**命令名始终是 `neo`**。
+> 包名是 `neo-code-cli`，但**命令名始终是 `neo`**。
 
-**③ 从源码构建**：
+**④ 从源码构建**：
 
 ```bash
 cargo build --release -p neo-code-cli   # 产物在 target/release/neo
 ```
 
-装好后 `neo` 提示 command not found，是因为安装目录不在 `PATH` 里
-（`cargo install` 装到 `~/.cargo/bin`，脚本装到 `~/.local/bin`）。
+装好后若 `neo` 提示 command not found，是因为安装目录不在 `PATH` 里
+（`cargo install` 装到 `~/.cargo/bin`，脚本装到 `~/.local/bin`，
+npm 用 `npm prefix -g` 下的 `bin`）。
 
 ### 亲测可用
 
@@ -206,7 +214,10 @@ proteus-code/                  ← 项目本体是 Rust 内核
 │   │   ├── 04-落地计划/       M0–M6 里程碑与验收
 │   │   └── 05-验证/           可执行验证套件（Python + golden）
 │   └── spi-first-methodology/ 方法论原文（跨 16 次生产泛化）
+├── npm/neo-code/              npm 发布包装层（bin/neo.js 只按平台转发到真二进制）
 ├── scripts/verify.sh          全套门禁入口
+├── scripts/install.sh         一键安装（下载预编译二进制 + 校验和）
+├── scripts/publish-npm.sh     发布 npm 包（平台包 + 主包，支持 --dry-run）
 └── legacy/                    旧实现（Electron + DSH 插件），仅作参考
 ```
 

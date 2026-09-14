@@ -1,6 +1,8 @@
-# 发布:打 tag（v*）时构建并上传预编译二进制到 GitHub Release。
+# 发布:打 tag（v*）时构建预编译二进制 → 上传 GitHub Release → 发布 npm 包。
 #
-# 用户不需要 Rust 工具链 —— 下载即用（见 scripts/install.sh）。
+# 用户不需要 Rust 工具链 —— 下载即用（见 scripts/install.sh）或 npm 安装。
+# npm 发布由 publish-npm 这个 job 负责，需要仓库 secret `NPM_TOKEN`；
+# 未配置时该 job 只告警跳过，不让 tag 发布整体失败。
 #
 # 产物矩阵（诚实边界）：
 #   macOS  aarch64 + x86_64  —— 含桌面窗口（系统 WebKit，无额外依赖）
@@ -79,3 +81,43 @@ jobs:
         with:
           files: dist/*.tar.gz*
           generate_release_notes: true
+
+  # npm 发布：把已构建的二进制打成平台包 + 主包（见 scripts/publish-npm.sh）。
+  # 与 release job 并列，都吃 build 的产物。
+  publish-npm:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write   # npm provenance（让 tarball 可溯源到这次 CI 构建）
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # 没有 token 就跳过（fork、或尚未配置 secret）—— 不该让 tag 发布失败
+      - name: 检查 npm 凭证
+        id: creds
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            echo "::warning::未设置 NPM_TOKEN —— 跳过 npm 发布（其余产物照常）"
+          fi
+      - name: 发布到 npm
+        if: steps.creds.outputs.ok == '1'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # tag 形如 v0.1.0 → 版本 0.1.0
+          bash scripts/publish-npm.sh --dist dist --version "${GITHUB_REF_NAME#v}"

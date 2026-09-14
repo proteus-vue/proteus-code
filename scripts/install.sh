@@ -27,7 +27,7 @@ arch="$(uname -m)"
 case "$os" in
   Darwin) os_tag="apple-darwin" ;;
   Linux)  os_tag="unknown-linux-gnu" ;;
-  *) die "不支持的系统：$os（预编译仅覆盖 macOS / Linux；其它平台请用 cargo install --git，见 README）" ;;
+  *) die "不支持的系统：${os}（预编译仅覆盖 macOS / Linux；其它平台请用 cargo install --git，见 README）" ;;
 esac
 case "$arch" in
   arm64|aarch64) arch_tag="aarch64" ;;

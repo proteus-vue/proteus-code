@@ -1,0 +1,35 @@
+{
+  "name": "neo-code",
+  "version": "0.1.0",
+  "description": "NEO —— 用 Rust 重写的编程 Agent 内核（TUI / Web / Desktop / exec 四宿主共享同一内核）",
+  "license": "MIT",
+  "bin": {
+    "neo": "bin/neo.js"
+  },
+  "files": [
+    "bin/neo.js"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/proteus-vue/proteus-code.git"
+  },
+  "homepage": "https://github.com/proteus-vue/proteus-code",
+  "bugs": {
+    "url": "https://github.com/proteus-vue/proteus-code/issues"
+  },
+  "keywords": [
+    "agent",
+    "coding-agent",
+    "tui",
+    "rust",
+    "cli"
+  ],
+  "optionalDependencies": {
+    "neo-code-darwin-arm64": "0.1.0",
+    "neo-code-darwin-x64": "0.1.0",
+    "neo-code-linux-x64": "0.1.0"
+  }
+}

@@ -12,3 +12,8 @@ target/
 
 # 外部资源缓存（ai-efficiency-rules 的 cache_fetch.sh 默认落这里）
 .cache/
+
+# npm（npm/ 包装层用；打包/安装产物不入库）
+node_modules/
+*.tgz
+npm-debug.log*
