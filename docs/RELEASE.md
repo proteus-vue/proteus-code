@@ -107,8 +107,9 @@ git push origin v0.1.0
 `release.yml` 会依次做：构建三平台二进制 → 传 GitHub Release →
 打 npm 包并发布（平台包在前、主包在后）。
 
-> 若此时还没配任何 npm 凭证，npm 这步会**告警跳过**，Release 产物照常
-> 上传 —— 也就是说可以先发 Release、之后再补 npm 发布。
+> **怎么确认它真的跑了**：Actions 里点进 **`release`** 这个 workflow（不是
+> `rust` / `efficiency` / `changeset release`），看 `publish-npm` job 的
+> "发布到 npm" 步骤是不是 ✅。它若失败会**报红并打印诊断**，不会静默跳过。
 
 ### 1.5 验证
 
@@ -168,6 +169,11 @@ OIDC 可信发布**不需要任何长期凭证**，且 npm 计划 2027-01 移除
 
 ## 3. 日常发布：写 changeset，不要手工改版本
 
+> ⚠️ **先记住这条：推送到 `main` 不会发布。** 发布流水线只由 **tag 推送**
+> 或**手动 dispatch** 触发。`rust` / `efficiency` / `changeset release`
+> 三个 workflow 会在 push 时跑并显示绿色 —— 那只是 CI 通过，**不代表发过包**。
+> 要确认发布是否真跑过，看 Actions 里有没有 **`release`** 这个 workflow 的 run。
+
 版本号**不要手改**。日常流程是"写一条碎片 → 机器人推进版本 → 你合并"：
 
 ### 3.1 在你的改动 PR 里加一条碎片
@@ -203,6 +209,13 @@ python3 scripts/changeset.py new --bump minor --note "新增 npm 分发"
 
 ### 3.4 手动发布（特殊情况下）
 
+**两条触发路径**（其余都不会发布）：
+
+| 方式 | 何时用 |
+|---|---|
+| `git push origin vX.Y.Z` | 正常发版（changeset 流程会自动做） |
+| `gh workflow run release.yml -f version=X.Y.Z` | 补发 / 重跑失败发布（**从 main 触发**，见 §5 的坑） |
+
 确实需要手工发某个版本时：
 
 ```bash
@@ -210,12 +223,19 @@ python3 scripts/changeset.py new --bump minor --note "新增 npm 分发"
 python3 scripts/changeset.py version
 git add -A && git commit -m "chore(release): vX.Y.Z"
 git tag vX.Y.Z && git push origin main --tags
-# 若 tag 没有触发 release（或想重跑），手动 dispatch：
-gh workflow run release.yml --ref vX.Y.Z
 ```
 
 `publish-npm.sh` 是幂等的：已发布过的版本会跳过，所以重复推同一个 tag
 或重跑 workflow 不会报错、也不会重复发布。
+
+### 3.5 版本一致性是硬闸
+
+`release.yml` 的 `resolve-version` job 会校验：**tag 的版本必须等于
+`Cargo.toml` 的 `[workspace.package] version`**，不等直接拒绝发布。
+这防止"推了 `v0.1.1` 却发布 `0.1.0`"这类错配（历史上真会发生）。
+
+若被这个闸拦住：说明 tag 与 Cargo.toml 不一致。对齐两者后重打 tag，
+或用 `gh workflow run release.yml -f version=<Cargo.toml 里的版本>` 补发已有版本。
 
 ---
 
@@ -259,21 +279,24 @@ job，npm 那一步可能被跳过而整体仍显示绿色。
 **Variables** 页 —— 于是 job 判定无凭证、跳过发布，而整体仍是绿色，
 表现为"推送后没发布但不报错"。
 
-**修好凭证后怎么重跑**（二选一）：
+**修好凭证后怎么重跑**：
 
 ```bash
-# 推荐：以 tag 为 ref 重新触发一次。版本从 Cargo.toml 读，不依赖 event ref，
-# 因此这条路径与 tag 推送等价（会建 Release、会发 npm）。
-gh workflow run release.yml --ref v0.1.0
+gh workflow run release.yml -f version=0.1.0
 ```
 
-或在网页上：**Actions → release → Run workflow**，把 "Use workflow from"
-选成 tag `v0.1.0`。
+或网页上 **Actions → release → Run workflow**，"Use workflow from" 保持
+**main**，在 `version` 框里填 `0.1.0`。
 
-> ⚠️ **不要用旧 run 的 "Re-run all jobs"**：它跑的是**该 tag 处那份旧
-> workflow 文件**（还带着静默跳过的 bug），且不会重新读取你刚补的凭证配置
-> —— 看起来重跑了一遍，其实什么都不会发生。必须在**包含修复的 main** 上
-> 以 tag 为 ref 重新触发。
+> ⚠️ **两个都要避开的坑**（都真实踩过）：
+>
+> 1. **不要用旧 run 的 "Re-run all jobs"** —— 它跑的是那次运行时的旧
+>    workflow 文件，不会带上级修复。
+> 2. **不要用 `--ref v0.1.0`** —— `workflow_dispatch` 用的是**所选 ref 处**
+>    的 workflow 文件。若那个 tag 早于本次修复，跑的仍是旧文件。**从 main
+>    触发 + 用 `-f version=` 显式给版本**才是确定的。
+>
+> 用 main + 显式 version 还有额外好处：不必为了修复流水线而重打 tag。
 
 ---
 

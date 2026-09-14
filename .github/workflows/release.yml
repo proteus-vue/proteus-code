@@ -1,15 +1,21 @@
 # 发布:打 tag（v*）时构建预编译二进制 → 上传 GitHub Release → 发布 npm 包。
 #
 # 用户不需要 Rust 工具链 —— 下载即用（见 scripts/install.sh）或 npm 安装。
-# npm 发布由 publish-npm 这个 job 负责，需要仓库 secret `NPM_TOKEN`；
-# 未配置时该 job 只告警跳过，不让 tag 发布整体失败。
+#
+# ⚠️ **只有 tag 推送（或手动 dispatch）会走发布流水线。推到 main 不会。**
+# 日常发版是 changeset 流程：合并 Version PR 后由 changeset-release.yml 打 tag。
+#
+# 手动重跑/补发：
+#   gh workflow run release.yml -f version=0.1.0     # 从 main（含最新修复）
+# **不要** `--ref v0.1.0`：workflow_dispatch 用的是**该 ref 处**的 workflow 文件，
+# 若那个 tag 早于本次修复，跑的仍是旧文件（这是个真实踩过的坑）。
 #
 # 产物矩阵（诚实边界）：
 #   macOS  aarch64 + x86_64  —— 含桌面窗口（系统 WebKit，无额外依赖）
 #   Linux  x86_64            —— **精简版**（--no-default-features）：
 #                             桌面宿主在 Linux 要 libwebkit2gtk；预编译二进制
 #                             动态链接它会让纯 TUI 用户也被迫装 webkit，
-#                             故 Linux 产物不含 desktop（用法提示会说清）。
+#                             故 Linux 产物不含桌面（用法提示会说清）。
 #                             需要 Linux 桌面窗口的用户自行 cargo install（含默认 feature）。
 #
 # 工具链版本由 rust-toolchain.toml 钉定（1.83.0），与 rust.yml 同一把尺子。
@@ -18,31 +24,40 @@ name: release
 on:
   push:
     tags: ["v*"]
-  # 手动触发。两个用途：
-  #   ① 用 ref=vX.Y.Z 重试一次失败/部分成功的发布（**推荐这条**）
-  #   ② 干跑验证流水线（不传 ref，只出 artifact，不发 Release/npm）
-  # 注意：手动触发时 GitHub 不会给 GITHUB_REF_NAME 一个 tag 名（是分支名），
-  # 所以**版本一律从 Cargo.toml 读**，不依赖 event ref —— 见 resolve-version。
   workflow_dispatch:
+    inputs:
+      version:
+        description: "要发布的版本，如 0.1.0（会建/更新 Release v<版本>）。留空 = 只干跑构建，不发 Release、不发 npm。"
+        required: false
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  # 版本从 **Cargo.toml** 读，不从 event ref 推。
-  # 原因：workflow_dispatch 从分支触发时 GITHUB_REF_NAME 是分支名（如 main），
-  # 拿它当版本会得到 `--version main`。Cargo.toml 才是版本真源。
+  # 唯一的「决策」job：定版本、定要不要真发。
+  #
+  # 两条触发路径取值规则不同，这里集中处理，下游只看 outputs：
+  #   tag 推送        → 版本取自 tag，且**必须等于 Cargo.toml 的版本**（漂移即拒绝）
+  #   workflow_dispatch → 版本取自 inputs.version；留空则只干跑
   resolve-version:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
-      - name: 读 Cargo.toml 的版本
+      - name: 定版本
         id: v
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          IN_VERSION: ${{ github.event.inputs.version }}
         run: |
-          V=$(python3 - <<'PY'
+          set -euo pipefail
+          CARGO_VERSION=$(python3 - <<'PY'
           import re
           src = open("Cargo.toml", encoding="utf-8").read()
           m = re.search(r'\[workspace\.package\][^\[]*?^version\s*=\s*"([^"]+)"',
@@ -50,9 +65,31 @@ jobs:
           print(m.group(1) if m else "")
           PY
           )
-          [ -n "$V" ] || { echo "::error::无法从 Cargo.toml 读出 [workspace.package] version"; exit 1; }
+          [ -n "$CARGO_VERSION" ] || { echo "::error::无法从 Cargo.toml 读出 [workspace.package] version"; exit 1; }
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "${IN_VERSION:-}" ]; then
+              V="$IN_VERSION"; PUBLISH=true
+              echo "手动触发：发布 ${V}"
+            else
+              V="$CARGO_VERSION"; PUBLISH=false
+              echo "手动触发且未给 version —— 只干跑构建，不建 Release、不发 npm"
+            fi
+          else
+            [ "$REF_TYPE" = "tag" ] || { echo "::error::非 tag 推送不应进入发布流程（ref=${REF_NAME}）"; exit 1; }
+            V="${REF_NAME#v}"
+            PUBLISH=true
+            # tag 与 Cargo.toml 必须一致 —— 这是版本漂移的最后一道闸。
+            # 历史上这里读 Cargo.toml 会造成"推 v0.1.1 却发 0.1.0"。
+            if [ "$V" != "$CARGO_VERSION" ]; then
+              echo "::error::tag ${REF_NAME} 的版本（${V}）与 Cargo.toml 的（${CARGO_VERSION}）不一致 —— 拒绝发布。请让两者对齐后重打 tag。"
+              exit 1
+            fi
+            echo "tag 推送：发布 ${V}（与 Cargo.toml 一致）"
+          fi
+
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "版本（来自 Cargo.toml）：$V"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
 
   build:
     needs: resolve-version
@@ -101,9 +138,8 @@ jobs:
 
   release:
     needs: [resolve-version, build]
-    # tag 触发、或用 ref=vX.Y.Z 手动触发时才建 Release；
-    # 从分支手动触发（干跑验证）只留 artifact，不建 Release。
-    if: startsWith(github.ref, 'refs/tags/')
+    # 只有"真要发"时才建 Release（tag 推送，或手动 dispatch 且给了 version）
+    if: needs.resolve-version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -113,6 +149,8 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          # 显式指定 tag：手动 dispatch 时 github.ref 是分支，不能靠它推
+          tag_name: v${{ needs.resolve-version.outputs.version }}
           files: dist/*.tar.gz*
           generate_release_notes: true
 
@@ -128,7 +166,7 @@ jobs:
   # 两者都未配置 → 告警跳过，不影响 GitHub Release 产物上传。
   publish-npm:
     needs: [resolve-version, build]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: needs.resolve-version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

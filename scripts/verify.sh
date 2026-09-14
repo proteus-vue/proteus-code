@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # NEO 全套门禁入口。
 #
-# 四部分：
+# 五部分：
 #   0. 预检：cargo 是否可执行（工具链钉版文件解析失败会让后续门禁失去意义）
 #   1. Rust 工程门禁：cargo test（含内核 conformance、内存有界性、SPI conformance）
 #   2. 架构与协议守卫：docs/neo-plan/05-验证/ 的 Python 检查（依赖方向、协议确定性、
 #      会话格式、配置层叠、模式矩阵、SPI 合规）
 #   3. 工具链卫生：零 warning（warning 是未来错误的温床）
 #   4. 执行效率规范：固定盲等 / 重复拉取 / 无退出轮询（ai-efficiency-rules）
+#   5. shell 卫生：变量后紧跟非 ASCII（bash 3.2 会把中文标点吃进变量名）
 #
 # 用法：bash scripts/verify.sh
 set -uo pipefail
@@ -59,7 +60,7 @@ if [ "$CARGO_OK" -eq 1 ]; then
   ( cd "$ROOT" && cargo check --workspace --all-targets ) >/tmp/neo-check.log 2>&1
   check_rc=$?
   if [ "$check_rc" -ne 0 ]; then
-    echo "  ❌ cargo check 未成功（exit $check_rc）—— 无法判定 warning，按失败处理"
+    echo "  ❌ cargo check 未成功（exit ${check_rc}）—— 无法判定 warning，按失败处理"
     head -20 /tmp/neo-check.log | sed 's/^/     /'
     fail=$((fail+1))
   else
@@ -116,7 +117,20 @@ if [ -f "$AUDIT" ]; then
     fail=$((fail+1))
   fi
 else
-  echo "  [SKIP] 未找到 $AUDIT（skill 未安装？见 docs/ai-efficiency-rules/）"
+  echo "  [SKIP] 未找到 ${AUDIT}（skill 未安装？见 docs/ai-efficiency-rules/）"
+fi
+
+# ── 5. shell 多字节变量名（bash 3.2 会把中文标点吃进变量名）─────────────
+#
+# 这类写法语法合法（`bash -n` 查不出），只在真跑时炸成
+# `V）: unbound variable`，且本项目已复发 4 次（publish-npm / install /
+# verify / release.yml 各一次），故固化成门禁。
+hr; echo "#  shell 卫生：变量后紧跟非 ASCII（bash 3.2 坑）"; hr
+MB="$ROOT/scripts/check_shell_multibyte.sh"
+if [ -f "$MB" ]; then
+  if bash "$MB"; then :; else fail=$((fail+1)); fi
+else
+  echo "  [SKIP] 未找到 ${MB}"
 fi
 
 echo

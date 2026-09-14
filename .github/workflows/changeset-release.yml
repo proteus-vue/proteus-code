@@ -126,5 +126,10 @@ jobs:
 
           # GITHUB_TOKEN 推的 tag 不会触发 release.yml（见文件顶部说明），
           # 故显式 dispatch —— workflow_dispatch 是反递归规则的例外。
-          gh workflow run release.yml --ref "v${V}"
-          echo "已触发 release.yml（ref=v${V}）"
+          #
+          # **从 main 触发并显式带上版本**，而不是 --ref v${V}：
+          # workflow_dispatch 用的是所选 ref 处的 workflow 文件；从刚打的 tag
+          # 触发虽等价，但若 tag 落后于 main 就会跑到旧文件（真实踩过的坑）。
+          # 从 main 触发永远用最新工作流，版本由入参显式给定。
+          gh workflow run release.yml --ref main -f version="${V}"
+          echo "已触发 release.yml（ref=main, version=${V}）"
