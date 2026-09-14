@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- 与站点同色系：主品牌紫 → 品红（取自 TUI 主题 primary/accent） -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a78bfa" />
+      <stop offset="1" stop-color="#e879f9" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#0a0a0c" />
+  <!-- 菱形（四宿主共用一核的抽象） -->
+  <path d="M32 12 L52 32 L32 52 L12 32 Z" fill="none" stroke="url(#g)" stroke-width="4" stroke-linejoin="round" />
+  <circle cx="32" cy="32" r="6" fill="url(#g)" />
+</svg>

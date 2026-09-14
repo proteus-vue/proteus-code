@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 单页站点，只有一个 URL。注意：本站是客户端渲染（SPA），
+     search engine 抓不到正文 —— 详见 PROJECT_MEMORY 里的记录。 -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://neo.proteus-vue.cn/</loc>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>

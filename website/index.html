@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>neo —— 用 Rust 重写的编程 Agent 内核</title>
+    <meta
+      name="description"
+      content="neo 是一个用 Rust 重写的编程 Agent 内核：TUI / Desktop / Web / Exec 四宿主共享同一内核，真实 OS 级沙箱，正交的沙箱 × 审批双轴，零 unsafe、零 warning。一条命令安装。"
+    />
+    <meta name="theme-color" content="#0a0a0c" />
+    <meta name="color-scheme" content="dark" />
+
+    <!-- Open Graph / 社交分享 -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="neo —— 用 Rust 重写的编程 Agent 内核" />
+    <meta
+      property="og:description"
+      content="四宿主共享同一内核 · 真实 OS 级沙箱 · 零 unsafe。一条命令安装，离线即可试。"
+    />
+    <meta property="og:url" content="https://neo.proteus-vue.cn/" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+    <!--
+      SEO 诚实说明：本站是纯 SPA（Vue 客户端渲染），且所用框架的 SSG 尚未落地，
+      因此搜索引擎抓不到正文。下面的 <noscript> 是无法执行 JS 时的核心文案兜底
+      —— 注意不能把文案放进 #app（Vue 挂载会清空它）。这一点已记入 PROJECT_MEMORY。
+    -->
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>
+      <div style="max-width: 42rem; margin: 4rem auto; padding: 0 1.5rem; font-family: system-ui, sans-serif; line-height: 1.7;">
+        <h1>neo —— 用 Rust 重写的编程 Agent 内核</h1>
+        <p>
+          TUI / Desktop / Web / Exec <strong>四宿主共享同一内核</strong>。真实 OS 级沙箱
+          （macOS Seatbelt 真机验证越权拦截），沙箱与审批是<strong>正交双轴</strong>。
+          23 个 crate，零 <code>unsafe</code>、零 warning，617 个测试。
+        </p>
+        <p>安装：</p>
+        <ul>
+          <li><code>curl -fsSL https://raw.githubusercontent.com/proteus-vue/proteus-code/main/scripts/install.sh | sh</code></li>
+          <li><code>npm install -g @proteus-vue/neo-code</code></li>
+          <li><code>cargo install --git https://github.com/proteus-vue/proteus-code -p neo-code-cli --locked</code></li>
+        </ul>
+        <p>
+          源码与完整说明：<a href="https://github.com/proteus-vue/proteus-code">github.com/proteus-vue/proteus-code</a>
+        </p>
+        <p><small>本页需要 JavaScript 才能显示完整内容（当前为客户端渲染）。</small></p>
+      </div>
+    </noscript>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

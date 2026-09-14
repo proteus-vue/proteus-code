@@ -17,3 +17,9 @@ target/
 node_modules/
 *.tgz
 npm-debug.log*
+
+# 官网构建产物（website/ 的 dist 由 npm run build 生成）
+website/dist/
+
+# 工具生成的本地目录（ZCode 的计划缓存等，非项目内容）
+.zcode/

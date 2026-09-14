@@ -1,0 +1,24 @@
+{
+  "name": "@proteus-vue/neo-code-website",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "neo 官网（dogfooding：用 Proteus 框架构建 —— 见 README 的选型说明）",
+  "scripts": {
+    "dev": "vite --mode web",
+    "build": "vue-tsc --noEmit && vite build --mode web",
+    "preview": "vite preview dist/web"
+  },
+  "dependencies": {
+    "@proteus-vue/router": "0.2.0-beta.0",
+    "vue": "3.5.42"
+  },
+  "devDependencies": {
+    "@proteus-vue/plugin-vite": "0.2.0-beta.0",
+    "@types/node": "20.19.43",
+    "@vitejs/plugin-vue": "5.2.4",
+    "typescript": "5.9.3",
+    "vite": "5.4.21",
+    "vue-tsc": "2.2.12"
+  }
+}

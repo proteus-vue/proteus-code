@@ -187,6 +187,17 @@ git tag v0.1.0 && git push origin v0.1.0
 完整步骤（含首次发布、npm 凭证、撤销版本、排错）见
 **[docs/RELEASE.md](docs/RELEASE.md)**。
 
+## 官网
+
+**<https://neo.proteus-vue.cn>** —— 用本组织自己的 [Proteus](https://github.com/proteus-vue/proteus)
+跨端框架构建（dogfooding），源码在 [`website/`](website/README.md)。
+
+```bash
+cd website && npm install && npm run dev    # 或 npm run build → dist/web
+```
+
+推到 `main` 且改动涉及 `website/**` 时，`.github/workflows/website.yml` 自动构建并部署到 GitHub Pages。
+
 ## 仓库结构
 
 ```
@@ -219,6 +230,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 │   │   └── 05-验证/           可执行验证套件（Python + golden）
 │   └── spi-first-methodology/ 方法论原文（跨 16 次生产泛化）
 ├── npm/neo-code/              npm 发布包装层（bin/neo.js 只按平台转发到真二进制）
+├── website/                   官网（用 Proteus 框架构建 → neo.proteus-vue.cn）
 ├── scripts/verify.sh          全套门禁入口
 ├── scripts/install.sh         一键安装（下载预编译二进制 + 校验和）
 ├── scripts/publish-npm.sh     发布 npm 包（平台包 + 主包，支持 --dry-run）
@@ -278,6 +290,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 | [docs/spi-first-methodology/](docs/spi-first-methodology/) | SPI-First 方法论原文与自检清单 |
 | [PROJECT_MEMORY.md](PROJECT_MEMORY.md) | 项目记忆：决策依据、踩过的坑、被证伪的方案 |
 | [docs/RELEASE.md](docs/RELEASE.md) | **发布检查清单**：首次发布 / npm 凭证 / 撤销与排错 |
+| [website/README.md](website/README.md) | **官网**源码与选型说明（用 Proteus 框架构建） |
 | [AGENTS.md](AGENTS.md) | 在本仓库工作的约定（效率标准 + Rust 约束） |
 | [docs/ai-efficiency-rules/](docs/ai-efficiency-rules/) | **强制技能**：AI 执行效率规范（六类低效行为 / 三条总则 / 可跑脚本 / CI 审计） |
 

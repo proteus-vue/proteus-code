@@ -1,0 +1,115 @@
+/* 全局样式 —— 配色取自 TUI 的真实主题（crates/neo-host-tui/src/theme.rs 的 ThemeName::Neo），
+   所以官网与产品是**同一套视觉语言**，不是另画一套。
+   层级用"底色阶梯"（backend/panel/element）而非堆边框，与 TUI 的处理方式一致。 */
+
+:root {
+  /* 主色（violet 400 / fuchsia 400）—— 与 TUI 的 primary/accent 完全一致 */
+  --neo-primary: #a78bfa;
+  --neo-accent: #e879f9;
+  --neo-success: #6ee7b7;
+  --neo-warning: #fbbf24;
+  --neo-error: #f87171;
+  --neo-info: #7dd3fc;
+
+  /* 底色阶梯：越靠后越亮（TUI 的 backdrop/base → bg_panel → bg_element） */
+  --neo-backdrop: #0a0a0c;
+  --neo-panel: #201e2a;
+  --neo-element: #2a2736;
+  --neo-menu: #262330;
+  --neo-selected: #332f45;
+  --neo-border: #454552;
+  --neo-border-active: #5c5c6e;
+
+  --neo-fg: #ededed;
+  --neo-fg-dim: #8a8a94;
+
+  --neo-radius: 10px;
+  --neo-radius-sm: 6px;
+  --neo-maxw: 1080px;
+
+  --neo-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  /* 锚点跳转时给 sticky 头部留出空间 */
+  scroll-padding-top: 5rem;
+}
+
+body {
+  margin: 0;
+  background: var(--neo-backdrop);
+  color: var(--neo-fg);
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--neo-primary);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--neo-accent);
+}
+
+code,
+pre {
+  font-family: var(--neo-mono);
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.3;
+  margin: 0;
+}
+
+/* 复用原语：面板 = 底色 + 细边，不画四角框（与 TUI 一致） */
+.panel {
+  background: var(--neo-panel);
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+}
+
+/* 主按钮 / 次按钮 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.15rem;
+  border-radius: var(--neo-radius-sm);
+  border: 1px solid var(--neo-border-active);
+  background: transparent;
+  color: var(--neo-fg);
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.btn:hover {
+  border-color: var(--neo-primary);
+  color: var(--neo-primary);
+}
+.btn-primary {
+  background: linear-gradient(135deg, var(--neo-primary), var(--neo-accent));
+  border-color: transparent;
+  color: #14101f;
+  font-weight: 600;
+}
+.btn-primary:hover {
+  color: #14101f;
+  filter: brightness(1.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  * {
+    transition: none !important;
+  }
+}

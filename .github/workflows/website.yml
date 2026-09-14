@@ -1,0 +1,80 @@
+# 官网（neo.proteus-vue.cn）—— 构建门禁 + GitHub Pages 部署
+#
+# 为什么单独一个 workflow：
+#   1. scripts/verify.sh 是 **Rust 门禁**（CI 主门禁），不能因为它引入 Node 依赖 ——
+#      所以站点自成一档，改动只影响本站。
+#   2. 网站在 website/ 子目录，用 paths 过滤，改 Rust 代码不会白跑一轮 Node。
+#
+# 站点用 **Proteus 框架**构建（同组织的 Vue 跨端框架，见 website/README.md）。
+name: website
+
+on:
+  pull_request:
+    paths: ['website/**', '.github/workflows/website.yml']
+  push:
+    branches: [main]
+    paths: ['website/**', '.github/workflows/website.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同分支串行；部署任务不取消进行中的（避免半途中断留下坏的线上版本）
+concurrency:
+  group: website-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      # `npm ci` 要求 lockfile 与 package.json 严格一致 —— 这正是我们要的：
+      # 依赖版本漂移会在这里立刻失败，而不是悄悄改变线上产物。
+      - name: 安装依赖
+        working-directory: website
+        run: npm ci
+
+      # build = vue-tsc --noEmit && vite build
+      # vue-tsc 是**类型门禁**：类型错误会让站点构建失败（本地已用它抓到过
+      # 配置缺字段与联合类型不匹配两个真错误）。
+      - name: 构建
+        working-directory: website
+        run: npm run build
+
+      - name: 检查产物关键文件
+        working-directory: website
+        run: |
+          set -euo pipefail
+          test -f dist/web/index.html || { echo "::error::缺少 index.html"; exit 1; }
+          # CNAME 必须进产物，否则自定义域名在 Pages 上会失效
+          test -f dist/web/CNAME || { echo "::error::缺少 CNAME"; exit 1; }
+          grep -q 'neo.proteus-vue.cn' dist/web/CNAME || { echo "::error::CNAME 内容不对"; exit 1; }
+          echo "产物文件："
+          find dist/web -type f | sort
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/dist/web
+
+  deploy:
+    needs: build
+    # 只在 main 上部署；PR 只做构建校验
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

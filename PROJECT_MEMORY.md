@@ -173,6 +173,51 @@ runner（自托管不支持）、`id-token: write` 权限、workflow 文件必�
    所以 `changeset-release.yml` 推完 tag 后**显式 dispatch** `release.yml`
    —— 确定性做法，且不需要额外 PAT。若靠"tag push 自动触发"会静默卡住。
 
+### (d4) 官网：用同组织的 Proteus 框架构建（dogfooding）
+
+**选型**：官网（`neo.proteus-vue.cn`）用 **Proteus**（`proteus-vue/proteus`）构建
+—— 本组织自己写的 Vue 跨端框架。理由：① dogfooding，自己的框架先在自己的站点上跑
+（Proteus 官方官网就是这么做的）；② 借它的「页面即文件 + `<route>` 元信息 + 路由表集中管理」
+约定，后续加内容页不必重搭架子。
+**没有**用普通 Vite 模板手搭 —— 那会丢掉这两个收益。
+
+**可行性先证伪再投入**：真跑 `npm create @proteus-vue/proteus` 生成脚手架 →
+`npm install`（79 包，无 404）→ `npm run build:web` 成功。所需包全部已在 npm 发布。
+关键发现：**脚手架实际产物与官网文档/示例都不一致** —— 它用的是普通
+`vite.config.ts` + `@vitejs/plugin-vue`，**不需要 `@proteus-vue/cli`**
+（文档仍写"生成 32 个文件含 vite.config.ts"，实际 18 个）。故以**脚手架产物**为准，
+不以文档为准。
+
+**三个代价（如实记录，也写进了 website/README）**：
+1. **全线 beta**（`0.1.0`～`0.3.0-beta.0`，多数包只有一个版本）→ **依赖钉精确版本**，不用 `^`。
+2. **UI 要自己写**：官网那套语义组件（`@proteus-vue/components` 的 `p-*`）与
+   `@proteus-vue/glass` **未发布 npm**，拿不到。框架给的是编译/路由/布局底座，不是组件库。
+3. **无 SSG**：产物是纯 SPA，搜索引擎抓不到正文 → 用 `<noscript>` 兜底核心文案
+   （**不能**把文案放进 `#app`，Vue 挂载会清空它）。
+
+**踩到的坑（都是 vue-tsc 抓的，说明类型门禁值钱）**：
+- `ProteusConfig` 的必填项是 **8 个**（含 `routesOutput` 与 `customRoute`），不是子代理
+  从源码读出的 6 个。**判据：以 `node_modules` 里实际安装包的类型定义为准**，
+  不以远端源码为准（版本不同）。`customRoute` 在 Web 端无意义但类型必填 → 给空 builders。
+- 联合类型 `kind?: 'cmd'|...` 漏了 `'plain'`，vue-tsc 直接拦下。
+
+**刻意不启用框架的 `audit` 规则**：其 `no-web-platform-api` 默认 error，会拦
+`window`/`document` 裸调用，而官网必须做复制按钮这类 DOM 操作。那套规则面向
+"一套源码编译到小程序"的跨端场景，**对纯 Web 站点不适用** —— 是规则不匹配目标，
+不是绕过门禁（本站无 MP 目标）。理由写在 `website/proteus.config.ts` 注释里。
+
+**Web-only 收敛**（相对脚手架）：删 `main.mp.ts`/`shims/mp.d.ts`/`scripts/gen-routes.ts`；
+`platform:'web'`；`RouterView.vue` 换成精简版（脚手架那份 378 行是小程序多页转场，
+含遮罩层与 `.page` 白底覆盖，单页站用会被样式绑架）。
+**保留路由**（`router/` + `auto-routes.ts` 签入仓库）：贴合框架约定，且为 v2 内容页留门。
+
+**验证方式**（无头浏览器不可用时）：构建产物 grep 关键文案 + **用 `@vue/server-renderer`
+真渲染首页**，断言 h1/卡片数/架构层数/边界表条数/中文正确 —— 这比"产物里有字符串"强，
+它证明组件**真能渲染**、无运行时错误。顺带确认 **SSR 可行**，故"SEO 无解"不准确，
+更准确的说法是"SSG 未做，将来可升级"。
+
+**未做（诚实）**：只做了单页 landing；无设计稿；视觉未做真人验收（环境无头浏览器）。
+
 ### (e) 诚实边界
 
 - **Linux 预编译产物是精简版**（不含桌面），因为动态链接 webkit 会让
