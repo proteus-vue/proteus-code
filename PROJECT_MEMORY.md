@@ -99,14 +99,43 @@ macOS 自带的是 **bash 3.2**。写 `"版本 $VERSION）"` 时，它会把全�
 但**标题写着"Proteus（普罗透斯）Vue 跨端编译框架"**（像是从别的项目拷来的）。
 已统一为 **MIT**，并把 README 协议段改成指向该文件、说明与 DSH（MIT）兼容。
 
+### (d2) npm 的 token 机制在 2025-11 变了（Automation token 已消失）
+
+**现象**：按老教程去 npm 建 "Automation token"，界面上找不到、建不出来。
+**原因**：npm 于 **2025 年 11 月移除了全部 legacy/classic token（含 Automation）**，
+现在只有 **Granular access token**。这不是操作失误，是机制变更。
+
+两条可用认证路径（`release.yml` 的 `publish-npm` job 两条都支持）：
+
+| 路径 | 怎么做 | 评价 |
+|---|---|---|
+| ① **OIDC Trusted Publishing** | npmjs.com → 各包 Settings → **Trusted Publisher** → 选 GitHub Actions，填 org/repo/**workflow 文件名**（`release.yml`，区分大小写）；仓库加变量 `NPM_TRUSTED_PUBLISHING=true` | **推荐**，无需任何 secret、无长期凭证 |
+| ② Granular token | npmjs.com → Access Tokens → Generate New Token → Packages and scopes 选 **Read and write** → 设过期（至少 1 天后）→ 存成仓库 secret `NPM_TOKEN` | 应急用 |
+
+**注意两条时间线**：npm 计划 **2027-01 起移除 granular token 的直接发布权限**
+（届时须走 `npm stage publish` + 人工 `npm stage approve`），所以 ① 才
+是长期解，② 只是过渡。
+
+**bootstrap 顺序**（官方文档只写了"在包的 Settings 里配置"，没给未发布包的
+流程，所以首次发布仍是鸡生蛋）：先用 ② granular token 把包发出去 →
+包在 npm 上存在后，才能进它的 Settings 配 ① 的 Trusted Publisher →
+之后就可以撤掉 token。
+
+**Trusted Publishing 的硬性前提**（漏一条都会失败）：npm CLI ≥ 11.5.1、
+**Node ≥ 22.14**（故 `publish-npm` job 用 Node 24 而非 20）、GitHub **托管**
+runner（自托管不支持）、`id-token: write` 权限、workflow 文件必须在
+`.github/workflows/` 且**文件名与 npm 侧填写的完全一致**（大小写敏感）。
+另：若同时存在 `NODE_AUTH_TOKEN`，npm 会优先用 token 而绕过 OIDC ——
+切到 ① 之后**记得把 secret 删掉**。
+
 ### (e) 诚实边界
 
 - **Linux 预编译产物是精简版**（不含桌面），因为动态链接 webkit 会让
   纯 TUI 用户被迫装它。要 Linux 桌面窗口得 `cargo install` 带默认 feature。
 - 预编译 / npm 产物只覆盖 macOS（双架构）+ Linux x86_64。其它平台走 `cargo install`。
-- **npm 包尚未真正发布**（需维护者 token）：验证止于
-  `scripts/publish-npm.sh --dry-run` + **真实 `npm install -g` 端到端跑通**
-  （wrapper 输出 `neo 0.1.0`）。
+- **npm 包尚未真正发布**（首次发布仍需一个 granular token 做 bootstrap，
+  见 d2）：验证止于 `scripts/publish-npm.sh --dry-run` + **真实
+  `npm install -g` 端到端跑通**（wrapper 输出 `neo 0.1.0`）。
 - **crates.io 未发布**（决定见 a2）：元数据齐备，随时可发。
 
 ---

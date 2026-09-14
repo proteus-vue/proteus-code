@@ -84,6 +84,14 @@ jobs:
 
   # npm 发布：把已构建的二进制打成平台包 + 主包（见 scripts/publish-npm.sh）。
   # 与 release job 并列，都吃 build 的产物。
+  #
+  # 认证两条路（npm 已于 2025-11 移除 Automation/legacy token，只剩 Granular）：
+  #   ① OIDC Trusted Publishing —— 推荐，**不需要任何 secret**。在 npmjs.com
+  #      各包的 Settings → Trusted Publisher 里指向本仓库 + 本 workflow 文件名。
+  #      开关：仓库 Actions 变量 NPM_TRUSTED_PUBLISHING=true
+  #   ② Granular access token 存成仓库 secret NPM_TOKEN（read and write）。
+  #      注意 npm 计划 2027-01 起移除 granular 的直接发布权限，故 ① 是长期解。
+  # 两者都未配置 → 告警跳过，不影响 GitHub Release 产物上传。
   publish-npm:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
@@ -91,28 +99,31 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      id-token: write   # npm provenance（让 tarball 可溯源到这次 CI 构建）
+      id-token: write   # OIDC Trusted Publishing + npm provenance 都靠它
     steps:
       - uses: actions/checkout@v4
+      # Node 24：Trusted Publishing 要求 npm CLI >= 11.5.1（Node 22.14+/24 才带得动）。
+      # package-manager-cache: false 是 npm 官方对可信发布的建议（避免缓存干扰）。
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      # 没有 token 就跳过（fork、或尚未配置 secret）—— 不该让 tag 发布失败
-      - name: 检查 npm 凭证
+      - name: 检查 npm 认证
         id: creds
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+          # 二选一即可：secret（granular token）或变量（已配置可信发布）
+          if [ -n "${NODE_AUTH_TOKEN:-}" ] || [ "${{ vars.NPM_TRUSTED_PUBLISHING }}" = "true" ]; then
             echo "ok=1" >> "$GITHUB_OUTPUT"
           else
             echo "ok=0" >> "$GITHUB_OUTPUT"
-            echo "::warning::未设置 NPM_TOKEN —— 跳过 npm 发布（其余产物照常）"
+            echo "::warning::未配置 npm 认证 —— 跳过 npm 发布（GitHub Release 产物照常）。见 .github/workflows/release.yml 顶部说明"
           fi
       - name: 发布到 npm
         if: steps.creds.outputs.ok == '1'
@@ -120,4 +131,5 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           # tag 形如 v0.1.0 → 版本 0.1.0
+          # 配了 Trusted Publishing 时无需 NODE_AUTH_TOKEN，npm 自动走 OIDC。
           bash scripts/publish-npm.sh --dist dist --version "${GITHUB_REF_NAME#v}"
