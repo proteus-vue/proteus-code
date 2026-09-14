@@ -163,13 +163,25 @@ interface Meteor {
 let meteors: Meteor[] = []
 let nextMeteorAt = 0
 
-const METEOR_MIN_GAP = 2600 // ms：太频繁会变成噪音（氛围感靠"偶尔"）
-const METEOR_MAX_GAP = 7000
+// 频次：从 2.6~7s 提到 1.1~3.0s（用户要求"频繁点儿"）。
+// ★但不能只调间隔：一颗流星存活约 1.4~2s，间隔缩短后必然出现重叠。
+//   故同时给**并发数**设上限（见 spawnMeteor 里的 MAX_ALIVE），
+//   否则会变成"流星雨"，丢掉"偶尔划过头顶"的氛围。
+const METEOR_MIN_GAP = 1100
+const METEOR_MAX_GAP = 3000
+/** 同屏最多几颗 —— 频次提高后靠这个守住"克制" */
+const METEOR_MAX_ALIVE = 2
 
 function spawnMeteor(w: number, h: number, now: number) {
+  // 同屏上限：满了就跳过本次（把下一次排到稍后），避免重叠成"流星雨"
+  if (meteors.length >= METEOR_MAX_ALIVE) {
+    nextMeteorAt = now + METEOR_MIN_GAP * 0.6
+    return
+  }
   // 固定方向：约 28° 斜向右下（比 45° 更"掠过头顶"的观感）
   const ang = Math.PI * 0.155
-  const speed = 0.55 + Math.random() * 0.35 // px/ms
+  // 速度随拖尾一起提：长尾巴配慢速会显得"飘"，扫快一点才像流星
+  const speed = 0.75 + Math.random() * 0.45 // px/ms
   meteors.push({
     // 起点偏左上，让轨迹从画面外进入
     x: -w * 0.1 + Math.random() * w * 0.85,
@@ -177,10 +189,12 @@ function spawnMeteor(w: number, h: number, now: number) {
     vx: Math.cos(ang) * speed,
     vy: Math.sin(ang) * speed,
     life: 0,
-    maxLife: 900 + Math.random() * 500,
-    len: 120 + Math.random() * 130,
-    width: 1.3 + Math.random() * 1.1,
-    bright: 0.75 + Math.random() * 0.25,
+    // 存活时间同步拉长，让长尾有足够时间划过（否则尾巴刚显形就回收了）
+    maxLife: 1200 + Math.random() * 700,
+    // 拖尾长度：从 120~250px 提到 260~470px（用户要求"再长点儿"）
+    len: 260 + Math.random() * 210,
+    width: 1.5 + Math.random() * 1.3,
+    bright: 0.8 + Math.random() * 0.2,
   })
   nextMeteorAt = now + METEOR_MIN_GAP + Math.random() * (METEOR_MAX_GAP - METEOR_MIN_GAP)
 }
@@ -302,7 +316,7 @@ function start() {
     return
   }
   lastT = 0
-  nextMeteorAt = performance.now() + 1200 // 首次稍快出现，让访客知道有流星
+  nextMeteorAt = performance.now() + 600 // 首次很快出现，让访客立刻知道有流星
   raf = requestAnimationFrame(loop)
 }
 function stop() {
