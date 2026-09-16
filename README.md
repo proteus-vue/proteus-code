@@ -88,9 +88,19 @@ macOS（Apple Silicon / Intel）与 Linux x86_64；脚本会校验 SHA-256。
 **Linux 预编译产物是精简版**（不含任何桌面窗口），原因有两条且**都关于
 系统库**，不是关于代码：
 - webview 桌面需要 `libwebkit2gtk`（构建期 pkg-config + 运行期动态库）；
-- GPUI 桌面需要 `libxkbcommon` / `libwayland` / `libX11`。
-  这三者走 **dlopen（运行时加载）** —— 编译不需要它们，但**运行时缺了会
-  直接 panic**（`Library libxkbcommon.so could not be loaded.`）。
+- GPUI 桌面需要 `libxkbcommon` / `libxkbcommon-x11` / `libwayland` / `libX11`。
+  其中 `libxkbcommon` / `libwayland` / `libX11` 走 **dlopen（运行时加载）**
+  —— 编译不需要它们，但**运行时缺了会直接 panic**
+  （`Library libxkbcommon.so could not be loaded.`）。
+  而 **`libxkbcommon-x11` 是链接期要求**（Ubuntu 包名
+  `libxkbcommon-x11-dev`）：缺它会在**链接**时报
+  `unable to find library -lxkbcommon-x11`。
+  注意这个差异很坑：`cargo check` 不做链接，所以"编译检查通过、测试/打包失败"。
+  完整清单（Debian/Ubuntu）：
+  ```bash
+  sudo apt-get install libxkbcommon-dev libxkbcommon-x11-dev \
+       libwayland-dev libx11-dev libfontconfig1-dev
+  ```
   也就是说 Linux 上自行构建含桌面的版本时，编译能过、启动才炸，
   所以这里必须写清楚要装什么。
 
