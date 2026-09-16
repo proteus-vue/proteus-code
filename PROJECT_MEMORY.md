@@ -3443,6 +3443,35 @@ D9 命令面板 / D11 模式与模型切换）。但这一轮真正的收获是*
 而"有改动却看不见"比"少显示一格"更糟（前者让用户以为没改动）。
 代价是极端情况下色带总高超出表面 —— 所以必须压配平的裁剪兜住，
 否则会画到相邻元素上（有测试守这两条）。
+### (z) Linux 构建：本地做不到，但把"能本地查的那部分"查了
+
+**试过交叉检查**：`rustup target add x86_64-unknown-linux-gnu` +
+`cargo check --target x86_64-unknown-linux-gnu` → 失败在
+`cc-rs: failed to find tool "x86_64-linux-gnu-gcc"`。
+这是**环境限制**（macOS 上没有 Linux C 工具链），不是代码问题 ——
+只要依赖树里有任何一个走 cc-rs 的 crate，这条路就过不去。
+**结论：Linux 只能靠 CI 首跑验**，别再把时间花在本地模拟上。
+
+**但有一类 Linux 崩溃能在本地查**：我们自己的 crate 里有没有
+"只对 macOS 成立"的假设。查法：
+```
+grep -rn 'cfg(target_os\|cfg(unix)\|cfg(target_family' crates/*/src/ --include="*.rs"
+```
+结果（**都是有意的三平台分支，不是遗漏**）：
+- `neo-sandbox` / `neo-sandbox-local`：三平台各有实现（Linux 受限档位
+  fail-closed，这是设计）；
+- `neo-host-egui/src/fonts.rs`：macOS / Windows / `all(unix, not(macos))` 三份
+  字体候选表（该宿主即将删除）；
+- `neo-web/auth.rs`、`neo-providers`、`neo-sandbox-local` 的 `cfg(unix)`：
+  读 `/dev/urandom` 之类的 unix 专有路径，有非 unix 回退。
+
+**UI 栈（`neo-ui-kit` / `neo-ui-render` / `neo-ui-behavior` / `neo-ui` /
+`neo-host-gpui`）里平台相关 cfg 数量为 0** —— 这正是它们应当的状态
+（中性绘制描述 + 后端翻译）。这也是 Linux 风险最集中的地方本来就在
+**依赖层**（gpui-pre-linux、x11rb、wayland dlopen）而非我们的代码里的证据。
+
+---
+
 ### (y) 我自己引入的一个缺陷：测试基建编进了生产构建
 
 给 IME 用例开 `test-support` 时，我把它写在了**根 Cargo.toml 的 pin** 上：
@@ -3778,6 +3807,7 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 |---|---|
 | ~~**gpui 宿主「回车提交」无机器证据**~~ **已解决** | 根因不是 gpui 而是**没打包**：直接跑裸二进制时进程 `bundle_id` 为 null，WindowServer 拿不到稳定应用身份 → 合成键盘事件投不进去。加了 `scripts/make-app.sh`（最小 .app + `CFBundleIdentifier` + ad-hoc 签名）后，`type`/`key return` 都能投递，会话日志出现 `user_submitted` —— 回车提交现在是**有机器证据**的结论（见 §4.64(t)） |
 | **gpui 宿主无多行输入** | 输入框是单行（`Input`）。ZCode 的 composer 支持多行与换行编辑；`Shift+Enter` 当前**什么都不做**（既不换行也不提交，`Textarea` 是下一步） |
+| **Linux 构建未验证** | 本地交叉检查不可行（macOS 无 Linux C 工具链，`cc-rs` 直接报缺 `x86_64-linux-gnu-gcc`），只能靠 CI 首跑。已本地排除一类风险：UI 栈五个 crate 的平台相关 `cfg` 为 0，其余 crate 的 `cfg(target_os)` 都是有意的三平台分支 |
 | **IME 只验了组件契约** | 已有 3 条自动化回归用例（preedit 删除后重输、连续合成、基建自证），钉住我们依赖的组件契约。但**真输入法**（装中文输入法敲键、候选框跟光标）未验：本用例不驱动系统输入法进程，真机还可能在奇怪时机连发 unmark |
 | **高 DPI 只验了整数倍两档** | 1x / 2x 实测通过（清晰、中文正常、无错位）。但 macOS 的 fractional scaling（125%/150%）是"高分辨率渲染再缩放"的**不同机制**，本机没有对应的可用模式，无法验证 —— 不能由整数倍结果推断 |
 | **Desktop 打包未产品化** | 窗口层与交互已机器验证（见 4.57）；当前用最小 .app 包（Info.plist 无图标/签名），正式发布需要打包脚本、图标与签名公证 |
