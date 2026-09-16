@@ -72,6 +72,12 @@ pub struct NeoView {
     notice: Option<String>,
     /// 工作区/模式说明
     status: String,
+    /// 帮助面板是否打开。
+    ///
+    /// 与命令面板同构。**内容从共享命令表读**（`neo_driver::commands`），
+    /// 不手写一份清单 —— 手写的会在加命令时忘记更新，而"面板里列了
+    /// 但实际没有"和"实际有但没列"都是错误信息。
+    help_open: bool,
     /// 模型选择器是否打开。
     ///
     /// 与命令面板同构（覆盖式面板 + 可点选），但**内容不同**：它要显示
@@ -225,6 +231,7 @@ impl NeoView {
             // （与 NEO_GUI_PROMPT 同一理由：画布无法靠自动化工具输入，
             //   面板的可见性只能由环境变量驱动）
             model_picker_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("models"),
+            help_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("help"),
             cmd_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("cmd"),
             terminal_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("terminal"),
             auto_prompt: std::env::var("NEO_GUI_PROMPT")
@@ -540,7 +547,9 @@ impl NeoView {
                 self.notice = Some("已清空屏幕转录（会话日志保留）".into());
             }
             A::Help => {
-                self.notice = Some("快捷键：Shift+Tab 切模式 · Cmd+K 命令面板".into());
+                // 打开帮助**面板**而不是弹一行提示：快捷键与命令列表放在
+                // 提示行里会被下一条提示冲掉，用户来不及看完。
+                self.help_open = !self.help_open;
             }
             A::Quit => {
                 self.handle.send(Op::Shutdown);
@@ -1191,6 +1200,85 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
 }
 
 /// **D9**：命令面板（覆盖式）。返回 None 表示未打开。
+/// 帮助面板：快捷键 + 全部命令。
+///
+/// 命令清单**从共享命令表读**（`neo_driver::commands::COMMANDS`），
+/// 不在这里手写。手写清单必然在加命令时忘记更新 ——
+/// 而"列了但按不出来"和"能按但没列"都是错误信息。
+fn help_panel(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
+    if !view.help_open {
+        return None;
+    }
+    let mut col = v_flex()
+        .w(px(440.))
+        .gap_1()
+        .p_3()
+        .bg(neo_ui::panel_bg())
+        .child(
+            div()
+                .text_color(neo_ui::neo_color(Tone::Info))
+                .child("快捷键"),
+        );
+
+    // 快捷键：**只列真的实现了的**。列一条按不出来的比不列更糟。
+    for (k, v) in [
+        ("Cmd/Ctrl+K", "命令面板"),
+        ("Shift+Tab", "循环切换执行模式"),
+        ("Enter", "提交输入框内容"),
+        ("Esc", "关闭最上层面板"),
+        ("↑ / ↓", "命令面板内选择"),
+    ] {
+        col = col.child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(96.))
+                        .text_color(neo_ui::neo_color(Tone::Muted))
+                        .child(k),
+                )
+                .child(div().text_color(neo_ui::neo_color(Tone::Text)).child(v)),
+        );
+    }
+
+    col = col.child(
+        div()
+            .pt_2()
+            .text_color(neo_ui::neo_color(Tone::Info))
+            .child(format!("命令（{} 条）", neo_driver::commands::COMMANDS.len())),
+    );
+    for c in neo_driver::commands::COMMANDS {
+        col = col.child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(96.))
+                        .text_color(neo_ui::neo_color(Tone::Accent))
+                        .child(format!("/{}", c.name)),
+                )
+                .child(
+                    div()
+                        .text_color(neo_ui::neo_color(Tone::Muted))
+                        .child(c.desc),
+                ),
+        );
+    }
+
+    let v = cx.entity().clone();
+    col = col.child(
+        div().pt_2().child(
+            Button::new("help-close").label("关闭").on_click(move |_, _, cx| {
+                v.update(cx, |this, cx| {
+                    this.help_open = false;
+                    cx.notify();
+                });
+            }),
+        ),
+    );
+    Some(col)
+}
+
 /// 模型选择器：列出全部模型，带说明与"是否桩"的标记。
 ///
 /// 与命令面板同构（覆盖式、可点选）。**不显示模型名列表就让人左右切换**
@@ -1756,6 +1844,11 @@ impl Render for NeoView {
 
             if secondary && key == "k" {
                 v.update(cx, |this, cx| this.toggle_cmd(cx));
+            } else if key == "escape" && v.read(cx).help_open {
+                v.update(cx, |this, cx| {
+                    this.help_open = false;
+                    cx.notify();
+                });
             } else if key == "escape" && v.read(cx).model_picker_open {
                 v.update(cx, |this, cx| {
                     this.model_picker_open = false;
@@ -1779,6 +1872,15 @@ impl Render for NeoView {
         });
 
         // ── 命令面板（D9）：覆盖在主区之上 ──
+        if let Some(p) = help_panel(self, cx) {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(48.))
+                    .left(px(120.))
+                    .child(p),
+            );
+        }
         if let Some(p) = model_picker(self, cx) {
             root = root.child(
                 div()

@@ -182,7 +182,10 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "model",
-        desc: "切换模型（状态栏的模型下拉）",
+        // 描述里**不写"下拉"**：那是猜具体控件。egui 侧是组合框、gpui 侧是
+        // 选择器面板，将来还可能变 —— 而命令表是共享的，写字面控件名
+        // 就是在三个宿主里说了三种都不完全对的话。
+        desc: "切换模型（打开模型选择器）",
         action: ActionStatic::ShowModels,
         category: Category::View,
     },
