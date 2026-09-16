@@ -293,13 +293,24 @@ fn an_unknown_path_is_indistinguishable_when_unauthenticated() {
 #[test]
 fn a_wrong_token_is_rejected_like_no_token_at_all() {
     let h = Harness::spawn();
+
+    // 「只差最后一位」的构造必须真的差一位：
+    //   format!("{}0", &token[..63]) 这种写法在 token 末位本就是 '0' 时
+    //   **恰好等于真令牌**（1/16 概率），于是这条负向用例会随机变绿或变红 ——
+    //   一个 6% 概率的 flaky 门禁。末位改成与真实末位不同的字符才成立。
+    let last = h.token.chars().next_back().expect("令牌非空");
+    let flipped = if last == '0' { '1' } else { '0' };
+    let off_by_one_last = format!("{}{}", &h.token[..63], flipped);
+
     for bogus in [
-        "0".repeat(64),                 // 长度对但值错
-        h.token[..63].to_string(),      // 前缀正确、长度差一
-        format!("{}0", &h.token[..63]), // 只差最后一位
-        String::new(),                  // 空
-        "short".to_string(),
+        "0".repeat(64),      // 长度对但值错
+        h.token[..63].to_string(), // 前缀正确、长度差一
+        off_by_one_last,     // 长度对、只差最后一位（且确定不同）
+        String::new(),       // 空
+        "short".to_string(), // 长度不对
     ] {
+        // 自检：构造出的"错令牌"绝不能等于真令牌，否则下面的断言毫无意义
+        assert_ne!(bogus, h.token, "负向用例构造出了真令牌，测试本身失效");
         let r = h.raw(&get_raw(&format!("/api/facts?token={bogus}")));
         assert_eq!(r.status, 401, "令牌 {bogus:?} 不应被接受");
     }
