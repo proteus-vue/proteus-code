@@ -96,9 +96,17 @@ jobs:
             echo "=== 失败：日志末尾 40 行 ==="
             tail -40 /tmp/test-out.log
             echo "=== 注解输出（供 API 读取）==="
-            tail -40 /tmp/test-out.log | while IFS= read -r line; do
+            # **优先发错误行**：编译失败的日志尾部常常全是 "Compiling ..."，
+            # 只发尾部会看不到真正的原因。先找 error/warning/FAILED 行，
+            # 再补尾部（两者都发，因为可能都没有）。
+            # 去掉 ANSI 颜色码，否则注解里是乱码转义。
+            grep -aE '^(error|warning: unused|test .* FAILED)|error\[|panicked at|^Error:|cannot find|failed to' /tmp/test-out.log \
+              | head -12 | sed -E 's/\x1b\[[0-9;]*m//g' | while IFS= read -r line; do
+              echo "::error title=错误::${line:0:800}"
+            done
+            tail -25 /tmp/test-out.log | sed -E 's/\x1b\[[0-9;]*m//g' | while IFS= read -r line; do
               [ -z "$line" ] && continue
-              echo "::error title=日志::${line:0:800}"
+              echo "::error title=尾部::${line:0:800}"
             done
           fi
           exit $code
