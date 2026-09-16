@@ -3521,6 +3521,39 @@ D9 命令面板 / D11 模式与模型切换）。但这一轮真正的收获是*
 默认不包含的例子：examples、benches、部分 test target。默认与直觉不一致，
 而它决定你的守卫是"覆盖了"还是"看起来覆盖了"。
 
+### (ao) 转正后必须补的两件事：默认路径的完整验证 + Linux 运行时库
+
+换默认宿主不是改一行 feature 就完了 —— 它把**从未走过的组合**变成了默认路径。
+我补了两件事：
+
+**1）默认宿主上的完整闭环验证。** 此前 gpui 的验证是分开做的（打字、审批各验过），
+但"默认模式下 selftest 触发审批 → 显示 diff → 点允许 → 文件落盘"这条**完整**链路
+只在 egui 上走过。补验结果：状态栏"待审批"、`apply_patch` 卡片、**diff 带绿色 + 行**、
+审批对话框（`类别: write` + 三档按钮）、输入区被阻塞，点"允许"后文件真实落盘
+（48 字节、内容正确）、审批按钮消失、输入框恢复可编辑、标题变为 READY。
+**证据以会话日志为准**（`tool_call_end exit_code=0` + 文件实际存在），
+截图只作辅助。
+
+**2）Linux 运行时库：一个"编译能过、启动才炸"的坑。** 查 `xkbcommon` 的实现：
+它**没有 build.rs**，通过 `xkbcommon-dl` 做 **dlopen（运行时加载）**。
+也就是说 Linux 上编译含 gpui 的版本**不需要** `libxkbcommon-dev`，
+但运行时缺库会直接：
+
+```
+Library libxkbcommon.so could not be loaded.
+```
+
+这是"编译期与运行期的依赖不一致"的典型 —— 而我的 README 原本写着
+"Linux 产物是精简版（不含桌面窗口，因它需要 libwebkit2gtk）"，
+**在 gpui 转正后这句话不完整了**（现在有第二组系统库需求，且机制不同：
+webkit 是构建期 pkg-config，xkbcommon 是运行期 dlopen）。已改写成
+两组需求分开说明，并写明"Linux 桌面产物尚未验证"。
+
+**教训**：换默认值时要问"**谁的计算前提变了**" —— feature 变了、文档没变、
+CI 没变、发布流程没变，而它们都依赖那个默认值。
+
+---
+
 ### (an) 删 egui：我**没有**做，以及为什么这一次该停下来问
 
 阶段 3 的清单里还写着"egui 删除"。我没有执行，理由不是懒：
@@ -4268,6 +4301,7 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 | ~~**许可证选择待拍板**~~ **已定** | 用户拍板：可开源集（5 个 crate）用 **Apache-2.0**（含明确专利授权），宿主与内核保持 MIT。已落地：显式 license 字段 + 标准全文 LICENSE + README 说明；提取集 38 个 Apache-2.0 依赖**都不带 NOTICE**，故 §4(d) 义务不触发（已写进 THIRD-PARTY-LICENSES.md）。仍未做：`cargo-deny` 需在 CI 安装后跑全量（本地脚本已覆盖主要能力） |
 | **NOTICE 依赖上游包内容** | §4(d) 义务的判定依据是"上游是否随包发布 NOTICE"。本脚本查的是本地 registry 目录 —— 若某包在上游带 NOTICE 而随包未分发，会漏判。彻底做法是用 `cargo-about` 读包元数据。当前实测 38 个包全无 NOTICE，风险低但非零 |
 | **许可证选择（历史记录）** | 方案建议可开源部分用 Apache-2.0（理由：明确的专利授权），本仓根是 MIT。两者都宽松、都允许商用，差别在专利条款 —— 属法律性决定，未擅自改。当前保持 MIT。另：Apache-2.0 依赖的 `NOTICE` 义务尚未履行（完整清单需生成器产出，不应手工维护） |
+| **Linux 桌面宿主的运行时库** | gpui 在 Linux 靠 **dlopen** 加载 `libxkbcommon` / `libwayland` / `libX11` —— **编译不需要**这些包，但运行时缺了会直接 panic（`Library libxkbcommon.so could not be loaded.`）。预编译 Linux 产物不含桌面（精简版）故不受影响；自行 `cargo install` 的 Linux 用户需要先装它们。README 已写明 |
 | **Linux 构建未验证** | 本地交叉检查不可行（macOS 无 Linux C 工具链，`cc-rs` 直接报缺 `x86_64-linux-gnu-gcc`），只能靠 CI 首跑。已本地排除一类风险：UI 栈五个 crate 的平台相关 `cfg` 为 0，其余 crate 的 `cfg(target_os)` 都是有意的三平台分支 |
 | **IME 只验了组件契约** | 已有 3 条自动化回归用例（preedit 删除后重输、连续合成、基建自证），钉住我们依赖的组件契约。但**真输入法**（装中文输入法敲键、候选框跟光标）未验：本用例不驱动系统输入法进程，真机还可能在奇怪时机连发 unmark |
 | **高 DPI 只验了整数倍两档** | 1x / 2x 实测通过（清晰、中文正常、无错位）。但 macOS 的 fractional scaling（125%/150%）是"高分辨率渲染再缩放"的**不同机制**，本机没有对应的可用模式，无法验证 —— 不能由整数倍结果推断 |

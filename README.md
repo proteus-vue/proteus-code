@@ -84,8 +84,19 @@ curl -fsSL https://raw.githubusercontent.com/proteus-vue/proteus-code/main/scrip
 
 装到 `~/.local/bin/neo`（可用 `NEO_INSTALL_DIR` 改）。预编译产物覆盖
 macOS（Apple Silicon / Intel）与 Linux x86_64；脚本会校验 SHA-256。
-**Linux 产物是精简版**（不含桌面窗口，因它需要 libwebkit2gtk）——
-需要 Linux 桌面窗口请用方式 ② 或 ③。
+
+**Linux 预编译产物是精简版**（不含任何桌面窗口），原因有两条且**都关于
+系统库**，不是关于代码：
+- webview 桌面需要 `libwebkit2gtk`（构建期 pkg-config + 运行期动态库）；
+- GPUI 桌面需要 `libxkbcommon` / `libwayland` / `libX11`。
+  这三者走 **dlopen（运行时加载）** —— 编译不需要它们，但**运行时缺了会
+  直接 panic**（`Library libxkbcommon.so could not be loaded.`）。
+  也就是说 Linux 上自行构建含桌面的版本时，编译能过、启动才炸，
+  所以这里必须写清楚要装什么。
+
+Linux 上要桌面窗口：用方式 ③ 自行构建，并先装好上述系统库；或继续用 TUI
+（命令行体验完整，不受影响）。**Linux 桌面产物尚未验证**（未在 CI 或真机上
+跑过含 gpui 的 Linux 构建），这一点如实记在项目缺口清单里。
 
 **② npm（有 Node 环境时最省事）**：
 
