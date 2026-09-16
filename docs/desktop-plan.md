@@ -1,9 +1,13 @@
 # 桌面版实现计划
 
-> 状态：**计划已定，实现未开始**。本轮只完成阶段 A（工具链升级）。
+> 状态：**阶段 A（工具链）与阶段 B（框架选型）已完成；阶段 C/D/E 未开始**。
+> 前置问题 1、2、4 已解决，只剩第 3 条（`DesktopHost` 定位，已标注为测试替身）。
 > 决策依据见 [`neo-plan/02-架构设计/ADR/ADR-0006-桌面原生GUI.md`](neo-plan/02-架构设计/ADR/ADR-0006-桌面原生GUI.md)。
 >
-> **本文所有事实均来自实际核查**（读源码 + 查 crates.io registry），凡未实测的一律标"待实测"。
+> **框架已选定：egui**（阶段 B 实测，gpui 因构建期依赖完整 Xcode 的 Metal 工具链而退出对比）。
+>
+> **本文所有事实均来自实际核查**（读源码 + 查 crates.io registry + 原型实测），
+> 凡未实测的一律标"待实测"。
 
 ---
 
@@ -80,9 +84,64 @@ Markdown 正文 · 思考轨迹 · 工具卡片 · **diff 渲染** · 轮摘要 
 
 ---
 
-## 阶段 B · 原型对比（一次性 spike，可丢弃）
+## 阶段 B · 原型对比（✅ 已实测，结论已出）
 
 **目的：不靠论证选框架。** 同一份最小需求（窗口 + 一段 Markdown + 一个 diff + 一个输入框 + 一段流式文本）用两条路各写一遍。
+
+> **结论（2026-09-16 实测）**：
+> - **路线 A（egui）走通** —— 121 行实现全部需求，编译成功、**真机开出窗口**。
+> - **路线 B（gpui）在本机编不过** —— 卡在 `gpui` 的 build script 调 `xcrun metal` 编译
+>   Metal 着色器，而 `metal` 编译器**只随完整 Xcode.app 分发**（本机只有 CommandLineTools）。
+> - **按计划既定规则，gpui 退出对比**（"若 gpui 编不过，直接退出对比 —— 这本身就是结论"）。
+>
+> ⚠️ **失败原因与计划预判的不同，更值得注意**：计划预判的是 **MSRV**（Zed 钉 1.98 > 我们的 1.95），
+> 而实际失败在**更早、更硬的一层** —— 构建期依赖 GPU 着色器工具链，与 Rust 版本无关。
+> 也就是说：**升到 1.98 也解决不了这个问题**，它要的是装完整 Xcode。
+> （本机 `xcodebuild -version` → "requires Xcode, but active developer directory
+> is a command line tools instance"；`xcrun --find metal` → "unable to find utility"。）
+
+### 实测数据（同一台机器、同一份需求）
+
+| 指标 | 路线 A：egui | 路线 B：gpui |
+|---|---|---|
+| 能否编译 | ✅ 成功 | ❌ 失败（`xcrun metal` 缺失，装完整 Xcode 才行） |
+| 能否开窗 | ✅ 进程存活、真窗口 | — 未到运行 |
+| **传递依赖规模（实测）** | **约 165 个 crate**（`cargo tree -e normal`） | 未测得（构建前失败） |
+| 首次编译时长 | **约 124 秒**（release，冷） | — |
+| 增量编译 | 2 秒 | — |
+| 二进制体积 | **13.4 MB**（release） | — |
+| 实现行数 | **121 行**（含 Markdown 解析与 diff 渲染） | — |
+| 构建产物占盘 | 592 MB | 1.1 GB（下载+编译到失败为止） |
+
+> **计划里的依赖数被严重低估**：原表写"egui 约 16 条 normal；eframe 约 34 条"，
+> 那是**各自的直接依赖**；实测 egui + eframe + pulldown-cmark + similar 的
+> **闭包是约 165 个 crate**。相差约 5 倍 —— 做"零多余依赖"这类判断时必须用闭包数，
+> 不能用直接依赖数。这条修正对阶段 C 的取舍也有影响。
+
+### 实测踩到的 API 事实（写给阶段 D，避免再踩）
+
+egui **0.36 相对常见教程是一次大改**，凭印象写必然编不过（本 spike 第一版 8 个编译错误全在此）：
+
+| 常见写法（旧） | 0.36 实际 | 说明 |
+|---|---|---|
+| `impl App { fn update(&mut self, ctx, frame) }` | **`fn ui(&mut self, ui: &mut egui::Ui, frame)`** | `update` 已不是 trait 成员；另有 `logic()` 用于非绘制逻辑 |
+| `egui::TopBottomPanel::top(id)` / `SidePanel::left(id)` | **`egui::Panel::top(id)` / `Panel::left(id)`** | 两者统一为 `Panel`，方向是构造器 |
+| `panel.show(ctx, …)` | **`panel.show(ui, …)`** | 面板接 `&mut Ui` 而非 `&Context` |
+| `Event::End(Tag::Heading(level))` | **`Event::End(TagEnd::Heading(level))`** | pulldown-cmark 0.13 的结束标签独立成 `TagEnd` |
+
+**检索方式**（下次直接查，别猜）：读本机 registry 里的源码，如
+`~/.cargo/registry/src/*/eframe-0.36.2/src/epi.rs` 的 `pub trait App`、
+`egui-0.36.2/src/containers/panel.rs` 的公开构造器。
+
+### 原型源码的去向
+
+按计划它是"一次性 spike，可丢弃"，因此**不并入 workspace**（避免死代码与依赖膨胀）：
+原型建在仓库外的独立 `cargo` 工程，测完即删。**留档的是上面那张 API 事实表与实测
+数据**，而不是 121 行源码 —— 前者是阶段 D 真正会用到的东西（凭印象写 egui 0.36 必然
+编不过），后者用一张表就能复现。
+
+**若阶段 D 采用 egui，第一步就是照着上表搭骨架**：`Panel`（不是 SidePanel）、
+`App::ui`（不是 `update`）、面板收 `&mut Ui`。这三点是本 spike 用 8 个编译错误换来的。
 
 | | 路线 A：egui | 路线 B：gpui |
 |---|---|---|
@@ -94,17 +153,30 @@ Markdown 正文 · 思考轨迹 · 工具卡片 · **diff 渲染** · 轮摘要 
 | 风险 | 渲染为 CPU tessellation，样式上限低 | pre-1.0、**无 MSRV 声明**、平台栈重 |
 
 **必量的指标**：能否在 1.95 下编译成功 · 依赖条目数 · 首次编译时长 · 二进制体积 · 实现行数 · 中英混排与流式追加的观感。
+（实测结果见上方结论表。**"中英混排与流式追加的观感"未量**——它要真人看窗口，机器测不出；
+egui 路线已确认能开窗，观感留待阶段 D 实现时由真人验收。）
 
 ### 路线 B 的已知障碍（记录，不预设结论）
 
-1. **无 MSRV 声明**，而 Zed 主线钉 **1.98.1**——**高于**本项目的 1.95。能否编译**必须实测**。
+> 实测后回填：**实际拦住的是第 5 条（构建成本），不是第 1 条（MSRV）**。
+> 1 从未被触发（构建在 Metal 着色器阶段就失败）；这条差异很重要 ——
+> 它意味着"升级到 1.98"这个看似可行的绕法**根本救不了 gpui**。
+
+1. ~~**无 MSRV 声明**，而 Zed 主线钉 **1.98.1**~~ —— 未能验证（构建更早失败），**且已证明非关键**。
 2. **crates.io 上的 `gpui` 已停滞**：最新 0.2.2（2025-10-22），且与 main 已漂移（`Application::new` vs 新的 `gpui_platform::application`），而 **`gpui_platform` 并未发布**。用新版只能走 git 依赖。
 3. **Zed 的 UI 组件拿不到**：`ui` / `editor` / `markdown` / `diff` / `component` 均为 **GPL-3.0-or-later 且 `publish = false`**，本项目 MIT —— 复用不了。
    （`gpui` 框架本体是 **Apache-2.0**，早年的 GPL 依赖 `zlog`/`ztracing` 已被官方改掉。）
 4. **可用组件来自第三方 fork**：`gpui-component`（Longbridge，Apache-2.0，60+ 组件，含 `MessageScroller` / `diff` / markdown / editor）依赖 **`gpui-pre`**——即 Longbridge 自己重发布的 Zed 快照。**采用它 = 把第三方 fork 当渲染底座**，这是需显式接受的供应链选择。
-5. **构建成本**：macOS 需完整 Xcode；`bindgen` 需 libclang。
+5. **构建成本**：macOS 需完整 Xcode；`bindgen` 需 libclang。← **✅ 实测确认：就是这一条把 gpui 挡在门外。**
+   `gpui-0.2.2/build.rs` 的 `compile_metal_shaders()` 无条件调 `xcrun -sdk macosx metal`
+   编译 `src/platform/mac/shaders.metal`，失败即 `process::exit(1)`；**没有任何环境变量开关可跳过**
+   （该函数里只有 `GPUI_FXC_PATH` 用于另一处，与此无关）。而 `metal` 编译器只随
+   **完整 Xcode.app** 分发：本机 `xcodebuild -version` 报 "requires Xcode, but active
+   developer directory is a command line tools instance"，`xcrun --find metal` 报
+   "unable to find utility"。装完整 Xcode 是 ~10 GB 级的额外前置。
 
 > **若 gpui 在 1.95 下编不过，直接退出对比**——这本身就是结论。
+> **✅ 已按此规则执行：gpui 退出对比，本阶段选型为 egui。**
 
 ---
 
@@ -243,4 +315,11 @@ workspace members + `docs/neo-plan/05-验证/checks/check_architecture.py` 的 `
 - **无签名**：用户首次打开需右键"打开"绕过 Gatekeeper。
 - **`page.rs` 那 184 行不在本次范围**：它是 `neo serve`（Web 宿主）的页面；桌面原生化后它不再影响桌面，但 **Web 宿主界面依然简陋，是另一条线**。
 - **对"零多余依赖"的让步**：GUI 栈是数十个 crate（TUI 至今手写 ANSI、HTTP 手写）。此让步见 ADR-0006 的理由与约束。
-- **本文档中的 gpui 结论待实测**：阶段 B 的原型会给出最终答案，届时回填。
+  **实测规模**：egui 路线的传递依赖闭包是**约 165 个 crate**（计划原估 16/34 是直接依赖数，见阶段 B）。
+- ~~本文档中的 gpui 结论待实测~~ → **已回填**（阶段 B）：gpui 因构建期调 `xcrun metal`（需完整
+  Xcode）而编不过，按既定规则退出对比；**选型为 egui**。
+- **观感尚未验证**：阶段 B 只证明了 egui 能编译、能开窗，**没有**验证"像不像对标产品"——
+  中英混排、流式追加的视觉、以及 `desktop-parity.md` 里那份界面契约的还原度，都要等阶段 D
+  做出来由真人验收。选型实测替代不了视觉验收。
+- **egui 的样式上限**：即时模式 + CPU tessellation，样式能力弱于 GPU 渲染的 gpui/Zed。
+  这是选 egui 换来的确定性（能编、能跑）所对应的代价，需在阶段 D 有预期。

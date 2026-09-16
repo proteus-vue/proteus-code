@@ -33,7 +33,10 @@
 
 ## 决策
 
-1. **桌面宿主新增 Rust 原生 GUI 实现**（框架由原型实测决定，见 `docs/desktop-plan.md` 阶段 B；候选 `egui/eframe` 与 `gpui + gpui-component`）。
+1. **桌面宿主新增 Rust 原生 GUI 实现**。框架由原型实测决定（见 `docs/desktop-plan.md` 阶段 B）：
+   **✅ 2026-09-16 实测结论为 `egui/eframe`** —— 原型 121 行走通全部最小需求、真机开窗；
+   候选 `gpui` 因 `build.rs` 调 `xcrun metal` 编译着色器（`metal` 编译器只随完整 Xcode.app
+   分发，无环境变量可跳过）而编不过，按既定规则退出对比。传递依赖闭包实测约 165 个 crate。
 2. **保留 wry/webview 作为第二个 `HostBackend`**，不删除——`L5-host.md:33` 早就主张"不押注单一方案"，且那份实现已有真机交互验证（PROJECT_MEMORY §4.57）。`neo desktop` 走原生，`neo desktop --webview` 保留 webview 路径。
 3. **工具链从 1.83.0 升到 1.95.0**（本 ADR 的配套前置）。1.83 钉版原本是为兜住 wry/tao 的 edition2024 依赖树；候选 GUI 框架的 MSRV 均高于 1.83，继续背着这个钉版只会让每个候选都要额外做依赖钉版维护。
 
