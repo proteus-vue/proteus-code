@@ -46,6 +46,11 @@ jobs:
       - name: 编译检查(全 target)
         run: cargo check --workspace --all-targets
       - name: 全量测试
+        # 关掉颜色：CI 日志里 cargo 默认带 ANSI 转义，而 `^error` 这类
+        # **行首锚点会因此永远匹配不上**（行其实以 \x1b[1m 开头）。
+        # 我为此白跑了一轮 —— 我的诊断 grep 用了 ^error，结果什么都匹配不到。
+        env:
+          CARGO_TERM_COLOR: never
         run: |
           # ⚠️ `set +e` **必须**显式关掉：GitHub Actions 的 run 块默认是
           # `bash -e`（出错即退出），所以 `cargo test` 失败后 shell **立刻退出**，
@@ -100,11 +105,13 @@ jobs:
             # 只发尾部会看不到真正的原因。先找 error/warning/FAILED 行，
             # 再补尾部（两者都发，因为可能都没有）。
             # 去掉 ANSI 颜色码，否则注解里是乱码转义。
-            grep -aE '^(error|warning: unused|test .* FAILED)|error\[|panicked at|^Error:|cannot find|failed to' /tmp/test-out.log \
-              | head -12 | sed -E 's/\x1b\[[0-9;]*m//g' | while IFS= read -r line; do
+            # ⚠️ **先去 ANSI 再 grep**（上一版顺序反了，导致 ^error 匹配不到）
+            sed -E 's/\x1b\[[0-9;]*m//g' /tmp/test-out.log > /tmp/plain.log
+            grep -aiE 'error|could not compile|failed to run|cannot find|panicked at|FAILED' /tmp/plain.log \
+              | head -15 | while IFS= read -r line; do
               echo "::error title=错误::${line:0:800}"
             done
-            tail -25 /tmp/test-out.log | sed -E 's/\x1b\[[0-9;]*m//g' | while IFS= read -r line; do
+            tail -30 /tmp/plain.log | while IFS= read -r line; do
               [ -z "$line" ] && continue
               echo "::error title=尾部::${line:0:800}"
             done
