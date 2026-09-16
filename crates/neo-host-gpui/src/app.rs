@@ -109,6 +109,12 @@ pub struct NeoView {
     /// 搜索输入框（惰性建，理由同任务输入框）。
     search_state: Option<Entity<InputState>>,
     search_subs: Vec<neo_ui_kit::gpui::Subscription>,
+    /// 每轮的 token 用量（按 `TurnComplete` 出现顺序）。
+    ///
+    /// 与 `turn_durations` 同一处收集、同样的理由：这是**宿主的派生状态**，
+    /// 不进共享转录模型（模型里有 `TurnSummary` 块，但那是给转录区逐行显示
+    /// 数字用的；画图需要的是序列，重复解析块列表既慢又容易错位）。
+    turn_usages: Vec<neo_ui_render::UsageBar>,
     /// 转录区的滚动句柄。
     ///
     /// ⚠️ 用 `track_scroll` + `overflow_y_scroll` + `vertical_scrollbar`
@@ -210,6 +216,7 @@ impl NeoView {
             show_reasoning: true,
             clock: neo_ui_behavior::TurnClock::new(),
             turn_durations: Vec::new(),
+            turn_usages: Vec::new(),
             force_expand_groups: std::env::var("NEO_GUI_EXPAND").is_ok(),
             shot_armed: std::env::var("NEO_GUI_SHOT").ok().map(|_| false),
             transcript: Transcript::new(),
@@ -267,8 +274,10 @@ impl NeoView {
                 EventMsg::TurnStarted { .. } => {
                     self.clock.start(elapsed_now());
                 }
-                EventMsg::TurnComplete { .. } => {
+                EventMsg::TurnComplete { input_tokens, output_tokens } => {
                     self.turn_durations.push(self.clock.elapsed_since_start(elapsed_now()));
+                    self.turn_usages
+                        .push(neo_ui_render::UsageBar::new(*input_tokens, *output_tokens));
                     self.clock.finish();
                 }
                 _ => {}
@@ -681,6 +690,44 @@ fn gutter_element(diff: &str) -> impl IntoElement {
     .h_full()
 }
 
+/// 用量条形图元素：**渲染缝的第二个真实消费者**。
+///
+/// 与变更条（第一个消费者）同构：宿主持有原始数据 → 映射成中立类型 →
+/// 经 `RenderBackend` 出场景 → 在 canvas 的 paint 回调里提交。
+/// 区别只在于数据来源（这里来自事件流而不是 diff 文本）。
+fn usage_chart_element(bars: Vec<neo_ui_render::UsageBar>) -> impl IntoElement {
+    use neo_ui_render::{usage_bars, RenderBackend};
+
+    // 颜色在**宿主**决定（渲染层不认识语义色调，这样它能随 UI 栈开源）。
+    //
+    // 直接用 `Color::from_tone`：它是"语义色调 → RGB"的那一处实现，
+    // 不必绕道 gpui 的 `Rgba` 再解回来（绕一圈要处理 0-1 浮点与字节序，
+    // 而那条路上任何一步写错都只表现为"颜色不对"，不会有编译错误）。
+    let input_color = neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Info);
+    let output_color = neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Accent);
+
+    let prepaint = move |bounds: neo_ui_kit::gpui::Bounds<neo_ui_kit::gpui::Pixels>,
+                         _window: &mut neo_ui_kit::gpui::Window,
+                         _cx: &mut neo_ui_kit::gpui::App| {
+        let scene = usage_bars(
+            &bars,
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+            input_color,
+            output_color,
+        );
+        (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
+    };
+    neo_ui_kit::gpui::canvas(
+        prepaint,
+        |bounds, (_, paint), window, _cx| {
+            paint.draw(bounds.origin, window);
+        },
+    )
+    .w_full()
+    .h(px(36.))
+}
+
 /// 把一行带色调的片段渲染成一个元素（复用 `neo-text` 的 Markdown 解析）。
 ///
 /// 用 `StyledText::with_highlights` 而不是逐片段 `div().child()`：
@@ -1024,6 +1071,53 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
         .h_full()
         .gap_2()
         .p_3()
+        // ── 用量趋势（渲染缝的第二个自绘消费者）──
+        //
+        // 放在最上面：它是**全局**信息（这条会话总共花了多少、有没有陡增），
+        // 而下面的目标与会话列表是"当前上下文"。
+        //
+        // 只在有数据时画：一条会话刚开始就摆一个空图表框，会让人以为
+        // 功能坏了（而不是"还没有数据"）。
+        .child({
+            let total: u64 = view.turn_usages.iter().map(|b| b.total()).sum();
+            if view.turn_usages.is_empty() {
+                div().into_any_element()
+            } else if total == 0 {
+                // **有轮次但全为 0** 是一个真实且常见的情况：桩 provider
+                // 不报 token。此时不能只显示标题 + 空白 —— 那看起来像图表坏了。
+                // 说明原因，用户才知道"不是坏了，是这个 provider 不报"。
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(neo_color(Tone::Info))
+                            .child(format!("用量（{} 轮）", view.turn_usages.len())),
+                    )
+                    .child(
+                        div()
+                            .text_color(neo_color(Tone::Muted))
+                            .child("本次未报告 token 用量（桩 provider 不报）"),
+                    )
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(neo_color(Tone::Info))
+                            .child(format!("用量（{} 轮）", view.turn_usages.len())),
+                    )
+                    .child(usage_chart_element(view.turn_usages.clone()))
+                    .child(
+                        // 图例：两条色带必须有说明，否则读者只能猜哪根是哪根
+                        h_flex()
+                            .gap_2()
+                            .child(div().text_color(neo_color(Tone::Info)).child("■ 输入"))
+                            .child(div().text_color(neo_color(Tone::Accent)).child("■ 输出")),
+                    )
+                    .into_any_element()
+            }
+        })
         .child(
             div()
                 .text_color(neo_color(Tone::Info))

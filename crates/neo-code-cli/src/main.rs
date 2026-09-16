@@ -1198,6 +1198,10 @@ fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
             ]],
             "multitool 脚本执行完毕：上面 3 次调用属于同一轮，应当折叠成一组。",
         ).with_name("multitool"))));
+    // 报 token 的演示桩：所有其它桩都不发 Usage，于是"用量图表"离线永远
+    // 画不出来（token 恒为 0）。图表必须看到形状才能判断对不对。
+    entries.push(mk("usage", "演示用量趋势：多轮 token 递增（供用量图表验证）", 0, false,
+        std::sync::Arc::new(neo_llm_deepseek::ScriptedProvider::usage_demo())));
 
     // ── 用户级注册表里的服务商（providers.json）──────────────────────
     //

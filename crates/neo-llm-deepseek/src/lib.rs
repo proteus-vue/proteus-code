@@ -1456,6 +1456,50 @@ impl ScriptedProvider {
         )
     }
 
+    /// 演示用量趋势：多轮、每轮 token 递增且输入/输出比例不同。
+    ///
+    /// **为什么需要它**：所有桩都不发 `Usage`，于是"用量图表"在离线环境
+    /// 永远画不出来（token 恒为 0），只能靠真实模型碰运气。
+    /// 而图表这种东西**必须看到形状**才能判断对不对 —— 读代码判断不了
+    /// "柱子高度是不是按比例"。
+    pub fn usage_demo() -> Self {
+        // 每轮的 (输入, 输出)：刻意做成递增 + 比例变化，
+        // 这样能看出"堆叠是按比例分的"而不是各占一半
+        // 一轮的 (输入, 输出)。单轮语义见下方注释。
+        let steps: Vec<(u64, u64)> = vec![(1800, 900)];
+        // ⚠️ 关于"怎样才会有多轮"（实测过两种都不对，这里记清楚）：
+        //
+        // 内核的**一轮**是"一次 BeginTurn 到它结束"，不是"一次模型调用"。
+        // `TurnComplete` 报的是**整轮累计**（`usage_in/out` 在整轮里累加）。
+        // 所以：
+        // - 每步带工具调用 → 内核在同**一轮**里连续推进多步（我第一版这样写，
+        //   结果 5 步的 token 全加在一起、只出一根柱子）；
+        // - 每步不带工具调用 → 内核认为任务已完成，**只跑第一步**（更早的版本）。
+        //
+        // 要真的多轮，得由外部驱动（目标模式每子任务一轮，或用户多次提交）。
+        // 这个桩因此只做"一次提交 = 一轮"，用量取自第一组数值 ——
+        // 想看多柱请走目标模式（`/goal`）或连续提交几次。
+        let script: Vec<Vec<ModelDelta>> = steps
+            .iter()
+            .enumerate()
+            .map(|(n, (i, o))| {
+                let mut deltas = vec![ModelDelta::Text(format!(
+                    "（usage 演示第 {} 轮）",
+                    n + 1
+                ))];
+                // 用 bash 回显：无副作用、走沙箱、每轮都会成功
+                deltas.push(Self::tool_call_delta(
+                    &format!("u{n}"),
+                    "bash",
+                    serde_json::json!({"cmd": format!("echo 第 {} 轮", n + 1)}),
+                ));
+                deltas.push(ModelDelta::Usage { input_tokens: *i, output_tokens: *o });
+                deltas
+            })
+            .collect();
+        Self::scripted(script, "usage 演示结束。").with_name("usage")
+    }
+
     fn tool_call_delta(id: &str, name: &str, args: serde_json::Value) -> ModelDelta {
         ModelDelta::ToolCall(neo_core::ToolInvocation {
             id: id.to_string(),
