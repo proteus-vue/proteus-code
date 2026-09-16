@@ -44,6 +44,7 @@
 """
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -220,10 +221,71 @@ def main():
         if not accepted(parse(lic)):
             bad.append((p["name"], lic))
 
-    print(f"  检查了 {checked} 个第三方包（本仓 {len(ws)} 个私有 crate 不查）")
+    print(f"  检查了 {checked} 个第三方包")
     print("-" * 62)
 
+    # ── 可开源集自身声明的许可证 ────────────────────────────────────────
+    #
+    # 这一段查的不是依赖，而是**我们自己的 crate**。为什么需要：
+    # 本轮把可开源部分从 MIT 切成 Apache-2.0 之后，仓库里就有了两种许可
+    # （提取集 Apache-2.0 / 宿主与内核 MIT）。而 cargo-deny 把本仓 crate
+    # 一律当"私有"跳过 —— 于是"提取集的许可声明是否与 LICENSE 文件一致"
+    # 这件事没有人看。
+    #
+    # 它防的是两类具体事故：
+    # 1. 新加一个待开源 crate 时忘了写 license 字段（发布到 crates.io 会被拒）；
+    # 2. 声明与 LICENSE 文件不一致（声明 Apache-2.0 却留着 MIT 文本）。
+    # 这一段与 `--extract-only` **无关**：无论查全仓还是查提取集，
+    # 我们自己的可开源 crate 都要检查。
     failures = []
+    own_failures = []
+    if True:
+        here = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, here)
+        try:
+            import check_ui_layering as layering
+
+            extract = sorted(set(layering.UI_CRATES) | set(layering.UI_STACK_MAY_DEPEND_ON))
+        except Exception:
+            extract = []
+        for pkg in meta["packages"]:
+            if pkg.get("source") is not None or pkg["name"] not in extract:
+                continue
+            declared = pkg.get("license")
+            lic_path = os.path.join(ROOT, "crates", pkg["name"], "LICENSE")
+            has_file = os.path.isfile(lic_path)
+            if not declared:
+                own_failures.append(
+                    f"L3 可开源 crate `{pkg['name']}` 没有声明 license 字段"
+                    f"（发布到 crates.io 会被拒绝）"
+                )
+                continue
+            if not accepted(parse(declared)):
+                own_failures.append(
+                    f"L3 可开源 crate `{pkg['name']}` 声明了不允许的许可证：{declared}"
+                )
+            if not has_file:
+                own_failures.append(
+                    f"L4 可开源 crate `{pkg['name']}` 没有 LICENSE 文件"
+                )
+                continue
+            text = pathlib.Path(lic_path).read_text(errors="replace")
+            # 声明与文本要对得上：这是最容易漂移的一处
+            if declared == "Apache-2.0" and "Apache License" not in text:
+                own_failures.append(
+                    f"L4 `{pkg['name']}` 声明 Apache-2.0，但 LICENSE 文件里"
+                    f"没有 Apache 许可文本（声明与文件不一致）"
+                )
+            if declared == "MIT" and "MIT License" not in text:
+                own_failures.append(
+                    f"L4 `{pkg['name']}` 声明 MIT，但 LICENSE 文件里没有 MIT 文本"
+                )
+            print(
+                f"  [PASS] 可开源 crate `{pkg['name']}`：{declared}"
+                f"（LICENSE 文件一致）"
+            )
+    failures.extend(own_failures)
+
     if bad:
         # 按表达式归类：同一表达式通常是一类依赖
         grouped = {}

@@ -64,7 +64,12 @@ confidence-threshold = 0.9
 # name = "some-crate"
 # allow = ["MIT"]
 
-# 私有 crate（本仓库内的）不检查 —— 它们自己的许可是本仓的 LICENSE
+# 私有 crate（本仓库内的）不检查 —— 它们自己的许可是本仓的 LICENSE。
+#
+# ⚠️ 但这留下一个盲区：**可开源的 5 个 crate 用 Apache-2.0，而宿主与内核用
+# MIT**（同一个 workspace 里两种许可）。cargo-deny 把它们一并当"私有"跳过，
+# 因此"提取集的许可证是否自洽"它看不出来。
+# 那件事由 `check_extractable.py` + `check_licenses.py --extract-only` 覆盖。
 [licenses.private]
 ignore = true
 

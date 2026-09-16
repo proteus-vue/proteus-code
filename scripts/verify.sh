@@ -96,6 +96,13 @@ if [ -d "$PLAN_CHECKS" ]; then
     py=python3; command -v "$py" >/dev/null 2>&1 || py=python
     ( cd "$PLAN_CHECKS" && "$py" "checks/$script" ) || fail=$((fail+1))
   done
+
+  # 第三方许可证清单是否与当前依赖一致（防止清单腐烂）。
+  # 它不属于 `checks/` 那一组（那组是"守卫"，这个是"交付物是否最新"），
+  # 但对开源产物同样重要：清单过期等于给使用者一份错的信息。
+  hr; echo "#  第三方许可证清单是否最新"; hr
+  py=python3; command -v "$py" >/dev/null 2>&1 || py=python
+  ( cd "$ROOT" && "$py" scripts/gen_third_party_licenses.py --check ) || fail=$((fail+1))
 else
   echo "  [SKIP] 未找到 $PLAN_CHECKS"
 fi
