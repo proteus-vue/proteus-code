@@ -5266,6 +5266,7 @@ dependencies = [
  "neo-mock",
  "neo-protocol",
  "neo-sandbox-local",
+ "neo-text",
  "serde_json",
 ]
 
@@ -5314,6 +5315,29 @@ dependencies = [
  "neo-sandbox-local",
  "neo-session",
  "neo-text",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-host-gpui"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "neo-capability",
+ "neo-config",
+ "neo-core",
+ "neo-driver",
+ "neo-exec",
+ "neo-llm-deepseek",
+ "neo-mock",
+ "neo-protocol",
+ "neo-sandbox-local",
+ "neo-session",
+ "neo-text",
+ "neo-ui",
+ "neo-ui-behavior",
+ "neo-ui-kit",
+ "neo-ui-render",
  "serde_json",
 ]
 

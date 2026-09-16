@@ -25,54 +25,97 @@ pub fn neo_color(tone: Tone) -> neo_ui_kit::gpui::Rgba {
     neo_ui_kit::gpui::rgba(Color::from_tone(&palette::NEO, tone).to_rgba_u32())
 }
 
+/// 页面底色（近黑）。
+///
+/// # 为什么必须单开一个入口，而不是让调用方写 `neo_color(Tone::None)`
+///
+/// 因为那是个**陷阱**：`Tone::None` 的语义是"未指定色调"，调色板把
+/// `None | Text` 都兜底到 `text` —— 也就是**近白**。拿它当背景色，
+/// 会得到一块近白的底，配深色调色板的近白正文，界面几乎看不清。
+///
+/// 本宿主的第一次真机截图就是这样白的（代码里看着"设了个背景色"）。
+/// 所以把"底色"做成显式函数名：名字本身说明它是背景，不再靠猜语义。
+pub fn base_bg() -> neo_ui_kit::gpui::Rgba {
+    let (r, g, b) = palette::NEO.bg_base;
+    neo_ui_kit::gpui::rgba(neo_ui_render::Color::rgb(r, g, b).to_rgba_u32())
+}
+
+/// 面板底色（侧栏/对话框，比页面底略亮一档）。
+pub fn panel_bg() -> neo_ui_kit::gpui::Rgba {
+    let (r, g, b) = palette::NEO.bg_panel;
+    neo_ui_kit::gpui::rgba(neo_ui_render::Color::rgb(r, g, b).to_rgba_u32())
+}
+
 /// 把 NEO 品牌色装进 gpui-component 的全局主题。
 ///
 /// **必须在 `neo_ui_kit::init(cx)` 之后、开窗之前调用一次。**
 /// 之后再调也可以（用于运行时换主题），但要跟着 `refresh_windows` 让界面重绘。
+///
+/// # 顺序要紧：先切模式，再改颜色
+///
+/// `gpui_component::init` 装好的是**浅色**主题（`ThemeMode::Light` 是默认值）。
+/// 而 NEO 的调色板是深色的（正文色 `#ededed`）。
+/// 如果只改语义色不改模式，结果就是**近白的文字画在近白的底上** ——
+/// 界面能开、布局正确、中文也正常，但看不清。这不是理论风险：本宿主第一次
+/// 真机截图就是这样（见 PROJECT_MEMORY §4.65）。
 pub fn apply_neo_theme(cx: &mut neo_ui_kit::gpui::App) {
-    use neo_ui_kit::component::Theme;
+    use neo_ui_kit::component::{Theme, ThemeMode};
 
-    // 十六进制字符串是 gpui-component 的公开解析入口（支持 #RRGGBB / #RRGGBBAA）。
-    // 这里从 `neo-text` 的调色板取数值再格式化成字符串，而不是直接写 "#a78bfa" ——
-    // 后者会让品牌色有两个来源，改一处忘一处。
+    // ⚠️ 顺序与做法都有讲究，这里是踩过坑之后的写法。
+    //
+    // gpui-component 的主题有**两层**：
+    //   1. `colors: ThemeColor` —— 语义色（primary / accent / background…）
+    //   2. `tokens: ThemeTokens` —— 由语义色**派生**的组件 token
+    //      （按钮底、滚动条、根视图底色…），`From<&ThemeColor>` 生成。
+    //
+    // 而 `Root` 渲染时读的是 `cx.theme().tokens.background` —— **第二层**。
+    //
+    // 第一次实现只改了第一层（`theme.primary = ...`），真机结果是：
+    // 窗口开了、布局对、中文正常，但**底色仍是浅色、正文近白**，几乎看不清。
+    // 从代码上看"明明设了深色"，实际设的那一层没人读。
+    //
+    // 正确做法：先切模式（拿到深色基线）→ 覆盖语义色 → **重建 tokens** →
+    // 同步 base 层（滚动条/拖拽柄读的是 base 那份拷贝）。
+
+    // 1) 切到深色（同时把 light/dark 两套基线装好）
+    Theme::change(ThemeMode::Dark, None, cx);
+
+    // 2) 覆盖语义色（用我们的调色板；hex 派生自 `neo-text`，不写字面量）
     let hex = |tone: Tone| -> String {
         let (r, g, b) = palette::NEO.rgb(tone);
         format!("#{r:02x}{g:02x}{b:02x}")
     };
+    let (br, bg, bb) = palette::NEO.bg_base;
 
-    // 语义色：primary 是"最常出现的强调"（品牌紫），accent 是结构性位置
-    // （标题、用户消息竖条）——与 `neo-text` 里那条注释同一套取舍。
-    set_color(cx, &hex(Tone::Primary), |t| &mut t.primary);
-    set_color(cx, &hex(Tone::Accent), |t| &mut t.accent);
-    set_color(cx, &hex(Tone::Success), |t| &mut t.success);
-    set_color(cx, &hex(Tone::Error), |t| &mut t.danger);
-    set_color(cx, &hex(Tone::Warning), |t| &mut t.warning);
-    set_color(cx, &hex(Tone::Info), |t| &mut t.info);
+    {
+        let theme = Theme::global_mut(cx);
+        let set = |dst: &mut neo_ui_kit::gpui::Hsla, hexstr: String| {
+            if let Ok(c) = neo_ui_kit::component::try_parse_color(&hexstr) {
+                *dst = c;
+            }
+        };
+        set(&mut theme.colors.primary, hex(Tone::Primary));
+        set(&mut theme.colors.accent, hex(Tone::Accent));
+        set(&mut theme.colors.background, format!("#{br:02x}{bg:02x}{bb:02x}"));
+        set(&mut theme.colors.foreground, hex(Tone::Text));
+        set(&mut theme.colors.border, hex(Tone::Border));
+        set(&mut theme.colors.muted, hex(Tone::Muted));
+        set(&mut theme.colors.danger, hex(Tone::Error));
+        set(&mut theme.colors.success, hex(Tone::Success));
+        set(&mut theme.colors.warning, hex(Tone::Warning));
+        set(&mut theme.colors.info, hex(Tone::Info));
 
-    // ⚠️ 必须同步：上面改的是"语义色"那一层，组件 token（按钮底色、
-    // 滚动条、拖拽柄…）是从它派生的。不调这一步，界面会一半新色一半旧色。
+        // 3) **重建 tokens** —— 漏掉这一步，界面用的还是旧底色/旧按钮色。
+        //    这是本函数最容易被漏掉、且最难从代码上看出问题的一步：
+        //    语义色看起来"已经改了"，但真正被读的是它们派生出的 token。
+        theme.tokens = neo_ui_kit::component::ThemeTokens::from(&theme.colors);
+    }
+
+    // 4) base 层（滚动条、拖拽柄、语义 token 投影）是另一份拷贝，要显式同步。
+    //    不调它：按钮颜色对了、滚动条还是旧色 —— "改了一半"。
     Theme::sync_base(cx);
 }
 
-/// 设置一个颜色字段（解析失败就保持原值并如实报告，不 panic）。
-///
-/// 为什么不 `unwrap`：主题色是**外观**，一个格式错误不该让应用起不来 ——
-/// 但要**说出来**，否则"颜色没生效"会被当成主题系统的 bug 去查。
-fn set_color(
-    cx: &mut neo_ui_kit::gpui::App,
-    hex: &str,
-    pick: impl FnOnce(&mut neo_ui_kit::component::ThemeColor) -> &mut neo_ui_kit::gpui::Hsla,
-) {
-    let parsed = match neo_ui_kit::component::try_parse_color(hex) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[neo-ui] 主题色 {hex} 解析失败，保持默认值：{e}");
-            return;
-        }
-    };
-    let theme = neo_ui_kit::component::Theme::global_mut(cx);
-    *pick(theme) = parsed;
-}
 
 #[cfg(test)]
 mod tests {
@@ -123,6 +166,57 @@ mod tests {
                 "调色板导出的 {hex} 应能被主题解析器接受"
             );
         }
+    }
+
+    /// **深色模式必须显式切换** —— 这条是给真机截图抓到的那个 bug 上的锁。
+    ///
+    /// `gpui_component::init` 默认装**浅色**主题，而 NEO 的调色板是深色的
+    /// （正文 `#ededed` 近白）。只改语义色不切模式，结果是近白文字画在近白底上：
+    /// 窗口能开、布局对、中文正常，**但看不清**。本宿主第一次真机截图就是这样。
+    ///
+    /// 这里断言 NEO 的正文色确实比底色**亮** —— 若哪天有人把模式改回 Light，
+    /// 或换了个亮底调色板却没同步改模式，这条会失败。
+    #[test]
+    fn the_palette_requires_dark_mode() {
+        let (tr, tg, tb) = palette::NEO.rgb(Tone::Text);
+        let (br, bg, bb) = palette::NEO.bg_base;
+        let lum = |r: u8, g: u8, b: u8| 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
+        assert!(
+            lum(tr, tg, tb) > lum(br, bg, bb) + 100.0,
+            "NEO 调色板的正文色应显著亮于底色（说明它是**深色**主题）—— \
+             若这条失败，`apply_neo_theme` 里的 ThemeMode::Dark 可能被改掉了，\
+             界面会变成浅底浅字"
+        );
+    }
+
+    /// **`Tone::None` 不能当背景色用** —— 它兜底到 `text`（近白）。
+    ///
+    /// 这是真机截图抓到的第二个坑（第一次是主题模式没切）：
+    /// 宿主写了 `.bg(neo_color(Tone::None))`，看着像"设了背景"，
+    /// 实际画出一块近白的底，配近白正文 = 看不清。
+    /// 现在有了显式的 [`base_bg`]，这条测试守住"两者确实不同"。
+    #[test]
+    fn tone_none_is_not_a_background_color() {
+        let none_as_bg = neo_color(Tone::None);
+        let real_bg = base_bg();
+        assert_ne!(
+            none_as_bg, real_bg,
+            "Tone::None 兜底到正文色（近白），不能当底色用；\
+             背景请用 neo_ui::base_bg()"
+        );
+    }
+
+    /// 页面底必须比正文暗（不然就是白底白字）。
+    #[test]
+    fn the_base_background_is_darker_than_the_text() {
+        let lum = |c: neo_ui_kit::gpui::Rgba| {
+            let (r, g, b) = (c.r * 255.0, c.g * 255.0, c.b * 255.0);
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        };
+        assert!(
+            lum(base_bg()) + 100.0 < lum(neo_color(Tone::Text)),
+            "底色应显著暗于正文色，否则界面看不清"
+        );
     }
 
     /// 主题类型可达（门面层透出正确）。

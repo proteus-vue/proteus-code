@@ -18,4 +18,4 @@
 
 pub mod theme;
 
-pub use theme::{apply_neo_theme, neo_color};
+pub use theme::{apply_neo_theme, base_bg, neo_color, panel_bg};

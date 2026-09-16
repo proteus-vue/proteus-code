@@ -57,12 +57,13 @@ LAYER = {
     "neo-host-tui":      5,  # L5
     "neo-host-desktop":  5,  # L5
     "neo-host-egui":     5,  # L5（桌面原生 GUI：egui/eframe）
+    "neo-host-gpui":     5,  # L5（桌面原生 GUI：GPUI / gpui-kit）
     "neo-host-web":      5,  # L5
     "neo-exec":          5,  # L5
     "neo-code-cli":      5,  # L5（bin 名 neo；crates.io 上 neo-cli 已被占用故包名加 code）
 }
 SIDE = {"neo-session", "neo-config"}   # 旁挂，任何层可用
-HOSTS = {"neo-host-tui", "neo-host-desktop", "neo-host-egui",
+HOSTS = {"neo-host-tui", "neo-host-desktop", "neo-host-egui", "neo-host-gpui",
          "neo-host-web", "neo-exec"}
 # 注意 1 是混合层：既有 L1 PLATFORM（平台抽象：沙箱/剪贴板/通知），
 # 也有 L1 BASE（宿主中立的文本语义）。两者依赖深度相同、互不依赖。

@@ -1,0 +1,51 @@
+[package]
+name = "neo-host-gpui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L5 宿主：桌面原生 GUI（GPUI / gpui-kit，NEO 的品牌界面）"
+
+# L5 HOST: 原生 GUI。不含业务逻辑，只做渲染 + 输入解析 + 消费事件流。
+#
+# # 与 neo-host-egui 的关系（过渡期并存，之后删 egui）
+#
+# 两者是**同一个位置的两种实现**：都消费同一份事件流、都用 `neo-driver` 驱动、
+# 都复用 `neo-text` 的文本语义。差别只在"谁来画"。ADR-0006「不押注单一方案」
+# 在这里的落地方式是：**gpui 转正、egui 冻结**（只修 bug、不再加功能），
+# 等 gpui 覆盖 D1–D11 后删除 egui，而不是长期双维护。
+#
+# # 它自己不声明 gpui 依赖
+#
+# 一行都不写 —— 全部经 `neo-ui-kit` 取用（门禁 `check_ui_layering.py` 的 U2 强制）。
+# 这条不是形式主义：两份 gpui 会让 Cargo 编译两份引擎，报出类型身份分裂的怪错误。
+[dependencies]
+# UI 栈（四层）：门面 / 渲染缝 / 行为层 / 设计系统
+neo-ui = { path = "../neo-ui", version = "0.1.0" }
+neo-ui-behavior = { path = "../neo-ui-behavior", version = "0.1.0" }
+neo-ui-kit = { path = "../neo-ui-kit", version = "0.1.0" }
+neo-ui-render = { path = "../neo-ui-render", version = "0.1.0" }
+# 共享内核驱动 + 转录模型（与 egui 宿主共用同一份实现）
+neo-driver = { path = "../neo-driver", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-session = { path = "../neo-session", version = "0.1.0" }
+neo-text = { path = "../neo-text", version = "0.1.0" }
+# 唤醒钩子用的通道（响应式宿主必须靠它通知重绘，不能轮询）。
+# 它本就在依赖树里（gpui 自己依赖它 2.5.0），这里显式声明是为了不依赖传递。
+async-channel = "2"
+
+[[example]]
+name = "window_smoke"
+
+[dev-dependencies]
+neo-mock = { path = "../neo-mock", version = "0.1.0" }
+neo-config = { path = "../neo-config", version = "0.1.0" }
+neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
+neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }
+neo-capability = { path = "../neo-capability", version = "0.1.0" }
+neo-exec = { path = "../neo-exec", version = "0.1.0" }
+serde_json = { workspace = true }

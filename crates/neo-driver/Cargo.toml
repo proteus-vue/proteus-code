@@ -27,6 +27,10 @@ description = "GUI 宿主的共享内核驱动：内核独占线程 + 边界守�
 [dependencies]
 neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
 neo-core = { path = "../neo-core", version = "0.1.0" }
+# 转录模型需要：宿主中立的语义色调（Tone）与工具参数摘要的 JSON 解析。
+# 这两条依赖都是**下行**的（neo-text 在 L1），不引入新的层级关系。
+neo-text = { path = "../neo-text", version = "0.1.0" }
+serde_json = { workspace = true }
 
 # 驱动线程的单测用离线桩（内存持久化 / 脚本化 provider / 写工具）
 [dev-dependencies]

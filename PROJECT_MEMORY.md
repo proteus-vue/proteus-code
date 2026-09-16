@@ -3312,7 +3312,7 @@ id 曾嵌 `turn_counter`，而 shell 在**任何轮次之外**、不递增那个
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 777 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web HTTP / 原生 GUI）
+cargo test --workspace      # 788 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web HTTP / 原生 GUI）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫 + 执行效率）
 ```
 

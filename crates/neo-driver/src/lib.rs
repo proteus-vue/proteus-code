@@ -33,6 +33,8 @@
 //! 不恢复，后续所有 Pump 都被当越界丢弃，轮次永远停在"运行中"（TUI 侧真实踩过）。
 
 use neo_core::Kernel;
+pub mod transcript;
+
 use neo_protocol::{EventMsg, Op};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
