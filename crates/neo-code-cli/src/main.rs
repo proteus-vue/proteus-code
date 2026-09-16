@@ -351,7 +351,8 @@ fn cmd_desktop(args: &[String]) -> i32 {
             .collect::<Vec<_>>();
 
         let (handle, cmd_rx, batch_tx) = neo_host_egui::driver::channel();
-        let kernel_thread = neo_host_egui::driver::spawn(kernel, cmd_rx, batch_tx);
+        // egui 是即时模式：每帧自己 drain，不需要唤醒钩子
+        let kernel_thread = neo_host_egui::driver::spawn(kernel, cmd_rx, batch_tx, None);
 
         // D1：会话栏需要会话库。用 `Sessions<H>`（泛型在句柄类型上，
         // 与 TUI 共用同一份会话逻辑 —— 见 `KernelAccess` 的说明）。
@@ -728,7 +729,7 @@ impl KernelAccess for KernelHandle {
     }
 }
 
-impl KernelAccess for neo_host_egui::driver::KernelHandle {
+impl KernelAccess for neo_driver::KernelHandle {
     fn with_kernel<R: Send + 'static>(
         &self,
         f: impl FnOnce(&mut neo_core::Kernel) -> R + Send + 'static,

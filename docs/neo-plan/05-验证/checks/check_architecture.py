@@ -39,6 +39,20 @@ LAYER = {
     "neo-providers":     3,  # L3 PROVIDER（服务商注册表：用户级 JSON）
     "neo-mcp":           3,  # L3 PROVIDER（MCP 客户端：外部工具服务器 → Tool 实现）
     "neo-agent-loader":  3,  # L3 PROVIDER（子代理定义发现与加载：Markdown → AgentSpec）
+    # ── UI 栈（与内核轴正交的另一条轴）────────────────────────────────
+    #
+    # 编号含义仍是"真实依赖深度"，只是这条轴服务的是界面而不是内核。
+    # 它们**不得**依赖内核轴（由 check_ui_layering.py 的 U1 强制），
+    # 因此放在低层是准确的。
+    "neo-ui-kit":        1,  # L1 UI 门面（唯一 pin GPUI 的地方）
+    "neo-ui-render":     2,  # L2 UI 渲染缝
+    "neo-ui-behavior":   3,  # L3 UI 行为层（无样式，与后端解耦）
+    "neo-ui":            4,  # L4 UI 设计系统（品牌主题 + 组件）
+    # GUI 宿主的共享内核驱动。依赖 neo-core(2)/neo-protocol(0)，与
+    # neo-capability 同级 —— 是"真实依赖深度"的正确落点，不是特权层。
+    # 它必须存在的原因：A3 禁止宿主互相依赖，而 egui 与 gpui 两个 GUI 宿主
+    # 共用同一份驱动（里面守着"越界 Pump 不触发多余模型请求"这条要花钱的约束）。
+    "neo-driver":        3,  # L3 共享驱动
     "neo-orchestration": 4,  # L4
     "neo-host-tui":      5,  # L5
     "neo-host-desktop":  5,  # L5

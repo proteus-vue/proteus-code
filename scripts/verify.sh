@@ -87,7 +87,8 @@ if [ -d "$PLAN_CHECKS" ]; then
     "check_session_schema.py|会话日志：append-only / 可重建 / schema" \
     "check_config_layers.py|配置层级与模式解析" \
     "check_mode_matrix.py|沙箱 × 审批 正交双轴矩阵自洽" \
-    "check_spi_conformance.py|SPI 合规：契约 / >=2 后端 / conformance" ; do
+    "check_spi_conformance.py|SPI 合规：契约 / >=2 后端 / conformance" \
+    "check_ui_layering.py|UI 栈守卫：开源边界 / 单一 GPUI pin / 行为层解耦" ; do
     script="${entry%%|*}"; desc="${entry##*|}"
     hr; echo "#  $desc"; hr
     py=python3; command -v "$py" >/dev/null 2>&1 || py=python

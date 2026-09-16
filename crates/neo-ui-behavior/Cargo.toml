@@ -1,0 +1,31 @@
+[package]
+name = "neo-ui-behavior"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L3 UI 行为层：无样式、不可见但难做对的东西（焦点仲裁、按键路由）"
+
+# L3 无样式行为层 —— 两个判据决定代码该不该放这里：
+#
+#   1. **去掉颜色与尺寸后仍然有意义** → 放这层
+#      （"本质在描述长什么样" → 属于更上面的设计系统层）
+#   2. **与具体渲染后端无关** → 放这层
+#      所以本 crate **不依赖 neo-ui-kit**，一行 gpui 都不碰。
+#
+# 这层的内容不是凭空设计的，而是**从 egui 版真机踩坑中提炼**出来的：
+#   - `FocusIntent`：修掉"两个控件争抢焦点"那个真实 bug（后果是命令台里敲的
+#     命令被当成任务发给了模型，白花一次模型请求）。当时的实现用两个独立布尔
+#     表达焦点意图，而胜负取决于面板绘制顺序 —— 与顺序耦合的意图表达是错的。
+#   - `KeyArbiter`：修掉"界面导航键被抢先消费"那一类问题（egui 里 `Shift+Tab`
+#     被当焦点导航、`Esc` 被当结束文本编辑，两者都导致按键的实际行为与预期不符）。
+#
+# 提炼成行为层而不是留在某个宿主里，是因为这些坑**与渲染后端无关**：
+# 换 gpui 后同样会遇到（gpui 也有自己的焦点与按键处理）。
+[dependencies]
+# 只依赖渲染缝的中立几何类型（`FocusIntent` 复用它做命中判断）。
+# **不依赖 neo-ui-kit** —— 这是本层"后端无关"的机器保证。
+neo-ui-render = { path = "../neo-ui-render", version = "0.1.0" }

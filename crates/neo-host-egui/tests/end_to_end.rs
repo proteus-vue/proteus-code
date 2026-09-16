@@ -54,7 +54,8 @@ fn run_turn(script: Vec<Vec<ModelDelta>>) -> (Transcript, Vec<EventMsg>) {
     let kernel = kernel_with(script);
 
     let (handle, cmd_rx, batch_tx) = driver::channel();
-    let _thread = driver::spawn(kernel, cmd_rx, batch_tx);
+    let _thread = // egui 是即时模式：自己每帧轮询，不需要唤醒钩子
+driver::spawn(kernel, cmd_rx, batch_tx, None);
 
     let mut t = Transcript::new();
     let mut all_events = Vec::new();
@@ -266,7 +267,8 @@ fn goal_snapshot_reaches_the_ui_model() {
     // Goal 需要编排器 —— 走生产装配才有（这正是改用 build_kernel 的原因）
     let kernel = kernel_with(vec![vec![ModelDelta::Text("做完了".into())]]);
     let (handle, cmd_rx, batch_tx) = driver::channel();
-    let _thread = driver::spawn(kernel, cmd_rx, batch_tx);
+    let _thread = // egui 是即时模式：自己每帧轮询，不需要唤醒钩子
+driver::spawn(kernel, cmd_rx, batch_tx, None);
 
     handle.send(Op::GoalSet { goal: "把 A 做完\n把 B 做完".into() });
 

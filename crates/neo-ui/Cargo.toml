@@ -1,0 +1,35 @@
+[package]
+name = "neo-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L4 UI 设计系统：NEO 品牌主题 + 带样式的组件"
+
+# L4 设计系统层 —— 将来开源目标 B（组件库）。
+#
+# # 一条硬规则（照抄方案，它决定了开源时能不能"复制目录就走"）
+#
+# **本 crate 禁止出现业务名词。** 组件只认识 `Item` / `Row` / `Entry` / `Cell`
+# 这类中性概念，不认识"会话""目标""审批"之外的领域词汇 —— 更不认识
+# "NEO 的 agent 内核"这样的上下文。理由不是洁癖：一旦组件里出现业务名词，
+# 这个目录就再也无法独立发布（外部用户看不懂、也不该被迫接受我们的领域模型）。
+#
+# 已落地的部分目前是中性的（主题、状态行、转录行、审批对话框），
+# 但"转录""审批"本身已经偏业务 —— 真开源时这几项要么下沉到宿主、
+# 要么改名成中性概念。**这是一个已登记的取舍**，不是疏漏。
+#
+# # 颜色不硬编码
+#
+# 所有颜色从 `neo_text::palette::NEO` 派生（与 TUI / egui 同一份来源），
+# 经 `neo-ui-render` 的中立 `Color` 转换。硬编码色值会同时破坏两件事：
+# 换主题、以及"同一 Tone 在各宿主颜色一致"。
+[dependencies]
+neo-ui-kit = { path = "../neo-ui-kit", version = "0.1.0" }
+neo-ui-render = { path = "../neo-ui-render", version = "0.1.0" }
+neo-ui-behavior = { path = "../neo-ui-behavior", version = "0.1.0" }
+# 宿主中立的语义色调与调色板（品牌色的唯一来源）
+neo-text = { path = "../neo-text", version = "0.1.0" }

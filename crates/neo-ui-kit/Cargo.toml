@@ -1,0 +1,40 @@
+[package]
+name = "neo-ui-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L1 UI 门面：全仓唯一 pin GPUI 的地方（其余 crate 只经此取用）"
+
+# L1 UI FACADE —— 这一层存在的理由只有一个：**单一 pin**。
+#
+# GPUI 生态的头号杀手是**类型身份分裂**：工程里若有两个 crate 各自声明了
+# 不同来源/版本的 gpui，Cargo 会编译两份引擎，然后报出人类很难读的错误
+# （形如 `expected gpui::WindowContext, found gpui::WindowContext` —— 类型
+# 名字一样但身份不同）。所以本仓**只允许这里**声明 gpui 系列依赖，
+# 其余所有 crate 一律 `use neo_ui_kit::gpui::*`（或经它取 component/base）。
+# 这条由门禁 `check_ui_layering.py` 机器强制。
+#
+# # 为什么 pin 的是 gpui-kit 而不是文档里说的 gpui-ce
+#
+# 方案文档（docs/gpui-方案）主张"用 gpui-ce，不用上游 gpui"。**实测推翻了它**：
+# 它同时钦定的组件库 `gpui-kit 0.6.1` 实际依赖的是 `gpui-pre 0.3.x`
+# （Longbridge 重发布的 Zed 快照）+ `gpui_platform`，与 gpui-ce 不是同一条线。
+# 而 `gpui_platform` **并未发布到 crates.io** —— 手工声明它 Cargo 会直接报错。
+#
+# 所以正确姿势是**只声明 `gpui-kit` 一个依赖**：它把 gpui / platform /
+# base / component / assets 全都带齐并保持版本自洽（实测：仅此一条即可编译开窗）。
+# 这也顺带满足单一 pin —— 反而是方案原本设想的写法会破坏它。
+#
+# # 为什么不需要完整 Xcode（上一轮 gpui 被否决的原因已消失）
+#
+# 上一轮否决 gpui 是因为上游 `gpui 0.2.2` 的 build.rs 无条件调 `xcrun metal`
+# 编译着色器（见 PROJECT_MEMORY §4.62）。而 `gpui-pre-macos` **没有 build.rs、
+# 没有 .metal 源文件** —— 着色器已预编译进库。实测在本机（仅 CommandLineTools、
+# 无完整 Xcode）构建成功并开出真窗口。
+[dependencies]
+# 版本 pin 在**根 Cargo.toml 的 [workspace.dependencies]**，全仓只有这一处写死。
+gpui-kit = { workspace = true }

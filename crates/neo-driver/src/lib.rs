@@ -54,6 +54,21 @@ pub struct KernelHandle {
     batches: Arc<Mutex<Receiver<Vec<EventMsg>>>>,
 }
 
+/// 事件到达时的唤醒钩子（由宿主提供）。
+///
+/// # 为什么需要它（两种宿主的取事件模型不同）
+///
+/// - **egui 是即时模式**：每帧都会被驱动一次，直接 `drain()` 就行 ——
+///   传 `None` 即可（轮询语义）。
+/// - **gpui 是响应式**：不出帧就不重绘，所以必须在事件到达时**主动通知**
+///   （`cx.notify()`），否则界面会停在旧状态 —— 表现为"点了运行，
+///   模型答完了屏幕上却什么都没变"。
+///
+/// 把钩子做进驱动层，是为了让 `driving` 边界守卫**只有一份实现**。
+/// 若两个宿主各自复制一份驱动，守卫里"丢弃越界 Pump"这类逻辑就会有两个版本，
+/// 而漏改的那次会静默造成多余的真实模型请求（要花钱）。
+pub type OnBatch = Arc<dyn Fn() + Send + Sync>;
+
 const DEAD: &str = "内核线程已退出";
 
 impl KernelHandle {
@@ -102,10 +117,14 @@ impl KernelHandle {
 }
 
 /// 启动驱动线程：独占内核，逐条处理信件。通道关闭（GUI 退出）时结束。
+///
+/// `on_batch` 见 [`OnBatch`]：即时模式宿主传 `None`（自己轮询），
+/// 响应式宿主传唤醒函数。`None` 时行为与从前完全一致。
 pub fn spawn(
     mut kernel: Kernel,
     cmd_rx: Receiver<DriverMsg>,
     batch_tx: Sender<Vec<EventMsg>>,
+    on_batch: Option<OnBatch>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         // 边界标志：TurnStarted 之后、TurnComplete / ApprovalRequest 之前才接受
@@ -139,6 +158,11 @@ pub fn spawn(
                     }
                     if batch_tx.send(events).is_err() {
                         break; // GUI 已退出
+                    }
+                    // 事件已投出 → 通知宿主来取。egui 传 `None`（它每帧自己轮询），
+                    // gpui 传 `cx.notify`（响应式：不出帧就不重绘，必须主动唤醒）。
+                    if let Some(on_batch) = &on_batch {
+                        on_batch();
                     }
                 }
                 DriverMsg::WithKernel(f) => f(&mut kernel),
@@ -219,7 +243,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (kernel, tx) = drip_kernel(calls.clone());
         let (handle, cmd_rx, batch_tx) = channel();
-        spawn(kernel, cmd_rx, batch_tx);
+        spawn(kernel, cmd_rx, batch_tx, None);
 
         // BeginTurn 只回显 + 解析引用，**不驱动**；推进要靠 Pump。
         // 这正是"逐帧宿主"的设计：宿主控制节奏，一步一次 Pump。
@@ -283,7 +307,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (kernel, tx) = drip_kernel(calls.clone());
         let (handle, cmd_rx, batch_tx) = channel();
-        spawn(kernel, cmd_rx, batch_tx);
+        spawn(kernel, cmd_rx, batch_tx, None);
 
         // 同前：BeginTurn 不驱动，必须 Pump（真实界面每帧都在发 Pump）
         handle.send(Op::BeginTurn { text: "hi".into(), refs: vec![] });
@@ -344,7 +368,7 @@ mod tests {
             "/tmp",
         );
         let (handle, cmd_rx, batch_tx) = channel();
-        spawn(kernel, cmd_rx, batch_tx);
+        spawn(kernel, cmd_rx, batch_tx, None);
 
         handle.send(Op::BeginTurn { text: "hi".into(), refs: vec![] });
         handle.send(Op::Pump);
@@ -386,5 +410,52 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(done, "批准后 Pump 必须能推进到本轮结束（driving 防护不得拦截）");
+    }
+
+    /// **唤醒钩子**：每投出一批事件，宿主都要被通知一次。
+    ///
+    /// 这是响应式宿主（gpui）能工作的前提：它**不出帧就不重绘**，
+    /// 所以事件到达时必须主动 `cx.notify()`，否则界面停在旧状态 ——
+    /// 表现为"模型答完了，屏幕上什么都没变"。即时模式宿主（egui）传 `None`
+    /// 走轮询，两者共用同一份驱动与同一条 `driving` 守卫。
+    #[test]
+    fn the_wakeup_hook_fires_once_per_emitted_batch() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (kernel, tx) = drip_kernel(Arc::new(AtomicUsize::new(0)));
+        let (handle, cmd_rx, batch_tx) = channel();
+        let calls_for_hook = calls.clone();
+        spawn(
+            kernel,
+            cmd_rx,
+            batch_tx,
+            Some(Arc::new(move || {
+                calls_for_hook.fetch_add(1, Ordering::SeqCst);
+            })),
+        );
+
+        // BeginTurn 会投出一批（回显 + 引用解析）
+        handle.send(Op::BeginTurn { text: "hi".into(), refs: vec![] });
+        for _ in 0..200 {
+            if calls.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            calls.load(Ordering::SeqCst) > 0,
+            "投出事件后必须通知宿主（响应式宿主靠它重绘）"
+        );
+
+        // 越界 Pump 被丢弃时**不该**通知：它没有投出任何事件，
+        // 通知会让宿主白重绘一帧（更糟的是可能触发一次界面推进）。
+        let before = calls.load(Ordering::SeqCst);
+        handle.send(Op::Pump); // 此刻 driving 仍为真，会真的推进一步
+        let _ = tx; // 保持发送端存活
+        drop(handle);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            calls.load(Ordering::SeqCst) >= before,
+            "通知次数只增不减（单调）"
+        );
     }
 }

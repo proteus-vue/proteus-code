@@ -25,13 +25,15 @@
 //! 而"同一事件流下语义等价"是项目的硬要求。
 
 pub mod commands;
-pub mod driver;
 pub mod facts;
 pub mod fonts;
 pub mod theme;
 pub mod ui;
 
-pub use driver::KernelHandle;
+// 驱动层已下沉到 `neo-driver`（UI 宿主共享）：第二个 GUI 宿主（gpui）也要用它，
+// 而 A3 禁止宿主互相依赖。这里 re-export 保持既有调用点不变。
+pub use neo_driver as driver;
+pub use neo_driver::KernelHandle;
 
 pub use neo_text::palette;
 pub use neo_text::Tone;

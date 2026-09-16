@@ -24,6 +24,8 @@ description = "L5 宿主：桌面原生 GUI（egui/eframe，复用 neo-text 的�
 # 与 TUI 共享同一份 —— 这正是阶段 C 抽取它的原因（A3 禁止宿主互相依赖）。
 neo-text = { path = "../neo-text", version = "0.1.0" }
 neo-session = { path = "../neo-session", version = "0.1.0" }
+# 共享内核驱动（与 gpui 宿主共用；它守着 driving 边界守卫）
+neo-driver = { path = "../neo-driver", version = "0.1.0" }
 neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
 neo-core = { path = "../neo-core", version = "0.1.0" }
 eframe = "0.36"

@@ -1,0 +1,32 @@
+[package]
+name = "neo-ui-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L2 UI 渲染缝：后端中立颜色/几何 + RenderBackend trait + GpuiBackend"
+
+# L2 渲染抽象（「渲染缝」）—— 未来开源渲染引擎的唯一可行性来源。
+#
+# 没有这一层会怎样：组件签名里直接透出 GPUI 类型，两年后想换后端时
+# 组件库要重写 100%。有了它，"可替换"这件事至少在架构上被固定住。
+#
+# # 但这一层的边界必须诚实（不假装是成熟抽象）
+#
+# 方案文档自己写了一条关键纪律：「只有一个实现的抽象是**信仰**，
+# 两个实现的抽象才是**设计**」。当前只有 `GpuiBackend` 一个实现，
+# 所以：
+#   - 这里**只**定义中立类型与 trait，**不**提前写 VelloBackend；
+#   - 常规组件（按钮/输入/表格）**不**走这条缝 —— 走了会立刻丢掉 GPUI 的
+#     element diff、脏区剔除、文本整形与字形缓存，性能倒退且抽象层要自己维护
+#     数万行（方案称之为"烂尾最常见的起点"）；
+#   - 只有**自绘表面**（diff 视图、图表、自绘画布）才走它。
+[dependencies]
+# 门面层（唯一 pin gpui 的入口）—— 本 crate 不直接声明任何 gpui 依赖
+neo-ui-kit = { path = "../neo-ui-kit", version = "0.1.0" }
+# 宿主中立的语义色调（Tone）与调色板（Palette）：中立颜色从它派生，
+# 这样"同一个 Tone 在 TUI / egui / gpui 里是同一个颜色"有单一来源
+neo-text = { path = "../neo-text", version = "0.1.0" }

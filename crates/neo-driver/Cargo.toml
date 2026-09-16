@@ -1,0 +1,37 @@
+[package]
+name = "neo-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "GUI 宿主的共享内核驱动：内核独占线程 + 边界守卫 + 事件批"
+
+# UI 宿主的共享内核驱动 —— 从 `neo-host-egui` 移出来，因为**第二个 GUI 宿主
+# 也要用它**（gpui）。而这些代码与渲染后端无关（driver.rs 原本就零 egui 代码），
+# 所以它不该长在任何一个宿主里：架构守卫 A3 禁止宿主互相依赖，
+# 共享逻辑必须在宿主之下。
+#
+# # 为什么不干脆每个宿主各写一份
+#
+# 因为这里守着**最贵的一件事**：`driving` 边界守卫丢弃越界 `Op::Pump`。
+# 没有它，逐帧宿主会在轮次结束后往空闲内核上再起一步 —— 那是一次**真实、
+# 要花钱的模型请求**。两份实现意味着"改一处忘一处"，而忘掉的那次会静默扣费。
+#
+# # 它为什么在 L3（而不是 L5）
+#
+# 依赖深度：只依赖 `neo-core`（L2）与 `neo-protocol`（L0），不依赖任何宿主、
+# 不依赖任何渲染库。L3 与 `neo-capability` 同级，符合"真实依赖深度"的编号语义。
+[dependencies]
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }
+
+# 驱动线程的单测用离线桩（内存持久化 / 脚本化 provider / 写工具）
+[dev-dependencies]
+neo-mock = { path = "../neo-mock", version = "0.1.0" }
+neo-config = { path = "../neo-config", version = "0.1.0" }
+neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
+neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }
+serde_json = { workspace = true }

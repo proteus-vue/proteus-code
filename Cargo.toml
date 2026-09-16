@@ -5,11 +5,21 @@ members = [
   # 宿主中立的文本语义（语义色调 / 显示宽度 / Markdown / 词法高亮）。
   # 独立成 crate 的原因：多个宿主要用同一份，而 A3 禁止宿主互相依赖。
   "crates/neo-text",
+  # UI 栈（与内核轴正交的另一条轴）：kit → render → behavior → ui。
+  # 四层独立成 crate 是为了将来**整目录复制出去开源**（渲染框架 + 组件库），
+  # 由门禁 check_ui_layering.py 保证它们不反向依赖内核轴。
+  "crates/neo-ui-kit",
+  "crates/neo-ui-render",
+  "crates/neo-ui-behavior",
+  "crates/neo-ui",
   "crates/neo-sandbox",
   "crates/neo-platform",
   "crates/neo-session",
   "crates/neo-config",
   "crates/neo-core",
+  # GUI 宿主的共享内核驱动（A3 禁止宿主互依赖，故下沉到宿主之下）。
+  # 守着一件很贵的事：driving 边界守卫丢弃越界 Pump —— 漏了会多花真实模型请求。
+  "crates/neo-driver",
   "crates/neo-capability",
   "crates/neo-orchestration",
   "crates/neo-host-tui",
@@ -41,6 +51,17 @@ authors = ["Proteus Contributors"]
 rust-version = "1.95"
 
 [workspace.dependencies]
+# ── UI 栈：全仓唯一的 GPUI pin ──────────────────────────────────────────
+#
+# 单一 pin 是 GPUI 生态的生命线：若有两个 crate 各自声明不同来源/版本的 gpui，
+# Cargo 会编译两份引擎，报出 `expected gpui::WindowContext, found gpui::WindowContext`
+# 这种极难定位的错误（类型名字一样、身份不同）。
+#
+# 因此只在这里写版本，且**只有 neo-ui-kit 允许依赖它**（由 check_ui_layering.py
+# 机器强制）。pin `gpui-kit` 而不是 `gpui-ce`，理由是实测：gpui-kit 把
+# gpui(pre) / platform / base / component / assets 全带齐且版本自洽，
+# 而 `gpui_platform` 并未发布到 crates.io —— 手工声明会直接报错。
+gpui-kit = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"

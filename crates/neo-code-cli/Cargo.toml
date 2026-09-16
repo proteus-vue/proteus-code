@@ -28,6 +28,8 @@ neo-host-web = { path = "../neo-host-web", version = "0.1.0" }
 neo-host-desktop = { path = "../neo-host-desktop", version = "0.1.0", optional = true }
 # 桌面原生 GUI（egui）。与 webview 版并存：ADR-0006 决定不押注单一方案。
 neo-host-egui = { path = "../neo-host-egui", version = "0.1.0", optional = true }
+# 共享内核驱动：CLI 需要为 egui/gpui 两种句柄各实现一次 KernelAccess
+neo-driver = { path = "../neo-driver", version = "0.1.0" }
 neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
 neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }
 neo-session-local = { path = "../neo-session-local", version = "0.1.0" }
