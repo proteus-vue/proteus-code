@@ -65,6 +65,14 @@ pub struct NeoView {
     status: String,
     /// 命令面板是否打开（D9）。
     cmd_open: bool,
+    /// **D3 思考轨迹搜索**串。
+    ///
+    /// 搜的是"想不起来的某段推理"，所以范围**只到思考块**：
+    /// 工具输出动辄上万行，全量搜一遍既慢又几乎不是用户想要的。
+    reasoning_query: String,
+    /// 搜索输入框（惰性建，理由同任务输入框）。
+    search_state: Option<Entity<InputState>>,
+    search_subs: Vec<neo_ui_kit::gpui::Subscription>,
     /// 命令面板的搜索串。
     cmd_query: String,
     /// 命令面板的高亮项（过滤后列表的下标）。
@@ -141,6 +149,9 @@ impl NeoView {
             shot_armed: std::env::var("NEO_GUI_SHOT").ok().map(|_| false),
             transcript: Transcript::new(),
             input: String::new(),
+            reasoning_query: String::new(),
+            search_state: None,
+            search_subs: Vec::new(),
             input_state: None,
             input_subs: Vec::new(),
             mode,
@@ -234,6 +245,31 @@ impl NeoView {
         if let Some(state) = self.input_state.clone() {
             state.update(cx, |s, cx| s.set_value("", window, cx));
         }
+    }
+
+    /// 惰性建"搜索思考"输入框并订阅（理由同 `ensure_input`）。
+    ///
+    /// 与命令面板一样，搜索是**面板级**的：只要有命中就跳出一行"N 处匹配"，
+    /// 没有命中就说没有 —— 不悄悄什么都不显示（"搜了没反应"会被当成坏掉）。
+    fn ensure_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_state.is_some() {
+            return;
+        }
+        let state = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("搜索思考轨迹（不区分大小写）")
+        });
+        let sub = cx.subscribe_in(
+            &state,
+            window,
+            |this, state, ev: &InputEvent, _window, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.reasoning_query = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+            },
+        );
+        self.search_state = Some(state);
+        self.search_subs = vec![sub];
     }
 
     fn submit(&mut self) {
@@ -529,6 +565,34 @@ fn styled_line(spans: &[(String, Tone)]) -> impl IntoElement {
     )
 }
 
+/// 思考块带搜索高亮：把匹配区间标成项目主色。
+///
+/// 用 `StyledText::with_highlights` 而不是拼多个 `div` —— 与 `styled_line`
+/// 同一个理由：它要作为**一行文字**参与排版（中文里搜索时，逐片段拼盒子会
+/// 让断行位置全错）。区间是**字节**偏移（`search_reasoning` 已保证落在
+/// char 边界上，否则这里会 panic 或错位）。
+fn reasoning_highlighted(
+    text: &str,
+    ranges: &[std::ops::Range<usize>],
+) -> neo_ui_kit::gpui::AnyElement {
+    let highlights = ranges
+        .iter()
+        .map(|r| {
+            (
+                r.clone(),
+                neo_ui_kit::gpui::HighlightStyle {
+                    color: Some(neo_color(Tone::Text).into()),
+                    background_color: Some(neo_color(Tone::Primary).into()),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    neo_ui_kit::gpui::StyledText::new(text.to_string())
+        .with_highlights(highlights)
+        .into_any_element()
+}
+
 /// 单个工具调用的卡片。
 ///
 /// 抽成自由函数，是为了让"组内展开"与"零散单次调用"复用同一份渲染 ——
@@ -610,6 +674,15 @@ impl NeoView {
         //
         // **只有 ≥2 个调用的组才有外壳**：单个调用套一层"1 次工具调用"，
         // 只是多一次点击，没有半点信息增量。
+        // **D3 搜索**：命中块 → 下标 → 字节区间（高亮用）。
+        //
+        // 判定在共享层（`search_reasoning`）：两个宿主必须给出同一套命中，
+        // 否则"同一个查询在两边结果数不同"是最难解释的一类不一致。
+        let hits = neo_driver::transcript::search_reasoning(blocks, &self.reasoning_query);
+        let hit_map: std::collections::HashMap<usize, Vec<std::ops::Range<usize>>> = hits
+            .iter()
+            .map(|h| (h.block, h.ranges.clone()))
+            .collect();
         let mut group_of: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
         let mut group_runs: std::collections::HashMap<usize, neo_driver::transcript::ToolRun> =
             std::collections::HashMap::new();
@@ -638,8 +711,11 @@ impl NeoView {
                     //   折叠 = 全局开关关掉 **或** 这一块被单独折叠
                     // 全局关掉是"我现在不想看思考"，逐块折叠是"这一块太长"——
                     // 两个独立的意图，必须叠加而不是互相覆盖。
-                    let collapsed = !self.show_reasoning
-                        || self.transcript.collapsed_reasoning.contains(&idx);
+                    let has_hit = hit_map.contains_key(&idx);
+                    // 命中块强制展开（见上面 must_expand 的理由）
+                    let collapsed = !has_hit
+                        && (!self.show_reasoning
+                            || self.transcript.collapsed_reasoning.contains(&idx));
                     let arrow = if collapsed { "▸" } else { "▾" };
                     let head = format!("{arrow} 思考（{} 字）", t.chars().count());
                     let v = cx.entity().clone();
@@ -660,9 +736,16 @@ impl NeoView {
                         });
                     col = col.child(header);
                     if !collapsed {
-                        col = col.child(
-                            div().text_color(neo_color(Tone::Muted)).child(t.clone()),
-                        );
+                        // 命中时走**高亮渲染**（把匹配区间标成项目色），
+                        // 未命中时保持原来的单色 —— 不给普通内容加视觉噪音。
+                        let el = match hit_map.get(&idx) {
+                            Some(ranges) => reasoning_highlighted(t, ranges),
+                            None => div()
+                                .text_color(neo_color(Tone::Muted))
+                                .child(t.clone())
+                                .into_any_element(),
+                        };
+                        col = col.child(el);
                     }
                 }
                 // 组内非首块：跳过（已由组的首块代表整组渲染）。
@@ -1099,6 +1182,7 @@ impl Render for NeoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 0) 输入框（惰性；第一次渲染时 window 才可用）
         self.ensure_input(window, cx);
+        self.ensure_search(window, cx);
 
         // 1) 收事件（非阻塞）
         // 冒烟钩子：首帧把 NEO_GUI_PROMPT 当作一次提交（只做一次）
@@ -1225,13 +1309,56 @@ impl Render for NeoView {
                 h_flex()
                     .flex_1()
                     .min_h(px(0.))
-                    .child(
-                        div()
+                    .child({
+                        // 搜索行在转录**上方**（它作用于转录内容，放侧栏会
+                        // 让人以为它只搜侧栏）
+                        let search = self.search_state.clone().expect("搜索框应已建好");
+                        let n_hits = neo_driver::transcript::search_reasoning(
+                            &self.transcript.blocks,
+                            &self.reasoning_query,
+                        )
+                        .len();
+                        let searching = !self.reasoning_query.trim().is_empty();
+                        v_flex()
                             .flex_1()
                             .h_full()
-                            .overflow_y_scrollbar()
-                            .child(self.transcript_view(cx)),
-                    )
+                            .min_h(px(0.))
+                            .gap_1()
+                            .child(
+                                v_flex()
+                                    .px_3()
+                                    .pt_2()
+                                    .gap_1()
+                                    .child(
+                                        Input::new(&search)
+                                            .appearance(false)
+                                            .aria_label("搜索思考轨迹"),
+                                    )
+                                    // 有查询就必须给出结果数：搜了没反应会被当成坏掉
+                                    .child(if searching {
+                                        div()
+                                            .text_color(neo_color(if n_hits > 0 {
+                                                Tone::Muted
+                                            } else {
+                                                Tone::Warning
+                                            }))
+                                            .child(if n_hits > 0 {
+                                                format!("思考轨迹命中 {n_hits} 处")
+                                            } else {
+                                                "思考轨迹里没有匹配".to_string()
+                                            })
+                                    } else {
+                                        div()
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .overflow_y_scrollbar()
+                                    .child(self.transcript_view(cx)),
+                            )
+                    })
                     .child(side_panel(self, cx)),
             );
 

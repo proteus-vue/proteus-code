@@ -481,6 +481,152 @@ pub fn run_in_progress(blocks: &[Block], run: &ToolRun) -> bool {
         .any(|b| matches!(b, Block::Tool(c) if !c.done))
 }
 
+/// 一次搜索命中：块下标 + 该块内的字节区间（**可多个**）。
+///
+/// 只在**思考块**里搜（D3 的原始需求是"思考轨迹可搜索"）。
+/// 不做"搜全文"是因为转录里的工具输出动辄上万行，一搜就是全量扫描 ——
+/// 而用户要找的几乎总是自己想不起来的某段推理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningHit {
+    /// 命中所在的块下标。
+    pub block: usize,
+    /// 该块内所有匹配的字节区间（按位置升序、互不重叠）。
+    pub ranges: Vec<std::ops::Range<usize>>,
+}
+
+/// 在思考块里查找 `query`（**大小写不敏感**，按字节区间返回，供高亮用）。
+///
+/// 为什么大小写不敏感：用户回忆某段推理时记不准大小写（`JSON` / `json`、
+/// `HashMap` / `hashmap`），区分大小写会让"明明有却搜不到"，
+/// 而搜索失败时用户只会以为内容不在那里。
+///
+/// 匹配按**字节**而不是字符：调用方要拿去给 `HighlightStyle` 用，
+/// 那套 API 收的就是字节区间。为此必须保证区间落在 char 边界上 ——
+/// 下面用 `find` 在 `&str` 上做，天然满足（不会切在多字节字符中间）。
+pub fn search_reasoning(blocks: &[Block], query: &str) -> Vec<ReasoningHit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for (idx, b) in blocks.iter().enumerate() {
+        let Block::Reasoning(text) = b else { continue };
+        let hay = text.to_lowercase();
+        // ⚠️ `to_lowercase` 可能**改变字节长度**（如 `İ` → `i̇`），
+        // 于是 haystack 上的偏移不能直接当作原串偏移。
+        // 折中：只在两者字节长度相同时用小写副本定位，否则退回原串精确匹配。
+        // 宁可"大小写敏感地搜"也不要给出**错位的高亮区间**
+        // （错位会把高亮画到别的字上，比不亮更糟）。
+        let hay = if hay.len() == text.len() { hay.as_str() } else { text.as_str() };
+        let mut ranges = Vec::new();
+        let mut from = 0usize;
+        while from <= hay.len() {
+            let Some(rel) = hay[from..].find(&needle) else { break };
+            let start = from + rel;
+            let end = start + needle.len();
+            // 区间必须落在 char 边界上（小写副本非同长时上面已退回原串，
+            // 但同一长度下仍可能有非边界情况，这里兜一层）
+            if hay.is_char_boundary(start) && hay.is_char_boundary(end) {
+                ranges.push(start..end);
+            }
+            from = end.max(start + 1);
+        }
+        if !ranges.is_empty() {
+            hits.push(ReasoningHit { block: idx, ranges });
+        }
+    }
+    hits
+}
+
+/// 把命中的块**整理成要展开的下标集合**。
+///
+/// 搜索一旦有结果，命中的思考块必须**自动展开** —— 否则用户看到"3 个结果"
+/// 却在屏幕上找不到任何一个（折叠的块把命中的字藏起来了）。
+/// 这是"搜索结果与可见内容必须对得上"的最小保证。
+pub fn blocks_to_expand(hits: &[ReasoningHit]) -> std::collections::HashSet<usize> {
+    hits.iter().map(|h| h.block).collect()
+}
+
+#[cfg(test)]
+mod reasoning_search_tests {
+    use super::*;
+
+    fn blocks(specs: &[(bool, &str)]) -> Vec<Block> {
+        specs
+            .iter()
+            .map(|(is_reasoning, t)| {
+                if *is_reasoning {
+                    Block::Reasoning((*t).to_string())
+                } else {
+                    Block::Assistant((*t).to_string())
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finds_matches_only_in_reasoning_blocks() {
+        let b = blocks(&[
+            (true, "先看 JSON 依赖"),
+            (false, "正文里也提到 JSON"),
+            (true, "然后确认 json 大小写"),
+        ]);
+        let hits = search_reasoning(&b, "json");
+        assert_eq!(hits.len(), 2, "只应命中思考块：{hits:?}");
+        assert_eq!(hits[0].block, 0);
+        assert_eq!(hits[1].block, 2, "正文块(下标 1)不应命中");
+    }
+
+    #[test]
+    fn matching_is_case_insensitive() {
+        let b = blocks(&[(true, "调用 HashMap 与 hashmap")]);
+        let hits = search_reasoning(&b, "HASHMAP");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].ranges.len(), 2, "两种写法都该命中");
+    }
+
+    #[test]
+    fn ranges_point_at_the_matched_text() {
+        let b = blocks(&[(true, "前缀 cfg 后缀")]);
+        let hits = search_reasoning(&b, "cfg");
+        let r = &hits[0].ranges[0];
+        assert_eq!(&"前缀 cfg 后缀"[r.clone()], "cfg");
+    }
+
+    /// 中文 query 的区间必须落在 **char 边界**上 ——
+    /// 切在多字节字符中间，高亮会画到别的字上（比不亮更糟）。
+    #[test]
+    fn multibyte_query_yields_char_boundary_ranges() {
+        let text = "先确认缩进与行号，再看缩进深度";
+        let b = vec![Block::Reasoning(text.to_string())];
+        let hits = search_reasoning(&b, "缩进");
+        assert_eq!(hits[0].ranges.len(), 2);
+        for r in &hits[0].ranges {
+            assert!(text.is_char_boundary(r.start), "start 不在 char 边界");
+            assert!(text.is_char_boundary(r.end), "end 不在 char 边界");
+            assert_eq!(&text[r.clone()], "缩进", "区间应精确框住匹配的字");
+        }
+    }
+
+    #[test]
+    fn empty_or_blank_query_matches_nothing() {
+        let b = blocks(&[(true, "有内容")]);
+        assert!(search_reasoning(&b, "").is_empty());
+        assert!(search_reasoning(&b, "   ").is_empty(), "全空白不该当成搜索");
+    }
+
+    /// 命中块必须自动展开 —— 否则用户看到"N 个结果"却在屏幕上找不到一个。
+    #[test]
+    fn hits_map_to_blocks_that_must_be_expanded() {
+        let b = blocks(&[(true, "看 JSON"), (true, "无关"), (true, "又是 JSON")]);
+        let hits = search_reasoning(&b, "json");
+        let expand = blocks_to_expand(&hits);
+        assert!(expand.contains(&0));
+        assert!(expand.contains(&2));
+        assert!(!expand.contains(&1));
+    }
+}
+
 #[cfg(test)]
 mod tool_group_tests {
     use super::*;
