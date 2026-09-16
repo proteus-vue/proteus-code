@@ -18,10 +18,22 @@
 //! | [`keys`] | 界面导航键被框架抢先消费 → `Shift+Tab` / `Esc` 行为与预期不符 |
 //! | [`clock`] | 耗时不能进共享转录模型（破坏回放确定性）→ 改成可注入时间的纯逻辑 |
 
+//! # 完整用法与边界
+//!
+//! 下面的内容直接来自本 crate 的 `README.md` —— **同一份文本**而不是抄一遍。
+//! 好处是其中的示例代码会被 `cargo test` 当作文档测试执行：
+//! 文档与实现一旦不一致，测试就会红（README 里写着过时 API 是发布的常见事故）。
+//!
+#![doc = include_str!("../README.md")]
+
 pub mod clock;
 pub mod focus;
 pub mod keys;
 
 pub use clock::{format_duration, TurnClock};
 pub use focus::FocusIntent;
-pub use keys::{KeyArbiter, Layer};
+// `Verdict` 必须导出：它是 `KeyArbiter::verdict()` 的**返回类型**，
+// 调用方要 `match` 它就得能命名它 —— 只导出 `KeyArbiter` 与 `Layer`
+// 会让"怎么用裁决结果"变成一个无法表达的问题（文档测试抓到过：
+// README 示例 `use neo_ui_behavior::Verdict` 编译失败）。
+pub use keys::{KeyArbiter, Layer, Verdict};

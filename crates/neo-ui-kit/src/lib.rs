@@ -27,6 +27,13 @@
 //! 因此这里 pin 的是 **`gpui-kit` 一个依赖**：它把 gpui / platform / base /
 //! component / assets 全带齐且版本自洽。详见本 crate 的 Cargo.toml 注释。
 
+//! # 完整用法与边界
+//!
+//! 以下内容来自本 crate 的 `README.md` —— **同一份文本**。示例会被
+//! `cargo test` 当作文档测试执行，文档漂移会立刻暴露。
+//!
+#![doc = include_str!("../README.md")]
+
 // ── gpui 本体（`gpui_kit` 内部 re-export 的 `gpui-pre`，lib 名就是 `gpui`）──
 pub use gpui_kit::gpui;
 

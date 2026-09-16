@@ -22,6 +22,13 @@
 //! 让自绘组件真正消费它（把产物嵌进 element 树）是阶段 2 接 diff 视图时做的，
 //! 现在不假装已经做到。
 
+//! # 完整用法与边界
+//!
+//! 以下内容来自本 crate 的 `README.md` —— **同一份文本**。示例会被
+//! `cargo test` 当作文档测试执行，文档漂移会立刻暴露。
+//!
+#![doc = include_str!("../README.md")]
+
 pub mod backend;
 pub mod gutter;
 pub mod scene;

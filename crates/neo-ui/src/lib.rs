@@ -16,6 +16,13 @@
 //! 硬编码色值会同时破坏两件事：换主题、以及跨宿主的颜色一致性。
 //! 所以本 crate **禁止**出现字面色值（`#[allow]` 之外的任何 `rgb(0x...)`）。
 
+//! # 完整用法与边界
+//!
+//! 以下内容来自本 crate 的 `README.md` —— **同一份文本**。示例会被
+//! `cargo test` 当作文档测试执行，文档漂移会立刻暴露。
+//!
+#![doc = include_str!("../README.md")]
+
 pub mod theme;
 
 pub use theme::{apply_neo_theme, base_bg, neo_color, panel_bg};

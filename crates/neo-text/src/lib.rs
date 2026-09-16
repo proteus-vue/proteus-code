@@ -20,12 +20,24 @@
 //! 主题（`neo-host-tui::theme`）**不在这里**：它是"语义色 → 终端 SGR"的翻译表，
 //! 每个宿主有自己的那一份。本 crate 只定义语义，不定义外观。
 
+//! # 完整用法与边界
+//!
+//! 以下内容来自本 crate 的 `README.md` —— **同一份文本**。其中的示例会被
+//! `cargo test` 当作文档测试执行，所以文档与实现不一致时会立刻失败。
+//!
+#![doc = include_str!("../README.md")]
+
 pub mod markdown;
 pub mod palette;
 pub mod syntax;
 pub mod width;
 
 pub use palette::Palette;
+// `Tone` 与 `Lang` 是本 crate 最常用的两个类型（前者是每个 API 的输出词汇，
+// 后者是语法高亮的入参）。定义在根/子模块并不意味着调用方找得到 ——
+// 文档测试抓到过：README 里 `use neo_text::{syntax, Lang}` 编译失败。
+// 常用类型必须能从 crate 根命名，否则每个调用方都要先摸清内部模块布局。
+pub use syntax::Lang;
 
 /// 语义色调。**只表达"这段文字在信息层次里是什么角色"**，不表达"用什么颜色"。
 ///
