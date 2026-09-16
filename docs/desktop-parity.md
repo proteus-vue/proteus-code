@@ -104,7 +104,11 @@ ZCode 官方文档把界面写得很细（[zcode.z.ai/en/docs](https://zcode.z.a
 > `neo-host-egui` 已实现 D2–D7、D10、D11 —— 详见每行的 ✅ 标注与括号里的实测结论。
 > **未经视觉对标的项**（D1/D8/D9/D12）与"像不像"仍需后续逐条核对。
 
-**前置（比任何 D 项都硬）**：`输入区` —— gpui 宿主此前是**纯展示的一行**，
+**前置（比任何 D 项都硬）**：`输入区`（含**自动聚焦**，`neo-ui-behavior::FocusIntent`
+单一槽位 + `FocusHandle::is_focused` 确定性验证）。**键盘路径可自动化验证**：
+需先 `bash scripts/make-app.sh --features gpui` 打包 —— 裸二进制的
+`bundle_id` 为 null，WindowServer 投不进键盘事件（与 gpui 无关）。
+ —— gpui 宿主此前是**纯展示的一行**，
 键盘打了字不进任何地方（只能靠 `NEO_GUI_PROMPT` 喂任务，对不可用）。
 已接入 `input::Input` + `InputState`，真机验证过「键盘输入 → 提交 → 内核收到 →
 模型回复」全链路（证据是会话日志里的 `user_submitted`，不是截图）。

@@ -3443,6 +3443,40 @@ D9 命令面板 / D11 模式与模型切换）。但这一轮真正的收获是*
 而"有改动却看不见"比"少显示一格"更糟（前者让用户以为没改动）。
 代价是极端情况下色带总高超出表面 —— 所以必须压配平的裁剪兜住，
 否则会画到相邻元素上（有测试守这两条）。
+### (t) 键盘投不进去不是 gpui 的问题，是**没打包**的问题
+
+**症状**：整个 GUI 阶段，自动化始终无法向 gpui 窗口投递键盘 ——
+`type` 报 "app_ref did not resolve to a unique live application"、
+坐标点击报 "no stable WindowServer app/window identity"。
+当时的结论是"gpui 窗口没有稳定身份，这条路走不通"，于是加了一堆
+环境变量钩子（`NEO_GUI_PROMPT` / `NEO_GUI_PANEL` / `NEO_GUI_EXPAND`）
+来绕开它。
+
+**真正的原因**：直接执行 `./target/debug/neo` 的进程**没有 `bundle_id`**
+（`list_apps` 里显示 `bundle_id: null`）。macOS 的自动化按应用身份路由事件，
+没有身份就没有投递目标 —— 这与 gpui 毫无关系。
+
+**修法**：`scripts/make-app.sh` 打成最小 .app，给
+`CFBundleIdentifier = dev.neokernel.neo`，ad-hoc 签名。之后：
+- `type` 走 `foreground_event` 成功投递；
+- `key return` 真的触发了提交（会话日志 `user_submitted`）。
+
+**教训**：把"工具链/环境限制"误判成"产品限制"，会让人去绕路（我加了三个
+环境变量钩子），而绕路方案还会被写进文档当成事实。**遇到"自动化做不了"
+先问一句"是我跑的方式不对吗"** —— 尤其当"产品真的不支持"这个结论
+意味着用户体验有硬伤时（无法键盘输入对 GUI 是致命的）。
+
+**副产品**：`NEO_GUI_FOCUS` 用 `FocusHandle::is_focused` 报告焦点状态。
+为什么不用截图判：焦点唯一的可见证据是**光标**，而光标会闪 ——
+单张截图 catch 到熄灭帧会得出"没聚焦"的错误结论，catch 到亮帧也证明不了
+"一直聚焦"。读句柄是确定性的。**报告点必须放在消费意图之后**，
+否则首帧会打印 false（那只是"还没处理"，不是"没聚焦"）。
+
+**`InputState::focus_handle()` 有个坑**：它与同名**字段**并存，字段遮蔽方法，
+所以必须经 `Focusable` trait 调用（`Focusable::focus_handle(&*state, cx)`）。
+
+---
+
 ### (s) D3 思考轨迹搜索：三条"搜索必须诚实"的规则
 
 **1）只搜思考块，不搜全文。** 工具输出动辄上万行，一搜就是全量扫描，
@@ -3600,7 +3634,7 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 
 | 缺口 | 影响 |
 |---|---|
-| **gpui 宿主「回车提交」无机器证据** | 输入框已能收字并提交（真机验过"键盘输入 → 提交 → 内核收到"），但**回车**这条入口只能靠真键盘触发：合成键盘事件进不了该窗口（`bundle_id` 为 null）。已读源码确认单行框会 `emit(PressEnter)` 且不插换行，属代码推理而非实测 —— 缺一条机器证据 |
+| ~~**gpui 宿主「回车提交」无机器证据**~~ **已解决** | 根因不是 gpui 而是**没打包**：直接跑裸二进制时进程 `bundle_id` 为 null，WindowServer 拿不到稳定应用身份 → 合成键盘事件投不进去。加了 `scripts/make-app.sh`（最小 .app + `CFBundleIdentifier` + ad-hoc 签名）后，`type`/`key return` 都能投递，会话日志出现 `user_submitted` —— 回车提交现在是**有机器证据**的结论（见 §4.64(t)） |
 | **gpui 宿主无多行输入** | 输入框是单行（`Input`）。ZCode 的 composer 支持多行与换行编辑；`Shift+Enter` 当前**什么都不做**（既不换行也不提交，`Textarea` 是下一步） |
 | **Desktop 打包未产品化** | 窗口层与交互已机器验证（见 4.57）；当前用最小 .app 包（Info.plist 无图标/签名），正式发布需要打包脚本、图标与签名公证 |
 | **Linux / Windows 沙箱未实现** | 受限档位在这些平台 **fail-closed**（拒绝执行），不会静默降级放行 |

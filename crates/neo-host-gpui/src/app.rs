@@ -29,6 +29,15 @@ use neo_ui_kit::component::{
 use neo_ui_kit::component::scroll::ScrollableElement as _;
 use neo_ui_kit::gpui::{div, prelude::*, px, Context, Entity, IntoElement, Render, Window};
 
+/// 焦点目标（`FocusIntent` 的载荷）。
+///
+/// 与 egui 宿主**同名同义** —— 两边指的是同一件事，改名会让人以为语义不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusTarget {
+    /// 任务输入框
+    Composer,
+}
+
 /// 界面状态（Entity）。
 pub struct NeoView {
     handle: KernelHandle,
@@ -73,6 +82,17 @@ pub struct NeoView {
     /// 搜索输入框（惰性建，理由同任务输入框）。
     search_state: Option<Entity<InputState>>,
     search_subs: Vec<neo_ui_kit::gpui::Subscription>,
+    /// 脚本化验证：每帧报告输入框焦点状态（`NEO_GUI_FOCUS`）。
+    focus_report: bool,
+    /// 上一帧是否处于"审批未决"（用于识别"刚刚解除阻塞"这一刻）。
+    composer_blocked_last: bool,
+    /// **焦点意图**（`neo-ui-behavior::FocusIntent`）。
+    ///
+    /// 用共享层的单一槽位而不是两个布尔：
+    /// 曾经（egui 宿主）用"面板要不要焦点"+"输入框要不要焦点"两个标志，
+    /// 两个都置位时**谁赢取决于代码顺序** —— 真机上表现为"命令被当成任务
+    /// 发给模型"（见 `neo-ui-behavior::focus` 的注释）。单一槽位就没有这个问题。
+    focus_intent: neo_ui_behavior::FocusIntent<FocusTarget>,
     /// 命令面板的搜索串。
     cmd_query: String,
     /// 命令面板的高亮项（过滤后列表的下标）。
@@ -150,6 +170,9 @@ impl NeoView {
             transcript: Transcript::new(),
             input: String::new(),
             reasoning_query: String::new(),
+            focus_report: std::env::var("NEO_GUI_FOCUS").is_ok(),
+            composer_blocked_last: false,
+            focus_intent: neo_ui_behavior::FocusIntent::new(),
             search_state: None,
             search_subs: Vec::new(),
             input_state: None,
@@ -233,6 +256,9 @@ impl NeoView {
         );
         self.input_state = Some(state);
         self.input_subs = vec![sub];
+        // **首帧自动聚焦**：这是聊天式界面，打开就该能直接打字。
+        // 不聚焦则用户得先点一下输入框 —— 纯键盘流里很别扭。
+        self.focus_intent.request(FocusTarget::Composer);
     }
 
     /// 清空输入框（**两条提交路径都必须调它**）。
@@ -1183,6 +1209,45 @@ impl Render for NeoView {
         // 0) 输入框（惰性；第一次渲染时 window 才可用）
         self.ensure_input(window, cx);
         self.ensure_search(window, cx);
+
+        // 审批刚答完 → 把焦点还回输入框（用户接着就要打字）。
+        // 只在**恢复那一刻**抢一次：每帧都抢会让用户没法把焦点移到搜索框。
+        let blocked_now = self.transcript.pending.is_some();
+        if self.composer_blocked_last && !blocked_now {
+            self.focus_intent.request(FocusTarget::Composer);
+        }
+        self.composer_blocked_last = blocked_now;
+
+        // 消费焦点意图：**每帧只消费一次**，且只认自己那一个目标。
+        // 消费（take）而不是读（peek）是关键 —— 否则每帧都会重新聚焦，
+        // 用户一移开焦点就被拽回来。
+        if let Some(FocusTarget::Composer) = self.focus_intent.take() {
+            if !blocked_now {
+                if let Some(state) = self.input_state.clone() {
+                    state.update(cx, |s, cx| s.focus(window, cx));
+                }
+            }
+        }
+
+        // 脚本化验证用：报告输入框是否真的拿到了焦点（`NEO_GUI_FOCUS=1`）。
+        //
+        // 为什么需要它：焦点在界面上**唯一的可见证据是光标**，而光标会闪 ——
+        // 单张截图可能正好catch在熄灭帧，据此判"没聚焦"会得出错误结论
+        // （反过来，catch到亮帧也不能证明它**一直是**聚焦的）。
+        // 直接读 `FocusHandle::is_focused` 是确定性的，且能自动断言。
+        if self.focus_report {
+            if let Some(state) = self.input_state.clone() {
+                // 用 `Focusable` trait（`focus_handle()` 与同名字段并存，
+                // 字段遮蔽了方法 → 必须经 trait 调用）
+                let focus = neo_ui_kit::gpui::Focusable::focus_handle(
+                    &*state.read(cx),
+                    cx,
+                );
+                let focused = focus.is_focused(window);
+                eprintln!("[neo] composer_focused={focused}");
+            }
+        }
+
 
         // 1) 收事件（非阻塞）
         // 冒烟钩子：首帧把 NEO_GUI_PROMPT 当作一次提交（只做一次）
