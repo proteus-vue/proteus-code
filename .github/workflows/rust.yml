@@ -50,7 +50,7 @@ jobs:
           set -o pipefail
           cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/test-out.log
           code=$?
-          # 失败定位写进 STEP SUMMARY —— check-run output 字段免认证可读
+          # 失败定位写进 STEP SUMMARY
           {
             echo "## 失败用例"
             grep -E '^test .* FAILED' /tmp/test-out.log | head -20 || true
@@ -61,6 +61,53 @@ jobs:
             echo "## 日志尾部"
             tail -c 2500 /tmp/test-out.log
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # ⚠️ **同时**输出为 `::error::` 注解。
+          #
+          # 为什么不能只写 STEP SUMMARY：那个字段**需要 admin 权限**才能通过
+          # API 读到（实测 403 "Must have admin rights"），而失败摘要恰恰是
+          # 最需要被读到的内容。注解（check-run annotations）是**免认证可读**的
+          # —— 本次就是靠它读到了 Node 版本警告，这证明通道可用。
+          #
+          # 一次 CI 失败的价值全在"能不能定位"，读不到就等于白跑一轮。
+          if [ $code -ne 0 ]; then
+            {
+              echo "### 失败用例（最多 8 条）"
+              grep -E '^test .* FAILED' /tmp/test-out.log | head -8 || true
+              echo "### panic（最多 5 条）"
+              grep -E 'panicked at' /tmp/test-out.log | head -5 || true
+              echo "### 编译错误（最多 8 条）"
+              grep -E '^error(\[|:)' /tmp/test-out.log | head -8 || true
+              echo "### 日志尾部（最后 1200 字符）"
+              tail -c 1200 /tmp/test-out.log
+            } > /tmp/summary.txt
+            # 注释里换行要转义成 %0A，否则只显示第一行
+            msg=$(sed ':a;N;$!ba;s/\n/%0A/g' /tmp/summary.txt)
+            echo "::error title=测试失败::$msg"
+          fi
           exit $code
+      # 失败时重跑失败用例并打印**完整输出**（--exact 逐条重跑）。
+      #
+      # 为什么单开这一步：全量测试的日志尾部常常只截到断言消息的一行，
+      # 而定位需要看它前后的上下文（哪个断言、期望值、实际值）。
+      # 这一步只在失败时跑，成功路径零开销。
+      - name: 失败用例详情（仅失败时）
+        if: failure()
+        run: |
+          echo "=== 逐条重跑失败用例（含完整输出）==="
+          # 从日志里取失败的用例名（形如 `test foo::bar ... FAILED`）
+          grep -E '^test .* FAILED' /tmp/test-out.log \
+            | sed -E 's/^test ([^ ]+) .*/\1/' | sort -u > /tmp/failed.txt || true
+          if [ ! -s /tmp/failed.txt ]; then
+            echo "（日志里没有失败用例行 —— 可能是编译期失败，见下方）"
+            grep -E '^error(\[|:)' /tmp/test-out.log | head -20 || true
+            exit 0
+          fi
+          while read -r name; do
+            echo ""
+            echo "########## $name ##########"
+            cargo test --workspace --exact "$name" -- --nocapture 2>&1 | tail -60 || true
+          done < /tmp/failed.txt
+
       - name: 全门禁
         run: bash scripts/verify.sh
