@@ -267,21 +267,35 @@ pub fn theme_items(query: &str) -> Vec<Item> {
 }
 
 /// 会话候选（由主循环从 `SessionControl::list` 取，宿主不自己维护清单）。
-pub fn session_items(list: &[(String, String, usize)], current: &str) -> Vec<Item> {
+pub fn session_items(list: &[neo_session::SessionInfo], current: &str) -> Vec<Item> {
     list.iter()
-        .map(|(id, title, records)| {
-            let mark = if id == current { "● " } else { "  " };
-            let label = if title == id {
-                // 没有标题的会话诚实显示 id（不编造"未命名会话"之类的假名）
-                format!("{mark}{id}")
+        .map(|s| {
+            let mark = if s.id == current { "● " } else { "  " };
+            let label = if s.has_title() {
+                format!("{mark}{}", s.title)
             } else {
-                format!("{mark}{title}")
+                // 没有标题的会话诚实显示 id（不编造"未命名会话"之类的假名）
+                format!("{mark}{}", s.id)
             };
-            Item::plain(
-                label,
-                format!("{id} · {records} 条记录"),
-                ItemAction::SwitchSession(id.clone()),
-            )
+            // 详情行：状态 + 记录数 + 改动行数（有则显示）。
+            // 状态用**文字**而非纯符号色块：tui 里颜色可能被终端主题吃掉，
+            // 只靠颜色传达"上次失败了"会在某些终端里彻底看不见。
+            let state = match s.state {
+                neo_session::SessionState::Failed => "失败",
+                neo_session::SessionState::Interrupted => "未完成",
+                neo_session::SessionState::Idle => "",
+                neo_session::SessionState::Empty => "空",
+            };
+            let changes = match s.changes {
+                Some((a, d)) => format!(" · +{a} -{d}"),
+                None => String::new(),
+            };
+            let detail = if state.is_empty() {
+                format!("{} · {} 条记录{changes}", s.id, s.records)
+            } else {
+                format!("{} · {} · {} 条记录{changes}", s.id, state, s.records)
+            };
+            Item::plain(label, detail, ItemAction::SwitchSession(s.id.clone()))
         })
         .collect()
 }

@@ -632,8 +632,17 @@ impl App {
         // "新建了却没用"留空文件）。于是刚点过"新建"的会话不在 `list()` 里 ——
         // 真机实测：点了新建、界面回了"已新建会话 X"，但侧栏仍显示"暂无会话"，
         // 用户看不到也点不到自己刚建的那个会话。补上这一条。
-        if !current.is_empty() && !list.iter().any(|(id, _, _)| *id == current) {
-            list.insert(0, (current.clone(), String::new(), 0));
+        if !current.is_empty() && !list.iter().any(|s| s.id == current) {
+            list.insert(
+                0,
+                neo_session::SessionInfo {
+                    id: current.clone(),
+                    title: String::new(),
+                    records: 0,
+                    changes: None,
+                    state: neo_session::SessionState::Empty,
+                },
+            );
         }
         if list.is_empty() {
             ui.label(
@@ -645,23 +654,24 @@ impl App {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for (id, title, records) in list {
-                    let is_current = id == current;
+                for s in list {
+                    let id = &s.id;
+                    let is_current = *id == current;
                     // 标题可能为空（新会话还没起名）——用 id 兜底，
                     // 否则列表里会出现一行空白，用户不知道那是什么
-                    let shown = if title.trim().is_empty() {
+                    let shown = if s.title.trim().is_empty() {
                         id.clone()
                     } else {
-                        title.clone()
+                        s.title.clone()
                     };
-                    let text = egui::RichText::new(format!("{shown}  ·{records}"))
+                    let text = egui::RichText::new(format!("{shown}  ·{}", s.records))
                         .color(self.palette.color(if is_current { Tone::Accent } else { Tone::Text }));
                     let resp = ui.selectable_label(is_current, text);
                     if resp.clicked() && !is_current {
                         pick = Some(id.clone());
                     }
                     // id 放在悬停提示里：标题可能重复，id 是唯一标识
-                    resp.on_hover_text(format!("{id}（{records} 条记录）"));
+                    resp.on_hover_text(format!("{id}（{} 条记录）", s.records));
                 }
             });
 
@@ -2238,13 +2248,13 @@ mod tests {
 
     /// 一个只用于测试的会话控制：可注入"列表"与"当前"。
     struct FakeSessions {
-        list: Vec<(String, String, usize)>,
+        list: Vec<neo_session::SessionInfo>,
         current: String,
         switched: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl neo_session::SessionControl for FakeSessions {
-        fn list(&self) -> Vec<(String, String, usize)> {
+        fn list(&self) -> Vec<neo_session::SessionInfo> {
             self.list.clone()
         }
         fn switch(&mut self, id: &str) -> Result<Vec<EventMsg>, String> {
@@ -2258,7 +2268,13 @@ mod tests {
         }
         fn create(&mut self) -> Result<String, String> {
             let id = "s-new".to_string();
-            self.list.push((id.clone(), String::new(), 0));
+            self.list.push(neo_session::SessionInfo {
+                id: id.clone(),
+                title: String::new(),
+                records: 0,
+                changes: None,
+                state: neo_session::SessionState::Empty,
+            });
             self.current = id.clone();
             Ok(id)
         }
@@ -2270,8 +2286,19 @@ mod tests {
         }
     }
 
+    /// 造一个列表项（测试只关心 id/标题/条数，状态与改动留默认）。
+    fn session(id: &str, title: &str, records: usize) -> neo_session::SessionInfo {
+        neo_session::SessionInfo {
+            id: id.into(),
+            title: title.into(),
+            records,
+            changes: None,
+            state: neo_session::SessionState::Empty,
+        }
+    }
+
     fn app_with_sessions(
-        list: Vec<(String, String, usize)>,
+        list: Vec<neo_session::SessionInfo>,
         current: &str,
     ) -> (App, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         let (handle, rx, tx) = crate::driver::channel();
@@ -2300,7 +2327,7 @@ mod tests {
     #[test]
     fn the_current_session_is_listed_even_when_it_has_no_file_yet() {
         // 列表里没有当前会话（模拟"新建后尚未落盘"）
-        let (app, _sw) = app_with_sessions(vec![("s-old".into(), "旧的".into(), 3)], "s-fresh");
+        let (app, _sw) = app_with_sessions(vec![session("s-old", "旧的", 3)], "s-fresh");
         let current = app.sessions.as_ref().unwrap().current();
         assert_eq!(current, "s-fresh");
         // 渲染侧应把 current 补进列表
@@ -2308,11 +2335,20 @@ mod tests {
         let mut app = app;
         run_frame(&ctx, &mut app, vec![]); // 不 panic，且侧栏会显示 current
         let mut list = app.sessions.as_ref().unwrap().list();
-        if !list.iter().any(|(id, _, _)| *id == current) {
-            list.insert(0, (current.clone(), String::new(), 0));
+        if !list.iter().any(|s| s.id == current) {
+            list.insert(
+                0,
+                neo_session::SessionInfo {
+                    id: current.clone(),
+                    title: String::new(),
+                    records: 0,
+                    changes: None,
+                    state: neo_session::SessionState::Empty,
+                },
+            );
         }
         assert!(
-            list.iter().any(|(id, _, _)| *id == "s-fresh"),
+            list.iter().any(|s| s.id == "s-fresh"),
             "当前会话必须出现在列表里：{list:?}"
         );
     }
@@ -2322,8 +2358,8 @@ mod tests {
     fn switching_session_replaces_the_transcript_with_history() {
         let (mut app, switched) = app_with_sessions(
             vec![
-                ("s-a".into(), "甲".into(), 2),
-                ("s-b".into(), "乙".into(), 5),
+                session("s-a", "甲", 2),
+                session("s-b", "乙", 5),
             ],
             "s-a",
         );

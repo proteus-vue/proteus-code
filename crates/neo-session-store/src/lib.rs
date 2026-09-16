@@ -22,6 +22,12 @@
 
 use std::path::{Path, PathBuf};
 
+// 状态枚举只有**一份定义**，在 `neo-session`（契据所在处）——
+// 这里 re-export 而不是各定义一份：两份同名类型会让"trait 要这个、
+// 实现给那个"变成一个纯粹的转换烦恼（实测踩到：编译报 expected
+// neo_session::SessionState, found neo_session_store::SessionState）。
+pub use neo_session::SessionState;
+
 /// 一个会话的元信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMeta {
@@ -35,6 +41,13 @@ pub struct SessionMeta {
     pub bytes: u64,
     /// 文件路径
     pub path: PathBuf,
+    /// **累计改动行数**（增, 删）。取自日志里**最后一个** `files_changed`。
+    ///
+    /// ⚠️ 取最后一个而不是把每条加起来：内核的 `FilesChanged` 是
+    /// **覆盖语义**（它自己持有累计状态），逐条相加会把同一文件重复计入。
+    pub changes: Option<(usize, usize)>,
+    /// 结束状态（见 [`SessionState`]）。
+    pub state: SessionState,
 }
 
 impl SessionMeta {
@@ -86,13 +99,15 @@ impl SessionStore {
             };
             let meta = e.metadata().ok();
             let bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-            let (title, records) = read_title_and_count(&path).unwrap_or((id.to_string(), 0));
+            let sum = read_summary(&path).unwrap_or_default();
             out.push(SessionMeta {
                 id: id.to_string(),
-                title,
-                records,
+                title: if sum.title.is_empty() { id.to_string() } else { sum.title },
+                records: sum.records,
                 bytes,
                 path,
+                changes: sum.changes,
+                state: sum.state,
             });
         }
         // 最近修改优先；无法取时间的排在后面（按 id 稳定排序）
@@ -180,41 +195,88 @@ pub fn sanitize_id(id: &str) -> String {
 }
 
 /// 读标题（第一条用户消息）与记录条数。
-fn read_title_and_count(path: &Path) -> Option<(String, usize)> {
+/// 单遍扫出会话摘要：标题、条数、累计改动、结束状态。
+///
+/// **一次读完**（而不是为每个字段各扫一遍）：会话列表每次打开都要列全部会话，
+/// 日志可能有几万行，多扫几遍是白白的 I/O。
+#[derive(Default)]
+struct Summary {
+    title: String,
+    records: usize,
+    /// 最后一个 `files_changed` 的合计（覆盖语义，见 `SessionMeta::changes`）
+    changes: Option<(usize, usize)>,
+    state: SessionState,
+}
+
+fn read_summary(path: &Path) -> Option<Summary> {
     let raw = std::fs::read_to_string(path).ok()?;
-    let mut title = None;
-    let mut n = 0usize;
+    let mut out = Summary { state: SessionState::Empty, ..Default::default() };
+    // 每轮是否已收尾。`turn_started` 置 false，`turn_complete` 置 true。
+    // 初始为 true（"没有未收尾的轮"）。
+    let mut settled = true;
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        n += 1;
-        if title.is_some() {
-            continue; // 只需要数条数了
-        }
+        out.records += 1;
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if v.get("kind").and_then(|k| k.as_str()) != Some("op") {
+        let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        let Some(p) = v.get("payload") else { continue };
+
+        // 标题：第一条带非空文本的 user_turn
+        if out.title.is_empty() && kind == "op" {
+            if let Some(t) = p.get("user_turn").and_then(|u| u.get("text")).and_then(|t| t.as_str())
+            {
+                let t = t.trim();
+                if !t.is_empty() {
+                    out.title = t.chars().take(48).collect();
+                }
+            }
             continue;
         }
-        // op 的 payload 是 Op 枚举；UserTurn 的 serde 表示是
-        // {"user_turn":{"text":"...","refs":[...]}}
-        let Some(p) = v.get("payload") else { continue };
-        let text = p
-            .get("user_turn")
-            .and_then(|u| u.get("text"))
-            .and_then(|t| t.as_str());
-        if let Some(t) = text {
-            let t = t.trim();
-            if !t.is_empty() {
-                title = Some(t.chars().take(48).collect::<String>());
+        if kind != "event" {
+            continue;
+        }
+        // event 的 payload 是 {"<变体名>": {...}} 的单键映射
+        let Some((name, body)) = p.as_object().and_then(|m| m.iter().next()) else {
+            continue;
+        };
+        match name.as_str() {
+            "turn_started" => {
+                settled = false;
+                out.state = SessionState::Interrupted; // 暂定；收尾会覆盖
             }
+            "turn_complete" => {
+                settled = true;
+                out.state = SessionState::Idle;
+            }
+            "error" => {
+                // 错误之后若还有正常的轮次收尾，应以收尾为准
+                out.state = SessionState::Failed;
+            }
+            "files_changed" => {
+                if let Some(files) = body.get("files").and_then(|f| f.as_array()) {
+                    let mut add = 0usize;
+                    let mut del = 0usize;
+                    for f in files {
+                        add += f.get("additions").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                        del += f.get("deletions").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                    }
+                    out.changes = Some((add, del));
+                }
+            }
+            _ => {}
         }
     }
-    let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    Some((title.unwrap_or_else(|| id.to_string()), n))
+    // 收尾与错误同时存在时：**以收尾为准**（一轮正常结束就说明它跑完了，
+    // 中间某个工具报错不等于会话失败）
+    if settled && out.state == SessionState::Interrupted {
+        out.state = SessionState::Empty;
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -226,6 +288,129 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// 写一个会话，事件序列由调用方给（用于构造各种"结束状态"）。
+    fn write_events(store: &SessionStore, id: &str, user_text: &str, payloads: Vec<serde_json::Value>) {
+        let path = store.path_for(id);
+        let mut lines = vec![serde_json::json!({
+            "v": 1, "ts": "1970-01-01T00:00:00Z", "seq": 1, "kind": "op",
+            "payload": {"user_turn": {"text": user_text, "refs": []}}
+        })
+        .to_string()];
+        for (i, payload) in payloads.into_iter().enumerate() {
+            lines.push(
+                serde_json::json!({
+                    "v": 1, "ts": "1970-01-01T00:00:00Z", "seq": i + 2, "kind": "event",
+                    "payload": payload
+                })
+                .to_string(),
+            );
+        }
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    }
+
+    /// **覆盖语义**：`files_changed` 是累计快照，取最后一个而不是逐条相加 ——
+    /// 相加会把同一文件重复计入（内核自己已持有累计状态）。
+    #[test]
+    fn changes_take_the_last_files_changed_not_the_sum() {
+        let dir = tmpdir("changes");
+        let store = SessionStore::open(&dir);
+        write_events(
+            &store,
+            "s-1",
+            "改文件",
+            vec![
+                serde_json::json!({"files_changed": {"files": [
+                    {"path": "a.rs", "additions": 3, "deletions": 1}
+                ]}}),
+                // 第二次是累计后的快照：a.rs 变成 +5 -2
+                serde_json::json!({"files_changed": {"files": [
+                    {"path": "a.rs", "additions": 5, "deletions": 2}
+                ]}}),
+            ],
+        );
+        let m = store.list().into_iter().find(|m| m.id == "s-1").unwrap();
+        assert_eq!(m.changes, Some((5, 2)), "应取最后一个快照，不是 8/3");
+    }
+
+    /// 一轮跑完（有 `turn_complete`）→ 正常结束。
+    #[test]
+    fn completed_turn_means_idle() {
+        let dir = tmpdir("idle");
+        let store = SessionStore::open(&dir);
+        write_events(
+            &store,
+            "s-1",
+            "任务",
+            vec![
+                serde_json::json!({"turn_started": {"turn_id": "t1"}}),
+                serde_json::json!({"turn_complete": {"input_tokens": 1, "output_tokens": 2}}),
+            ],
+        );
+        assert_eq!(store.list()[0].state, SessionState::Idle);
+    }
+
+    /// **悬空的 `turn_started`**（没有收尾）→ 未完成。
+    /// 这是磁盘上的历史：进程早就不在了，所以**不能**显示成"运行中"。
+    #[test]
+    fn dangling_turn_started_means_interrupted_not_running() {
+        let dir = tmpdir("interrupted");
+        let store = SessionStore::open(&dir);
+        write_events(
+            &store,
+            "s-1",
+            "任务",
+            vec![serde_json::json!({"turn_started": {"turn_id": "t1"}})],
+        );
+        assert_eq!(store.list()[0].state, SessionState::Interrupted);
+    }
+
+    #[test]
+    fn error_marks_the_session_failed() {
+        let dir = tmpdir("failed");
+        let store = SessionStore::open(&dir);
+        write_events(
+            &store,
+            "s-1",
+            "任务",
+            vec![serde_json::json!({"error": {"message": "炸了"}})],
+        );
+        assert_eq!(store.list()[0].state, SessionState::Failed);
+    }
+
+    /// 中间报错但最后正常收尾 → **以收尾为准**（不标失败）。
+    /// 否则"工具报过错"会被当成"这次会话失败了"，而它其实跑完了。
+    #[test]
+    fn a_settled_turn_wins_over_an_earlier_error() {
+        let dir = tmpdir("err-then-ok");
+        let store = SessionStore::open(&dir);
+        write_events(
+            &store,
+            "s-1",
+            "任务",
+            vec![
+                serde_json::json!({"error": {"message": "某工具失败"}}),
+                serde_json::json!({"turn_complete": {"input_tokens": 1, "output_tokens": 1}}),
+            ],
+        );
+        assert_eq!(
+            store.list()[0].state,
+            SessionState::Idle,
+            "收尾了就不该标失败"
+        );
+    }
+
+    /// 完全没有轮次的会话 → `Empty`（不是"失败"，也不是"未完成"）。
+    #[test]
+    fn a_session_without_turns_is_empty() {
+        // ⚠️ tag 不能叫 "empty" —— 那是既有测试 `empty_store_lists_nothing`
+        // 的目录名，`tmpdir` 按 tag 命名且会先删目录，两个测试会互相清掉
+        //（实测撞过一次）
+        let dir = tmpdir("no-turns");
+        let store = SessionStore::open(&dir);
+        write_events(&store, "s-1", "只是提了个问题", vec![]);
+        assert_eq!(store.list()[0].state, SessionState::Empty);
     }
 
     fn write_session(store: &SessionStore, id: &str, user_text: &str, events: usize) {

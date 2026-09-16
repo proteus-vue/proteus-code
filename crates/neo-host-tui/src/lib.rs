@@ -9967,7 +9967,7 @@ mod tests {
         // 用了它就会出现"切换了会话，设置页还显示旧会话"（脱节）。
         struct FakeSessions;
         impl SessionControl for FakeSessions {
-            fn list(&self) -> Vec<(String, String, usize)> { vec![] }
+            fn list(&self) -> Vec<neo_session::SessionInfo> { vec![] }
             fn switch(&mut self, _id: &str) -> Result<Vec<EventMsg>, String> { Ok(vec![]) }
             fn create(&mut self) -> Result<String, String> { Ok("new".into()) }
             fn delete(&mut self, _id: &str) -> Result<bool, String> { Ok(false) }

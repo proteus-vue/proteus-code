@@ -108,9 +108,55 @@ pub fn assert_contiguous(events: &[SessionEvent]) -> Result<(), String> {
 /// `switch` 返回 `Vec<EventMsg>` 而不是某个会话状态结构：宿主重画转录需要的是
 /// **事件**（与实时流同一种形态），这样"重放历史"与"接收新事件"走同一条渲染
 /// 路径，不必为历史单独写一套画法（那正是两份实现漂移的来源）。
+/// 会话列表里的一行。
+///
+/// 为什么用具名结构而不是元组：这个列表原本是
+/// `(id, 标题, 记录数)` —— 三个元素已到可读性的极限，再加"改动行数"与
+/// "结束状态"就要写成五元组，调用处会变成 `list[0].3` 这种没人读得懂的东西。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub id: String,
+    /// 标题（取不到时等于 id，见 `has_title`）。
+    pub title: String,
+    /// 日志条数（粗略反映规模）。
+    pub records: usize,
+    /// 累计改动行数（增, 删）；没有改动过则为 `None`。
+    ///
+    /// **取自最后一次快照**，不是逐步累加（内核的改动事件是覆盖语义）。
+    pub changes: Option<(usize, usize)>,
+    /// 结束状态（正常结束 / 失败 / 未完成 / 空）。
+    pub state: SessionState,
+}
+
+impl SessionInfo {
+    /// 标题是否来自真实内容（否则是 id 兜底）。
+    ///
+    /// 界面应当据此**弱化显示**兜底标题：把 id 当标题显示会让人以为
+    /// 会话真的叫这个名字。
+    pub fn has_title(&self) -> bool {
+        self.title != self.id
+    }
+}
+
+/// 会话的结束状态（从日志末尾推断）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionState {
+    /// 正常结束。
+    Idle,
+    /// 出现过 `error` 且此后没有正常收尾。
+    Failed,
+    /// 有一轮开了头却没结束。**这是磁盘上的历史，不是"正在运行"** ——
+    /// 进程早就不在了，它只说明上次没跑完（崩溃/中断/被杀）。
+    /// 显示成"运行中"是编的。
+    Interrupted,
+    /// 空会话（没有任何一轮）。
+    #[default]
+    Empty,
+}
+
 pub trait SessionControl {
-    /// 列出现有会话：(id, 标题, 记录数)。最近修改的在前。
-    fn list(&self) -> Vec<(String, String, usize)>;
+    /// 列出现有会话。最近修改的在前。
+    fn list(&self) -> Vec<SessionInfo>;
 
     /// 切换到指定会话；返回该会话的历史事件流。
     fn switch(&mut self, id: &str) -> Result<Vec<neo_protocol::EventMsg>, String>;

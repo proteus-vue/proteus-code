@@ -999,7 +999,10 @@ impl NeoView {
 /// ZCode 把它们分在左右两侧（各占 240px），那在宽屏上才成立。
 fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
     let mut col = v_flex()
-        .w(px(220.))
+        // 260 而不是 220：220 会把"标题 ·条数 +3 -1"里最右侧的 `-1` 裁掉
+        //（真机截图看出来的 —— 那一行**恰好**在改动行数出现时超宽，
+        //  而"改动行数"正是这个列表新加的信息，等于新功能自己不可见）
+        .w(px(260.))
         .h_full()
         .gap_2()
         .p_3()
@@ -1113,8 +1116,17 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
     // ⚠️ 当前会话必须在列表里，哪怕它还没有文件：
     // `new_id()` 刻意不建文件（首次写入才惰性创建），于是刚点过"新建"的会话
     // 不在 list() 里 —— 用户看不到也点不到自己刚建的那个（egui 版真机踩过）。
-    if !current.is_empty() && !list.iter().any(|(id, _, _)| *id == current) {
-        list.insert(0, (current.clone(), String::new(), 0));
+    if !current.is_empty() && !list.iter().any(|s| s.id == current) {
+        list.insert(
+            0,
+            neo_session::SessionInfo {
+                id: current.clone(),
+                title: String::new(),
+                records: 0,
+                changes: None,
+                state: neo_session::SessionState::Empty,
+            },
+        );
     }
     if list.is_empty() {
         col = col.child(
@@ -1123,21 +1135,41 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
                 .child("暂无会话"),
         );
     }
-    for (id, title, records) in list {
+    for si in list {
+        let id = si.id.clone();
         let is_current = id == current;
         // 标题为空（新会话还没起名）用 id 兜底，否则列表里出现空白行
-        let shown = if title.trim().is_empty() { id.clone() } else { title.clone() };
+        let shown = if si.title.trim().is_empty() { id.clone() } else { si.title.clone() };
+        // **状态圆点**：只对"需要用户注意"的两种状态上色。
+        // 正常结束不画圆点（全是绿点等于没有信息）；空会话也不画。
+        let (dot, dot_tone) = match si.state {
+            neo_session::SessionState::Failed => ("●", Some(Tone::Error)),
+            neo_session::SessionState::Interrupted => ("◐", Some(Tone::Warning)),
+            _ => ("", None),
+        };
+        // **改动行数**：只显示增删，不带"改动"之类的字（列表里每行都要短）
+        let changes = match si.changes {
+            Some((a, d)) if a > 0 || d > 0 => format!(" +{a} -{d}"),
+            _ => String::new(),
+        };
         let click_id = id.clone();
         let v = cx.entity().clone();
         col = col.child(
-            div()
+            h_flex()
+                .gap_1()
                 .id(format!("sess-{id}"))
-                .text_color(neo_color(if is_current {
-                    Tone::Accent
+                .child(if let Some(t) = dot_tone {
+                    div().text_color(neo_color(t)).child(dot)
                 } else {
-                    Tone::Text
-                }))
-                .child(format!("{shown} ·{records}"))
+                    div()
+                })
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .text_color(neo_color(if is_current { Tone::Accent } else { Tone::Text }))
+                        .child(format!("{shown} ·{}{changes}", si.records)),
+                )
                 .on_click(move |_, _, cx| {
                     if !is_current {
                         let id = click_id.clone();

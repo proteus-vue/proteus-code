@@ -1018,11 +1018,17 @@ impl neo_host_tui::ProviderControl for TuiProviders {
 }
 
 impl<H: KernelAccess> neo_session::SessionControl for Sessions<H> {
-    fn list(&self) -> Vec<(String, String, usize)> {
+    fn list(&self) -> Vec<neo_session::SessionInfo> {
         self.store
             .list()
             .into_iter()
-            .map(|m| (m.id, m.title, m.records))
+            .map(|m| neo_session::SessionInfo {
+                id: m.id,
+                title: m.title,
+                records: m.records,
+                changes: m.changes,
+                state: m.state,
+            })
             .collect()
     }
 
