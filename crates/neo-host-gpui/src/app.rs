@@ -59,6 +59,13 @@ pub struct NeoView {
     models: Vec<String>,
     /// 是否折叠思考轨迹（D3）。
     show_reasoning: bool,
+    /// **D6** 轮次计时。
+    ///
+    /// 计时在**宿主**做，不进共享转录模型 —— 挂钟时间会破坏回放确定性
+    /// （同一份日志回放必须得到同一个转录）。见 `neo_ui_behavior::clock`。
+    clock: neo_ui_behavior::TurnClock,
+    /// 每轮耗时（按 `TurnComplete` 出现顺序追加，与 `Block::TurnSummary` 对齐）。
+    turn_durations: Vec<Option<std::time::Duration>>,
     /// 启动时自动提交的任务（一次性）。来源 `NEO_GUI_PROMPT`。
     ///
     /// 与 egui 宿主的同名钩子同源（AGENTS.md 里 `PROTEUS_CODE_SMOKE` 的约定）：
@@ -86,6 +93,8 @@ impl NeoView {
             cmd_selected: 0,
             terminal_input: String::new(),
             show_reasoning: true,
+            clock: neo_ui_behavior::TurnClock::new(),
+            turn_durations: Vec::new(),
             transcript: Transcript::new(),
             input: String::new(),
             mode,
@@ -113,8 +122,19 @@ impl NeoView {
             // 只有**宿主自己的**派生状态在这里处理。
             // 事件到"待审批/运行中/目标/转录块"的映射由 `Transcript` 负责
             //（它是共享的，两个 GUI 宿主必须用同一套语义）。
-            if let EventMsg::ModelSwitched { model, .. } = ev {
-                self.model = model.clone();
+            match ev {
+                EventMsg::ModelSwitched { model, .. } => self.model = model.clone(),
+                // **D6 计时**：边界由宿主自己判定（它才知道哪个事件算一轮的开始/结束）。
+                // 这里刻意不用 `transcript.running` —— 那是共享模型的状态，
+                // 而计时的起点要精确到"看到 TurnStarted 的那一刻"。
+                EventMsg::TurnStarted { .. } => {
+                    self.clock.start(elapsed_now());
+                }
+                EventMsg::TurnComplete { .. } => {
+                    self.turn_durations.push(self.clock.elapsed_since_start(elapsed_now()));
+                    self.clock.finish();
+                }
+                _ => {}
             }
         }
         self.transcript.push_batch(&events);
@@ -315,6 +335,17 @@ impl NeoView {
         // 模式变化**没有内核事件**，宿主必须自记 —— 否则状态行显示旧档位
         self.notice = Some(format!("已切换到 {} 模式", mode_label(next)));
     }
+}
+
+/// 进程启动至今的时长。
+///
+/// `TurnClock` 用的是 `Duration`（从零起算的时长）而不是 `Instant` ——
+/// 这样它是**纯数据**、可注入假值做确定性测试。
+/// 这里把真实的单调时钟折算成同一个表示。
+fn elapsed_now() -> std::time::Duration {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed()
 }
 
 /// 变更条元素：**经渲染缝**绘制（不直接用 gpui 的绘制 API）。
@@ -530,10 +561,30 @@ impl NeoView {
                     );
                 }
                 Block::TurnSummary { input_tokens, output_tokens } => {
+                    // **D6 耗时**：把第 n 个轮摘要与第 n 个记录的耗时配对。
+                    // 用**计数**而不是块下标对齐：转录里还夹着别的块，
+                    // 按下标索引会在任何一次"块类型变化"后错位（悄悄显示错的耗时）。
+                    let nth = self
+                        .transcript
+                        .blocks
+                        .iter()
+                        .take(idx + 1)
+                        .filter(|b| matches!(b, Block::TurnSummary { .. }))
+                        .count()
+                        - 1;
+                    let dur = self
+                        .turn_durations
+                        .get(nth)
+                        .copied()
+                        .flatten()
+                        .map(|d| format!(" · 耗时 {}", neo_ui_behavior::format_duration(d)))
+                        .unwrap_or_default();
                     col = col.child(
                         div()
                             .text_color(neo_color(Tone::Muted))
-                            .child(format!("· 本轮完成（{input_tokens} in / {output_tokens} out）")),
+                            .child(format!(
+                                "· 本轮完成（{input_tokens} in / {output_tokens} out{dur}）"
+                            )),
                     );
                 }
                 Block::Files(files) => {

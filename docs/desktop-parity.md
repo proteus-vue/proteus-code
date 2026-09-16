@@ -111,7 +111,7 @@ ZCode 官方文档把界面写得很细（[zcode.z.ai/en/docs](https://zcode.z.a
 | D3 | **思考轨迹**（可折叠、可搜索） | ZCode | ✅ **已实现**（可折叠 + 显示字数；**搜索未做**） | ✅ `ReasoningDelta` |
 | D4 | 工具调用**分组** + 参数摘要 | 两者 | ✅ **已实现**（卡片含名字/状态/exit/参数摘要/输出/截断标注；**调用分组未做**） | ✅ `ToolCallBegin{name,arguments}` |
 | D5 | **diff 渲染** | 两者 | ✅ **已实现**（按行着色；顺带修掉"预览与执行可能不是同一文件"的缺陷） | ✅ `PatchProposed{path,diff}` |
-| D6 | 每轮**执行摘要 + 耗时** | ZCode | ⚠️ 半程：token 数有了，**耗时未加**（需前端计时或补字段） | ✅ `TurnComplete` |
+| D6 | 每轮**执行摘要 + 耗时** | ZCode | ✅ **两个 GUI 宿主都已实现**（token + 耗时。耗时**刻意不进共享转录模型**——挂钟时间会破坏回放确定性，故做成可注入时间的纯逻辑 `neo-ui-behavior::clock`） | ✅ `TurnComplete`（耗时由宿主计时） |
 | D7 | 右侧 summary / Goal 面板 | ZCode | ✅ **两个 GUI 宿主都已实现**（目标卡片 + 子任务清单 + 暂停/恢复/清除） | ✅ `GoalUpdated{snapshot}` |
 | D8 | 底部终端面板 | ZCode | ⚠️ **两宿主已做命令台**（`Cmd+K` → `/terminal` 开关；输入命令走 `Op::Shell`：**不经模型**、走沙箱、输出上限一致，真机验证日志为 `op {"shell"...}` + `tool_call_end exit 0`）。**与 ZCode 的关键差别**：它用 `node-pty` 起真 PTY（可跑 vim/htop 这类全屏交互程序），我们是**每条命令一个进程、无 PTY** —— 所以面板叫「命令台」不叫「终端」，边界如实呈现 | ✅ 无需新后端能力（原写「需新功能」是过时判断） |
 | D9 | 命令中心（`Cmd+K`） | ZCode | ⚠️ **两宿主已做 commands 一类**（覆盖式面板 + 搜索过滤 + 键盘导航 + 11 条命令，每条都有可观察效果，有测试逐个守着）。**conversations / files 两类未做** —— 它们需要会话库与文件索引，属 D1 范畴 | 纯前端（已兑现） |

@@ -16,9 +16,12 @@
 //! |---|---|
 //! | [`focus`] | 两个控件争抢焦点 → 命令台里敲的命令被当成任务发给模型 |
 //! | [`keys`] | 界面导航键被框架抢先消费 → `Shift+Tab` / `Esc` 行为与预期不符 |
+//! | [`clock`] | 耗时不能进共享转录模型（破坏回放确定性）→ 改成可注入时间的纯逻辑 |
 
+pub mod clock;
 pub mod focus;
 pub mod keys;
 
+pub use clock::{format_duration, TurnClock};
 pub use focus::FocusIntent;
 pub use keys::{KeyArbiter, Layer};

@@ -3462,7 +3462,7 @@ D9 命令面板 / D11 模式与模型切换）。但这一轮真正的收获是*
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 799 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web HTTP / 原生 GUI）
+cargo test --workspace      # 806 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web HTTP / 原生 GUI）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫 + 执行效率）
 ```
 
