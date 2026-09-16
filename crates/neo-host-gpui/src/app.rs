@@ -690,6 +690,63 @@ fn gutter_element(diff: &str) -> impl IntoElement {
     .h_full()
 }
 
+/// 目标阶段 → 进度段（`0..=5` 步中的第几步）。
+///
+/// 五个阶段（Plan→Code→Review→Learn→Done）天然是一个有序的推进过程，
+/// 所以"走到第几步了"就是进度。映射放在宿主：渲染层不认识 `GoalPhase`
+/// （那是协议类型，会破坏 UI 栈的可提取性）。
+fn goal_progress_segments(snapshot: &neo_protocol::GoalSnapshot) -> Vec<neo_ui_render::ProgressSegment> {
+    snapshot
+        .subtasks
+        .iter()
+        .map(|st| {
+            let done = match st.phase {
+                neo_protocol::GoalPhase::Plan => 1,
+                neo_protocol::GoalPhase::Code => 2,
+                neo_protocol::GoalPhase::Review => 3,
+                neo_protocol::GoalPhase::Learn => 4,
+                neo_protocol::GoalPhase::Done => 5,
+            };
+            // 总步数固定为 5：这是阶段**枚举的基数**，不是"这个子任务要几步"。
+            // 用固定基数才能让不同子任务的段长一致（否则段长随阶段数变化，
+            // 一眼看不出谁更靠前）。
+            neo_ui_render::ProgressSegment::new(done, 5)
+        })
+        .collect()
+}
+
+/// 分段进度条元素：**渲染缝的第三个真实消费者**。
+///
+/// 与变更条、用量图同构：宿主持有原始数据 → 映射成中立类型 →
+/// 经 `RenderBackend` 出场景 → 在 canvas 的 paint 回调里提交。
+fn progress_chart_element(segments: Vec<neo_ui_render::ProgressSegment>) -> impl IntoElement {
+    use neo_ui_render::{segmented_progress, RenderBackend};
+
+    let track_color = neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Border);
+    let fill_color = neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Success);
+
+    let prepaint = move |bounds: neo_ui_kit::gpui::Bounds<neo_ui_kit::gpui::Pixels>,
+                         _window: &mut neo_ui_kit::gpui::Window,
+                         _cx: &mut neo_ui_kit::gpui::App| {
+        let scene = segmented_progress(
+            &segments,
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+            track_color,
+            fill_color,
+        );
+        (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
+    };
+    neo_ui_kit::gpui::canvas(
+        prepaint,
+        |bounds, (_, paint), window, _cx| {
+            paint.draw(bounds.origin, window);
+        },
+    )
+    .w_full()
+    .h(px(6.))
+}
+
 /// 用量条形图元素：**渲染缝的第二个真实消费者**。
 ///
 /// 与变更条（第一个消费者）同构：宿主持有原始数据 → 映射成中立类型 →
@@ -1156,6 +1213,10 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
                     .text_color(neo_color(Tone::Accent))
                     .child(g.summary()),
             );
+            // 分段进度条：每个子任务一段，段内表达走到第几阶段。
+            // 文字列表说得出"每个子任务在哪个阶段"，说不出"整体推进了多少" ——
+            // 后者要读完全部行再自己数，而色带一眼可见。
+            col = col.child(progress_chart_element(goal_progress_segments(g)));
             for s in &g.subtasks {
                 let (mark, tone) = match s.phase {
                     neo_protocol::GoalPhase::Done => ("✓", Tone::Success),
@@ -1812,6 +1873,12 @@ impl Render for NeoView {
             .child(
                 h_flex()
                     .flex_1()
+                    // ⚠️ `min_w(0)` 不能省：转录区是 `flex_1`，而 flex 项的
+                    // 默认最小宽度是"内容宽度" —— 于是长转录（不换行的长行）
+                    // 会把整个横向布局撑开，**把右侧栏挤出窗口**（真机看到
+                    // 侧栏连标题都不见了，而它的数据是好的）。
+                    // `min_w(0)` 允许它被压缩到可用宽度以内，内容由滚动条处理。
+                    .min_w(px(0.))
                     .min_h(px(0.))
                     .child({
                         // 搜索行在转录**上方**（它作用于转录内容，放侧栏会
@@ -1826,6 +1893,11 @@ impl Render for NeoView {
                         v_flex()
                             .flex_1()
                             .h_full()
+                            // ⚠️ 与外层 `h_flex` 同一个坑：flex 项默认
+                            // `min-width: auto`，不压到 0 的话它会撑到
+                            // **内容宽度**（转录里那些不换行的长行），
+                            // 从而把侧栏挤出窗口。
+                            .min_w(px(0.))
                             .min_h(px(0.))
                             .gap_1()
                             .child(
@@ -1893,7 +1965,20 @@ impl Render for NeoView {
                             })
                     })
                     .child(if self.sidebar_open {
-                        side_panel(self, cx).into_any_element()
+                        // 侧栏内容会随"用量图 + 目标 + 进度条 + 会话列表"变长，
+                        // 而它**必须有滚动容器** —— 我加第三个自绘组件时
+                        // 真机发现目标区块被挤出可视区且滚不到（侧栏此前没有
+                        // 滚动，因为内容少到没暴露这个问题）。
+                        div()
+                            .id("side-scroll")
+                            // 宽度写在外层（内层 side_panel 自己的 w 会被
+                            // 滚动容器影响 —— 显式给出更可靠）
+                            .w(px(260.))
+                            .h_full()
+                            .min_h(px(0.))
+                            .overflow_y_scrollbar()
+                            .child(side_panel(self, cx))
+                            .into_any_element()
                     } else {
                         div().into_any_element()
                     }),
@@ -2127,4 +2212,77 @@ pub fn run(
 /// 供测试与调用方检查工具参数摘要（转发共享实现，避免宿主各写一套）。
 pub use neo_driver::transcript::summarize_args as summarize_tool_args;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neo_protocol::{GoalPhase, GoalSnapshot, GoalSubtask};
 
+    fn snapshot(phases: &[GoalPhase]) -> GoalSnapshot {
+        GoalSnapshot {
+            goal_id: "goal-1".into(),
+            goal: "测试目标".into(),
+            paused: false,
+            stopped: None,
+            subtasks: phases
+                .iter()
+                .enumerate()
+                .map(|(i, ph)| GoalSubtask {
+                    id: i,
+                    title: format!("子任务 {i}"),
+                    phase: *ph,
+                    retries: 0,
+                })
+                .collect(),
+            iterations: 0,
+            consecutive_failures: 0,
+            turns_remaining: 0,
+            budget_used: 0,
+        }
+    }
+
+    /// 每个子任务一段，且**总步数固定为 5**（阶段枚举的基数）——
+    /// 否则段长会随阶段数变化，一眼看不出谁更靠前。
+    #[test]
+    fn each_subtask_becomes_one_segment_with_a_fixed_total() {
+        let g = snapshot(&[GoalPhase::Plan, GoalPhase::Done, GoalPhase::Review]);
+        let segs = goal_progress_segments(&g);
+        assert_eq!(segs.len(), 3, "三个子任务三段");
+        for s in &segs {
+            assert_eq!(s.total, 5, "总步数恒为 5");
+        }
+        assert_eq!(segs[0].done, 1, "Plan 是第 1 步");
+        assert_eq!(segs[1].done, 5, "Done 是第 5 步");
+        assert_eq!(segs[2].done, 3, "Review 是第 3 步");
+    }
+
+    /// 阶段顺序必须**严格递增**地映射到步数 ——
+    /// 若两个阶段映射到同一步，进度条上就分不出先后（而那是它的唯一用途）。
+    #[test]
+    fn phases_map_to_strictly_increasing_steps() {
+        let order = [
+            GoalPhase::Plan,
+            GoalPhase::Code,
+            GoalPhase::Review,
+            GoalPhase::Learn,
+            GoalPhase::Done,
+        ];
+        let g = snapshot(&order);
+        let segs = goal_progress_segments(&g);
+        for w in segs.windows(2) {
+            assert!(w[1].done > w[0].done, "阶段步数必须严格递增：{segs:?}");
+        }
+    }
+
+    #[test]
+    fn done_phase_maps_to_a_complete_segment() {
+        let g = snapshot(&[GoalPhase::Done]);
+        let segs = goal_progress_segments(&g);
+        assert!(segs[0].is_complete(), "Done 应是完成态（画满整段）");
+    }
+
+    #[test]
+    fn a_goal_without_subtasks_yields_no_segments() {
+        let g = snapshot(&[]);
+        assert!(goal_progress_segments(&g).is_empty());
+    }
+}

@@ -31,6 +31,7 @@
 
 pub mod backend;
 pub mod gutter;
+pub mod progress;
 pub mod scene;
 pub mod usage;
 
@@ -38,4 +39,5 @@ pub use backend::GpuiBackend;
 pub use backend::RenderBackend;
 pub use gutter::{change_gutter, GutterMark};
 pub use scene::{Color, Op, Point, Rect, Scene, Size};
+pub use progress::{segmented_progress, ProgressSegment};
 pub use usage::{usage_bars, UsageBar};
