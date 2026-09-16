@@ -23,6 +23,8 @@
 //!
 #![doc = include_str!("../README.md")]
 
+pub mod text;
 pub mod theme;
 
+pub use text::{rich_text, RichText};
 pub use theme::{apply_neo_theme, base_bg, neo_color, panel_bg};

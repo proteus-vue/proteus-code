@@ -282,8 +282,16 @@ members = [{members}]
             "NEO_EXTRACT_TARGET_DIR", os.path.join(ROOT, "target", "extract-drill")
         )
         env = {**os.environ, "CARGO_TARGET_DIR": target_dir}
+        # ⚠️ `--all-targets` 是必需的，不是保守选择：不加它，
+        # `cargo check --workspace` **会跳过 examples** —— 而 examples
+        # 恰恰是"这个 crate 拿出去能不能用"的最直接证据（展示台就是 example）。
+        # 实测踩到：只跑 `--workspace` 时演练报绿，但展示台在空仓里能否编译
+        # 根本没被验证过，即"声明比验证的范围大"。
         for step, cmd in (
-            ("E7  编译（cargo check --workspace）", ["cargo", "check", "--workspace"]),
+            (
+                "E7  编译（cargo check --workspace --all-targets，含 examples）",
+                ["cargo", "check", "--workspace", "--all-targets"],
+            ),
             ("E8  测试（cargo test --workspace）", ["cargo", "test", "--workspace"]),
         ):
             r = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, env=env)

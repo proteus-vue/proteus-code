@@ -644,25 +644,10 @@ fn next_model(current: &str, models: &[String]) -> String {
 /// 前者把它当**一行文字**参与排版（换行、基线正确），后者是并排的盒子，
 /// 中英混排时会各占各的宽度、断行位置全错。
 fn styled_line(spans: &[(String, Tone)]) -> impl IntoElement {
-    let text: String = spans.iter().map(|(t, _)| t.as_str()).collect();
-    let mut highlights = Vec::new();
-    let mut offset = 0usize;
-    for (seg, tone) in spans {
-        let len = seg.len();
-        if len > 0 {
-            highlights.push((
-                offset..offset + len,
-                neo_ui_kit::gpui::HighlightStyle {
-                    color: Some(neo_color(*tone).into()),
-                    ..Default::default()
-                },
-            ));
-        }
-        offset += len;
-    }
-    div().child(
-        neo_ui_kit::gpui::StyledText::new(text).with_highlights(highlights),
-    )
+    // 归并、色调翻译、区间语义这三件事都在 `neo_ui::rich_text` 里做 ——
+    // 宿主只负责"给内容"。原先这里是手写的偏移累加，与
+    // `reasoning_highlighted` 各写了一遍同样的区间逻辑。
+    neo_ui::rich_text(&neo_ui::RichText::from_spans(spans)).into_any_element()
 }
 
 /// 思考块带搜索高亮：把匹配区间标成项目主色。
@@ -675,22 +660,12 @@ fn reasoning_highlighted(
     text: &str,
     ranges: &[std::ops::Range<usize>],
 ) -> neo_ui_kit::gpui::AnyElement {
-    let highlights = ranges
-        .iter()
-        .map(|r| {
-            (
-                r.clone(),
-                neo_ui_kit::gpui::HighlightStyle {
-                    color: Some(neo_color(Tone::Text).into()),
-                    background_color: Some(neo_color(Tone::Primary).into()),
-                    ..Default::default()
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    neo_ui_kit::gpui::StyledText::new(text.to_string())
-        .with_highlights(highlights)
-        .into_any_element()
+    // 思考块正文用 Muted，命中区间加高亮背景。
+    // 命中处**保留** Muted 前景（不是换成固定色）—— 见 `rich_text` 的说明。
+    let rt = neo_ui::RichText::new(text)
+        .span(0..text.len(), Tone::Muted)
+        .marks(ranges);
+    neo_ui::rich_text(&rt).into_any_element()
 }
 
 /// 单个工具调用的卡片。
