@@ -21,7 +21,10 @@ use neo_protocol::{Decision, EventMsg, ExecMode, Op};
 use neo_text::Tone;
 use neo_ui::neo_color;
 use neo_ui_kit::component::{
-    button::Button, h_flex, v_flex, Root,
+    button::Button,
+    h_flex,
+    input::{Input, InputEvent, InputState},
+    v_flex, Root,
 };
 use neo_ui_kit::component::scroll::ScrollableElement as _;
 use neo_ui_kit::gpui::{div, prelude::*, px, Context, Entity, IntoElement, Render, Window};
@@ -30,7 +33,24 @@ use neo_ui_kit::gpui::{div, prelude::*, px, Context, Entity, IntoElement, Render
 pub struct NeoView {
     handle: KernelHandle,
     transcript: Transcript,
+    /// 任务输入框当前文本（与 `input_state` 同步）。
+    ///
+    /// 保留这个镜像而不是每次去读 `InputState`：`submit()` 与冒烟钩子
+    /// （`NEO_GUI_PROMPT` 直接写字符串）都走它，读起来是普通 `String`，
+    /// 不必到处传 `window`。
     input: String,
+    /// **真实文本输入框**（gpui 的 `InputState`）。
+    ///
+    /// ⚠️ 曾经这里是**纯展示**的一行 `div` —— 于是 gpui 宿主根本没法用键盘
+    /// 输入任务，只能靠 `NEO_GUI_PROMPT` 喂（egui 侧一直是真 `TextEdit`）。
+    /// 这是 gpui 转正最主要的拦路石，比任何 D 项都硬。
+    ///
+    /// 惰性创建：`InputState::new` 要 `&mut Window`，而视图实体在窗口之前
+    /// 就建好了 —— 所以第一次渲染时补上。
+    input_state: Option<Entity<InputState>>,
+    /// 输入框事件订阅。**必须持有**：`Subscription` 一 drop 就退订，
+    /// 表现为"打字没反应"或"回车不提交"。
+    input_subs: Vec<neo_ui_kit::gpui::Subscription>,
     mode: ExecMode,
     model: String,
     // ⚠️ **待审批不在这里单独存**：`Transcript` 已经有 `pending`
@@ -121,6 +141,8 @@ impl NeoView {
             shot_armed: std::env::var("NEO_GUI_SHOT").ok().map(|_| false),
             transcript: Transcript::new(),
             input: String::new(),
+            input_state: None,
+            input_subs: Vec::new(),
             mode,
             model,
             notice: None,
@@ -165,13 +187,63 @@ impl NeoView {
         true
     }
 
+    /// 惰性建输入框并订阅它的事件。
+    ///
+    /// 只在第一次渲染时做 —— `InputState::new` 需要 `&mut Window`，
+    /// 而视图实体先于窗口存在。
+    fn ensure_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.input_state.is_some() {
+            return;
+        }
+        let state = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("输入任务后回车提交（@文件 / $技能 可用）")
+        });
+        // 订阅必须在**持有 Subscription** 的前提下才有意义（drop 即退订）
+        let sub = cx.subscribe_in(
+            &state,
+            window,
+            |this, state, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => {
+                    this.input = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+                InputEvent::PressEnter { shift, .. } => {
+                    // Shift+Enter 不提交：单行框里它也不换行，但至少不该发送
+                    //（多行输入是下一步；现在让 shift 回车"什么都不做"比
+                    //  "以为是换行其实发出去了"安全）。
+                    if *shift {
+                        return;
+                    }
+                    this.submit();
+                    this.clear_input_box(window, cx);
+                }
+                _ => {}
+            },
+        );
+        self.input_state = Some(state);
+        self.input_subs = vec![sub];
+    }
+
+    /// 清空输入框（**两条提交路径都必须调它**）。
+    ///
+    /// 回车与"发送"按钮是两个入口，各清一半是典型的"改一处忘一处"：
+    /// 点按钮提交后输入框里还留着上一句，用户会以为没发出去、再点一次，
+    /// 于是同一句话被提交两遍。
+    fn clear_input_box(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.clear();
+        if let Some(state) = self.input_state.clone() {
+            state.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+    }
+
     fn submit(&mut self) {
         let text = self.input.trim().to_string();
         // 审批未决时不接受新任务（避免把下一步排进队列）
         if text.is_empty() || self.transcript.pending.is_some() {
             return;
         }
-        self.input.clear();
+        // **不在这里清输入** —— 清理由 `clear_input_box` 一处负责。
+        // 各清各的正是"改一处忘一处"的来源（见该方法的注释）。
         let refs = neo_protocol::parse_refs(&text);
         // BeginTurn 而不是 UserTurn：后者一次跑完整轮（界面会卡住）。
         // 推进由每帧的 Pump 完成。
@@ -1025,11 +1097,15 @@ fn approval_dialog(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElemen
 
 impl Render for NeoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 0) 输入框（惰性；第一次渲染时 window 才可用）
+        self.ensure_input(window, cx);
+
         // 1) 收事件（非阻塞）
         // 冒烟钩子：首帧把 NEO_GUI_PROMPT 当作一次提交（只做一次）
         if let Some(text) = self.auto_prompt.take() {
             self.input = text;
             self.submit();
+            self.clear_input_box(window, cx);
             cx.notify();
         }
 
@@ -1068,7 +1144,6 @@ impl Render for NeoView {
         let status = self.status.clone();
         let notice = self.notice.clone();
         let total = (self.transcript.total_in, self.transcript.total_out);
-        let input = self.input.clone();
         let blocked = self.transcript.pending.is_some();
 
         let view_entity = cx.entity().clone();
@@ -1171,7 +1246,10 @@ impl Render for NeoView {
         }
 
         // ── 输入区（审批未决时阻塞）──
-        root = root.child(
+        //
+        // 审批未决时**整行换成提示**而不是把输入框置灰：置灰的输入框仍占着
+        // 视觉焦点，用户会先去点它、发现打不了字，才回读那行小字。
+        let input_row = if blocked {
             h_flex()
                 .gap_2()
                 .px_3()
@@ -1179,23 +1257,38 @@ impl Render for NeoView {
                 .child(
                     div()
                         .flex_1()
-                        .text_color(if blocked {
-                            neo_color(Tone::Muted)
-                        } else {
-                            neo_color(Tone::Text)
-                        })
-                        .child(if blocked {
-                            "待审批：请先在上方选择（避免把下一步排进队列）".to_string()
-                        } else if input.is_empty() {
-                            "输入任务后回车提交（@文件 / $技能 可用）".to_string()
-                        } else {
-                            input.clone()
-                        }),
+                        .text_color(neo_color(Tone::Muted))
+                        .child("待审批：请先在上方选择（避免把下一步排进队列）"),
                 )
-                .child(Button::new("send").label("发送").on_click(move |_, _, cx| {
-                    view_for_submit.update(cx, |this, _| this.submit());
-                })),
-        );
+        } else {
+            let state = self
+                .input_state
+                .clone()
+                .expect("输入框应在第一次渲染时建好（见 ensure_input）");
+            h_flex()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .child(
+                    div().flex_1().child(
+                        Input::new(&state)
+                            // 无边框外观：它是应用里唯一的输入区，套一个框
+                            // 反而像网页表单，与转录区的连续排版割裂
+                            .appearance(false)
+                            .aria_label("任务输入"),
+                    ),
+                )
+                .child(Button::new("send").label("发送").on_click(
+                    move |_, window, cx| {
+                        view_for_submit.update(cx, |this, cx| {
+                            this.submit();
+                            // 与回车同一条清理路径 —— 见 `clear_input_box`
+                            this.clear_input_box(window, cx);
+                        });
+                    },
+                ))
+        };
+        root = root.child(input_row);
 
         // ── 键盘：模态优先，由应用自己裁决（见 neo-ui-behavior 的 KeyArbiter）──
         //
