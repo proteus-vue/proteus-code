@@ -3258,7 +3258,7 @@ TUI 的命令表有 24 条，含主题/星场/logo 等**终端专有**动作 —
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 751 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web HTTP / 原生 GUI）
+cargo test --workspace      # 752 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web HTTP / 原生 GUI）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫 + 执行效率）
 ```
 

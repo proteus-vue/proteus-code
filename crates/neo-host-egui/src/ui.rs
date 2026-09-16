@@ -2932,5 +2932,73 @@ mod tests {
             "关掉命令台后焦点应回到任务输入框"
         );
     }
+    /// **端到端**：经命令面板打开终端后，在输入框里敲的东西必须走 `Op::Shell`。
+    ///
+    /// # 为什么这条要断言"发出去的 Op"而不是"焦点 id"
+    ///
+    /// 断言焦点是**间接指标**，而且很容易测错：我第一版就是直接调
+    /// `run_action(ToggleTerminal)` + `close()`，**绕过了面板真实的按键处理路径**
+    /// ——于是"关闭面板时无条件归还焦点"这个 bug 在测试里根本不出现
+    /// （用旧行为跑那条测试照样绿）。
+    ///
+    /// 真正要保证的是**用户能感知的结果**：在命令台里敲的命令**不该发给模型**。
+    /// 所以这里直接看驱动通道上发出去的 `Op` —— 真机验证时我也是这么判断的
+    /// （会话日志里出现 `op {"shell": ...}` 而不是 `op {"begin_turn": ...}`）。
+    #[test]
+    fn a_command_typed_in_the_terminal_goes_to_shell_not_the_model() {
+        let (mut app, rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+
+        // 1) 用户真实路径：`Cmd+K` → 搜 terminal → `Enter` 执行该命令
+        app.cmd_palette.open();
+        app.cmd_palette.query = "terminal".into();
+        run_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.cmd_palette.selected_command().map(|c| c.name),
+            Some("terminal"),
+            "过滤器应把 terminal 排在第一位"
+        );
+        // 用**回车事件**走面板自己的处理（`draw_command_palette` 读 ctx.input），
+        // 而不是替他调 run_action —— 那正是上一版漏掉的那段代码
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::Enter, egui::Modifiers::default())],
+        );
+        assert!(app.terminal_open, "面板里的 terminal 命令应打开命令台");
+        // 焦点请求在**下一帧**才生效（egui 的 request_focus 语义），
+        // 所以要多跑一帧再断言 —— 这是上一版测试的另一个盲点：
+        // 它执行完动作立刻断言，那时终端输入框还没画出来。
+        for _ in 0..3 {
+            run_frame(&ctx, &mut app, vec![]);
+        }
+        assert_eq!(
+            app.__test_last_focus,
+            Some(egui::Id::new("neo_terminal_in")),
+            "打开后焦点应在终端输入框"
+        );
+
+        // 2) 敲一条命令并回车 → 必须是 Op::Shell（不是 BeginTurn）。
+        // 注意 `render_test_app` 的句柄是**发到同一通道**的，所以下面
+        // 直接从 rx 收 Op 就能看到 UI 侧发了什么。
+        app.terminal_input = "echo hi".into();
+        run_frame(&ctx, &mut app, vec![key_event(egui::Key::Enter, egui::Modifiers::default())]);
+
+        // 3) 看通道上到底发出去了什么
+        let mut sent = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::driver::DriverMsg::Op(op) = msg {
+                sent.push(op);
+            }
+        }
+        assert!(
+            sent.iter().any(|op| matches!(op, neo_protocol::Op::Shell { .. })),
+            "命令台里敲的命令必须走 Op::Shell；实际发出：{sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|op| matches!(op, neo_protocol::Op::BeginTurn { .. })),
+            "命令台里的命令**绝不能**发给模型（那会白花一次请求）：{sent:?}"
+        );
+    }
 }
 
