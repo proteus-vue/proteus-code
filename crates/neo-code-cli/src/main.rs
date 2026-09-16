@@ -352,12 +352,12 @@ fn cmd_desktop(args: &[String]) -> i32 {
     // （同一个 build_kernel / 同一份 sessions / 同一个驱动），差别只在谁渲染。
     #[cfg(feature = "gpui")]
     if use_gpui {
-        let models = kernel
+        // 模型名列表：装配期取一次（kernel 随后被 move 进驱动线程）
+        let models: Vec<String> = kernel
             .available_models()
             .into_iter()
-            .map(|m| (m.name, m.description, m.production))
-            .collect::<Vec<_>>();
-        let _ = &models; // GPUI 版暂未接模型 picker（阶段 2）
+            .map(|m| m.name)
+            .collect();
 
         let (handle, cmd_rx, batch_tx) = neo_driver::channel();
         // 响应式宿主：事件到达时要主动唤醒重绘（gpui 不出帧就不画）。
@@ -368,13 +368,15 @@ fn cmd_desktop(args: &[String]) -> i32 {
 
         let sessions_dir = workspace.join(".neo/sessions");
         let store = neo_session_store::SessionStore::open(&sessions_dir);
-        let _sessions: Option<Box<dyn neo_session::SessionControl>> =
+        let sessions: Option<Box<dyn neo_session::SessionControl>> =
             Some(Box::new(Sessions::new(handle.clone(), store)));
 
         eprintln!("[neo] 桌面窗口（GPUI；阶段 1，界面能力尚少于 egui）");
         let status = format!("{} · {}", workspace.display(), neo_exec::mode_short(mode));
         let result = neo_host_gpui::run(
             handle,
+            sessions,
+            models,
             "NEO".to_string(),
             status,
             mode,

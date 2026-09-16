@@ -24,7 +24,6 @@
 //! 若 GUI 自己解析一遍 Markdown，同一个回复在终端与窗口里就会长得不一样，
 //! 而"同一事件流下语义等价"是项目的硬要求。
 
-pub mod commands;
 pub mod facts;
 pub mod fonts;
 pub mod theme;
@@ -33,6 +32,9 @@ pub mod ui;
 // 驱动层已下沉到 `neo-driver`（UI 宿主共享）：第二个 GUI 宿主（gpui）也要用它，
 // 而 A3 禁止宿主互相依赖。这里 re-export 保持既有调用点不变。
 pub use neo_driver as driver;
+// 命令表已下沉到 `neo-driver`（它引用 `Op`，依赖内核轴；两个 GUI 宿主共用）。
+// re-export 保持既有调用点（`crate::commands::...`）不变。
+pub use neo_driver::commands;
 pub use neo_driver::KernelHandle;
 
 pub use neo_text::palette;

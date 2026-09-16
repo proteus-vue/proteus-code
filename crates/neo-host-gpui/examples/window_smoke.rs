@@ -31,6 +31,8 @@ fn main() {
 
     let r = neo_host_gpui::run(
         handle,
+        None,                       // 不接会话库（本冒烟只验窗口层）
+        vec!["mock".to_string()],   // 模型名列表
         "NEO (gpui)".to_string(),
         "/tmp · default".to_string(),
         neo_protocol::ExecMode::Default,
