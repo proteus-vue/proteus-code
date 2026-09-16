@@ -1,0 +1,43 @@
+[package]
+name = "neo-host-egui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L5 宿主：桌面原生 GUI（egui/eframe，复用 neo-text 的文本语义）"
+
+# L5 HOST: 原生 GUI。不含业务逻辑，只做渲染 + 输入解析 + 消费事件流。
+#
+# 这是本项目对「零多余依赖」立场的**实质让步**：GUI 栈是数十个 crate
+# （TUI 至今手写 ANSI、HTTP 手写）。让步的理由与边界见
+# docs/neo-plan/02-架构设计/ADR/ADR-0006-桌面原生GUI.md 与 docs/desktop-plan.md：
+#   - 选型靠阶段 B 原型实测（egui 走通；gpui 因构建期需要完整 Xcode 的
+#     Metal 工具链而编不过，退出对比）；
+#   - 约束是**只走纯 Rust 路径**，避开需要 C 工具链的方案；
+#   - 引入的是依赖而非本项目的不安全代码，"生产代码零 unsafe"承诺仍成立，
+#     由门禁的 unsafe 扫描持续守护。
+[dependencies]
+# 宿主中立的文本语义：Tone / 语义调色板 / 显示宽度 / Markdown / 词法高亮。
+# 与 TUI 共享同一份 —— 这正是阶段 C 抽取它的原因（A3 禁止宿主互相依赖）。
+neo-text = { path = "../neo-text", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }
+eframe = "0.36"
+egui = "0.36"
+# 工具参数摘要是 JSON（ToolCallBegin.arguments）
+serde_json = { workspace = true }
+
+# 驱动线程的单测用离线桩（内存持久化 / 脚本化 provider / 写工具）
+[dev-dependencies]
+neo-mock = { path = "../neo-mock", version = "0.1.0" }
+# 往返测试要拿**真实生产者**喂**真实消费者**：diff 文本由 neo-capability
+# 产出、本宿主流式着色。分层方向 L5→L3 是向下的，合法。
+# （反向约束是 L3 不得依赖宿主 —— 那正是当初把这类测试放在宿主侧的原因。）
+neo-capability = { path = "../neo-capability", version = "0.1.0" }
+neo-config = { path = "../neo-config", version = "0.1.0" }
+neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
+neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }
+

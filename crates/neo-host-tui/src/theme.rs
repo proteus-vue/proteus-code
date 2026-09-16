@@ -503,4 +503,42 @@ mod tests {
         }
         assert_eq!(cur.next(), ThemeName::default(), "应回到起点");
     }
+    /// 防漂移：TUI 的 NEO 主题必须与 `neo-text::palette::NEO` 的品牌色一致。
+    ///
+    /// # 为什么需要这条
+    ///
+    /// 品牌色现在写在**两处**：这里（TUI 的完整主题，含星场/方角等终端专有字段）
+    /// 与 `neo-text::palette::NEO`（宿主中立的语义调色板，GUI 宿主共用）。
+    /// 两份并存是架构约束的结果（A3 禁止宿主互相依赖，而主题带着终端专有字段，
+    /// 整体搬进共享层会把它们一起带进来），但"同一组值写在两处"就是漂移的温床：
+    /// 只改一边，TUI 与桌面就会显示成两个品牌的样子 —— 而且不会有任何测试失败。
+    ///
+    /// 所以不靠约定，靠这里逐字段比对：改漏了当场失败。
+    #[test]
+    fn neo_theme_matches_the_shared_palette() {
+        let t = get(ThemeName::Neo);
+        let p = neo_text::palette::NEO;
+        for (name, a, b) in [
+            ("primary", t.primary, p.primary),
+            ("accent", t.accent, p.accent),
+            ("success", t.success, p.success),
+            ("error", t.error, p.error),
+            ("warning", t.warning, p.warning),
+            ("info", t.info, p.info),
+            ("text", t.text, p.text),
+            ("muted", t.muted, p.muted),
+            ("border", t.border, p.border),
+            ("border_active", t.border_active, p.border_active),
+            ("bg_panel", t.bg_panel, p.bg_panel),
+            ("bg_selected", t.bg_selected, p.bg_selected),
+            ("bg_element", t.bg_element, p.bg_element),
+        ] {
+            assert_eq!(
+                a, b,
+                "TUI 主题与 neo-text::palette::NEO 的 {name} 不一致：\
+                 两边是同一组品牌色，改了这里就要同步改那边（反之亦然）"
+            );
+        }
+    }
 }
+

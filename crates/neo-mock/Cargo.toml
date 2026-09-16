@@ -20,5 +20,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 neo-host-desktop = { path = "../neo-host-desktop", version = "0.1.0" }
+# 桌面原生 GUI（egui）：T6 宿主等价也要覆盖它
+neo-host-egui = { path = "../neo-host-egui", version = "0.1.0" }
 neo-host-tui = { path = "../neo-host-tui", version = "0.1.0" }
 neo-host-web = { path = "../neo-host-web", version = "0.1.0" }

@@ -26,6 +26,8 @@ neo-exec = { path = "../neo-exec", version = "0.1.0" }
 neo-host-tui = { path = "../neo-host-tui", version = "0.1.0" }
 neo-host-web = { path = "../neo-host-web", version = "0.1.0" }
 neo-host-desktop = { path = "../neo-host-desktop", version = "0.1.0", optional = true }
+# 桌面原生 GUI（egui）。与 webview 版并存：ADR-0006 决定不押注单一方案。
+neo-host-egui = { path = "../neo-host-egui", version = "0.1.0", optional = true }
 neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
 neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }
 neo-session-local = { path = "../neo-session-local", version = "0.1.0" }
@@ -41,8 +43,20 @@ serde_json = { workspace = true }
 #   cargo install neo-code-cli --no-default-features    # 精简，Linux 免 webkit
 # 默认**开启**是为了让门控代码总被编译（不腐烂）；CI 另跑
 # `--no-default-features` 验证精简组合仍有产物。
-default = ["desktop"]
+#
+# `egui` 也进默认：`neo desktop` 按计划就该是**原生 GUI**，若它不在默认里，
+# 用户不装就得到一句"未编译"—— 那等于默认行为与文档不符。两条路仍可分别关闭：
+#   cargo install neo-code-cli --no-default-features            # 只要 TUI/exec/web
+#   cargo install neo-code-cli --no-default-features -F desktop # 只要 webview 桌面
+#
+# 注：egui 的 crate 是 workspace 成员，`cargo check --workspace` **无论如何都会
+# 编译它** —— 所以把它放进默认并不新增 Linux 构建面，只是让 CLI 的接线分支
+# 也进 CI（否则那段 `#[cfg(feature = "egui")]` 无人编译，正是"腐烂"的成因）。
+default = ["desktop", "egui"]
 desktop = ["dep:neo-host-desktop"]
+# 原生 GUI。注意它与 `desktop` 是**两个独立窗口技术**，不是替代关系：
+# 默认 `neo desktop` 走原生；`neo desktop --webview` 走 webview。
+egui = ["dep:neo-host-egui"]
 
 # 驱动线程的单测用离线桩（内存持久化 / 确定性断言）
 [dev-dependencies]

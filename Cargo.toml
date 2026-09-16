@@ -15,6 +15,7 @@ members = [
   "crates/neo-host-tui",
   "crates/neo-host-web",
   "crates/neo-host-desktop",
+  "crates/neo-host-egui",
   "crates/neo-exec",
   "crates/neo-code-cli",
   "crates/neo-mock",

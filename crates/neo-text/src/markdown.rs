@@ -37,6 +37,7 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
         quote: 0,
         list_stack: Vec::new(),
         tones: Vec::new(),
+        item_started: false,
         heading: None,
         in_code: false,
         code_lang: Lang::Plain,
@@ -47,6 +48,31 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
     }
     r.flush();
     r.out
+}
+
+/// 解析成**逻辑行**（不折行、不带列号）：`Vec<Vec<(文本, 色调)>>`。
+///
+/// # 为什么需要它（与 [`render`] 的分工）
+///
+/// `render` 面向**终端**：终端没有文本布局引擎，换行必须由宿主自己按显示宽度
+/// 算出来，所以它返回带列号的格子内容。
+///
+/// GUI 宿主相反 —— egui 有自己的文本布局（字体度量、按像素折行、可选择可滚动）。
+/// 若把终端折好的行再喂给它，会**折两遍**：终端已按等宽列断一次，egui 又按
+/// 实际字体宽度断一次，结果是断点错位、缩进错乱。
+///
+/// 所以这里只做"解析 + 语义分层"（前缀缩进、项目符号、色调），**不做折行**，
+/// 把换行交给宿主的布局引擎。两者共用同一个解析器，因此**内容与色调必然一致**
+/// （有测试钉住），差别只在谁来断行。
+pub fn blocks(text: &str) -> Vec<Vec<(String, Tone)>> {
+    // 预算给足 = 永不触发折行；用 MAX/4 是为了让内部 `col += 宽度` 那些
+    // 累加有充裕余量，不必担心溢出（`saturating_*` 之外的普通加法）。
+    let never_wraps = usize::MAX / 4;
+    render(text, never_wraps)
+        .into_iter()
+        // 丢掉列号：布局由宿主做，列号只对终端的格子模型有意义
+        .map(|line| line.into_iter().map(|(_, text, tone)| (text, tone)).collect())
+        .collect()
 }
 
 struct Renderer {
@@ -60,6 +86,13 @@ struct Renderer {
     list_stack: Vec<Option<u64>>,
     /// 内联色调栈（强调/加粗可嵌套）。
     tones: Vec<Tone>,
+    /// 当前列表项的**首行是否已输出过前缀**。
+    ///
+    /// 用来区分"新的一项"与"同一项内的续行"：列表符号属于**项**，不属于源码里
+    /// 的每一行。软换行会反复收口同一项内的多行，若不加这个标记，一项就被画成
+    /// 多个项目符号，有序列表还会**逐行递增编号**
+    /// （`- a\n  b` → "• a / • b"；`1. a\n   b` → "1. a / 2. b"）。
+    item_started: bool,
     /// 当前标题的色调（在标题内时非 None）。
     heading: Option<Tone>,
     in_code: bool,
@@ -131,7 +164,8 @@ impl Renderer {
                 self.flush();
                 self.list_stack.pop();
             }
-            Event::Start(Tag::Item) => { /* 前缀在 flush 时按栈顶生成 */ }
+            // 新的一项：前缀归零，下次 flush 重新出符号
+            Event::Start(Tag::Item) => self.item_started = false,
             Event::End(TagEnd::Item) => self.flush(),
             Event::End(TagEnd::Paragraph) => self.flush(),
             Event::Start(Tag::BlockQuote(_)) => {
@@ -239,6 +273,18 @@ impl Renderer {
                 parts.push((" ".repeat(indent), Tone::Text));
                 col += indent;
             }
+            // 同一项内的续行：只缩进对齐到正文，**不再出符号**（符号属于项，
+            // 不属于源码的每一行）。缩进宽度 = 该项符号的显示宽度，
+            // 于是续行与首行正文左对齐。
+            let marker_w = match self.list_stack.last().copied().flatten() {
+                None => 2, // "• "
+                Some(n) => crate::width::display_width(&format!("{n}. ")),
+            };
+            if self.item_started {
+                parts.push((" ".repeat(marker_w), Tone::Text));
+                col += marker_w;
+                return (col, parts, col);
+            }
             match self.list_stack.last().copied().flatten() {
                 // 无序
                 None => {
@@ -285,11 +331,19 @@ impl Renderer {
         }
         // ⚠️ 顺序要紧：`prefix_parts` 依赖 `cur` 非空来判断"这是不是列表项"，
         // 所以必须在取走 cur **之前**调用（先 take 再算会永远拿不到列表前缀）。
+        let in_item = !self.list_stack.is_empty();
+        let first_line_of_item = !self.item_started;
         let (_, parts, body_col) = self.prefix_parts();
         let spans = std::mem::take(&mut self.cur);
-        // 有序列表当前项用掉后编号 +1
-        if let Some(Some(n)) = self.list_stack.last_mut() {
-            *n += 1;
+        if in_item {
+            // 标记"本项已出过符号"：后续同项内的续行只缩进、不再出符号。
+            self.item_started = true;
+            // 编号只在**本项首行**递增 —— 逐行递增会把一项拆成多个编号。
+            if first_line_of_item {
+                if let Some(Some(n)) = self.list_stack.last_mut() {
+                    *n += 1;
+                }
+            }
         }
 
         let budget = self.width.saturating_sub(body_col);
@@ -542,6 +596,38 @@ mod tests {
         assert!(!text.contains("- 第一项"), "短横线应换成圆点：{text}");
     }
 
+    /// 列表符号属于**项**，不属于源码里的每一行。
+    ///
+    /// 回归测试（软换行改动引入的真 bug）：`- a\n  b` 是**一个**列表项被源码
+    /// 折行，`b` 是续行 —— 它不该再得到一个项目符号；有序列表更严重，
+    /// 逐行递增编号会把一项画成两项（`1. a / 2. b`）。
+    #[test]
+    fn list_marker_belongs_to_the_item_not_to_every_source_line() {
+        let text = text_of(&render("- 甲\n  乙", 40));
+        assert_eq!(text.matches('•').count(), 1, "同一项只能有一个符号：{text}");
+        assert!(text.contains("甲") && text.contains("乙"), "{text}");
+
+        let text = text_of(&render("1. 甲\n   乙", 40));
+        assert!(!text.contains("2."), "同一项不该递增编号：{text}");
+        assert_eq!(text.matches("1.").count(), 1, "{text}");
+
+        // 但**不同**的项各自要有符号与递进的编号
+        let text = text_of(&render("- 甲\n- 乙", 40));
+        assert_eq!(text.matches('•').count(), 2, "两项就要两个符号：{text}");
+        let text = text_of(&render("1. 甲\n2. 乙", 40));
+        assert!(text.contains("1. 甲") && text.contains("2. 乙"), "{text}");
+
+        // 续行应与首行正文对齐（缩进 = 符号宽度）
+        let ls = render("- 甲\n  乙", 40);
+        let col_of = |needle: &str| {
+            ls.iter()
+                .find(|l| l.iter().any(|(_, t, _)| t.contains(needle)))
+                .and_then(|l| l.iter().find(|(_, t, _)| t.contains(needle)).map(|(c, _, _)| *c))
+                .unwrap_or(0)
+        };
+        assert_eq!(col_of("甲"), col_of("乙"), "续行应与首行正文左对齐：{ls:?}");
+    }
+
     #[test]
     fn ordered_list_keeps_its_numbering() {
         let ls = render("1. 甲\n2. 乙", 40);
@@ -733,6 +819,65 @@ mod tests {
             let w: usize = l.iter().map(|(_, t, _)| crate::width::display_width(t)).sum();
             assert!(w <= 18, "行宽 {w} 超预算：{l:?}");
         }
+    }
+    /// `blocks()` 与 `render()` 必须对**同一段 Markdown 给出相同的内容与色调**。
+    ///
+    /// 它们服务两个不同的宿主（GUI 自己布局 / 终端按列折行），但共用同一个
+    /// 解析器。这条测试是"宿主等价"在这层的落点：如果两者内容漂了，
+    /// 同一个模型回复在窗口与终端里就会显示成不同的东西。
+    /// 允许的差别只有**断行位置**（终端折行、GUI 交给 egui）。
+    #[test]
+    fn blocks_and_render_agree_on_content_and_tones() {
+        // 覆盖各类块：标题 / 粗体 / 行内代码 / 列表 / 引用 / 代码块 / 链接
+        let md = "# 标题\n\n正文 **加粗** 与 `代码`\n\n- 甲\n- 乙\n\n> 引用\n\n```rust\nlet x = 1;\n```\n\n见 [文档](https://e.com)";
+
+        // render：折行后的文字拼回去（去掉折行带来的换行差异，只比字符序列）
+        let rendered: String = render(md, 200)
+            .iter()
+            .flat_map(|l| l.iter().map(|(_, t, _)| t.as_str()))
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+
+        let blocked: String = blocks(md)
+            .iter()
+            .flat_map(|l| l.iter().map(|(t, _)| t.as_str()))
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+
+        assert_eq!(rendered, blocked, "两者内容必须一致（只允许断行位置不同）");
+
+        // 色调集合也必须一致 —— 层次表达是语义，不属于布局
+        let tones_of = |ls: &[Vec<(String, Tone)>]| {
+            let mut v: Vec<Tone> = ls.iter().flatten().map(|(_, t)| *t).collect();
+            v.sort_by_key(|t| format!("{t:?}"));
+            v.dedup();
+            v
+        };
+        let render_tones = tones_of(
+            &render(md, 200)
+                .into_iter()
+                .map(|l| l.into_iter().map(|(_, t, tone)| (t, tone)).collect())
+                .collect::<Vec<_>>(),
+        );
+        let block_tones = tones_of(&blocks(md));
+        assert_eq!(
+            render_tones, block_tones,
+            "两者的色调集合必须一致（同一份语义分层）"
+        );
+    }
+
+    /// `blocks()` 不得折行：折行是宿主的责任。
+    #[test]
+    fn blocks_never_wraps_even_for_very_long_lines() {
+        let long = "字".repeat(500);
+        let ls = blocks(&long);
+        assert_eq!(ls.len(), 1, "不应折行（GUI 用自己的布局引擎）：{ls:?}");
+        let text: String = ls[0].iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(text.chars().count(), 500, "内容不能丢");
     }
 }
 

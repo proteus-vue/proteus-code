@@ -21,8 +21,11 @@
 //! 每个宿主有自己的那一份。本 crate 只定义语义，不定义外观。
 
 pub mod markdown;
+pub mod palette;
 pub mod syntax;
 pub mod width;
+
+pub use palette::Palette;
 
 /// 语义色调。**只表达"这段文字在信息层次里是什么角色"**，不表达"用什么颜色"。
 ///

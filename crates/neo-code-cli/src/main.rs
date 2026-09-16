@@ -46,8 +46,10 @@ desktop 选项：
   --workspace <dir>            工作区（默认当前目录）
   --provider <...>             模型后端（同 serve）
   --mode <...>                 执行模式（同 serve）
-                               桌面窗口 = 系统 webview 指向内置 Web 宿主
-                               （本地回环端口，窗口关闭即退出）
+  --webview                    用系统 webview 窗口（默认是原生 GUI）
+                               默认 = 原生 GUI（egui，不经 HTTP、不开端口）
+                               --webview = 系统 webview 指向内置 Web 宿主
+                               两者窗口关闭即退出
 
 serve 选项：
   --addr <host:port>           监听地址（默认 127.0.0.1:8787）
@@ -265,10 +267,14 @@ fn cmd_desktop(args: &[String]) -> i32 {
     // 直接 `neo` 时被要求 DEEPSEEK_API_KEY（真实反馈）。
     let mut provider = String::new();
     let mut mode = ExecMode::Default;
+    // 默认走**原生 GUI**（egui）；--webview 回退到系统 webview 版。
+    // ADR-0006：不押注单一方案，两条路都保留。
+    let mut use_webview = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--webview" => use_webview = true,
             "--workspace" => {
                 i += 1;
                 match args.get(i) {
@@ -321,12 +327,53 @@ fn cmd_desktop(args: &[String]) -> i32 {
         workspace.join(".neo/sessions/neo-desktop.jsonl"),
     ));
     let opts = ExecOptions { mode, max_steps: 32, ..Default::default() };
-    let mut kernel = build_kernel("neo-desktop", &workspace, &opts, models, sandbox, persistence);
+    let kernel = build_kernel("neo-desktop", &workspace, &opts, models, sandbox, persistence);
 
+    eprintln!("[neo] 工作区 {}", workspace.display());
+    eprintln!("[neo] 模式   {}", describe_mode(mode));
+    eprintln!("[neo] 模型   {model_name}");
+
+    // ── 原生 GUI（默认）────────────────────────────────────────────
+    //
+    // 不经 HTTP、不开端口：内核独占驱动线程，UI 直接消费 `EventMsg`。
+    // 与 webview 版相比少了整条 HTTP/SSE 链路 —— 那条链路存在的原因是
+    // "窗口是个浏览器"，原生宿主不需要它（也顺带没有了"本地端口谁能访问"
+    // 这个问题）。
+    #[cfg(feature = "egui")]
+    if !use_webview {
+        let (handle, cmd_rx, batch_tx) = neo_host_egui::driver::channel();
+        let kernel_thread = neo_host_egui::driver::spawn(kernel, cmd_rx, batch_tx);
+        eprintln!("[neo] 桌面窗口（原生 GUI；--webview 可切回 webview）");
+        let status = format!(
+            "{} · {} · {model_name}",
+            workspace.display(),
+            describe_mode(mode)
+        );
+        let result = neo_host_egui::ui::run(handle, "NEO", status);
+        // 窗口已关：驱动线程的通道随之关闭，内核线程停机
+        let _ = kernel_thread.join();
+        if let Err(e) = result {
+            eprintln!("[neo] {e}");
+            return 1;
+        }
+        return 0;
+    }
+
+    #[cfg(not(feature = "egui"))]
+    if !use_webview {
+        eprintln!("[neo] 本二进制未编译原生 GUI 宿主（构建时缺 feature `egui`）。");
+        eprintln!("      用 webview 桌面：neo desktop --webview");
+        eprintln!("      或重装并保留该 feature：cargo install neo-code-cli --features egui");
+        return 2;
+    }
+
+    // ── webview（--webview）────────────────────────────────────────
+    //
     // 只绑回环 + 临时端口。绑回环**不等于**访问控制：本机任意进程都能枚举
     // 端口，浏览器里的任意网页也能跨源 POST（端点是简单请求，请求会生效）。
     // 因此窗口加载的是带访问令牌的 page_url —— 恶意网页拿不到令牌
     // （它在另一个源的 URL 里，跨源 fetch 读不到）。
+    let mut kernel = kernel;
     let (server, kernel_thread) = match neo_host_web::start("127.0.0.1:0", move |op| {
         kernel
             .submit(op)
@@ -339,11 +386,7 @@ fn cmd_desktop(args: &[String]) -> i32 {
         }
     };
     let url = server.page_url();
-
-    eprintln!("[neo] 工作区 {}", workspace.display());
-    eprintln!("[neo] 模式   {}", describe_mode(mode));
-    eprintln!("[neo] 模型   {model_name}");
-    eprintln!("[neo] 桌面窗口 {url}（关闭窗口即退出）");
+    eprintln!("[neo] 桌面窗口（webview）{url}（关闭窗口即退出）");
 
     // 事件流不重放：窗口先连上 SSE 再提交任务 —— 页面加载即建连，
     // 与 serve 同一约定。

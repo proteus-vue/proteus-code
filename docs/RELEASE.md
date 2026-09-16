@@ -30,7 +30,7 @@ npm 包与 GitHub Release 的版本取自 **git tag**，而 tag 由流程从 Car
 Cargo.toml 不符就直接失败。
 
 > 为什么碎片只写 bump 级别、不写包名：本仓库是**单一版本工作区**，
-> 24 个 crate 共享一个版本号。
+> 25 个 crate 共享一个版本号。
 
 ---
 
