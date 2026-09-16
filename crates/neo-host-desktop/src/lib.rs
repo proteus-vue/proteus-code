@@ -30,6 +30,18 @@ use neo_protocol::{EventMsg, Fact};
 /// 输入解析：与 TUI / Web 共用 L0 协议层的同一份实现（自造副本会漂移）。
 pub use neo_protocol::parse_refs;
 
+/// **测试替身，不是运行路径。**
+///
+/// 真实桌面窗口跑的是 `neo-host-web`（见 `window` 模块与 `neo-code-cli` 的
+/// `cmd_desktop`），它才是那个消费事件流的宿主。本类型存在的唯一理由是让
+/// T6 契约测试里有一个"desktop"身份的后端参与比对
+/// （`neo-mock/tests/conformance.rs`）—— 换成真实实现会让那个测试依赖
+/// 图形栈，而它要验的是**契约**、不是渲染。
+///
+/// 因此它只做两件事：按顺序累积事件、交给协议层的 `facts_of` 抽事实。
+/// ⚠️ 别把它当成"桌面渲染器"去接线 —— 它没有窗口、没有 webview，
+/// 也不会把任何东西画出来。新增 Rust 原生 GUI 宿主时，要么让它接上真实
+/// 渲染（届时本注释与 `id()` 都需重新审视），要么保持它测试替身的定位。
 pub struct DesktopHost { events: Vec<EventMsg> }
 
 impl DesktopHost {
@@ -53,8 +65,7 @@ impl HostBackend for DesktopHost {
     }
 
     fn consume(&mut self, event: &EventMsg) -> Result<(), String> {
-        // 真实实现：把事件推给 webview 渲染。
-        // 当前只累积，供 T6 等价性断言使用。
+        // 只累积 —— 详见类型注释。这里**没有**渲染，也不应有人把它当渲染器接线。
         self.events.push(event.clone());
         Ok(())
     }
