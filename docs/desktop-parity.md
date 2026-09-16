@@ -114,7 +114,7 @@ ZCode 官方文档把界面写得很细（[zcode.z.ai/en/docs](https://zcode.z.a
 | D6 | 每轮**执行摘要 + 耗时** | ZCode | ⚠️ 半程：token 数有了，**耗时未加**（需前端计时或补字段） | ✅ `TurnComplete` |
 | D7 | 右侧 summary / Goal 面板 | ZCode | ✅ **已实现**（目标卡片 + 子任务清单 + 暂停/恢复/清除） | ✅ `GoalUpdated{snapshot}` |
 | D8 | 底部终端面板 | ZCode | ❌ 无（**待做**，`Op::Shell` 已存在） | 需新功能 |
-| D9 | 命令中心（`Cmd+K`） | ZCode | ❌ 无（**待做**，纯前端） | 纯前端 |
+| D9 | 命令中心（`Cmd+K`） | ZCode | ⚠️ **已做 commands 一类**（覆盖式面板 + 搜索过滤 + 键盘导航 + 9 条命令，每条都有可观察效果，有测试逐个守着）。**conversations / files 两类未做** —— 它们需要会话库与文件索引，属 D1 范畴 | 纯前端（已兑现） |
 | D10 | 审批：**阻塞 composer** + 三档 + 风险常驻 | ZCode | ✅ **已实现**（三档 Allow/Always/Reject；未决时输入框 `disabled`；高风险档位在状态栏**常驻**风险提示） | 部分（`ApprovalRequest`） |
 | D11 | 执行模式切换 | ZCode | ✅ **已实现**（状态栏下拉 + `Shift+Tab` 循环；**模型 picker 一并做了**）<br>注：原表写"需新端点"是**过时的** —— `Op::ConfigureSession` 早已支持运行时改 `exec_mode` | ✅ 走 `ConfigureSession`（但**内核不发"模式已变"事件**，宿主须自行记状态） |
 | D12 | 文件树 / 内置浏览器 / Repo Wiki | ZCode | ❌ 无（**待做**） | 需新能力 |
@@ -129,7 +129,8 @@ ZCode 官方文档把界面写得很细（[zcode.z.ai/en/docs](https://zcode.z.a
 2. ~~**D2 + D6 + D7**（Markdown / 轮摘要 / Goal 面板）~~ ✅ 已完成（D6 的耗时待补）
 3. ~~**D10**（审批三段式 + 阻塞 composer）~~ ✅ 已完成
 4. ~~**D11**（执行模式切换）~~ ✅ 已完成（**比预期简单**：`ConfigureSession` 早已支持，不需新端点）
-5. **D1 + D9**（任务栏 / 命令中心）——工作区管理，需会话库支持。**下一步做这个**
+5. ~~**D9**（命令中心）~~ ✅ commands 一类已完成（conversations / files 随 D1 一起做）。
+   **下一步做 D1**（左侧任务/工作区栏）——需会话库支持
 6. **D6 补充（耗时）+ D8 + D12**（终端 / 文件树）——需要新后端能力，放最后
 
 > **纪律**（沿用 TUI parity 的教训）：新界面必须复用同一套视觉原语（面板/选项条/对话框），

@@ -24,6 +24,7 @@
 //! 若 GUI 自己解析一遍 Markdown，同一个回复在终端与窗口里就会长得不一样，
 //! 而"同一事件流下语义等价"是项目的硬要求。
 
+pub mod commands;
 pub mod driver;
 pub mod facts;
 pub mod fonts;

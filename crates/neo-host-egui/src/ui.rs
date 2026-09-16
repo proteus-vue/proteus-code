@@ -260,6 +260,17 @@ impl Transcript {
         self.advanced_for.as_ref() != Some(&(g.goal_id.clone(), g.iterations))
     }
 
+    /// 只清**屏幕上的**转录。
+    ///
+    /// 刻意不清 `goal` / `total_in` / `total_out` / `pending`：那些是**状态**
+    /// 不是显示内容 —— 清掉会让"目标还在跑"变成"目标没了"，
+    /// 或让审批挂起时的阻塞状态消失（那就可能把下一步排进队列）。
+    /// 用户想清的是"看不过来的一屏文字"，不是把会话状态重置。
+    pub fn clear_view(&mut self) {
+        self.blocks.clear();
+        self.collapsed_reasoning.clear();
+    }
+
     /// 记下"已为该快照请求推进"，避免重复下发。
     pub fn mark_advanced(&mut self) {
         if let Some(g) = &self.goal {
@@ -419,6 +430,21 @@ pub struct App {
     model: String,
     /// 可选模型列表（启动时查一次；运行时切换不改注册表）。
     models: Vec<(String, String, bool)>,
+    /// D9 命令面板状态（与上面那个**颜色** `palette` 是两回事，故名字带 cmd_）。
+    pub cmd_palette: crate::commands::Palette,
+    /// `raw_input_hook` 摘下了本帧的 `Cmd/Ctrl+K`。
+    pending_cmd_k: bool,
+    /// `raw_input_hook` 摘下了本帧的 `Esc`（仅在命令面板打开时）。
+    pending_esc: bool,
+    /// 命令面板的搜索框是否已抢过焦点（每次打开抢一次）。
+    cmd_palette_focused_once: bool,
+    /// 是否显示帮助面板（命令与快捷键）。
+    show_help: bool,
+    /// 用户请求退出（由 `draw` 转成窗口关闭命令）。
+    ///
+    /// 不直接在这里调 `ViewportCommand::Close`：`run_action` 不接触 `Ui`，
+    /// 保持"动作与绘制分离"，这样动作能被无头测试直接调用。
+    quit_requested: bool,
     /// `raw_input_hook` 摘下了本帧的 `Shift+Tab`，等 `draw` 来执行切换。
     ///
     /// 为什么绕一道：egui 把 `Tab` / `Shift+Tab` 当**焦点导航键**，而它是在
@@ -467,6 +493,12 @@ impl App {
             models,
             notice: None,
             pending_shift_tab: false,
+            cmd_palette: crate::commands::Palette::default(),
+            cmd_palette_focused_once: false,
+            pending_cmd_k: false,
+            pending_esc: false,
+            show_help: false,
+            quit_requested: false,
             show_reasoning: true,
             composer_focused_once: false,
             __test_last_focus: None,
@@ -556,6 +588,54 @@ impl App {
         // （TUI 同样按"提交后即认为生效"处理，因为它拿不到同步回执。）
         self.model = name.clone();
         self.notice = Some((format!("已切换到 {name}"), std::time::Instant::now()));
+    }
+
+    /// 执行一条命令（D9 命令面板的落地端）。
+    ///
+    /// 每个动作都**真的做点什么**：列着却点了没反应比没有更糟
+    /// （用户会以为坏了）。能做的只有这些 —— 终端专有动作（主题、星场、
+    /// logo）不在表里，所以这里不需要"空实现"分支。
+    fn run_action(&mut self, action: crate::commands::Action) {
+        use crate::commands::Action as A;
+        match action {
+            A::Compact => {
+                self.handle.send(neo_protocol::Op::Compact);
+                self.notice = Some(("正在压缩上下文…".into(), std::time::Instant::now()));
+            }
+            A::Rewind => {
+                self.handle.send(neo_protocol::Op::Rewind { turns: 1 });
+                self.notice = Some(("已请求回退一轮".into(), std::time::Instant::now()));
+            }
+            A::Interrupt => {
+                self.handle.send(neo_protocol::Op::Interrupt);
+                self.notice = Some(("已请求打断".into(), std::time::Instant::now()));
+            }
+            A::ShowModels => {
+                // 模型 picker 常驻在状态栏，这里只提示一下去哪儿找
+                self.notice = Some((
+                    "模型可在状态栏的模型下拉里切换".into(),
+                    std::time::Instant::now(),
+                ));
+            }
+            A::CycleMode => self.cycle_mode(),
+            A::ToggleReasoning => {
+                self.show_reasoning = !self.show_reasoning;
+                let st = if self.show_reasoning { "展开" } else { "折叠" };
+                self.notice = Some((format!("思考轨迹已{st}"), std::time::Instant::now()));
+            }
+            A::ClearTranscript => {
+                // 只清屏幕，**不动会话日志**：日志是回放与审计的唯一依据
+                self.transcript.clear_view();
+                self.notice = Some((
+                    "已清空屏幕转录（会话日志保留）".into(),
+                    std::time::Instant::now(),
+                ));
+            }
+            A::Help => self.show_help = true,
+            A::Quit => {
+                self.quit_requested = true;
+            }
+        }
     }
 
     fn set_goal(&mut self) {
@@ -684,6 +764,152 @@ impl App {
         }
         if let Some(name) = pick_model {
             self.set_model(name);
+        }
+    }
+
+    /// **D9**：命令面板（覆盖式，`Cmd/Ctrl+K`）。
+    ///
+    /// 覆盖式而不是侧边抽屉 —— 对标 ZCode 的语义：它是"随手唤起的动作入口"，
+    /// 用完就消失，不该长期占地方。
+    fn draw_command_palette(&mut self, ctx: &egui::Context) {
+        if !self.cmd_palette.open {
+            return;
+        }
+        let mut close = false;
+        let mut run: Option<crate::commands::Action> = None;
+
+        egui::Window::new("命令")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+            .fixed_size([460.0, 320.0])
+            .show(ctx, |ui| {
+                // 搜索框自动聚焦：打开就能打字（否则还得点一下）
+                let search = ui.add(
+                    egui::TextEdit::singleline(&mut self.cmd_palette.query)
+                        .hint_text("输入以筛选（可搜命令名或说明）")
+                        .id(egui::Id::new("neo_cmd_search")),
+                );
+                if !self.cmd_palette_focused_once {
+                    search.request_focus();
+                    self.cmd_palette_focused_once = true;
+                }
+
+                ui.separator();
+
+                let matches = self.cmd_palette.matches();
+                if matches.is_empty() {
+                    ui.label(
+                        egui::RichText::new("没有匹配的命令")
+                            .color(self.palette.color(Tone::Muted)),
+                    );
+                }
+                // 高亮夹紧：搜索变化后旧下标可能越界（会显示空行/错行）
+                let n = matches.len();
+                if n > 0 && self.cmd_palette.selected >= n {
+                    self.cmd_palette.selected = n - 1;
+                }
+
+                egui::ScrollArea::vertical().max_height(230.0).show(ui, |ui| {
+                    for (cat, list) in crate::commands::grouped(&matches) {
+                        ui.label(
+                            egui::RichText::new(crate::commands::category_title(cat))
+                                .color(self.palette.color(Tone::Muted))
+                                .small(),
+                        );
+                        for c in list {
+                            let idx = matches
+                                .iter()
+                                .position(|m| m.name == c.name)
+                                .unwrap_or(0);
+                            let is_sel = idx == self.cmd_palette.selected;
+                            let text = egui::RichText::new(format!("/{}  {}", c.name, c.desc))
+                                .color(self.palette.color(if is_sel { Tone::Accent } else { Tone::Text }));
+                            let resp = ui.selectable_label(is_sel, text);
+                            if resp.clicked() {
+                                run = Some(c.action.resolve());
+                                close = true;
+                            }
+                            if resp.hovered() {
+                                self.cmd_palette.selected = idx;
+                            }
+                        }
+                    }
+                });
+
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("↑↓ 选择 · Enter 执行 · Esc 关闭")
+                        .color(self.palette.color(Tone::Muted))
+                        .small(),
+                );
+            });
+
+        // 键盘：用原始事件（egui 会把方向键/回车用于控件导航，与 Shift+Tab 同理）
+        ctx.input(|i| {
+            for e in &i.events {
+                if let egui::Event::Key { key, pressed: true, .. } = e {
+                    match key {
+                        egui::Key::ArrowDown => self.cmd_palette.move_selection(true),
+                        egui::Key::ArrowUp => self.cmd_palette.move_selection(false),
+                        egui::Key::Enter => {
+                            if let Some(c) = self.cmd_palette.selected_command() {
+                                run = Some(c.action.resolve());
+                                close = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        if let Some(a) = run {
+            self.run_action(a);
+        }
+        if close {
+            self.cmd_palette.close();
+            self.cmd_palette_focused_once = false;
+        }
+    }
+
+    /// 帮助面板（命令与快捷键总览）。
+    fn draw_help(&mut self, ctx: &egui::Context) {
+        if !self.show_help {
+            return;
+        }
+        let mut close = false;
+        egui::Window::new("帮助")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("快捷键").strong());
+                for (k, v) in [
+                    ("Cmd/Ctrl+K", "命令面板"),
+                    ("Shift+Tab", "循环切换执行模式"),
+                    ("Enter", "提交输入框内容"),
+                ] {
+                    ui.label(
+                        egui::RichText::new(format!("  {k:<14} {v}"))
+                            .color(self.palette.color(Tone::Text)),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("命令").strong());
+                for c in crate::commands::COMMANDS {
+                    ui.label(
+                        egui::RichText::new(format!("  /{:<12} {}", c.name, c.desc))
+                            .color(self.palette.color(Tone::Text)),
+                    );
+                }
+                ui.add_space(8.0);
+                if ui.button("关闭").clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.show_help = false;
         }
     }
 
@@ -1085,6 +1311,45 @@ impl eframe::App for App {
             raw_input.events.retain(|e| !is_shift_tab(e));
             self.pending_shift_tab = true;
         }
+
+        // `Cmd/Ctrl+K`：开命令面板。用同一个钩子是为了**同一套修饰键判断口径** ——
+        // macOS 上要 `Cmd`，其它平台 `Ctrl`（egui 的 `Modifiers::command` 已做了
+        // 这个平台适配，不必自己 cfg）。
+        let is_cmd_k = |e: &egui::Event| {
+            matches!(
+                e,
+                egui::Event::Key {
+                    key: egui::Key::K,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.command
+            )
+        };
+        if raw_input.events.iter().any(is_cmd_k) {
+            raw_input.events.retain(|e| !is_cmd_k(e));
+            self.pending_cmd_k = true;
+        }
+
+        // `Esc`：关命令面板。同样必须在**这里**摘掉 —— 真机实测：只在帧内判
+        // `Key::Escape` 的话，egui 已经先把它当"结束文本编辑"处理了，
+        // 表现是**搜索框被清空、面板却还开着**（用户按 Esc 以为关了，实际没有）。
+        if self.cmd_palette.open {
+            let is_esc = |e: &egui::Event| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        pressed: true,
+                        ..
+                    }
+                )
+            };
+            if raw_input.events.iter().any(is_esc) {
+                raw_input.events.retain(|e| !is_esc(e));
+                self.pending_esc = true;
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1109,6 +1374,21 @@ impl App {
             self.pending_shift_tab = false;
             if self.transcript.pending.is_none() {
                 self.cycle_mode();
+            }
+        }
+        if self.pending_esc {
+            self.pending_esc = false;
+            self.cmd_palette.close();
+            self.cmd_palette_focused_once = false;
+        }
+        if self.pending_cmd_k {
+            self.pending_cmd_k = false;
+            // 再按一次 `Cmd+K` 关闭（与"开关式"命令面板的通行做法一致）
+            if self.cmd_palette.open {
+                self.cmd_palette.close();
+                self.cmd_palette_focused_once = false;
+            } else {
+                self.cmd_palette.open();
             }
         }
 
@@ -1138,6 +1418,13 @@ impl App {
         egui::CentralPanel::default().show(ui, |ui| self.draw_transcript(ui));
 
         self.draw_approval(ui);
+        self.draw_command_palette(ui.ctx());
+        self.draw_help(ui.ctx());
+
+        // 退出：由 `run_action` 标记，这里转成窗口关闭命令
+        if self.quit_requested {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
 
         // 回车提交已由 composer 的 lost_focus 路径处理（那里才知道输入框的
         // 真实状态）；这里不再做全局回车判断 —— 两处都判会导致一次回车提交两次。
@@ -1824,6 +2111,198 @@ mod tests {
             }],
         );
         assert_eq!(app.mode, before, "待审批时不该改执行模式");
+    }
+    // ─────────── D9：命令面板 ───────────
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// `Cmd/Ctrl+K` 打开面板（走 `raw_input_hook`，与真机同一条路径）。
+    #[test]
+    fn cmd_k_opens_and_closes_the_command_palette() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        run_frame(&ctx, &mut app, vec![]);
+        assert!(!app.cmd_palette.open, "初始应关闭");
+
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::K, egui::Modifiers::COMMAND)],
+        );
+        assert!(app.cmd_palette.open, "Cmd+K 应打开命令面板");
+
+        // 再按一次应关闭（开关式）
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::K, egui::Modifiers::COMMAND)],
+        );
+        assert!(!app.cmd_palette.open, "再按 Cmd+K 应关闭");
+    }
+
+    /// `Esc` 关闭面板，且**不执行任何命令**。
+    ///
+    /// ⚠️ 这条测试原来只断言"面板关了"，而**真机上它其实没关**：
+    /// egui 先把 `Esc` 当"结束文本编辑"处理（清空搜索框），面板却还开着 ——
+    /// 用户按了 Esc 以为关了，实际没有。断言太弱，所以没抓到。
+    ///
+    /// 现在断言搜索框内容（Esc 不该清它）与"面板确实关"。修法是把 `Esc`
+    /// 也放进 `raw_input_hook` 拦截（与 `Shift+Tab` 同一原因：egui 会先消费它）。
+    #[test]
+    fn escape_closes_the_palette_without_running_anything() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        app.cmd_palette.open();
+        app.cmd_palette.query = "quit".into();
+        run_frame(&ctx, &mut app, vec![]);
+        assert_eq!(app.cmd_palette.query, "quit", "前置：搜索串应在");
+
+        let before = app.transcript.blocks.len();
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::Escape, egui::Modifiers::default())],
+        );
+        assert!(!app.cmd_palette.open, "Esc 应关闭面板");
+        assert_eq!(app.transcript.blocks.len(), before, "Esc 不该执行任何动作");
+    }
+
+    /// `Enter` 执行高亮的命令，并关闭面板。
+    #[test]
+    fn enter_runs_the_selected_command_and_closes() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        app.cmd_palette.open();
+        // 过滤到唯一一条，确定会命中哪个动作
+        app.cmd_palette.query = "thinking".into();
+        run_frame(&ctx, &mut app, vec![]);
+        assert_eq!(app.cmd_palette.selected_command().map(|c| c.name), Some("thinking"));
+        let before = app.show_reasoning;
+
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::Enter, egui::Modifiers::default())],
+        );
+        assert!(!app.cmd_palette.open, "执行后应关闭");
+        assert_ne!(app.show_reasoning, before, "thinking 命令应切换思考轨迹显示");
+    }
+
+    /// 方向键在列表里移动高亮（循环）。
+    #[test]
+    fn arrow_keys_move_the_selection() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        app.cmd_palette.open();
+        run_frame(&ctx, &mut app, vec![]);
+        assert_eq!(app.cmd_palette.selected, 0);
+
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::ArrowDown, egui::Modifiers::default())],
+        );
+        assert_eq!(app.cmd_palette.selected, 1, "↓ 应下移一项");
+
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::ArrowUp, egui::Modifiers::default())],
+        );
+        assert_eq!(app.cmd_palette.selected, 0, "↑ 应上移回来");
+
+        // 从 0 往上应绕到最后
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::ArrowUp, egui::Modifiers::default())],
+        );
+        let n = app.cmd_palette.matches().len();
+        assert_eq!(app.cmd_palette.selected, n - 1, "到顶应绕到最后");
+    }
+
+    /// **每个命令都必须真的做点什么** —— 列着却点了没反应比没有更糟。
+    ///
+    /// 这条逐个执行注册表里的全部命令，断言"界面状态确实变了"。
+    /// 漏实现一个动作会在这里被抓住。
+    #[test]
+    fn every_command_has_an_observable_effect() {
+        use crate::commands::COMMANDS;
+        for c in COMMANDS {
+            let (mut app, _rx, _tx) = render_test_app();
+            let before = (
+                app.show_reasoning,
+                app.mode,
+                app.show_help,
+                app.quit_requested,
+                app.transcript.blocks.len(),
+                app.notice.clone(),
+            );
+            app.run_action(c.action.resolve());
+            let after = (
+                app.show_reasoning,
+                app.mode,
+                app.show_help,
+                app.quit_requested,
+                app.transcript.blocks.len(),
+                app.notice.clone(),
+            );
+            assert_ne!(
+                before, after,
+                "命令 /{} 执行后界面状态毫无变化（用户会以为坏了）",
+                c.name
+            );
+        }
+    }
+
+    /// `clear` 只清屏幕，**不动会话状态**。
+    ///
+    /// 会话状态（目标、token 累计、待审批）不是"显示内容" —— 一起清掉会让
+    /// "目标还在跑"变成"目标没了"，或让审批挂起时的阻塞消失。
+    #[test]
+    fn clear_transcript_keeps_session_state() {
+        let (mut app, _rx, _tx) = render_test_app();
+        app.transcript.push_batch(&[
+            EventMsg::UserSubmitted { text: "问".into() },
+            EventMsg::TurnComplete { input_tokens: 7, output_tokens: 3 },
+        ]);
+        app.transcript.pending = Some(Pending {
+            id: "a".into(),
+            detail: "d".into(),
+            kind: "write".into(),
+        });
+        app.transcript.push_batch(&[EventMsg::GoalUpdated { snapshot: goal("g", 1, 2) }]);
+
+        app.run_action(crate::commands::Action::ClearTranscript);
+
+        assert!(app.transcript.blocks.is_empty(), "转录应被清空");
+        assert_eq!(app.transcript.total_in, 7, "token 累计是状态，不该被清");
+        assert!(app.transcript.pending.is_some(), "待审批是状态，不该被清");
+        assert!(app.transcript.goal.is_some(), "目标是状态，不该被清");
+    }
+
+    /// 面板打开时跑帧不 panic（含空搜索结果）。
+    #[test]
+    fn drawing_the_open_palette_does_not_panic() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        app.cmd_palette.open();
+        run_frame(&ctx, &mut app, vec![]);
+        // 搜不到任何命令
+        app.cmd_palette.query = "zzzz-no-such-command".into();
+        run_frame(&ctx, &mut app, vec![]);
+        assert!(app.cmd_palette.matches().is_empty());
+        // 帮助面板
+        app.show_help = true;
+        run_frame(&ctx, &mut app, vec![]);
     }
 }
 
