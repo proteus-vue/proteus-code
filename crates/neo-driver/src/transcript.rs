@@ -226,6 +226,29 @@ impl Transcript {
                     _ => self.push_block(Block::Todos(items.clone())),
                 }
             }
+            // 引用解析结果（`@文件` / `$技能`）：**用户必须看到"引用到了没有"**。
+            //
+            // 不显示正文：几百行文件正文会把对话挤没，而那是**模型上下文**，
+            // 不是人要读的对话（正文已随事件落盘，回放与审计不受影响）。
+            // 与 TUI 同一约定、同一来源（`facts_of`）—— 各宿主自己拼摘要
+            // 必然漂移出"同一条引用在两个宿主里说法不同"。
+            EventMsg::RefsResolved { summary, .. } => {
+                for line in summary {
+                    self.push_block(Block::Notice { text: format!("  {line}"), tone: Tone::Muted });
+                }
+            }
+            // 项目指令（AGENTS.md 级联）来源：用户需要知道这次会话受哪些约定约束；
+            // **截断必须显式告警** —— 静默截断会让用户以为模型看到了完整约定。
+            EventMsg::InstructionsLoaded { sources, truncated, .. } => {
+                self.push_block(Block::Notice {
+                    text: format!(
+                        "⚑ 项目指令：{} 个文件{}",
+                        sources.len(),
+                        if *truncated { "（已按 32 KiB 截断）" } else { "" }
+                    ),
+                    tone: Tone::Muted,
+                });
+            }
             // D7：Goal 面板
             EventMsg::GoalUpdated { snapshot } => {
                 self.goal = Some(snapshot.clone());
@@ -545,6 +568,69 @@ pub fn search_reasoning(blocks: &[Block], query: &str) -> Vec<ReasoningHit> {
 /// 这是"搜索结果与可见内容必须对得上"的最小保证。
 pub fn blocks_to_expand(hits: &[ReasoningHit]) -> std::collections::HashSet<usize> {
     hits.iter().map(|h| h.block).collect()
+}
+
+#[cfg(test)]
+mod refs_and_instructions_tests {
+    use super::*;
+    use neo_protocol::EventMsg;
+
+    fn notices(t: &Transcript) -> Vec<String> {
+        t.blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Notice { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 引用解析结果必须**每行一条**显示 —— 用户要看的是"哪条引用没读到"，
+    /// 合并成一行就分不出是哪条失败了。
+    #[test]
+    fn refs_summary_lines_become_notices() {
+        let mut t = Transcript::new();
+        t.push_batch(&[EventMsg::RefsResolved {
+            summary: vec!["📄 a.rs 已注入".into(), "🧩 $x 未找到".into()],
+            block: "（几百行正文，不该进转录）".into(),
+        }]);
+        let n = notices(&t);
+        assert_eq!(n.len(), 2, "两条摘要应各占一行：{n:?}");
+        assert!(n[0].contains("a.rs") && n[1].contains("未找到"));
+        // 正文不进转录：那是模型上下文，不是对话
+        assert!(
+            !n.iter().any(|s| s.contains("几百行正文")),
+            "注入正文不该出现在转录里"
+        );
+    }
+
+    #[test]
+    fn instructions_loaded_reports_source_count() {
+        let mut t = Transcript::new();
+        t.push_batch(&[EventMsg::InstructionsLoaded {
+            sources: vec!["AGENTS.md".into(), ".neo/AGENTS.md".into()],
+            block: "x".into(),
+            truncated: false,
+        }]);
+        let n = notices(&t);
+        assert_eq!(n.len(), 1);
+        assert!(n[0].contains("2 个文件"), "{:?}", n[0]);
+        assert!(!n[0].contains("截断"), "未截断时不该提截断");
+    }
+
+    /// 截断**必须显式告警**：静默截断会让用户以为模型看到了完整约定，
+    /// 而他的规则可能正好在被切掉的那部分里。
+    #[test]
+    fn truncated_instructions_are_flagged() {
+        let mut t = Transcript::new();
+        t.push_batch(&[EventMsg::InstructionsLoaded {
+            sources: vec!["AGENTS.md".into()],
+            block: "x".into(),
+            truncated: true,
+        }]);
+        let n = notices(&t);
+        assert!(n[0].contains("截断"), "截断必须说出来：{:?}", n[0]);
+    }
 }
 
 #[cfg(test)]
