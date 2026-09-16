@@ -29,9 +29,11 @@
 pub mod clock;
 pub mod focus;
 pub mod keys;
+pub mod scroll;
 
 pub use clock::{format_duration, TurnClock};
 pub use focus::FocusIntent;
+pub use scroll::{FollowTail, ScrollPos};
 // `Verdict` 必须导出：它是 `KeyArbiter::verdict()` 的**返回类型**，
 // 调用方要 `match` 它就得能命名它 —— 只导出 `KeyArbiter` 与 `Layer`
 // 会让"怎么用裁决结果"变成一个无法表达的问题（文档测试抓到过：

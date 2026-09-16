@@ -92,6 +92,24 @@ pub struct NeoView {
     /// 搜索输入框（惰性建，理由同任务输入框）。
     search_state: Option<Entity<InputState>>,
     search_subs: Vec<neo_ui_kit::gpui::Subscription>,
+    /// 转录区的滚动句柄。
+    ///
+    /// ⚠️ 用 `track_scroll` + `overflow_y_scroll` + `vertical_scrollbar`
+    /// **三项组合**，而不是组件库的 `overflow_y_scrollbar()`：
+    /// 后者内部自己创建并持有句柄，调用方拿不到它 —— 而我们需要读
+    /// "用户是不是在底部"来决定要不要自动跟随。三种写法等价（组件库内部
+    /// 也是这个组合），区别只在于**句柄归谁**。
+    transcript_scroll: neo_ui_kit::gpui::ScrollHandle,
+    /// 自动跟随状态（逻辑在 `neo-ui-behavior::scroll`，可无头测试）。
+    follow_tail: neo_ui_behavior::FollowTail,
+    /// 脚本化验证：每帧报告滚动位置与跟随判定（`NEO_GUI_SCROLL`）。
+    ///
+    /// 为什么需要它：自动跟随的正确性有一半在**符号约定**上 ——
+    /// gpui 的 `offset()` 是负值，若直接喂进判定会让"是否在底部"恒为假，
+    /// 而纯逻辑单测全绿（测试里的输入都是正的）。这类错只有把**真实的
+    /// 框架返回值**打出来才能确认。它与 `NEO_GUI_FOCUS` 同一个理由：
+    /// 滚动状态在截图里看不出来（截图是静止的）。
+    scroll_report: bool,
     /// 脚本化验证：每帧报告输入框焦点状态（`NEO_GUI_FOCUS`）。
     focus_report: bool,
     /// 上一帧是否处于"审批未决"（用于识别"刚刚解除阻塞"这一刻）。
@@ -184,6 +202,9 @@ impl NeoView {
             goal_state: None,
             goal_subs: Vec::new(),
             focus_report: std::env::var("NEO_GUI_FOCUS").is_ok(),
+            scroll_report: std::env::var("NEO_GUI_SCROLL").is_ok(),
+            transcript_scroll: neo_ui_kit::gpui::ScrollHandle::new(),
+            follow_tail: neo_ui_behavior::FollowTail::new(),
             composer_blocked_last: false,
             focus_intent: neo_ui_behavior::FocusIntent::new(),
             search_state: None,
@@ -1552,13 +1573,42 @@ impl Render for NeoView {
                                         div()
                                     }),
                             )
-                            .child(
+                            .child({
+                                // 自动跟随（流式输出时视图跟着走）。语义是
+                                // "**只有用户本来就在底部才跟随**" —— 他往上翻
+                                // 就是在读历史，那时自动滚动是干扰。
+                                // 判定在 `neo-ui-behavior::scroll`（有测试），
+                                // 这里只把当前滚动位置喂给它。
+                                let handle = self.transcript_scroll.clone();
+                                // ⚠️ 必须走 `from_raw`：gpui 的 `offset()`
+                                // 是**负值**（往下滚为负），直接喂给判定会让
+                                // `offset >= max_offset` 恒为假 —— 自动跟随
+                                // 永远不生效，而纯逻辑单测全绿。
+                                let pos = neo_ui_behavior::ScrollPos::from_raw(
+                                    handle.offset().y.into(),
+                                    handle.max_offset().y.into(),
+                                );
+                                let follow = self.follow_tail.should_follow(pos);
+                                if follow {
+                                    handle.scroll_to_bottom();
+                                }
+                                self.follow_tail.observe(pos);
+                                if self.scroll_report {
+                                    eprintln!(
+                                        "[neo] scroll raw_offset={} raw_max={} -> offset={} max={} at_bottom={} follow={}",
+                                        handle.offset().y, handle.max_offset().y,
+                                        pos.offset, pos.max_offset, pos.at_bottom(), follow
+                                    );
+                                }
                                 div()
+                                    .id("transcript-scroll")
                                     .flex_1()
                                     .min_h(px(0.))
-                                    .overflow_y_scrollbar()
-                                    .child(self.transcript_view(cx)),
-                            )
+                                    .track_scroll(&handle)
+                                    .overflow_y_scroll()
+                                    .vertical_scrollbar(&handle)
+                                    .child(self.transcript_view(cx))
+                            })
                     })
                     .child(side_panel(self, cx)),
             );
