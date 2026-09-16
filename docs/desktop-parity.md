@@ -114,7 +114,7 @@ ZCode 官方文档把界面写得很细（[zcode.z.ai/en/docs](https://zcode.z.a
 | D6 | 每轮**执行摘要 + 耗时** | ZCode | ⚠️ 半程：token 数有了，**耗时未加**（需前端计时或补字段） | ✅ `TurnComplete` |
 | D7 | 右侧 summary / Goal 面板 | ZCode | ✅ **已实现**（目标卡片 + 子任务清单 + 暂停/恢复/清除） | ✅ `GoalUpdated{snapshot}` |
 | D8 | 底部终端面板 | ZCode | ⚠️ **已做命令台**（`Cmd+K` → `/terminal` 开关；输入命令走 `Op::Shell`：**不经模型**、走沙箱、输出上限一致，真机验证日志为 `op {"shell"...}` + `tool_call_end exit 0`）。**与 ZCode 的关键差别**：它用 `node-pty` 起真 PTY（可跑 vim/htop 这类全屏交互程序），我们是**每条命令一个进程、无 PTY** —— 所以面板叫「命令台」不叫「终端」，边界如实呈现 | ✅ 无需新后端能力（原写「需新功能」是过时判断） |
-| D9 | 命令中心（`Cmd+K`） | ZCode | ⚠️ **已做 commands 一类**（覆盖式面板 + 搜索过滤 + 键盘导航 + 9 条命令，每条都有可观察效果，有测试逐个守着）。**conversations / files 两类未做** —— 它们需要会话库与文件索引，属 D1 范畴 | 纯前端（已兑现） |
+| D9 | 命令中心（`Cmd+K`） | ZCode | ⚠️ **已做 commands 一类**（覆盖式面板 + 搜索过滤 + 键盘导航 + 11 条命令，每条都有可观察效果，有测试逐个守着）。**conversations / files 两类未做** —— 它们需要会话库与文件索引，属 D1 范畴 | 纯前端（已兑现） |
 | D10 | 审批：**阻塞 composer** + 三档 + 风险常驻 | ZCode | ✅ **已实现**（三档 Allow/Always/Reject；未决时输入框 `disabled`；高风险档位在状态栏**常驻**风险提示） | 部分（`ApprovalRequest`） |
 | D11 | 执行模式切换 | ZCode | ✅ **已实现**（状态栏下拉 + `Shift+Tab` 循环；**模型 picker 一并做了**）<br>注：原表写"需新端点"是**过时的** —— `Op::ConfigureSession` 早已支持运行时改 `exec_mode` | ✅ 走 `ConfigureSession`（但**内核不发"模式已变"事件**，宿主须自行记状态） |
 | D12 | 文件树 / 内置浏览器 / Repo Wiki | ZCode | ❌ 无（**待做**） | 需新能力 |
