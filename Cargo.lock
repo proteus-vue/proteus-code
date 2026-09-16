@@ -2635,6 +2635,7 @@ dependencies = [
  "neo-protocol",
  "neo-providers",
  "neo-sandbox-local",
+ "neo-session",
  "neo-session-local",
  "neo-session-store",
  "serde_json",
@@ -2705,6 +2706,7 @@ dependencies = [
  "neo-mock",
  "neo-protocol",
  "neo-sandbox-local",
+ "neo-session",
  "neo-text",
  "serde_json",
 ]
@@ -2718,6 +2720,7 @@ dependencies = [
  "neo-core",
  "neo-platform",
  "neo-protocol",
+ "neo-session",
  "neo-text",
  "serde",
  "serde_json",

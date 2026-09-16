@@ -352,6 +352,14 @@ fn cmd_desktop(args: &[String]) -> i32 {
 
         let (handle, cmd_rx, batch_tx) = neo_host_egui::driver::channel();
         let kernel_thread = neo_host_egui::driver::spawn(kernel, cmd_rx, batch_tx);
+
+        // D1：会话栏需要会话库。用 `Sessions<H>`（泛型在句柄类型上，
+        // 与 TUI 共用同一份会话逻辑 —— 见 `KernelAccess` 的说明）。
+        let sessions_dir = workspace.join(".neo/sessions");
+        let store = neo_session_store::SessionStore::open(&sessions_dir);
+        let sessions: Option<Box<dyn neo_session::SessionControl>> =
+            Some(Box::new(Sessions::new(handle.clone(), store)));
+
         eprintln!("[neo] 桌面窗口（原生 GUI；--webview 可切回 webview）");
         let status = format!(
             "{} · {}",
@@ -360,7 +368,8 @@ fn cmd_desktop(args: &[String]) -> i32 {
             // （可点击切换），重复显示会占地方也说不出更多信息
             neo_exec::mode_short(mode)
         );
-        let result = neo_host_egui::ui::run(handle, "NEO", status, mode, model_name.clone(), models);
+        let result =
+            neo_host_egui::ui::run(handle, "NEO", status, mode, model_name.clone(), models, sessions);
         // 窗口已关：驱动线程的通道随之关闭，内核线程停机
         let _ = kernel_thread.join();
         if let Err(e) = result {
@@ -671,7 +680,7 @@ fn cmd_tui(args: &[String]) -> i32 {
     tui_driver::spawn(kernel, cmd_rx, batch_tx);
 
     // 会话控制：宿主调契据，CLI 经句柄在驱动线程上执行（含换内核与历史重建）。
-    let mut sessions = TuiSessions::new(kernel_handle.clone(), store);
+    let mut sessions = Sessions::new(kernel_handle.clone(), store);
     let mut providers = TuiProviders::new(kernel_handle.clone());
     let result = neo_host_tui::run(about, gate, theme_name, &mut sessions, &mut providers, move |op| {
         match op {
@@ -690,19 +699,61 @@ fn cmd_tui(args: &[String]) -> i32 {
 }
 
 
-/// TUI 的会话控制实现：持有内核与会话库，执行切换/新建/删除。
+/// 「能在内核上跑一段闭包」的最小端口。
+///
+/// # 为什么需要它（而不是每个宿主写一份会话逻辑）
+///
+/// 会话切换要同时做两件事：让内核换会话并重建上下文、再把历史转回事件流给宿主。
+/// 这段逻辑是**宿主无关**的。但每个宿主的内核句柄是**各自类型**（A3 禁止宿主
+/// 互相依赖，驱动层各自实现）—— 于是直接复用会卡在"句柄类型不同"上。
+///
+/// 抽这个两行端口，两端各实现一次，会话逻辑就**只有一份**：
+/// `Sessions<H>` 对两种句柄都能用。否则那 120 行（persistence_for /
+/// history_of / switch / create / delete 的边界处理）要抄两遍，
+/// 而抄一遍就意味着将来修一处忘一处。
+trait KernelAccess {
+    /// 在内核上执行闭包并取回结果（内核在驱动线程上，故需 `Send`）。
+    fn with_kernel<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut neo_core::Kernel) -> R + Send + 'static,
+    ) -> Option<R>;
+}
+
+impl KernelAccess for KernelHandle {
+    fn with_kernel<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut neo_core::Kernel) -> R + Send + 'static,
+    ) -> Option<R> {
+        self.query(f)
+    }
+}
+
+impl KernelAccess for neo_host_egui::driver::KernelHandle {
+    fn with_kernel<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut neo_core::Kernel) -> R + Send + 'static,
+    ) -> Option<R> {
+        // GUI 版名字不同（`query_blocking`），语义一致：发出 + 等回执。
+        // 它**会阻塞**，只在用户的显式动作（切会话/新建）里调用 ——
+        // 不在每帧路径上，所以不违反"一帧都不等"的约束。
+        self.query_blocking(f)
+    }
+}
+
+/// 会话控制实现：持有内核访问端口与会话库，执行列举/切换/新建/删除。
 ///
 /// 它活在 CLI 层而不是宿主里，因为**只有 CLI 知道内核怎么装配** ——
 /// 宿主只调用契据（`SessionControl`），不碰内核类型。
-struct TuiSessions {
-    /// 内核在驱动线程上，经句柄通信（见 tui_driver 模块注释）
-    k: KernelHandle,
+/// 泛型 `H` 让它同时服务于 TUI 与桌面 GUI（见 [`KernelAccess`]）。
+struct Sessions<H: KernelAccess> {
+    /// 内核在驱动线程上，经句柄通信（见各宿主的 driver 模块注释）
+    k: H,
     /// 会话库：会话的列举/新建/删除都在这里（日志路径由它给出）
     store: neo_session_store::SessionStore,
 }
 
-impl TuiSessions {
-    fn new(k: KernelHandle, store: neo_session_store::SessionStore) -> Self {
+impl<H: KernelAccess> Sessions<H> {
+    fn new(k: H, store: neo_session_store::SessionStore) -> Self {
         Self { k, store }
     }
 
@@ -906,7 +957,7 @@ impl neo_host_tui::ProviderControl for TuiProviders {
 
 }
 
-impl neo_host_tui::SessionControl for TuiSessions {
+impl<H: KernelAccess> neo_session::SessionControl for Sessions<H> {
     fn list(&self) -> Vec<(String, String, usize)> {
         self.store
             .list()
@@ -924,9 +975,9 @@ impl neo_host_tui::SessionControl for TuiSessions {
         // 内核换会话并重建历史；历史**转回事件流**给宿主重画转录
         // （从落盘日志直接取 event 记录，保持与原始流一致）。
         self.k
-            .query(move |k| {
+            .with_kernel(move |k| {
                 k.switch_session(id, p);
-                TuiSessions::history_of(k)
+                Sessions::<H>::history_of(k)
             })
             .ok_or_else(|| "内核线程已退出".to_string())
     }
@@ -936,7 +987,7 @@ impl neo_host_tui::SessionControl for TuiSessions {
         let p = self.persistence_for(&id);
         let new_id = id.clone();
         self.k
-            .query(move |k| k.switch_session(new_id, p))
+            .with_kernel(move |k| k.switch_session(new_id, p))
             .ok_or_else(|| "内核线程已退出".to_string())?;
         Ok(id)
     }
@@ -944,7 +995,7 @@ impl neo_host_tui::SessionControl for TuiSessions {
     fn delete(&mut self, id: &str) -> Result<bool, String> {
         let current = self
             .k
-            .query(|k| k.session_id().to_string())
+            .with_kernel(|k| k.session_id().to_string())
             .ok_or_else(|| "内核线程已退出".to_string())?;
         if id == current {
             return Err("不能删除当前正在使用的会话（先切换到别的会话）".into());
@@ -954,7 +1005,7 @@ impl neo_host_tui::SessionControl for TuiSessions {
 
     fn current(&self) -> String {
         self.k
-            .query(|k| k.session_id().to_string())
+            .with_kernel(|k| k.session_id().to_string())
             .unwrap_or_default()
     }
 }

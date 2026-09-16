@@ -23,6 +23,7 @@ description = "L5 宿主：桌面原生 GUI（egui/eframe，复用 neo-text 的�
 # 宿主中立的文本语义：Tone / 语义调色板 / 显示宽度 / Markdown / 词法高亮。
 # 与 TUI 共享同一份 —— 这正是阶段 C 抽取它的原因（A3 禁止宿主互相依赖）。
 neo-text = { path = "../neo-text", version = "0.1.0" }
+neo-session = { path = "../neo-session", version = "0.1.0" }
 neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
 neo-core = { path = "../neo-core", version = "0.1.0" }
 eframe = "0.36"

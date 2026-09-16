@@ -3721,22 +3721,10 @@ fn fact_lines(facts: &[Fact], body_cols: usize, tv: &ThoughtView) -> Vec<Vec<Seg
 ///
 /// 切换后宿主需要**重画新的转录**。返回重建出的 `EventMsg` 流，宿主直接
 /// 用它重建 Facts —— 宿主不需要知道"日志怎么读、历史怎么重建"。
-pub trait SessionControl {
-    /// 列出现有会话：(id, 标题, 记录数)。最近修改的在前。
-    fn list(&self) -> Vec<(String, String, usize)>;
-
-    /// 切换到指定会话；返回该会话的历史事件流。
-    fn switch(&mut self, id: &str) -> Result<Vec<EventMsg>, String>;
-
-    /// 新建会话；返回 (新 id, 空事件流)。
-    fn create(&mut self) -> Result<String, String>;
-
-    /// 删除会话；`Ok(false)` 表示本来就不存在。
-    fn delete(&mut self, id: &str) -> Result<bool, String>;
-
-    /// 当前会话 id。
-    fn current(&self) -> String;
-}
+// `SessionControl` 已下沉到 `neo-session`（SIDE 层，任何层可用）：
+// 桌面原生 GUI 也需要会话管理，而 A3 禁止宿主互相依赖，
+// 所以共享契约必须在宿主之下。这里 re-export 保持既有调用点不变。
+pub use neo_session::SessionControl;
 
 /// 服务商管理契据。
 ///

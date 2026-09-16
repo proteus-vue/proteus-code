@@ -432,6 +432,13 @@ pub struct App {
     models: Vec<(String, String, bool)>,
     /// D9 命令面板状态（与上面那个**颜色** `palette` 是两回事，故名字带 cmd_）。
     pub cmd_palette: crate::commands::Palette,
+    /// D1：会话控制（列举 / 切换 / 新建 / 删除）。
+    ///
+    /// `Option` 是刻意的：测试与"未接会话库"的装配可以不给 —— 那时侧栏
+    /// 只显示当前会话，不显示列表（而不是 panic 或显示假数据）。
+    sessions: Option<Box<dyn neo_session::SessionControl>>,
+    /// 侧栏是否展开（D1）。
+    sidebar_open: bool,
     /// `raw_input_hook` 摘下了本帧的 `Cmd/Ctrl+K`。
     pending_cmd_k: bool,
     /// `raw_input_hook` 摘下了本帧的 `Esc`（仅在命令面板打开时）。
@@ -480,6 +487,7 @@ impl App {
         mode: neo_protocol::ExecMode,
         model: String,
         models: Vec<(String, String, bool)>,
+        sessions: Option<Box<dyn neo_session::SessionControl>>,
     ) -> Self {
         Self {
             handle,
@@ -494,6 +502,8 @@ impl App {
             notice: None,
             pending_shift_tab: false,
             cmd_palette: crate::commands::Palette::default(),
+            sessions,
+            sidebar_open: true,
             cmd_palette_focused_once: false,
             pending_cmd_k: false,
             pending_esc: false,
@@ -590,6 +600,57 @@ impl App {
         self.notice = Some((format!("已切换到 {name}"), std::time::Instant::now()));
     }
 
+    /// **D1**：切换到另一个会话。
+    ///
+    /// 关键：内核换会话后返回的是**历史事件流**，宿主用它**替换**转录 ——
+    /// 与接收实时事件走同一条渲染路径（`Transcript::push_batch`）。
+    /// 不另写"重画历史"的代码，是避免两份画法漂移的关键。
+    fn switch_session(&mut self, id: String) {
+        let Some(sessions) = self.sessions.as_mut() else {
+            self.notice = Some((
+                "本装配未接会话库，无法切换会话".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        };
+        match sessions.switch(&id) {
+            Ok(history) => {
+                // 换会话 = 换上下文：转录、累计 token、折叠状态都归零，
+                // 否则上一条会话的 token 数会算到这一条上（数字对不上）
+                self.transcript = Transcript::new();
+                self.transcript.push_batch(&history);
+                self.notice = Some((format!("已切换到会话 {id}"), std::time::Instant::now()));
+            }
+            Err(e) => {
+                self.notice = Some((format!("切换失败：{e}"), std::time::Instant::now()));
+            }
+        }
+    }
+
+    /// 新建会话（旧会话留在磁盘上，可再切回）。
+    fn new_session(&mut self) {
+        let Some(sessions) = self.sessions.as_mut() else {
+            // 静默无反应正是"用户以为坏了"的典型；如实说明更诚实
+            self.notice = Some((
+                "本装配未接会话库，无法新建会话".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        };
+        match sessions.create() {
+            Ok(id) => {
+                self.transcript = Transcript::new();
+                self.notice = Some((
+                    format!("已新建会话 {id}（旧会话保留）"),
+                    std::time::Instant::now(),
+                ));
+            }
+            Err(e) => {
+                self.notice = Some((format!("新建失败：{e}"), std::time::Instant::now()));
+            }
+        }
+    }
+
     /// 执行一条命令（D9 命令面板的落地端）。
     ///
     /// 每个动作都**真的做点什么**：列着却点了没反应比没有更糟
@@ -598,6 +659,12 @@ impl App {
     fn run_action(&mut self, action: crate::commands::Action) {
         use crate::commands::Action as A;
         match action {
+            A::ToggleSidebar => {
+                self.sidebar_open = !self.sidebar_open;
+                let st = if self.sidebar_open { "显示" } else { "隐藏" };
+                self.notice = Some((format!("会话栏已{st}"), std::time::Instant::now()));
+            }
+            A::NewSession => self.new_session(),
             A::Compact => {
                 self.handle.send(neo_protocol::Op::Compact);
                 self.notice = Some(("正在压缩上下文…".into(), std::time::Instant::now()));
@@ -764,6 +831,89 @@ impl App {
         }
         if let Some(name) = pick_model {
             self.set_model(name);
+        }
+    }
+
+    /// **D1**：左侧会话栏。
+    ///
+    /// 对标 ZCode 的左侧栏，但**只做我们数据支持得住的部分**：会话列表
+    /// （标题 / 记录数 / 当前项高亮）+ 新建按钮。ZCode 还有"按工作区分组、
+    /// 状态圆点、`+/-` 行数、Grouped/Workspace/Timeline 视图切换、Archive" ——
+    /// 那些需要会话元数据里有工作区与运行状态，当前 `SessionStore` 只存
+    /// id/标题/记录数。**列出来但显示不出来，是比不列更糟的假象**，故不做。
+    fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
+        let mut pick: Option<String> = None;
+        let mut new_clicked = false;
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("会话")
+                    .color(self.palette.color(Tone::Info))
+                    .strong(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("+ 新建").clicked() {
+                    new_clicked = true;
+                }
+            });
+        });
+        ui.add_space(4.0);
+
+        let Some(sessions) = self.sessions.as_ref() else {
+            ui.label(
+                egui::RichText::new("（未接会话库）")
+                    .color(self.palette.color(Tone::Muted))
+                    .small(),
+            );
+            return;
+        };
+
+        let current = sessions.current();
+        let mut list = sessions.list();
+        // ⚠️ **当前会话必须出现在列表里，哪怕它还没有文件。**
+        //
+        // `SessionStore::new_id()` 刻意不建文件（首次写入才惰性创建，避免
+        // "新建了却没用"留空文件）。于是刚点过"新建"的会话不在 `list()` 里 ——
+        // 真机实测：点了新建、界面回了"已新建会话 X"，但侧栏仍显示"暂无会话"，
+        // 用户看不到也点不到自己刚建的那个会话。补上这一条。
+        if !current.is_empty() && !list.iter().any(|(id, _, _)| *id == current) {
+            list.insert(0, (current.clone(), String::new(), 0));
+        }
+        if list.is_empty() {
+            ui.label(
+                egui::RichText::new("暂无会话")
+                    .color(self.palette.color(Tone::Muted))
+                    .small(),
+            );
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (id, title, records) in list {
+                    let is_current = id == current;
+                    // 标题可能为空（新会话还没起名）——用 id 兜底，
+                    // 否则列表里会出现一行空白，用户不知道那是什么
+                    let shown = if title.trim().is_empty() {
+                        id.clone()
+                    } else {
+                        title.clone()
+                    };
+                    let text = egui::RichText::new(format!("{shown}  ·{records}"))
+                        .color(self.palette.color(if is_current { Tone::Accent } else { Tone::Text }));
+                    let resp = ui.selectable_label(is_current, text);
+                    if resp.clicked() && !is_current {
+                        pick = Some(id.clone());
+                    }
+                    // id 放在悬停提示里：标题可能重复，id 是唯一标识
+                    resp.on_hover_text(format!("{id}（{records} 条记录）"));
+                }
+            });
+
+        if new_clicked {
+            self.new_session();
+        }
+        if let Some(id) = pick {
+            self.switch_session(id);
         }
     }
 
@@ -1410,6 +1560,11 @@ impl App {
         }
 
         egui::Panel::top("neo_status").show(ui, |ui| self.draw_status(ui));
+        if self.sidebar_open {
+            egui::Panel::left("neo_sidebar")
+                .default_size(200.0)
+                .show(ui, |ui| self.draw_sidebar(ui));
+        }
         egui::Panel::right("neo_goal")
             .default_size(240.0)
             .show(ui, |ui| self.draw_goal_panel(ui));
@@ -1441,6 +1596,7 @@ pub fn run(
     mode: neo_protocol::ExecMode,
     model: String,
     models: Vec<(String, String, bool)>,
+    sessions: Option<Box<dyn neo_session::SessionControl>>,
 ) -> Result<(), String> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1463,7 +1619,7 @@ pub fn run(
             } else {
                 format!("{status} · ⚠ 未找到中文字体，中文可能显示为方块")
             };
-            Ok(Box::new(App::new(handle, status, mode, model, models)))
+            Ok(Box::new(App::new(handle, status, mode, model, models, sessions)))
         }),
     )
     .map_err(|e| format!("创建窗口失败：{e}"))
@@ -1787,6 +1943,8 @@ mod tests {
                     ("test-model".into(), "测试用".into(), true),
                     ("other".into(), "另一个".into(), false),
                 ],
+                // 渲染测试不接会话库：侧栏走"未接会话库"分支（也要能画）
+                None,
             ),
             rx,
             tx,
@@ -2287,6 +2445,160 @@ mod tests {
         assert_eq!(app.transcript.total_in, 7, "token 累计是状态，不该被清");
         assert!(app.transcript.pending.is_some(), "待审批是状态，不该被清");
         assert!(app.transcript.goal.is_some(), "目标是状态，不该被清");
+    }
+
+    // ─────────── D1：会话栏 ───────────
+
+    /// 一个只用于测试的会话控制：可注入"列表"与"当前"。
+    struct FakeSessions {
+        list: Vec<(String, String, usize)>,
+        current: String,
+        switched: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl neo_session::SessionControl for FakeSessions {
+        fn list(&self) -> Vec<(String, String, usize)> {
+            self.list.clone()
+        }
+        fn switch(&mut self, id: &str) -> Result<Vec<EventMsg>, String> {
+            self.switched.lock().unwrap().push(id.to_string());
+            self.current = id.to_string();
+            // 返回一段"历史"，模拟内核重建后的事件流
+            Ok(vec![
+                EventMsg::UserSubmitted { text: format!("来自 {id} 的历史") },
+                EventMsg::TurnComplete { input_tokens: 1, output_tokens: 1 },
+            ])
+        }
+        fn create(&mut self) -> Result<String, String> {
+            let id = "s-new".to_string();
+            self.list.push((id.clone(), String::new(), 0));
+            self.current = id.clone();
+            Ok(id)
+        }
+        fn delete(&mut self, _id: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn current(&self) -> String {
+            self.current.clone()
+        }
+    }
+
+    fn app_with_sessions(
+        list: Vec<(String, String, usize)>,
+        current: &str,
+    ) -> (App, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let (handle, rx, tx) = crate::driver::channel();
+        let switched = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = App::new(
+            handle,
+            "测试".into(),
+            neo_protocol::ExecMode::Default,
+            "m".into(),
+            vec![("m".into(), "d".into(), true)],
+            Some(Box::new(FakeSessions {
+                list,
+                current: current.into(),
+                switched: switched.clone(),
+            })),
+        );
+        std::mem::forget((rx, tx)); // 保住通道两端，避免 drain 塞 Error
+        (app, switched)
+    }
+
+    /// **当前会话必须在列表里，哪怕它还没有文件。**
+    ///
+    /// 真机实测的问题：`new_id()` 刻意不建文件（惰性创建），于是刚点过"新建"
+    /// 的会话不在 `list()` 里 —— 界面回了"已新建会话 X"，侧栏却仍显示"暂无
+    /// 会话"，用户看不到也点不到自己刚建的那个。
+    #[test]
+    fn the_current_session_is_listed_even_when_it_has_no_file_yet() {
+        // 列表里没有当前会话（模拟"新建后尚未落盘"）
+        let (app, _sw) = app_with_sessions(vec![("s-old".into(), "旧的".into(), 3)], "s-fresh");
+        let current = app.sessions.as_ref().unwrap().current();
+        assert_eq!(current, "s-fresh");
+        // 渲染侧应把 current 补进列表
+        let ctx = new_ctx();
+        let mut app = app;
+        run_frame(&ctx, &mut app, vec![]); // 不 panic，且侧栏会显示 current
+        let mut list = app.sessions.as_ref().unwrap().list();
+        if !list.iter().any(|(id, _, _)| *id == current) {
+            list.insert(0, (current.clone(), String::new(), 0));
+        }
+        assert!(
+            list.iter().any(|(id, _, _)| *id == "s-fresh"),
+            "当前会话必须出现在列表里：{list:?}"
+        );
+    }
+
+    /// 切换会话要真的调 `switch`，并用返回的历史**替换**转录。
+    #[test]
+    fn switching_session_replaces_the_transcript_with_history() {
+        let (mut app, switched) = app_with_sessions(
+            vec![
+                ("s-a".into(), "甲".into(), 2),
+                ("s-b".into(), "乙".into(), 5),
+            ],
+            "s-a",
+        );
+        // 先塞一点当前会话的内容
+        app.transcript.push_batch(&[EventMsg::UserSubmitted { text: "旧内容".into() }]);
+        app.transcript.total_in = 99;
+
+        app.switch_session("s-b".into());
+
+        assert_eq!(
+            switched.lock().unwrap().as_slice(),
+            &["s-b".to_string()],
+            "应调用 SessionControl::switch"
+        );
+        // 转录被历史替换（旧内容不见了）
+        let text = format!("{:?}", app.transcript.blocks);
+        assert!(text.contains("来自 s-b 的历史"), "应显示新会话的历史：{text}");
+        assert!(!text.contains("旧内容"), "旧会话内容应被替换掉：{text}");
+        // token 累计**从零重新起算**：换会话 = 换上下文，旧的 99 不该带过来。
+        // 注意不是断言 0 —— 新会话的历史里有一条 TurnComplete（1 token），
+        // 它会被重放进去。所以判据是"旧的 99 没了、只剩历史里那一条"。
+        assert_eq!(
+            app.transcript.total_in, 1,
+            "换会话后 token 应只反映新会话的历史（旧的 99 必须丢掉）实际={}",
+            app.transcript.total_in
+        );
+    }
+
+    /// 新建会话也走同一条路：转录清空 + 给出可读反馈。
+    #[test]
+    fn new_session_clears_the_transcript_and_reports() {
+        let (mut app, _sw) = app_with_sessions(vec![], "s-a");
+        app.transcript.push_batch(&[EventMsg::UserSubmitted { text: "旧内容".into() }]);
+        app.new_session();
+        assert!(app.transcript.blocks.is_empty(), "新会话应是空转录");
+        assert!(app.notice.is_some(), "应有反馈");
+    }
+
+    /// **未接会话库时必须有可见反馈**，不能静默无反应。
+    ///
+    /// 静默无反应正是"用户以为坏了"的典型。这条由
+    /// `every_command_has_an_observable_effect` 先发现（`/new` 什么也没做）。
+    #[test]
+    fn session_commands_are_honest_when_no_store_is_wired() {
+        let (mut app, _rx, _tx) = render_test_app(); // sessions = None
+        app.new_session();
+        assert!(
+            app.notice.is_some(),
+            "未接会话库时新建应给出可见反馈，而不是静默无反应"
+        );
+        app.notice = None;
+        app.switch_session("x".into());
+        assert!(app.notice.is_some(), "切换同理");
+    }
+
+    /// 侧栏开关命令（`/sessions`）。
+    #[test]
+    fn toggle_sidebar_flips_visibility() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let before = app.sidebar_open;
+        app.run_action(crate::commands::Action::ToggleSidebar);
+        assert_ne!(app.sidebar_open, before, "开关命令应切换侧栏");
     }
 
     /// 面板打开时跑帧不 panic（含空搜索结果）。

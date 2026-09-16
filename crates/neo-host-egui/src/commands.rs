@@ -54,6 +54,9 @@ impl Category {
 /// 新增一条命令时，编译器会提醒这里的 `match` 漏了分支。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    /// 切换 / 新建会话（D1）
+    ToggleSidebar,
+    NewSession,
     /// 压缩上下文（`Op::Compact`）
     Compact,
     /// 回退对话一轮（`Op::Rewind`，不还原文件）
@@ -92,6 +95,8 @@ pub struct Command {
 /// 带参数的命令（如"跳到第 N 轮"）时不必重写注册表结构。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionStatic {
+    ToggleSidebar,
+    NewSession,
     Compact,
     Rewind,
     Interrupt,
@@ -107,6 +112,8 @@ impl ActionStatic {
     /// 转成可执行的动作。
     pub fn resolve(self) -> Action {
         match self {
+            Self::ToggleSidebar => Action::ToggleSidebar,
+            Self::NewSession => Action::NewSession,
             Self::Compact => Action::Compact,
             Self::Rewind => Action::Rewind,
             Self::Interrupt => Action::Interrupt,
@@ -122,6 +129,18 @@ impl ActionStatic {
 
 /// 命令注册表。**只收录 GUI 真的能执行的动作**。
 pub const COMMANDS: &[Command] = &[
+    Command {
+        name: "sessions",
+        desc: "显示 / 隐藏会话栏",
+        action: ActionStatic::ToggleSidebar,
+        category: Category::Session,
+    },
+    Command {
+        name: "new",
+        desc: "新建会话（旧会话保留，可切回）",
+        action: ActionStatic::NewSession,
+        category: Category::Session,
+    },
     Command {
         name: "compact",
         desc: "压缩上下文（把较早消息摘要为一条）",
@@ -276,7 +295,8 @@ mod tests {
             // resolve 必然产出某个动作；这里确认它不是"空动作"占位
             // （靠 match 的穷尽性保证：新增 ActionStatic 会编译失败）
             match a {
-                Action::Compact | Action::Rewind | Action::Interrupt
+                Action::ToggleSidebar | Action::NewSession
+                | Action::Compact | Action::Rewind | Action::Interrupt
                 | Action::ShowModels | Action::CycleMode | Action::ToggleReasoning
                 | Action::ClearTranscript | Action::Help | Action::Quit => {}
             }
