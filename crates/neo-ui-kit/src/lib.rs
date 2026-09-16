@@ -48,6 +48,7 @@ pub use gpui_kit::gpui;
 //
 // 上游注释也提醒过同一件事："Test modules should import their Kit types
 // explicitly to avoid shadowing Rust's #[test]."
+#[cfg(feature = "test-support")]
 pub use gpui_kit::test as kit_test;
 
 // ── 其余三层 ──

@@ -35,6 +35,12 @@ description = "L1 UI 门面：全仓唯一 pin GPUI 的地方（其余 crate 只
 # 编译着色器（见 PROJECT_MEMORY §4.62）。而 `gpui-pre-macos` **没有 build.rs、
 # 没有 .metal 源文件** —— 着色器已预编译进库。实测在本机（仅 CommandLineTools、
 # 无完整 Xcode）构建成功并开出真窗口。
+[features]
+# 测试基建（无头窗口 + 交互派发）。**默认关闭**：它会把 gpui/gpui-base/
+# gpui-component 各自的 test-support 全打开，编进生产构建是纯粹的浪费。
+# 需要它的测试在自己的 `[dev-dependencies]` 里打开本 feature。
+test-support = ["gpui-kit/test-support"]
+
 [dependencies]
 # 版本 pin 在**根 Cargo.toml 的 [workspace.dependencies]**，全仓只有这一处写死。
 gpui-kit = { workspace = true }
