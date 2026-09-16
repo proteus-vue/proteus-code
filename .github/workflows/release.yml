@@ -99,13 +99,20 @@ jobs:
         include:
           - os: macos-14          # Apple Silicon
             target: aarch64-apple-darwin
-            features: ""          # 含桌面
+            # 空 = 走 default feature，**含 GPUI 桌面宿主**（默认桌面 UI）
+            # 与 egui（回退通道，尚未删除）。两者都在 default 里，
+            # 所以这里不需要显式 --features。
+            features: ""
           - os: macos-14          # 交叉编出 Intel 产物
             target: x86_64-apple-darwin
             features: ""
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            features: "--no-default-features"   # 免 webkit 依赖
+            # 精简版：不含任何 GUI 宿主（免 webkit，也免 gpui 需要的
+            # x11/wayland 系统包）。Linux 桌面宿主的发布是另一件事：
+            # gpui 在 Linux 上要 libxkbcommon / libwayland / libx11 等，
+            # CI 的 rust.yml 已装（供编译检查用），但**发布产物未验证过**。
+            features: "--no-default-features"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
