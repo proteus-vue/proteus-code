@@ -47,6 +47,14 @@ jobs:
         run: cargo check --workspace --all-targets
       - name: 全量测试
         run: |
+          # ⚠️ `set +e` **必须**显式关掉：GitHub Actions 的 run 块默认是
+          # `bash -e`（出错即退出），所以 `cargo test` 失败后 shell **立刻退出**，
+          # 后面所有诊断代码（code=$?、STEP SUMMARY、注解）**一行都不会执行**。
+          #
+          # 这正是我前面加了三版注解却一条都没出现的原因 —— 不是注解语法问题、
+          # 不是 grep 没匹配，而是**那段代码从来没被执行**。
+          # 代价：连"exit code 101"都是 GitHub 兜底生成的，我读不到任何细节。
+          set +e
           set -o pipefail
           cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/test-out.log
           code=$?
