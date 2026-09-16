@@ -30,6 +30,26 @@
 // ── gpui 本体（`gpui_kit` 内部 re-export 的 `gpui-pre`，lib 名就是 `gpui`）──
 pub use gpui_kit::gpui;
 
+// ── 测试基建 ──
+//
+// `gpui_kittest` 那套（`gpui-kit::test`）提供**无头窗口**：真渲染组件、
+// 真派发指针/键盘事件、断言状态/焦点/布局。IME 这种"只有真输入法才走得到"
+// 的路径，这是唯一能自动化验证的入口 —— 否则只能靠人手工在中文输入法下试，
+// 而"人试过了"留不下任何可复现证据。
+//
+// 它挂在 `gpui-kit` 的 `test-support` feature 上（已在根 Cargo.toml 打开）：
+// 那个 feature 同时打开 gpui / gpui-base / gpui-component 各自的 test-support，
+// 是四层一致的要求。
+// ⚠️ **不能**写成 `pub use gpui_kit::test;`：
+// 那个模块里有一个 glob 引入的 GPUI `test` 宏（`pub use ::gpui::*` 带的），
+// 直接再导出会把宏放进本 crate 的名字空间，于是本文件里普通的 `#[test]`
+// 会被解析成 GPUI 的测试宏 → 编译期报 "recursion limit reached while
+// expanding `#[test]`"（实测踩到）。改名再导出即可绕开。
+//
+// 上游注释也提醒过同一件事："Test modules should import their Kit types
+// explicitly to avoid shadowing Rust's #[test]."
+pub use gpui_kit::test as kit_test;
+
 // ── 其余三层 ──
 pub use gpui_kit::assets;
 pub use gpui_kit::base;
