@@ -22,3 +22,4 @@ neo-platform = { path = "../neo-platform", version = "0.1.0" }
 neo-capability = { path = "../neo-capability", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+pulldown-cmark = { version = "0.13.4", default-features = false }

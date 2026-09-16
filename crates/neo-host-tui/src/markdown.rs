@@ -1,289 +1,458 @@
 //! Markdown → 带色调的行
 //!
-//! # 范围（有意不做完整 Markdown）
+//! # 解析与渲染分开：解析交给成熟 crate，渲染决策留在本模块
 //!
-//! 终端里渲染 Markdown 的价值排序很清楚：**代码块 > 行内代码 > 标题 >
-//! 列表 > 强调**。表格、脚注、HTML、嵌套列表这些在窄终端里本来就难读，
-//! 做了反而占地方。所以这里只做前五类。
+//! 早期版本手写解析（431 行）。它能跑，但**手写的永远只是 CommonMark 的一个子集**：
+//! 嵌套列表、`_强调_`、链接/自动链接、软换行、转义、setext 标题这些都要自己补，
+//! 而行内解析还踩过"按字节偏移当字符下标"的多字节坑（`**重点** 与 *次要*` 里的
+//! "与"整段消失）。
 //!
-//! # 为什么行内标记要"剥掉"而不是只改色
+//! 现在解析交给 `pulldown-cmark`（MIT，`default-features=false` 下只有
+//! `bitflags` / `memchr` / `unicase` 三个小依赖，其中 `memchr` 本就在依赖树里）。
+//! **但渲染决策仍在本模块** —— 这是有意的产品取舍，不是库能替我们定的：
 //!
-//! `**重点**` 渲染成带色的 `**重点**` 仍然很难读 —— 星号本身就是噪声。
-//! 这里剥掉标记只留文字（终端没有真正的粗体，加粗只能靠颜色层次表达）。
-//! 代价是**原文不再逐字可见**，所以行内代码里的反引号内容一律原样保留。
+//! - **剥掉行内标记而不是只改色**：`**重点**` 渲染成带色的 `**重点**` 仍然难读，
+//!   星号本身就是噪声。终端没有真正的粗体，加粗只能靠颜色层次表达。
+//!   代价是原文不再逐字可见，所以**行内代码的内容一律原样保留**。
+//! - **只做五类**：代码块 > 行内代码 > 标题 > 列表 > 强调。表格、脚注、HTML
+//!   在窄终端里本来就难读，做了反而占地方。因此用 `Parser::new`（即
+//!   `Options::empty()`）——**刻意不打开** tables/footnotes/GFM 那些扩展位。
+//! - **有序列表的超长编号按普通文字渲染**：CommonMark 允许 1–9 位编号，
+//!   于是 `1234567. 不是列表` 会被解析成列表项。渲染时对 >999 的编号
+//!   用普通色调（而非列表强调色）—— 内容与编号都保留，只是不当作列表强调。
 
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use crate::syntax::{self, Lang};
 use crate::Tone;
 
-/// 一行渲染结果：(缩进, 文本, 色调)。
+/// 一行渲染结果：(绝对列号, 文本, 色调)。
 pub type Line = Vec<(usize, String, Tone)>;
 
-/// 渲染一段 Markdown 为若干行。
-///
-/// `width` 用于换行预算（含缩进）。
+/// 渲染一段 Markdown 为若干行。`width` 用于换行预算（含前缀缩进）。
 pub fn render(text: &str, width: usize) -> Vec<Line> {
-    let mut out: Vec<Line> = Vec::new();
-    let mut in_code = false;
-    let mut lang = Lang::Plain;
-
-    for raw in text.lines() {
-        let line = raw.trim_end();
-
-        // ── 代码围栏 ──
-        if let Some(rest) = line.trim_start().strip_prefix("```") {
-            if in_code {
-                in_code = false;
-                continue;
-            }
-            in_code = true;
-            lang = Lang::from_fence(rest);
-            continue;
-        }
-        if in_code {
-            // 代码块：先整体高亮，再**整行排版**。
-            // 不能逐 span 换行 —— 那会让每个 span 都从同一列开始，互相覆盖，
-            // 代码在终端里会变成残缺的碎片。
-            let spans = syntax::highlight_line(line, lang);
-            out.extend(layout_styled(&spans, 2, width.saturating_sub(4)));
-            continue;
-        }
-
-        if line.is_empty() {
-            out.push(Vec::new());
-            continue;
-        }
-
-        // ── 标题：去掉 # 号，用强调色 ──
-        let trimmed = line.trim_start();
-        if let Some(hashes) = trimmed.split_whitespace().next() {
-            if !hashes.is_empty() && hashes.chars().all(|c| c == '#') {
-                let title = trimmed[hashes.len()..].trim();
-                let tone = if hashes.len() <= 2 { Tone::Accent } else { Tone::Info };
-                for w in crate::width::wrap_to_width(title, width) {
-                    out.push(vec![(0, w, tone)]);
-                }
-                continue;
-            }
-        }
-
-        // ── 引用：左侧竖条 + 压暗 ──
-        if let Some(q) = trimmed.strip_prefix('>') {
-            let body = q.trim_start();
-            for w in crate::width::wrap_to_width(body, width.saturating_sub(2)) {
-                out.push(vec![(0, "▏".to_string(), Tone::Border), (2, w, Tone::Muted)]);
-            }
-            continue;
-        }
-
-        // ── 无序列表：`- ` / `* ` / `+ ` → 圆点 ──
-        if let Some(rest) = strip_bullet(trimmed) {
-            let indent = leading_spaces(line);
-            for (j, w) in crate::width::wrap_to_width(rest, width.saturating_sub(indent + 2))
-                .into_iter()
-                .enumerate()
-            {
-                if j == 0 {
-                    let mut seg = vec![(indent, "• ".to_string(), Tone::Primary)];
-                    seg.extend(inline(&w, indent + 2));
-                    out.push(seg);
-                } else {
-                    out.push(vec![(indent, "  ".to_string(), Tone::Text), (indent + 2, w, Tone::Text)]);
-                }
-            }
-            continue;
-        }
-
-        // ── 有序列表：保持原编号 ──
-        if let Some((num, rest)) = strip_ordered(trimmed) {
-            let indent = leading_spaces(line);
-            let label = format!("{num}. ");
-            let mut first = true;
-            for w in crate::width::wrap_to_width(&rest, width.saturating_sub(indent + label.len())) {
-                if first {
-                    let mut seg = vec![(indent, label.clone(), Tone::Primary)];
-                    seg.extend(inline(&w, indent + label.len()));
-                    out.push(seg);
-                    first = false;
-                } else {
-                    out.push(vec![(indent + label.len(), w, Tone::Text)]);
-                }
-            }
-            continue;
-        }
-
-        // ── 水平线 ──
-        if trimmed.chars().all(|c| c == '-' || c == '*' || c == '_') && trimmed.len() >= 3 {
-            out.push(vec![(0, "─".repeat(width.min(40)), Tone::Border)]);
-            continue;
-        }
-
-        // ── 普通段落 ──
-        for w in crate::width::wrap_to_width(trimmed, width) {
-            out.push(inline(&w, 0));
-        }
+    let mut r = Renderer {
+        width: width.max(1),
+        out: Vec::new(),
+        cur: Vec::new(),
+        quote: 0,
+        list_stack: Vec::new(),
+        tones: Vec::new(),
+        heading: None,
+        in_code: false,
+        code_lang: Lang::Plain,
+        code: String::new(),
+    };
+    for ev in Parser::new(text) {
+        r.event(ev);
     }
-    out
+    r.flush();
+    r.out
 }
 
-/// 行内标记：`` `code` `` / `**bold**` / `*em*`。
-///
-/// 返回带绝对列号的片段（调用方给定起始缩进）。
-///
-/// **全程按 char 索引**：曾用 `String::find` 取偏移后当字符数用，
-/// 遇到中文（多字节）就会跳过后续文本 —— `**重点** 与 *次要*` 里的
-/// "与" 整段消失。字面量在下标运算里必须统一口径。
-fn inline(s: &str, base: usize) -> Line {
-    let chars: Vec<char> = s.chars().collect();
-    let mut spans: Vec<(String, Tone)> = Vec::new();
-    let mut buf = String::new();
-    let mut i = 0;
+struct Renderer {
+    width: usize,
+    out: Vec<Line>,
+    /// 当前逻辑行的内联片段（相对，列号在 flush 时计算）。
+    cur: Vec<(String, Tone)>,
+    /// 引用深度（每层占 2 列：竖条 + 一个空格）。
+    quote: usize,
+    /// 列表嵌套栈：`None` = 无序，`Some(n)` = 有序的下一个编号。
+    list_stack: Vec<Option<u64>>,
+    /// 内联色调栈（强调/加粗可嵌套）。
+    tones: Vec<Tone>,
+    /// 当前标题的色调（在标题内时非 None）。
+    heading: Option<Tone>,
+    in_code: bool,
+    code_lang: Lang,
+    /// 代码块正文（围栏内逐行累积，收口时统一高亮）。
+    code: String,
+}
 
-    // 把 buf 以指定色调推出（同色调相邻合并）
-    fn flush(spans: &mut Vec<(String, Tone)>, buf: &mut String, tone: Tone) {
-        if buf.is_empty() {
+impl Renderer {
+    /// 当前内联文字的色调（栈顶，无则正文色）。
+    fn tone(&self) -> Tone {
+        self.heading
+            .or_else(|| self.tones.last().copied())
+            .unwrap_or(Tone::Text)
+    }
+
+    fn event(&mut self, ev: Event<'_>) {
+        match ev {
+            // ── 块级 ──
+            Event::Start(Tag::Heading { level, .. }) => {
+                self.heading = Some(match level {
+                    HeadingLevel::H1 | HeadingLevel::H2 => Tone::Accent,
+                    _ => Tone::Info,
+                });
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                self.heading = None;
+                self.flush();
+            }
+            Event::Start(Tag::CodeBlock(kind)) => {
+                self.in_code = true;
+                self.code.clear();
+                self.code_lang = match &kind {
+                    CodeBlockKind::Fenced(info) => {
+                        // 围栏信息串可能带额外属性（```rust ignore），取第一个词
+                        let first = info.split_whitespace().next().unwrap_or("");
+                        Lang::from_fence(first)
+                    }
+                    CodeBlockKind::Indented => Lang::Plain,
+                };
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                self.in_code = false;
+                // 代码块：先整体高亮，再**整行排版**。
+                // 不能逐 span 换行 —— 那会让每个 span 都从同一列开始、互相覆盖，
+                // 代码在终端里会变成残缺的碎片。
+                let body = std::mem::take(&mut self.code);
+                let indent = self.quote * 2;
+                let budget = self.width.saturating_sub(indent + 2);
+                for line in body.lines() {
+                    let spans = syntax::highlight_line(line, self.code_lang);
+                    if spans.is_empty() {
+                        self.out.push(self.prefixed_line(indent, Vec::new()));
+                        continue;
+                    }
+                    for seg in layout_styled(&spans, budget) {
+                        self.out.push(self.prefixed_line(indent + 2, seg));
+                    }
+                }
+            }
+            Event::Start(Tag::List(start)) => {
+                // 紧凑列表（tight list）的项内不含 Paragraph 事件，所以父项的
+                // 文字会滞留在 cur 里；嵌套列表开始时必须先收口，否则
+                // "外层内层"会被拼成同一行。
+                self.flush();
+                self.list_stack.push(start);
+            }
+            Event::End(TagEnd::List(_)) => {
+                self.flush();
+                self.list_stack.pop();
+            }
+            Event::Start(Tag::Item) => { /* 前缀在 flush 时按栈顶生成 */ }
+            Event::End(TagEnd::Item) => self.flush(),
+            Event::End(TagEnd::Paragraph) => self.flush(),
+            Event::Start(Tag::BlockQuote(_)) => {
+                self.quote += 1;
+                // 引用正文压暗（与"▏"竖条形成层次）
+                self.tones.push(Tone::Muted);
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                self.flush();
+                self.tones.pop();
+                self.quote = self.quote.saturating_sub(1);
+            }
+            Event::Rule => {
+                self.flush();
+                let indent = self.quote * 2;
+                let bar = "─".repeat(self.width.saturating_sub(indent).min(40));
+                self.out.push(self.prefixed_line(
+                    indent,
+                    vec![(bar, Tone::Border)],
+                ));
+            }
+
+            // ── 行内 ──
+            Event::Start(Tag::Emphasis) => self.tones.push(Tone::Muted),
+            Event::End(TagEnd::Emphasis) => {
+                self.tones.pop();
+            }
+            Event::Start(Tag::Strong) => self.tones.push(Tone::Primary),
+            Event::End(TagEnd::Strong) => {
+                self.tones.pop();
+            }
+            Event::Start(Tag::Strikethrough) => self.tones.push(Tone::Muted),
+            Event::End(TagEnd::Strikethrough) => {
+                self.tones.pop();
+            }
+            // 链接/图片：文字照常显示（终端里点不了），色调与正文一致，
+            // 以免噪声；URL 不额外渲染 —— 它通常又长又没信息量。
+            Event::Start(Tag::Link { .. }) | Event::Start(Tag::Image { .. }) => {}
+            Event::End(TagEnd::Link) | Event::End(TagEnd::Image) => {}
+            Event::Code(code) => {
+                // 行内代码：内容**原样**保留（其中的 * 与 _ 不解释），独立色调
+                self.cur.push((code.into_string(), Tone::Success));
+            }
+            Event::Text(t) => {
+                if self.in_code {
+                    self.code.push_str(&t);
+                } else {
+                    let tone = self.tone();
+                    push_text(&mut self.cur, &t, tone);
+                }
+            }
+            Event::SoftBreak => {
+                // ⚠️ **有意偏离 CommonMark**：规范说软换行渲染成空格，但这里按换行处理。
+                //
+                // 依据是本项目的场景不是"读文章"而是"看 Agent 的回复"：模型输出的
+                // 单个换行通常是有意义的（代码片段、错误输出、条目化的内容），
+                // 把它们折叠成空格会改变原文形态 —— `a\nb\nc` 会显示成 "a b c"，
+                // 用户看到的东西和模型写的不是一个样子。
+                //
+                // 代价：一段在源码里被硬折行的长句会显示成多行（换行处通常
+                // 会重新排版，观感尚可）。两害相权，**保原文**优先。
+                // 这条取舍由 `transcript_line_count_is_nonzero_and_bounded` 钉住。
+                self.flush();
+            }
+            Event::HardBreak => self.flush(),
+            // HTML 与其它未启用的事件：原样作为文字，**不丢内容**
+            Event::Html(t) | Event::InlineHtml(t) => {
+                let tone = self.tone();
+                push_text(&mut self.cur, &t, tone);
+            }
+            Event::FootnoteReference(t) => {
+                self.cur.push((format!("[{t}]"), Tone::Muted));
+            }
+            Event::TaskListMarker(done) => {
+                self.cur
+                    .push((if done { "[x] ".into() } else { "[ ] ".into() }, Tone::Muted));
+            }
+            Event::InlineMath(t) | Event::DisplayMath(t) => {
+                self.cur.push((t.into_string(), Tone::Success));
+            }
+            Event::End(_) | Event::Start(_) => {}
+        }
+    }
+
+    /// 当前行的结构前缀（引用条 + 列表缩进 + 项目符号）。
+    ///
+    /// 返回 (起始列, 片段列表, 正文起始列)。列表项每行都要带符号（换行时
+    /// 续行用等宽空格对齐在符号之下 —— 与旧实现一致）。
+    fn prefix_parts(&self) -> (usize, Vec<(String, Tone)>, usize) {
+        let mut col = 0usize;
+        let mut parts: Vec<(String, Tone)> = Vec::new();
+        // 引用：每层占 2 列（竖条 + 空格）
+        for _ in 0..self.quote {
+            parts.push(("▏".to_string(), Tone::Border));
+            col += 2;
+        }
+        if self.cur.is_empty() {
+            return (col, parts, col);
+        }
+        // 列表缩进：每层 2 列
+        let depth = self.list_stack.len();
+        if depth > 0 {
+            let indent = (depth - 1) * 2;
+            if indent > 0 {
+                parts.push((" ".repeat(indent), Tone::Text));
+                col += indent;
+            }
+            match self.list_stack.last().copied().flatten() {
+                // 无序
+                None => {
+                    parts.push(("• ".to_string(), Tone::Primary));
+                    col += 2;
+                }
+                // 有序：编号超长（>999）按普通文字，不当列表强调
+                Some(n) => {
+                    let label = format!("{n}. ");
+                    let tone = if n > 999 { Tone::Text } else { Tone::Primary };
+                    col += crate::width::display_width(&label);
+                    parts.push((label, tone));
+                }
+            }
+        }
+        (col, parts, col)
+    }
+
+    /// 用给定缩进收口当前行（内部已包含前缀处理）。
+    fn prefixed_line(&self, indent: usize, spans: Vec<(String, Tone)>) -> Line {
+        let mut line: Line = Vec::new();
+        let mut col = 0usize;
+        if indent > 0 {
+            line.push((0, " ".repeat(indent), Tone::Text));
+            col = indent;
+        }
+        for (text, tone) in spans {
+            if text.is_empty() {
+                continue;
+            }
+            line.push((col, text.clone(), tone));
+            col += crate::width::display_width(&text);
+        }
+        if line.is_empty() {
+            line.push((0, String::new(), Tone::Text));
+        }
+        line
+    }
+
+    /// 收口当前逻辑行：加前缀、折行、带色调输出。
+    fn flush(&mut self) {
+        if self.cur.is_empty() {
             return;
         }
-        if let Some(last) = spans.last_mut() {
-            if last.1 == tone {
-                last.0.push_str(buf);
-                buf.clear();
-                return;
-            }
+        // ⚠️ 顺序要紧：`prefix_parts` 依赖 `cur` 非空来判断"这是不是列表项"，
+        // 所以必须在取走 cur **之前**调用（先 take 再算会永远拿不到列表前缀）。
+        let (_, parts, body_col) = self.prefix_parts();
+        let spans = std::mem::take(&mut self.cur);
+        // 有序列表当前项用掉后编号 +1
+        if let Some(Some(n)) = self.list_stack.last_mut() {
+            *n += 1;
         }
-        spans.push((std::mem::take(buf), tone));
-    }
 
-    while i < chars.len() {
-        // 行内代码：内容原样保留（不解释其中的 * 与 _）
-        if chars[i] == '`' {
-            if let Some(end) = chars[i + 1..].iter().position(|c| *c == '`') {
-                flush(&mut spans, &mut buf, Tone::Text);
-                let code: String = chars[i + 1..i + 1 + end].iter().collect();
-                spans.push((code, Tone::Success));
-                i += end + 2;
-                continue;
-            }
-        }
-        // 粗体 / 强调：剥掉标记，只留文字
-        if chars[i] == '*' {
-            let is_bold = chars.get(i + 1) == Some(&'*');
-            let mlen = if is_bold { 2 } else { 1 };
-            // 在 **字符** 序列里找配对的标记，偏移天然是字符数
-            let find_from = i + mlen;
-            let close = chars[find_from..]
-                .windows(mlen)
-                .position(|w| w.iter().all(|c| *c == '*'));
-            if let Some(rel) = close {
-                flush(&mut spans, &mut buf, Tone::Text);
-                let inner: String = chars[find_from..find_from + rel].iter().collect();
-                let tone = if is_bold { Tone::Primary } else { Tone::Muted };
-                for (c, t) in inline_simple(&inner, tone) {
-                    spans.push((c, t));
+        let budget = self.width.saturating_sub(body_col);
+        let lines = wrap_spans(&spans, budget);
+        let total = lines.len();
+
+        for (i, segments) in lines.into_iter().enumerate() {
+            let mut line: Line = Vec::new();
+            let mut col = 0usize;
+            if i == 0 {
+                for (text, tone) in &parts {
+                    line.push((col, text.clone(), *tone));
+                    col += crate::width::display_width(text);
                 }
-                i = find_from + rel + mlen;
-                continue;
+            } else {
+                // 续行：与首行正文对齐（前缀宽度用空格填）
+                let padding: usize = parts
+                    .iter()
+                    .map(|(t, _)| crate::width::display_width(t))
+                    .sum();
+                if padding > 0 {
+                    line.push((0, " ".repeat(padding), Tone::Text));
+                    col = padding;
+                }
             }
+            for (text, tone) in segments {
+                if text.is_empty() {
+                    continue;
+                }
+                line.push((col, text.clone(), tone));
+                col += crate::width::display_width(&text);
+            }
+            if line.is_empty() {
+                line.push((0, String::new(), Tone::Text));
+            }
+            let _ = total;
+            self.out.push(line);
         }
-        buf.push(chars[i]);
-        i += 1;
     }
-    flush(&mut spans, &mut buf, Tone::Text);
-    if spans.is_empty() {
-        return vec![(base, String::new(), Tone::Text)];
-    }
-    // 相对片段 → 绝对列号
-    let mut col = base;
-    let mut line: Line = Vec::new();
-    for (text, tone) in spans {
-        let w = crate::width::display_width(&text);
-        line.push((col, text, tone));
-        col += w;
-    }
-    line
 }
 
-/// 按显示宽度把带色调的片段排成多行（**字符级**换行，适合代码）。
+/// 把文字追加到片段序列（同色调相邻合并，减少转义序列）。
+fn push_text(spans: &mut Vec<(String, Tone)>, text: &str, tone: Tone) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = spans.last_mut() {
+        if last.1 == tone {
+            last.0.push_str(text);
+            return;
+        }
+    }
+    spans.push((text.to_string(), tone));
+}
+
+/// 把一个逻辑行按宽度折行，**保留每段文字的色调**。
 ///
-/// 与 `wrap_to_width` 的区别：那个按词换行（适合散文），
-/// 这个按宽度硬换（适合代码/路径/长标识符）且保留逐段色调。
-fn layout_styled(spans: &[(String, Tone)], indent: usize, width: usize) -> Vec<Line> {
+/// 为什么不直接调 `width::wrap_to_width` 再"切回来"：那个函数按空格分词、
+/// 用单个空格重新拼接，于是**连续空格被归一化、首尾空格被丢掉** ——
+/// 折行前后的字符数不再一一对应，没法把色调映射回去。
+///
+/// 这里按字符走：优先在最后一个空格处断行（该空格丢弃），词内没有空格
+/// （CJK、长标识符、URL）就按显示宽度硬断。与 `hard_split` 同策略。
+fn wrap_spans(spans: &[(String, Tone)], budget: usize) -> Vec<Vec<(String, Tone)>> {
+    let budget = budget.max(1);
+    // 展平成 (字符, 色调)，折行时只需处理单一序列
+    let mut flat: Vec<(char, Tone)> = Vec::new();
+    for (text, tone) in spans {
+        for ch in text.chars() {
+            flat.push((ch, *tone));
+        }
+    }
+
+    let mut lines: Vec<Vec<(char, Tone)>> = Vec::new();
+    let mut cur: Vec<(char, Tone)> = Vec::new();
+    let mut used = 0usize;
+    let mut last_space: Option<usize> = None;
+
+    for (ch, tone) in flat {
+        let cw = crate::width::char_width(ch);
+        if used + cw > budget && !cur.is_empty() {
+            if let Some(si) = last_space {
+                let mut rest = cur.split_off(si);
+                // 断点处的空格本身不保留（行尾空白没意义）
+                if !rest.is_empty() {
+                    rest.remove(0);
+                }
+                lines.push(std::mem::take(&mut cur));
+                cur = rest;
+            } else {
+                lines.push(std::mem::take(&mut cur));
+            }
+            used = cur
+                .iter()
+                .map(|(c, _)| crate::width::char_width(*c))
+                .sum();
+            last_space = None;
+        }
+        // 行首空格丢弃；行中空格记为潜在断点
+        if ch == ' ' {
+            if cur.is_empty() {
+                continue;
+            }
+            last_space = Some(cur.len());
+        }
+        cur.push((ch, tone));
+        used += cw;
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(Vec::new());
+    }
+
+    // 合并同色调相邻字符为片段
+    lines
+        .into_iter()
+        .map(|chars| {
+            let mut segs: Vec<(String, Tone)> = Vec::new();
+            for (ch, tone) in chars {
+                if let Some(last) = segs.last_mut() {
+                    if last.1 == tone {
+                        last.0.push(ch);
+                        continue;
+                    }
+                }
+                segs.push((ch.to_string(), tone));
+            }
+            segs
+        })
+        .collect()
+}
+
+/// 把高亮片段按宽度硬折（**字符级**，适合代码：路径、长标识符不会在
+/// "单词"中间被当作可断点而错位），保留逐段色调。
+fn layout_styled(spans: &[(String, Tone)], width: usize) -> Vec<Vec<(String, Tone)>> {
     let width = width.max(1);
-    let mut out: Vec<Line> = Vec::new();
-    let mut line: Line = Vec::new();
-    let mut col = indent;
+    let mut out: Vec<Vec<(String, Tone)>> = Vec::new();
+    let mut line: Vec<(String, Tone)> = Vec::new();
+    let mut used = 0usize;
     for (text, tone) in spans {
         for ch in text.chars() {
             let cw = crate::width::char_width(ch);
-            if col + cw > indent + width {
+            if used + cw > width && !line.is_empty() {
                 out.push(std::mem::take(&mut line));
-                col = indent;
+                used = 0;
             }
-            // 同色调相邻合并，减少转义序列
             if let Some(last) = line.last_mut() {
-                if last.2 == *tone {
-                    last.1.push(ch);
-                    col += cw;
+                if last.1 == *tone {
+                    last.0.push(ch);
+                    used += cw;
                     continue;
                 }
             }
-            line.push((col, ch.to_string(), *tone));
-            col += cw;
+            line.push((ch.to_string(), *tone));
+            used += cw;
         }
     }
-    out.push(line);
-    out
-}
-
-/// 强调内部的极小渲染：只识别 `` `code` ``，其余整体用给定色调。
-fn inline_simple(s: &str, tone: Tone) -> Vec<(String, Tone)> {
-    let mut out = Vec::new();
-    let mut rest = s;
-    loop {
-        let Some(a) = rest.find('`') else {
-            if !rest.is_empty() {
-                out.push((rest.to_string(), tone));
-            }
-            break;
-        };
-        let Some(b) = rest[a + 1..].find('`') else {
-            if !rest.is_empty() {
-                out.push((rest.to_string(), tone));
-            }
-            break;
-        };
-        if a > 0 {
-            out.push((rest[..a].to_string(), tone));
-        }
-        out.push((rest[a + 1..a + 1 + b].to_string(), Tone::Success));
-        rest = &rest[a + 1 + b + 1..];
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
     }
     out
-}
-
-fn strip_bullet(s: &str) -> Option<&str> {
-    for m in ["- ", "* ", "+ "] {
-        if let Some(rest) = s.strip_prefix(m) {
-            return Some(rest);
-        }
-    }
-    None
-}
-
-fn strip_ordered(s: &str) -> Option<(String, String)> {
-    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return None;
-    }
-    // 防御：超长数字串不是列表（避免把一大串数字误当编号）
-    if digits.len() > 3 {
-        return None;
-    }
-    let rest = s[digits.len()..].strip_prefix(". ")?;
-    Some((digits, rest.to_string()))
-}
-
-fn leading_spaces(s: &str) -> usize {
-    s.chars().take_while(|c| *c == ' ').count()
 }
 
 #[cfg(test)]
@@ -296,6 +465,10 @@ mod tests {
             .map(|l| l.iter().map(|(_, t, _)| t.as_str()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn tones_of(lines: &[Line]) -> Vec<Tone> {
+        lines.iter().flatten().map(|(_, _, t)| *t).collect()
     }
 
     #[test]
@@ -319,7 +492,7 @@ mod tests {
         let text = text_of(&ls);
         assert!(text.contains("let x = \"s\"; // c"), "代码内容应保留：{text}");
         // 关键字 / 字符串 / 注释都应有各自的色调
-        let tones: Vec<Tone> = ls.iter().flatten().map(|(_, _, t)| *t).collect();
+        let tones = tones_of(&ls);
         assert!(tones.contains(&Tone::Accent), "应有关键字色：{tones:?}");
         assert!(tones.contains(&Tone::Success), "应有字符串色：{tones:?}");
         assert!(tones.contains(&Tone::Muted), "应有注释色：{tones:?}");
@@ -328,7 +501,7 @@ mod tests {
     #[test]
     fn code_fence_without_language_is_not_highlighted() {
         let ls = render("```\nlet x = 1;\n```", 60);
-        let tones: Vec<Tone> = ls.iter().flatten().map(|(_, _, t)| *t).collect();
+        let tones = tones_of(&ls);
         assert!(!tones.contains(&Tone::Accent), "未知语言不该高亮：{tones:?}");
     }
 
@@ -380,7 +553,7 @@ mod tests {
     fn quote_gets_a_left_bar_and_muted_tone() {
         let ls = render("> 引用内容", 40);
         assert!(text_of(&ls).contains("引用内容"));
-        let tones: Vec<Tone> = ls.iter().flatten().map(|(_, _, t)| *t).collect();
+        let tones = tones_of(&ls);
         assert!(tones.contains(&Tone::Border) && tones.contains(&Tone::Muted), "{tones:?}");
     }
 
@@ -392,9 +565,19 @@ mod tests {
 
     #[test]
     fn a_long_digit_run_is_not_treated_as_a_list() {
-        // 防御：`1234567. x` 不是有序列表（避免误判噪声）
+        // CommonMark 允许 1–9 位编号，所以 1234567. 会被解析成列表项；
+        // 渲染时对超长编号用普通色调（内容与编号都保留，只是不当列表强调）
         let ls = render("1234567. 不是列表", 60);
-        assert!(text_of(&ls).contains("1234567. 不是列表"), "不该被拆成编号");
+        assert!(
+            text_of(&ls).contains("1234567. 不是列表"),
+            "内容与编号必须保留：{:?}",
+            text_of(&ls)
+        );
+        assert!(
+            !tones_of(&ls).contains(&Tone::Primary),
+            "超长编号不该用列表强调色：{:?}",
+            ls
+        );
     }
 
     #[test]
@@ -428,4 +611,128 @@ mod tests {
             }
         }
     }
+
+    // ── 迁移到 pulldown-cmark 后**新支持**的情形 ──
+    // 这些在手写解析下做不到，是本次替换的主要收益。
+
+    #[test]
+    fn nested_lists_are_rendered_with_increasing_indent() {
+        let ls = render("- 外层\n  - 内层", 40);
+        let text = text_of(&ls);
+        assert!(text.contains("外层") && text.contains("内层"), "{text}");
+        // 内层的正文列号必须大于外层（嵌套靠缩进体现）
+        let outer = ls
+            .iter()
+            .find(|l| l.iter().any(|(_, t, _)| t.contains("外层")))
+            .expect("应有外层行");
+        let inner = ls
+            .iter()
+            .find(|l| l.iter().any(|(_, t, _)| t.contains("内层")))
+            .expect("应有内层行");
+        let col_of = |l: &Line, needle: &str| {
+            l.iter()
+                .find(|(_, t, _)| t.contains(needle))
+                .map(|(c, _, _)| *c)
+                .unwrap_or(0)
+        };
+        assert!(
+            col_of(inner, "内层") > col_of(outer, "外层"),
+            "内层应缩进更多：{ls:?}"
+        );
+    }
+
+    #[test]
+    fn underscore_emphasis_is_recognized_like_asterisk() {
+        // 手写解析只认 `*`，`_强调_` 会原样带下划线显示
+        let ls = render("这是 _强调_ 内容", 40);
+        let text = text_of(&ls);
+        assert!(!text.contains('_'), "下划线标记应被剥掉：{text}");
+        assert!(text.contains("强调"), "{text}");
+    }
+
+    #[test]
+    fn links_show_their_text_without_the_url_noise() {
+        let ls = render("见 [文档](https://example.com/very/long/path) 说明", 60);
+        let text = text_of(&ls);
+        assert!(text.contains("文档"), "链接文字应显示：{text}");
+        assert!(
+            !text.contains("https://example.com"),
+            "URL 不该挤进终端正文：{text}"
+        );
+    }
+
+    #[test]
+    fn soft_break_is_preserved_as_a_line_break() {
+        // 有意偏离 CommonMark（那里软换行 = 空格）：Agent 输出的单个换行
+        // 通常有意义，折叠成空格会让显示与原文不符。
+        let ls = render("前半句\n后半句", 60);
+        assert_eq!(text_of(&ls), "前半句\n后半句", "{:?}", text_of(&ls));
+    }
+
+    #[test]
+    fn a_three_line_message_stays_three_lines() {
+        // 与 render 同源的行数估算依赖这条（滚动上限、搜索行号都按它算）
+        let ls = render("a\nb\nc", 80);
+        assert_eq!(ls.len(), 3, "三行文本应渲染成三行：{ls:?}");
+        assert_eq!(text_of(&ls), "a\nb\nc");
+    }
+
+    #[test]
+    fn multibyte_text_is_not_dropped_by_inline_parsing() {
+        // 历史 bug：按字节偏移当字符下标，导致多字节文本整段消失
+        let ls = render("这是 **重点** 与 *次要* 内容", 60);
+        let text = text_of(&ls);
+        assert!(text.contains('与'), "多字节字符不能丢：{text}");
+        assert!(text.contains("内容"), "{text}");
+    }
+
+    #[test]
+    fn table_syntax_is_kept_as_plain_text_by_intent() {
+        // 刻意不开 tables 扩展：窄终端里表格难读，原样输出比强行排版好
+        let md = "| a | b |\n|---|---|\n| 1 | 2 |";
+        let ls = render(md, 60);
+        let text = text_of(&ls);
+        assert!(text.contains("a") && text.contains("1"), "内容不能丢：{text}");
+    }
+
+    /// **行内标记跨越折行边界**时，标记必须已被剥掉、色调必须延续。
+    ///
+    /// 这是老实现的一个真 bug（迁移时实测复现）：老流程是"先按宽度折行、
+    /// 再对每个折好的片段跑行内解析"。当 `**加粗**` 跨行时，两边的片段
+    /// 各自都不含配对的 `**`，解析失败 → **字面星号留在屏幕上**：
+    ///
+    /// ```text
+    /// 这是
+    /// **一段很长的加粗文      ← 星号没被剥掉
+    /// 字需要折行** 结束
+    /// ```
+    ///
+    /// 新流程是"先解析拿色调、再带着色调折行"，从根上避免了这个错位。
+    /// 这条也是本次替换**不以行数减少为收益**的实证：新实现多出的行
+    /// 主要就是这类"先解析后折行"的协调成本，换来的是正确。
+    #[test]
+    fn inline_markup_spanning_a_wrap_boundary_loses_its_markers() {
+        let ls = render("这是 **一段很长的加粗文字需要折行** 结束", 18);
+        let text = text_of(&ls);
+        assert!(!text.contains('*'), "跨行折行的加粗不该留下字面星号：\n{text}");
+        assert!(text.contains("一段很长的加粗文字"), "内容不能丢：\n{text}");
+        assert!(text.contains("结束"), "{text}");
+        // 色调必须**跨越折行边界延续**（加粗部分整段都是 Primary）
+        let bold_tones: Vec<Tone> = ls
+            .iter()
+            .flatten()
+            .filter(|(_, t, _)| t.contains("加粗"))
+            .map(|(_, _, tone)| *tone)
+            .collect();
+        assert!(
+            !bold_tones.is_empty() && bold_tones.iter().all(|t| *t == Tone::Primary),
+            "加粗文字的色调应在折行后延续：{bold_tones:?}"
+        );
+        // 每行仍在预算内
+        for l in &ls {
+            let w: usize = l.iter().map(|(_, t, _)| crate::width::display_width(t)).sum();
+            assert!(w <= 18, "行宽 {w} 超预算：{l:?}");
+        }
+    }
 }
+
