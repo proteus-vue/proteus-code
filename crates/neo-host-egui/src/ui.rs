@@ -268,6 +268,41 @@ impl Transcript {
     }
 }
 
+/// 执行模式的中文标签（界面用；`mode_short` 是命令行用的英文短名）。
+///
+/// 与 ZCode 的四档是同一类东西（见 `desktop-parity.md` §1.3）：
+/// 它那边的 Ask before changes / Edit automatically / Plan / Full access
+/// 可以直接映射到我们内核的 `ExecMode` 五档，不需要发明新概念。
+pub fn mode_label(mode: neo_protocol::ExecMode) -> &'static str {
+    use neo_protocol::ExecMode as M;
+    match mode {
+        M::Plan => "计划",
+        M::ConfirmBefore => "变更前确认",
+        M::Default => "默认",
+        M::AutoEdit => "自动编辑",
+        M::FullAccess => "完全放行",
+    }
+}
+
+/// 下一档模式（`Shift+Tab` 循环）。顺序按"限制从紧到松"。
+fn next_mode(mode: neo_protocol::ExecMode) -> neo_protocol::ExecMode {
+    use neo_protocol::ExecMode as M;
+    match mode {
+        M::Plan => M::ConfirmBefore,
+        M::ConfirmBefore => M::Default,
+        M::Default => M::AutoEdit,
+        M::AutoEdit => M::FullAccess,
+        M::FullAccess => M::Plan,
+    }
+}
+
+/// 该模式是否需要**常驻**风险提示（ZCode 语义：高风险/全自动档位要在工具栏
+/// 持续显示，不能只在弹窗里提一次）。依据是"这个档位允许不经确认就写"。
+fn mode_is_risky(mode: neo_protocol::ExecMode) -> bool {
+    use neo_protocol::ExecMode as M;
+    matches!(mode, M::AutoEdit | M::FullAccess)
+}
+
 /// 工具参数摘要：单行、有长度上限。
 ///
 /// # 为什么必须自己摘要而不是 `to_string()` 整个 JSON
@@ -373,13 +408,34 @@ pub struct App {
     /// 输入框是否曾经取得过焦点（首帧要抢一次）。
     composer_focused_once: bool,
     /// 上一帧是否处于"被审批阻塞"状态（用于检测"刚恢复可用"）。
+    composer_blocked_last: bool,
+    /// 当前执行模式。
+    ///
+    /// **必须由宿主自己记住**：内核的 `ConfigureSession` 只回一条
+    /// `SessionConfigured`（不含模式），没有独立的"模式已变"事件 ——
+    /// 所以状态行若不本地维护，切完模式界面还会显示旧档位（两处各说一套）。
+    mode: neo_protocol::ExecMode,
+    /// 当前模型名（同理由宿主维护；`ModelSwitched` 事件会覆盖它）。
+    model: String,
+    /// 可选模型列表（启动时查一次；运行时切换不改注册表）。
+    models: Vec<(String, String, bool)>,
+    /// `raw_input_hook` 摘下了本帧的 `Shift+Tab`，等 `draw` 来执行切换。
+    ///
+    /// 为什么绕一道：egui 把 `Tab` / `Shift+Tab` 当**焦点导航键**，而它是在
+    /// `begin_pass` 里读按键的 —— 那时我们的 `draw` 还没跑，等到帧内再
+    /// `consume_key` 已经晚了（焦点已经被挪走）。真机复现过：切完模式焦点
+    /// 从输入框跳到了右侧面板的 resize 手柄，**接着敲的字全部丢失**。
+    /// 唯一的拦截点是 `raw_input_hook`（eframe 专门留给"阻止 egui 处理某个
+    /// 快捷键"的口子），它在 `begin_pass` **之前**跑。
+    pending_shift_tab: bool,
+    /// 底下状态行的一次性提示（如"已切换到 X"），显示后自行消失。
+    notice: Option<(String, std::time::Instant)>,
     /// **仅测试用**：最后一帧的焦点 id（供无头跑帧断言）。
     ///
     /// 焦点存在 `Context` 的 memory 里，而 `draw` 只拿到 `Ui`；测试跑完帧后
     /// 从 ctx 读出来塞回这里，避免为了可测而改 `draw` 的签名。
     #[doc(hidden)]
     pub __test_last_focus: Option<egui::Id>,
-    composer_blocked_last: bool,
     /// 启动时自动提交的任务（一次性）。
     ///
     /// 来源是 `NEO_GUI_PROMPT` 环境变量 —— 供**冒烟验证**用：把
@@ -390,7 +446,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(handle: KernelHandle, status: String) -> Self {
+    /// `mode` / `model` / `models` 由调用方（CLI）在启动时告知：
+    /// 宿主不持有内核，这些是装配期的已知状态，之后由用户交互更新。
+    pub fn new(
+        handle: KernelHandle,
+        status: String,
+        mode: neo_protocol::ExecMode,
+        model: String,
+        models: Vec<(String, String, bool)>,
+    ) -> Self {
         Self {
             handle,
             transcript: Transcript::new(),
@@ -398,6 +462,11 @@ impl App {
             goal_input: String::new(),
             palette: GuiPalette::neo(),
             status,
+            mode,
+            model,
+            models,
+            notice: None,
+            pending_shift_tab: false,
             show_reasoning: true,
             composer_focused_once: false,
             __test_last_focus: None,
@@ -445,6 +514,50 @@ impl App {
         self.transcript.running = true;
     }
 
+    /// **D11**：运行时切换执行模式。
+    ///
+    /// 走 `Op::ConfigureSession`（内核既有能力，不需要新端点 —— 计划里
+    /// "D11 需新端点"的判断是过时的）。切换后必须**本地更新 `self.mode`**：
+    /// 内核只回 `SessionConfigured`，不会告诉我们模式变成了什么。
+    fn set_mode(&mut self, mode: neo_protocol::ExecMode) {
+        if mode == self.mode {
+            return;
+        }
+        self.handle.send(neo_protocol::Op::ConfigureSession {
+            patch: neo_protocol::SessionPatch {
+                exec_mode: Some(mode),
+                ..Default::default()
+            },
+        });
+        self.mode = mode;
+        self.notice = Some((
+            format!("已切换到 {} 模式", crate::ui::mode_label(mode)),
+            std::time::Instant::now(),
+        ));
+    }
+
+    /// 循环切换模式（对齐 ZCode 的 `Shift+Tab`）。
+    fn cycle_mode(&mut self) {
+        self.set_mode(next_mode(self.mode));
+    }
+
+    /// 切换模型。内核会校验名字，失败时不改本地状态（避免界面说谎）。
+    fn set_model(&mut self, name: String) {
+        if name == self.model {
+            return;
+        }
+        self.handle.send(neo_protocol::Op::ConfigureSession {
+            patch: neo_protocol::SessionPatch {
+                model: Some(name.clone()),
+                ..Default::default()
+            },
+        });
+        // 乐观更新：内核若校验失败会发 Error 事件，届时转录里可见。
+        // （TUI 同样按"提交后即认为生效"处理，因为它拿不到同步回执。）
+        self.model = name.clone();
+        self.notice = Some((format!("已切换到 {name}"), std::time::Instant::now()));
+    }
+
     fn set_goal(&mut self) {
         let text = self.goal_input.trim().to_string();
         if text.is_empty() {
@@ -457,7 +570,10 @@ impl App {
         self.handle.send(op);
     }
 
-    fn draw_status(&self, ui: &mut egui::Ui) {
+    fn draw_status(&mut self, ui: &mut egui::Ui) {
+        let mut pick_mode: Option<neo_protocol::ExecMode> = None;
+        let mut pick_model: Option<String> = None;
+
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("NEO")
@@ -469,6 +585,69 @@ impl App {
                     .color(self.palette.color(Tone::Muted))
                     .small(),
             );
+
+            // ── D11：模式（下拉切换；Shift+Tab 也能循环）──
+            let risky = mode_is_risky(self.mode);
+            let mode_tone = if risky { Tone::Warning } else { Tone::Info };
+            egui::ComboBox::from_id_salt("neo_mode")
+                .selected_text(
+                    egui::RichText::new(mode_label(self.mode)).color(self.palette.color(mode_tone)),
+                )
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    use neo_protocol::ExecMode as M;
+                    for m in [M::Plan, M::ConfirmBefore, M::Default, M::AutoEdit, M::FullAccess] {
+                        if ui
+                            .selectable_label(m == self.mode, mode_label(m))
+                            .clicked()
+                        {
+                            pick_mode = Some(m);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("执行模式（Shift+Tab 循环）");
+
+            // ── 模型 picker ──
+            let current = self.model.clone();
+            let label = if self.models.len() > 1 {
+                format!("模型：{current}")
+            } else {
+                format!("模型：{current}")
+            };
+            ui.add_enabled_ui(self.models.len() > 1, |ui| {
+                egui::ComboBox::from_id_salt("neo_model")
+                    .selected_text(egui::RichText::new(label).color(self.palette.color(Tone::Muted)).small())
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for (name, desc, production) in &self.models {
+                            // 桩 provider（mock/selftest）标出来：它们不能真跑任务
+                            let text = if *production {
+                                name.clone()
+                            } else {
+                                format!("{name}（桩）")
+                            };
+                            let resp = ui.selectable_label(*name == current, text);
+                            if resp.clicked() {
+                                pick_model = Some(name.clone());
+                            }
+                            if !desc.is_empty() {
+                                resp.on_hover_text(desc);
+                            }
+                        }
+                    });
+            });
+
+            // ── ZCode 语义：高风险档位要在**工具栏常驻**提示 ──
+            // （不是只在切档那一刻弹一次 —— 否则用户过一会儿就忘了自己在放行模式）
+            if risky {
+                ui.label(
+                    egui::RichText::new("⚠ 写操作可能不经确认")
+                        .color(self.palette.color(Tone::Warning))
+                        .small(),
+                );
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (label, tone) = if self.transcript.pending.is_some() {
                     ("待审批", Tone::Warning)
@@ -486,8 +665,26 @@ impl App {
                     .color(self.palette.color(Tone::Muted))
                     .small(),
                 );
+                // 一次性提示（"已切换到 X"），几秒后自行消失
+                if let Some((text, at)) = &self.notice {
+                    if at.elapsed() < std::time::Duration::from_secs(4) {
+                        ui.label(
+                            egui::RichText::new(text)
+                                .color(self.palette.color(Tone::Success))
+                                .small(),
+                        );
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+                    }
+                }
             });
         });
+
+        if let Some(m) = pick_mode {
+            self.set_mode(m);
+        }
+        if let Some(name) = pick_model {
+            self.set_model(name);
+        }
     }
 
     /// D7：右侧 Goal 面板。
@@ -860,6 +1057,36 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// **在 egui 的 `begin_pass` 之前**摘掉 `Shift+Tab`。
+    ///
+    /// 这是唯一能阻止 egui 把它当焦点导航键的地方。若不摘：切了模式的同时
+    /// 焦点被挪到下一个控件（真机实测跳到了右侧面板的 resize 手柄），
+    /// 用户接着敲的字会落在别处甚至丢失。
+    ///
+    /// 代价：界面里 Tab 焦点导航基本失效 —— 有意的取舍，"切执行模式"是
+    /// 高频操作，而 Tab 导航在这套界面里几乎用不到。
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if self.transcript.pending.is_some() {
+            return; // 审批未决时不响应（不该偷偷放宽权限）
+        }
+        let is_shift_tab = |e: &egui::Event| {
+            matches!(
+                e,
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.shift
+            )
+        };
+        if raw_input.events.iter().any(is_shift_tab) {
+            // 摘掉它：egui 就看不到这个 Tab，也就不会做焦点导航
+            raw_input.events.retain(|e| !is_shift_tab(e));
+            self.pending_shift_tab = true;
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // 只做转发：真正的绘制在 `App::draw`。
         // 这样拆开的理由是**可测**：`eframe::Frame` 没有公开构造函数，
@@ -873,6 +1100,18 @@ impl App {
     /// 绘制一帧。**不依赖 `eframe::Frame`**，因此可在无窗口环境测试
     /// （`Context::run_ui` + 本方法即可，不需要显示器）。
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        // D11：`Shift+Tab` 切执行模式。
+        //
+        // 按键的**摘除**在 `raw_input_hook` 里做（见那里的说明）—— 这里只负责
+        // 执行动作。用一个标记而不是直接判按键，是因为"事件已被摘掉"这件事
+        // 只有 hook 知道。
+        if self.pending_shift_tab {
+            self.pending_shift_tab = false;
+            if self.transcript.pending.is_none() {
+                self.cycle_mode();
+            }
+        }
+
         // 冒烟钩子：首帧把 NEO_GUI_PROMPT 的内容当作一次提交（只做一次）
         if let Some(text) = self.auto_prompt.take() {
             self.input = text;
@@ -908,7 +1147,14 @@ impl App {
 /// 打开窗口并运行到关闭。
 ///
 /// `status` 是状态行文字（工作区 / 模式 / 模型），由调用方（CLI）装配。
-pub fn run(handle: KernelHandle, title: &str, status: String) -> Result<(), String> {
+pub fn run(
+    handle: KernelHandle,
+    title: &str,
+    status: String,
+    mode: neo_protocol::ExecMode,
+    model: String,
+    models: Vec<(String, String, bool)>,
+) -> Result<(), String> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1080.0, 720.0])
@@ -930,7 +1176,7 @@ pub fn run(handle: KernelHandle, title: &str, status: String) -> Result<(), Stri
             } else {
                 format!("{status} · ⚠ 未找到中文字体，中文可能显示为方块")
             };
-            Ok(Box::new(App::new(handle, status)))
+            Ok(Box::new(App::new(handle, status, mode, model, models)))
         }),
     )
     .map_err(|e| format!("创建窗口失败：{e}"))
@@ -1243,7 +1489,21 @@ mod tests {
     fn render_test_app() -> (App, std::sync::mpsc::Receiver<crate::driver::DriverMsg>,
                              std::sync::mpsc::Sender<Vec<EventMsg>>) {
         let (handle, rx, tx) = crate::driver::channel();
-        (App::new(handle, "测试状态".into()), rx, tx)
+        (
+            App::new(
+                handle,
+                "测试状态".into(),
+                neo_protocol::ExecMode::Default,
+                "test-model".into(),
+                // 两个可选模型：让 picker 处在"可切换"状态，测到真实路径
+                vec![
+                    ("test-model".into(), "测试用".into(), true),
+                    ("other".into(), "另一个".into(), false),
+                ],
+            ),
+            rx,
+            tx,
+        )
     }
 
     fn raw_input() -> egui::RawInput {
@@ -1264,6 +1524,13 @@ mod tests {
     fn run_frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) {
         let mut input = raw_input();
         input.events = events;
+        // ⚠️ 必须走和真实 eframe 一样的入口：`raw_input_hook` 是摘除
+        // `Shift+Tab` 的唯一拦截点（它在 `begin_pass` 之前跑）。测试若绕过它，
+        // 就测不到"焦点会不会被 Tab 导航带走"这个真机 bug。
+        {
+            use eframe::App as _;
+            app.raw_input_hook(ctx, &mut input);
+        }
         let mut out = ctx.run_ui(input, |ui| app.draw(ui));
         out.textures_delta.clear();
         // 焦点状态记在 ctx 的 memory 里；带出来供断言
@@ -1384,4 +1651,179 @@ mod tests {
             run_frame(&ctx, &mut app, vec![]);
         }
     }
+    // ─────────── D11：执行模式切换 ───────────
+
+    /// 模式循环必须**覆盖全部五档并回到起点**。
+    ///
+    /// 漏一档就会让用户永远切不到那个模式（或卡在某一档出不来）。
+    #[test]
+    fn mode_cycle_visits_every_mode_and_wraps() {
+        use neo_protocol::ExecMode as M;
+        let all = [M::Plan, M::ConfirmBefore, M::Default, M::AutoEdit, M::FullAccess];
+        let mut seen = vec![M::Default];
+        let mut cur = M::Default;
+        for _ in 0..all.len() - 1 {
+            cur = next_mode(cur);
+            assert!(!seen.contains(&cur), "{cur:?} 重复出现，说明漏了别的档位");
+            seen.push(cur);
+        }
+        assert_eq!(next_mode(cur), M::Default, "应回到起点");
+        assert_eq!(seen.len(), all.len(), "必须覆盖全部档位");
+    }
+
+    /// 高风险档位必须**常驻**提示（ZCode 语义：不是只在切换时弹一次）。
+    ///
+    /// 判据是"这个档位允许不经确认就写"。少标一个 = 用户在放行模式下没有提醒。
+    #[test]
+    fn risky_modes_are_flagged_and_safe_ones_are_not() {
+        use neo_protocol::ExecMode as M;
+        assert!(mode_is_risky(M::AutoEdit), "自动编辑允许不经确认就写");
+        assert!(mode_is_risky(M::FullAccess), "完全放行更该提示");
+        assert!(!mode_is_risky(M::Plan), "计划模式不动手，不该报风险");
+        assert!(!mode_is_risky(M::ConfirmBefore), "变更前确认本来就会问");
+        assert!(!mode_is_risky(M::Default), "默认档有审批门");
+    }
+
+    /// 切换模式要真的提交 `ConfigureSession` 并更新本地状态。
+    ///
+    /// 本地状态更新是**必须的**：内核只回 `SessionConfigured`（不含模式），
+    /// 没有"模式已变"的独立事件 —— 不本地记的话状态行会一直显示旧档位。
+    #[test]
+    fn set_mode_submits_and_updates_local_state() {
+        let (mut app, _rx, _tx) = render_test_app();
+        assert_eq!(app.mode, neo_protocol::ExecMode::Default);
+        app.set_mode(neo_protocol::ExecMode::Plan);
+        assert_eq!(
+            app.mode,
+            neo_protocol::ExecMode::Plan,
+            "本地模式必须跟着变（否则界面显示旧档位）"
+        );
+        assert!(app.notice.is_some(), "切换后应给出一次性提示");
+    }
+
+    /// 重复设同一个模式不发多余指令（避免每次点都产生一条日志）。
+    #[test]
+    fn setting_the_same_mode_is_a_noop() {
+        let (mut app, _rx, _tx) = render_test_app();
+        app.set_mode(neo_protocol::ExecMode::Default);
+        assert!(app.notice.is_none(), "同档位切换不该产生提示（也没发指令）");
+    }
+
+    /// 切换模型：更新本地名字 + 给提示；同名也是空操作。
+    #[test]
+    fn set_model_updates_state_and_ignores_a_noop() {
+        let (mut app, _rx, _tx) = render_test_app();
+        app.set_model("other".into());
+        assert_eq!(app.model, "other");
+        assert!(app.notice.is_some(), "切换模型应有反馈");
+
+        app.notice = None;
+        app.set_model("other".into());
+        assert!(app.notice.is_none(), "同名切换是空操作");
+    }
+
+    /// `Shift+Tab` 在界面上真的会切模式（真机按键路径）。
+    #[test]
+    fn shift_tab_cycles_the_mode_in_a_frame() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        run_frame(&ctx, &mut app, vec![]);
+        let before = app.mode;
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            }],
+        );
+        assert_ne!(app.mode, before, "Shift+Tab 应切换执行模式");
+        assert_eq!(app.mode, next_mode(before));
+    }
+
+    /// `Shift+Tab` 之后**焦点必须留在输入框**。
+    ///
+    /// 这是真机抓到的 bug：egui 把 `Shift+Tab` 当焦点导航键，切完模式焦点
+    /// 跳到了右侧目标框，**接着敲的字全部丢失**（真机复现：输入框里只有
+    /// `Shift+Tab` 之前的 "aaa"，之后的 "bbb" 没了）。
+    /// 修法是在**帧初**消费掉这个按键 —— 帧末消费来不及，导航已经发生。
+    #[test]
+    fn shift_tab_keeps_focus_on_the_composer() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        // 先跑一帧让输入框拿到焦点
+        run_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.__test_last_focus,
+            Some(egui::Id::new("neo_composer")),
+            "前置条件：输入框有焦点"
+        );
+        let before_mode = app.mode;
+
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            }],
+        );
+        assert_ne!(app.mode, before_mode, "应已切换模式");
+
+        // ⚠️ 必须再跑几帧才看得出焦点是否被带走：egui 的焦点导航是**延迟生效**的
+        // ——`focus_direction` 在某一帧被设置，焦点实际转移发生在**下一个 pass**
+        // 里控件注册时。第一版这条测试只跑一帧就断言，结果无论实现对错都通过
+        // （用"帧末才消费"验证过：照样绿）—— 那是**假通过**，比没有测试更糟。
+        for _ in 0..3 {
+            run_frame(&ctx, &mut app, vec![]);
+        }
+        assert_eq!(
+            app.__test_last_focus,
+            Some(egui::Id::new("neo_composer")),
+            "Shift+Tab 切模式后焦点必须仍在输入框（否则后续输入会丢）；实际={:?}",
+            app.__test_last_focus
+        );
+    }
+
+    /// 审批未决时 `Shift+Tab` **不得**改档位（不该在等审批时偷偷放宽权限）。
+    #[test]
+    fn shift_tab_does_not_change_mode_while_awaiting_approval() {
+        let (mut app, _rx, _tx) = render_test_app();
+        app.transcript.pending = Some(Pending {
+            id: "a".into(),
+            detail: "写文件".into(),
+            kind: "write".into(),
+        });
+        let ctx = new_ctx();
+        run_frame(&ctx, &mut app, vec![]);
+        let before = app.mode;
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            }],
+        );
+        assert_eq!(app.mode, before, "待审批时不该改执行模式");
+    }
 }
+

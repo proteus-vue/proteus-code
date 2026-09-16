@@ -341,15 +341,26 @@ fn cmd_desktop(args: &[String]) -> i32 {
     // 这个问题）。
     #[cfg(feature = "egui")]
     if !use_webview {
+        // 模型列表要在**装配期**取：`kernel` 一旦 move 进驱动线程，UI 就只剩
+        // 事件流可用（而"有哪些模型可选"不是事件，是启动时的已知状态）。
+        // 切换模型仍然走 Op::ConfigureSession 提交给内核（宿主不持有内核）。
+        let models = kernel
+            .available_models()
+            .into_iter()
+            .map(|m| (m.name, m.description, m.production))
+            .collect::<Vec<_>>();
+
         let (handle, cmd_rx, batch_tx) = neo_host_egui::driver::channel();
         let kernel_thread = neo_host_egui::driver::spawn(kernel, cmd_rx, batch_tx);
         eprintln!("[neo] 桌面窗口（原生 GUI；--webview 可切回 webview）");
         let status = format!(
-            "{} · {} · {model_name}",
+            "{} · {}",
             workspace.display(),
-            describe_mode(mode)
+            // 模式与模型不再塞进状态串：它们在状态行里有各自的可用控件
+            // （可点击切换），重复显示会占地方也说不出更多信息
+            neo_exec::mode_short(mode)
         );
-        let result = neo_host_egui::ui::run(handle, "NEO", status);
+        let result = neo_host_egui::ui::run(handle, "NEO", status, mode, model_name.clone(), models);
         // 窗口已关：驱动线程的通道随之关闭，内核线程停机
         let _ = kernel_thread.join();
         if let Err(e) = result {
