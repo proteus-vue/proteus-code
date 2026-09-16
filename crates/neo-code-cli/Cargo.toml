@@ -57,14 +57,20 @@ serde_json = { workspace = true }
 # 注：egui 的 crate 是 workspace 成员，`cargo check --workspace` **无论如何都会
 # 编译它** —— 所以把它放进默认并不新增 Linux 构建面，只是让 CLI 的接线分支
 # 也进 CI（否则那段 `#[cfg(feature = "egui")]` 无人编译，正是"腐烂"的成因）。
-default = ["desktop", "egui"]
+# GPUI 转正（2026-09）：**默认原生 GUI 是 gpui**。
+#
+# 转正的依据是 D1–D11 parity 已覆盖，且 gpui 领先三项（思考轨迹搜索、
+# 工具调用分组、只在底部才跟随的自动跟随）。切换前逐项核对过 egui 的能力，
+# 没有发现 gpui 缺失的项。
+#
+# egui 仍留在默认里：它还没删（阶段 3 的下一步）。两个宿主并存期间，
+# `neo desktop --egui` 可回到旧实现 —— 留一条退路比"切了就回不去"稳妥。
+default = ["desktop", "gpui", "egui"]
 desktop = ["dep:neo-host-desktop"]
-# 原生 GUI。注意它与 `desktop` 是**两个独立窗口技术**，不是替代关系：
-# 默认 `neo desktop` 走原生；`neo desktop --webview` 走 webview。
+# 原生 GUI（旧实现，冻结中：只修 bug，不加功能）。它已经不再是默认，
+# 但**仍在 default 里**：删掉会让"回退到 egui"需要重新编译安装。
 egui = ["dep:neo-host-egui"]
-# GPUI 宿主。**刻意不进 default**：阶段 1 它的能力还远未对齐 egui
-# （只有转录区 + 审批 + 状态行），进默认会让 `neo desktop` 的能力倒退。
-# 用 `neo desktop --gpui` 显式试用；等它覆盖 parity 清单后再转正。
+# GPUI 宿主：默认的原生 GUI。
 gpui = ["dep:neo-host-gpui"]
 
 # 驱动线程的单测用离线桩（内存持久化 / 确定性断言）

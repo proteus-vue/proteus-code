@@ -46,11 +46,11 @@ desktop 选项：
   --workspace <dir>            工作区（默认当前目录）
   --provider <...>             模型后端（同 serve）
   --mode <...>                 执行模式（同 serve）
-  --gpui                       用 GPUI 窗口（NEO 的下一代 UI，阶段 1）
+  --egui                       用旧的原生窗口（egui，已冻结只修 bug）
   --webview                    用系统 webview 窗口
                                三种窗口实现，都不经 HTTP、不开端口：
-                                 默认      = egui（当前能力最全）
-                                 --gpui    = GPUI（界面能力尚少于 egui，试用）
+                                 默认      = GPUI（NEO 的桌面 UI）
+                                 --egui    = 旧实现（保留作回退通道）
                                  --webview = 系统 webview 指向内置 Web 宿主
                                窗口关闭即退出
 
@@ -253,7 +253,7 @@ fn cmd_serve(args: &[String]) -> i32 {
     0
 }
 
-/// 启动桌面窗口（三种实现：egui 默认 / --gpui / --webview）。
+/// 启动桌面窗口（三种实现：GPUI 默认 / --egui / --webview）。
 ///
 /// 窗口只是壳：完整复用 Web 宿主（本地回环端口 + 内置页面），
 /// T6 宿主等价因此天然成立 —— 桌面跑的就是 Web 宿主，没有第三套
@@ -271,17 +271,21 @@ fn cmd_desktop(args: &[String]) -> i32 {
     let mut provider = String::new();
     let mut mode = ExecMode::Default;
     // 桌面宿主的三种窗口实现：
-    //   默认      → egui（当前能力最全）
-    //   --gpui    → GPUI（NEO 的下一代 UI，阶段 1 opt-in）
+    //   默认      → GPUI（NEO 的桌面 UI）
+    //   --egui    → 旧原生 GUI（已冻结，保留作回退通道）
     //   --webview → 系统 webview（复用 Web 宿主，ADR-0006 保留的第二后端）
     let mut use_webview = false;
-    let mut use_gpui = false;
+    let mut use_egui = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--webview" => use_webview = true,
-            "--gpui" => use_gpui = true,
+            // `--gpui` 保留为**无操作**而不是删掉：脚本/文档里用过它。
+            // 删掉会让 `neo desktop --gpui` 报"未知参数"—— 而它现在正是默认，
+            // 报错会让人以为这个选项坏了。
+            "--gpui" => {}
+            "--egui" => use_egui = true,
             "--workspace" => {
                 i += 1;
                 match args.get(i) {
@@ -351,7 +355,7 @@ fn cmd_desktop(args: &[String]) -> i32 {
     // 放在 egui 分支**之前**：显式指定优先。两条路的装配完全一样
     // （同一个 build_kernel / 同一份 sessions / 同一个驱动），差别只在谁渲染。
     #[cfg(feature = "gpui")]
-    if use_gpui {
+    if !use_webview && !use_egui {
         // 模型清单：装配期取一次（kernel 随后被 move 进驱动线程）。
         //
         // ⚠️ 取**完整信息**（说明 + 是否桩），不只取名字：宿主的选择器要标出
@@ -377,7 +381,7 @@ fn cmd_desktop(args: &[String]) -> i32 {
         let sessions: Option<Box<dyn neo_session::SessionControl>> =
             Some(Box::new(Sessions::new(handle.clone(), store)));
 
-        eprintln!("[neo] 桌面窗口（GPUI；阶段 1，界面能力尚少于 egui）");
+        eprintln!("[neo] 桌面窗口（GPUI；--egui 可切回旧实现，--webview 可切 webview）");
         let status = format!("{} · {}", workspace.display(), neo_exec::mode_short(mode));
         let result = neo_host_gpui::run(
             handle,
@@ -397,14 +401,15 @@ fn cmd_desktop(args: &[String]) -> i32 {
         return 0;
     }
     #[cfg(not(feature = "gpui"))]
-    if use_gpui {
+    if !use_webview && !use_egui {
         eprintln!("[neo] 本二进制未编译 GPUI 宿主（构建时缺 feature `gpui`）。");
-        eprintln!("      重装并保留该 feature：cargo install neo-code-cli --features gpui");
+        eprintln!("      它现在是默认桌面窗口。可用 --egui 走旧实现，");
+        eprintln!("      或重装并保留该 feature：cargo install neo-code-cli --features gpui");
         return 2;
     }
 
     #[cfg(feature = "egui")]
-    if !use_webview {
+    if !use_webview && use_egui {
         // 模型列表要在**装配期**取：`kernel` 一旦 move 进驱动线程，UI 就只剩
         // 事件流可用（而"有哪些模型可选"不是事件，是启动时的已知状态）。
         // 切换模型仍然走 Op::ConfigureSession 提交给内核（宿主不持有内核）。
@@ -425,7 +430,7 @@ fn cmd_desktop(args: &[String]) -> i32 {
         let sessions: Option<Box<dyn neo_session::SessionControl>> =
             Some(Box::new(Sessions::new(handle.clone(), store)));
 
-        eprintln!("[neo] 桌面窗口（原生 GUI；--webview 可切回 webview）");
+        eprintln!("[neo] 桌面窗口（egui 旧实现；它已冻结，只修 bug）");
         let status = format!(
             "{} · {}",
             workspace.display(),
@@ -445,10 +450,10 @@ fn cmd_desktop(args: &[String]) -> i32 {
     }
 
     #[cfg(not(feature = "egui"))]
-    if !use_webview {
-        eprintln!("[neo] 本二进制未编译原生 GUI 宿主（构建时缺 feature `egui`）。");
-        eprintln!("      用 webview 桌面：neo desktop --webview");
-        eprintln!("      或重装并保留该 feature：cargo install neo-code-cli --features egui");
+    if !use_webview && use_egui {
+        eprintln!("[neo] 本二进制未编译 egui 宿主（构建时缺 feature `egui`）。");
+        eprintln!("      默认桌面窗口是 GPUI，不需要它；要回退旧实现才需要：");
+        eprintln!("      cargo install neo-code-cli --features egui");
         return 2;
     }
 
