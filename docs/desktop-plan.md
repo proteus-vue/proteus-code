@@ -184,10 +184,19 @@ workspace members + `docs/neo-plan/05-验证/checks/check_architecture.py` 的 `
 
 ## 有待解决的前置问题（不解决会埋雷）
 
-### 1. 安全网缺失：HTTP 层零集成测试
+### 1. ~~安全网缺失：HTTP 层零集成测试~~ ✅ 已补
 
-`route()`、`/api/turn`、`/api/events`(SSE)、`/api/approve`、`/api/goal` **全无集成测试**（`neo-host-web` 只有 15 个单元测试，覆盖 HTTP 解析与广播；`crates/neo-host-web/tests/` 不存在）。
-**新宿主也要复用这条 HTTP 链路**（`--webview` 路径），所以**动界面之前应先补这层网**。
+**现状**：`crates/neo-host-web/tests/http_endpoints.rs` 共 **16 项**集成测试，起真实监听端口、
+走真实 `route()`，只把内核侧替换成记录 Op 的假内核（`start()` 本就接受注入的 `handle_op`，
+因此不需要真的内核就能测 HTTP）。覆盖：内置页面 / 404 与错误方法 / `POST /api/turn`（引用
+解析走协议层、空任务 400）/ `GET /api/events`（`subscribed` 确认、线格式扁平信封、多订阅者
+扇出、断连回收）/ `GET /api/approve`（decision 映射、`%3D` 解码、缺 id 400）/
+`POST|GET /api/goal`（设定、`advance|clear|pause|resume`、非法 action 400、无活动目标 409、
+`current_goal` 跟踪）。
+
+**同一轮补掉一个真实缺陷**：SSE 原先只在"写事件失败"时才发现客户端断开，空闲期间断开的连接
+会一直占着订阅槽位与**连接线程**；并发上限 64，攒满即对新连接 503。已改为**事件驱动的断开
+探测**（服务端读侧返回 0；不发心跳、不改线格式），回归测试钉住（撤掉修复即失败）。
 
 ### 2. 无鉴权（事实，非建议）
 

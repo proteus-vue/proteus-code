@@ -27,7 +27,7 @@ pub mod page;
 use std::sync::{Arc, Mutex};
 use neo_core::{DiffSupport, HostBackend, HostCapabilities, ImageSupport};
 use neo_protocol::{EventMsg, Fact, Op};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -209,9 +209,45 @@ fn route(
                 return;
             }
             let sub = bus.subscribe();
+            let sub_id = sub.id();
+
+            // 客户端断开的即时探测。
+            //
+            // 只靠"写事件失败"来发现断开是不够的：空闲期间没有事件可写，
+            // 已断开的连接会一直占着订阅槽位与**连接线程**，直到下一条事件
+            // 才归还。并发上限是 64，攒满 64 个空闲断开连接，新连接就只会
+            // 收到 503 —— 本机任何进程都能触发，且端点无鉴权。
+            //
+            // SSE 是单向的：客户端除关闭外不再上行数据。所以"读返回 0"
+            // 就是断开的确定信号，无需心跳、无需轮询。探测是事件驱动的。
+            let watcher = stream.try_clone().ok().and_then(|mut probe| {
+                // 必须清掉 serve() 设的 15s 读超时：否则空闲但**健康**的连接
+                // 会被超时唤醒，进而被误判成断开（那会踢掉正在看的页面）。
+                // 清不掉就**放弃探测**，退回"写事件时发现"的老行为 ——
+                // 少一个优化可以，误杀健康连接不行。
+                probe.set_read_timeout(None).ok()?;
+                let bus = bus.clone();
+                Some(std::thread::spawn(move || {
+                    let mut buf = [0u8; 64];
+                    loop {
+                        match probe.read(&mut buf) {
+                            Ok(0) => break,    // EOF = 客户端已关闭
+                            Ok(_) => {}        // SSE 期间不该有上行数据，忽略
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                            Err(_) => break,   // 其它错误（含 shutdown 唤醒）
+                        }
+                    }
+                    bus.unsubscribe(sub_id);
+                }))
+            });
+
             // 订阅确认，让客户端知道流已建立
             if http::write_sse_event(stream, "{\"kind\":\"subscribed\"}").is_err() {
-                bus.unsubscribe(sub.id());
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                if let Some(w) = watcher {
+                    let _ = w.join();
+                }
+                bus.unsubscribe(sub_id);
                 return;
             }
             while let Some(msg) = sub.recv() {
@@ -219,7 +255,13 @@ fn route(
                     break; // 客户端断开
                 }
             }
-            bus.unsubscribe(sub.id());
+            bus.unsubscribe(sub_id);
+            // 关掉读侧，唤醒探测线程的阻塞读；否则它会一直挂在这条已死的
+            // 连接上（线程泄漏）。
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            if let Some(w) = watcher {
+                let _ = w.join();
+            }
             let _ = stream.flush();
         }
         ("GET", "/api/approve") => {
