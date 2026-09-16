@@ -370,6 +370,16 @@ pub struct App {
     status: String,
     /// 是否折叠思考块（全局开关，与逐块折叠叠加）
     show_reasoning: bool,
+    /// 输入框是否曾经取得过焦点（首帧要抢一次）。
+    composer_focused_once: bool,
+    /// 上一帧是否处于"被审批阻塞"状态（用于检测"刚恢复可用"）。
+    /// **仅测试用**：最后一帧的焦点 id（供无头跑帧断言）。
+    ///
+    /// 焦点存在 `Context` 的 memory 里，而 `draw` 只拿到 `Ui`；测试跑完帧后
+    /// 从 ctx 读出来塞回这里，避免为了可测而改 `draw` 的签名。
+    #[doc(hidden)]
+    pub __test_last_focus: Option<egui::Id>,
+    composer_blocked_last: bool,
     /// 启动时自动提交的任务（一次性）。
     ///
     /// 来源是 `NEO_GUI_PROMPT` 环境变量 —— 供**冒烟验证**用：把
@@ -389,6 +399,9 @@ impl App {
             palette: GuiPalette::neo(),
             status,
             show_reasoning: true,
+            composer_focused_once: false,
+            __test_last_focus: None,
+            composer_blocked_last: false,
             auto_prompt: std::env::var("NEO_GUI_PROMPT").ok().filter(|s| !s.trim().is_empty()),
         }
     }
@@ -802,27 +815,64 @@ impl App {
     /// 底部输入区。审批未决时**阻塞**并说明原因。
     fn draw_composer(&mut self, ui: &mut egui::Ui) {
         let blocked = self.transcript.pending.is_some();
+        let mut submit_now = false;
         ui.horizontal(|ui| {
             let hint = if blocked {
                 "待审批：请先在上方对话框中选择（避免把下一步排进队列）"
             } else {
                 "输入任务，回车提交（@文件 / $技能 可用）"
             };
-            ui.add_enabled(
+            let edit = ui.add_enabled(
                 !blocked,
-                egui::TextEdit::singleline(&mut self.input).hint_text(hint),
+                egui::TextEdit::singleline(&mut self.input)
+                    .hint_text(hint)
+                    // 稳定 id 是自动聚焦的前提：egui 靠 id 记住"谁有焦点"，
+                    // 不给 id 时每帧可能生成不同的 id，聚焦会掉。
+                    .id(egui::Id::new("neo_composer")),
             );
+
+            // **自动聚焦输入框**：这是聊天式界面，打开就该能直接打字。
+            // 不聚焦则用户要先点一下输入框 —— 纯键盘流里很别扭。
+            // 时机：首帧；以及从"被阻塞"恢复时（审批刚答完，接着就该输入）。
+            // 注意只在**恢复那一刻**抢一次焦点：每帧都抢会让用户没法把焦点
+            // 移到别处（比如右侧目标输入框）。
+            let just_unblocked = self.composer_blocked_last && !blocked;
+            if !blocked && (!self.composer_focused_once || just_unblocked) {
+                edit.request_focus();
+                self.composer_focused_once = true;
+            }
+            self.composer_blocked_last = blocked;
+
+            // 回车提交：egui 在单行 TextEdit 里按回车会 lost_focus
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                submit_now = true;
+            }
             ui.add_enabled_ui(!blocked, |ui| {
                 if ui.button("发送").clicked() {
-                    self.submit();
+                    submit_now = true;
                 }
             });
         });
+        if submit_now {
+            self.submit();
+        }
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // 只做转发：真正的绘制在 `App::draw`。
+        // 这样拆开的理由是**可测**：`eframe::Frame` 没有公开构造函数，
+        // 若绘制逻辑长在 trait 方法里，测试就永远没法无头跑一帧 —— 而
+        // "输入框有没有自动聚焦""回车会不会提交"这类问题恰恰只有跑帧才知道。
+        self.draw(ui);
+    }
+}
+
+impl App {
+    /// 绘制一帧。**不依赖 `eframe::Frame`**，因此可在无窗口环境测试
+    /// （`Context::run_ui` + 本方法即可，不需要显示器）。
+    pub fn draw(&mut self, ui: &mut egui::Ui) {
         // 冒烟钩子：首帧把 NEO_GUI_PROMPT 的内容当作一次提交（只做一次）
         if let Some(text) = self.auto_prompt.take() {
             self.input = text;
@@ -850,13 +900,8 @@ impl eframe::App for App {
 
         self.draw_approval(ui);
 
-        // 回车提交（输入框有焦点时）
-        if !self.transcript.pending.is_some() {
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if enter && !self.input.is_empty() {
-                self.submit();
-            }
-        }
+        // 回车提交已由 composer 的 lost_focus 路径处理（那里才知道输入框的
+        // 真实状态）；这里不再做全局回车判断 —— 两处都判会导致一次回车提交两次。
     }
 }
 
@@ -1182,5 +1227,161 @@ mod tests {
             1,
             "摘要应恰有一个 hunk 头"
         );
+    }
+    // ─────────── 无头跑帧：界面行为可测（不需要显示器） ───────────
+    //
+    // 这一组解决的是个真实困境：egui 是自绘画布，不通过 accessibility 暴露
+    // 可写文本，自动化工具**没法往输入框里打字**（真机验证时 set_value / type
+    // 都报 target_verification_status: mismatched）。既然"点一下再打字"这条路
+    // 走不通，就把"输入框该不该有焦点""回车会不会提交"变成**可断言的行为**，
+    // 用 run_ui 跑真帧来验。
+
+    /// 造一个不接内核的 App（渲染测试不需要真内核）。
+    ///
+    /// 保留 rx/tx 不 drop：通道若两端都关闭，`drain()` 会塞一条 Error 事件，
+    /// 干扰渲染断言。
+    fn render_test_app() -> (App, std::sync::mpsc::Receiver<crate::driver::DriverMsg>,
+                             std::sync::mpsc::Sender<Vec<EventMsg>>) {
+        let (handle, rx, tx) = crate::driver::channel();
+        (App::new(handle, "测试状态".into()), rx, tx)
+    }
+
+    fn raw_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 600.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// 跑一帧。**Context 必须跨帧复用**（焦点存在它的 memory 里）。
+    ///
+    /// 第一版这里每帧新建 Context，于是"上一帧有焦点、这一帧回车触发
+    /// lost_focus"永远不成立 —— 测试失败怪到了产品头上，实际是测试台错了。
+    /// 真实应用只有一个 Context，测试必须照做。
+    fn run_frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) {
+        let mut input = raw_input();
+        input.events = events;
+        let mut out = ctx.run_ui(input, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        // 焦点状态记在 ctx 的 memory 里；带出来供断言
+        app.__test_last_focus = ctx.memory(|m| m.focused());
+    }
+
+    fn new_ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        ctx
+    }
+
+    /// **输入框必须自动聚焦** —— 否则用户打开窗口后得先点一下才能打字。
+    ///
+    /// 这条在真机验证时是**卡住验收**的那个问题：辅助功能已授权，但 egui
+    /// 画布不接受注入文本，唯一的活路是"先用真键盘打字"—— 而真键盘打字
+    /// 需要输入框已有焦点。加了自动聚焦后，真机 `keystroke` 一次就把文字送
+    /// 进去了（日志里看到 `begin_turn` 带着输入的文本）。
+    #[test]
+    fn composer_takes_focus_on_the_first_frame() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        run_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.__test_last_focus,
+            Some(egui::Id::new("neo_composer")),
+            "首帧应把焦点交给输入框（打开就能打字）"
+        );
+    }
+
+    /// 回车提交：单行输入框按回车会 `lost_focus`，由 composer 捕获并提交。
+    ///
+    /// 真机验证过（osascript `key code 36` → 会话日志出现 `begin_turn`），
+    /// 这里把它钉在 CI 上。注意提交后输入框要清空。
+    #[test]
+    fn pressing_enter_submits_the_composer_text() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        app.input = "列出文件".into();
+        // 先跑一帧拿到焦点（真实交互顺序：聚焦 → 打字 → 回车）
+        run_frame(&ctx, &mut app, vec![]);
+        // 回车：egui 把它作为事件送进来
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert!(app.input.is_empty(), "提交后输入框应清空：{:?}", app.input);
+    }
+
+    /// 审批未决时输入框**不可用**（ZCode 语义：权限门暂停当前任务）。
+    #[test]
+    fn composer_is_disabled_while_an_approval_is_pending() {
+        let (mut app, _rx, _tx) = render_test_app();
+        app.transcript.pending = Some(Pending {
+            id: "a1".into(),
+            detail: "写文件".into(),
+            kind: "write".into(),
+        });
+        let ctx = new_ctx();
+        run_frame(&ctx, &mut app, vec![]);
+        // 阻塞时不该抢焦点（焦点应留给审批对话框）
+        assert_ne!(
+            app.__test_last_focus,
+            Some(egui::Id::new("neo_composer")),
+            "待审批时输入框不应获得焦点"
+        );
+        // 且此时提交是空操作（不会被排队）
+        app.input = "下一步".into();
+        app.submit();
+        assert!(!app.input.is_empty(), "待审批时提交应被忽略，不排进队列");
+    }
+
+    /// 跑帧不该 panic（覆盖空转录、有内容、审批挂起、Goal 面板四种状态）。
+    #[test]
+    fn drawing_every_panel_state_does_not_panic() {
+        // 每种状态单独跑一帧；用独立的 App 避免状态互相影响
+        let cases: Vec<Box<dyn Fn(&mut App)>> = vec![
+            Box::new(|_a| {}),
+            Box::new(|a| {
+                a.transcript.push_batch(&[
+                    EventMsg::UserSubmitted { text: "问".into() },
+                    EventMsg::AgentMessageDelta { delta: "**答**\n\n- 项".into() },
+                    EventMsg::ReasoningDelta { delta: "想".into() },
+                    EventMsg::ToolCallBegin {
+                        id: "c".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"cmd": "ls"}),
+                    },
+                    EventMsg::PatchProposed {
+                        path: "a.rs".into(),
+                        diff: "@@ -1 +1 @@\n-a\n+b".into(),
+                    },
+                    EventMsg::TurnComplete { input_tokens: 1, output_tokens: 2 },
+                ]);
+            }),
+            Box::new(|a| {
+                a.transcript.pending = Some(Pending {
+                    id: "a".into(),
+                    detail: "d".into(),
+                    kind: "write".into(),
+                });
+            }),
+            Box::new(|a| {
+                a.transcript.push_batch(&[EventMsg::GoalUpdated { snapshot: goal("g1", 1, 2) }]);
+            }),
+        ];
+        for setup in cases {
+            let (mut app, _rx, _tx) = render_test_app();
+            let ctx = new_ctx();
+            setup(&mut app);
+            run_frame(&ctx, &mut app, vec![]);
+        }
     }
 }

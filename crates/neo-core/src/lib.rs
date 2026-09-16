@@ -390,7 +390,19 @@ pub trait Tool: Send + Sync {
     /// 为什么放在工具而不是内核：**只有工具知道自己的参数怎么变成改动**。
     /// 内核只负责"要审批时先把预览发给宿主"，不解析任何工具特有的参数格式。
     /// 默认 `None` —— 不改文件的工具（bash/grep）无需实现。
-    fn preview(&self, _args: &Value) -> Option<(String, String)> {
+    ///
+    /// # 为什么必须接收 `cwd`
+    ///
+    /// 预览与执行**必须解析到同一个文件**：用户是照着预览批准改动的，
+    /// 若预览读的是 A 文件、执行写的是 B 文件，那这份"不盲批"的保证就是假的。
+    ///
+    /// 曾经这里没有 `cwd`，实现只能按**进程当前目录**读相对路径 —— 而
+    /// `ToolCtx::resolve` 是按 `cwd`（工作区）解析的。两者在
+    /// `--workspace <非进程目录>` 时必然不同：真机复现过一次 —— 工作区是
+    /// `/tmp/x`、进程 CWD 是仓库根，仓库根恰好有个同名文件且内容相同，
+    /// 于是预览算出"空 diff"、界面**什么都不显示**，而用户仍被要求批准一次
+    /// 真实写入（正是 preview 要消灭的"盲批"）。
+    fn preview(&self, _args: &Value, _cwd: &std::path::Path) -> Option<(String, String)> {
         None
     }
     /// 执行后要公告的事件（如 `todowrite` 更新任务清单）。
@@ -1393,7 +1405,7 @@ impl Kernel {
                     // 用户看到"需要审批"却不知道是什么在等他。
                     let detail = format!("{detail}:{} {}", call.name, call_arg_summary(&call.arguments));
                     if let Some(tool) = self.tools.get(&call.name) {
-                        if let Some((path, diff)) = tool.preview(&call.arguments) {
+                        if let Some((path, diff)) = tool.preview(&call.arguments, &self.cwd) {
                             let ev = EventMsg::PatchProposed { path, diff };
                             self.emit_and_log(&ev)?;
                         }
@@ -1830,7 +1842,7 @@ impl Kernel {
         let change_before = self
             .tools
             .get(&call.name)
-            .and_then(|t| t.preview(&call.arguments));
+            .and_then(|t| t.preview(&call.arguments, &self.cwd));
 
         let output = match self.tools.get(&call.name) {
             Some(tool) => {

@@ -183,3 +183,106 @@ fn apply_patch_is_in_the_default_tool_set_and_classified_as_write() {
         neo_core::GateDecision::Ask { .. }
     ));
 }
+
+// ─────────── 预览与执行必须解析到**同一个文件** ───────────
+//
+// 这组测试守的是一个真实踩过的坑：`preview` 曾经按**进程当前目录**读相对路径，
+// 而 `execute` 走 `ToolCtx::resolve` 按**工作区**解析。当 `--workspace` 不是进程
+// CWD 时两者指向不同文件 —— 真机复现：工作区是 /tmp/x、CWD 是仓库根，仓库根
+// 恰好有同名文件且内容相同，于是预览算出空 diff、界面什么都不显示，而用户仍被
+// 要求批准一次真实写入。**"审批前看到改什么"这个保证就此失效。**
+
+#[test]
+fn preview_resolves_relative_paths_against_the_given_cwd() {
+    let ws = tmpdir("preview-cwd");
+    std::fs::write(ws.join("f.txt"), "KEEP\n").unwrap();
+
+    // 相对路径：必须按传入的 cwd 读到 ws/f.txt（而不是进程 CWD）
+    let (path, diff) = ApplyPatchTool
+        .preview(&json!({"path": "f.txt", "new": "KEEP\nNEW\n"}), &ws)
+        .expect("应能算出预览");
+    assert_eq!(path, "f.txt", "预览里的路径保持用户给的形式（用于展示）");
+    // KEEP 没被改动，所以它是**上下文行**（前导空格）而不是删除行。
+    // 断言"它作为上下文出现在预览里"就足以证明读到的是 ws/f.txt 的旧内容 ——
+    // 若读的是别处（比如进程 CWD 里同名但内容不同的文件），这里不会是 KEEP。
+    // 只看**内容行**：`---`/`+++` 文件头也以 -/+ 开头，不能拿 `contains("-")` 判断
+    let content: Vec<&str> = diff
+        .lines()
+        .filter(|l| !l.starts_with("---") && !l.starts_with("+++") && !l.starts_with("@@"))
+        .collect();
+    assert!(
+        content.iter().any(|l| *l == " KEEP"),
+        "预览应基于 ws/f.txt 的旧内容（KEEP 作为上下文行）：{diff}"
+    );
+    assert!(content.iter().any(|l| l.starts_with("+NEW")), "{diff}");
+    assert!(
+        !content.iter().any(|l| l.starts_with('-')),
+        "只做新增，不该有删除行：{diff}"
+    );
+}
+
+#[test]
+fn preview_of_a_file_absent_from_the_workspace_is_a_full_addition() {
+    // 这个用例是那次真机 bug 的**直接复现**：工作区里没有这个文件，
+    // 所以预览必须是"整文件新增"（旧内容为空），不能因为别处有同名文件
+    // 就算出一个空 diff 来。
+    let ws = tmpdir("preview-absent");
+    let (_, diff) = ApplyPatchTool
+        .preview(
+            &json!({"path": "only-here-please.txt", "new": "内容\n"}),
+            &ws,
+        )
+        .expect("文件不存在也要给预览（这是整文件新增）");
+    // ⚠️ 不能用 "包含 -" 判断：文件头 `--- a/...` 本身就以 `-` 开头。
+    // 只看**内容行**（跳过 `---`/`+++`/`@@`）。
+    let content_lines: Vec<&str> = diff
+        .lines()
+        .filter(|l| !l.starts_with("---") && !l.starts_with("+++") && !l.starts_with("@@"))
+        .collect();
+    assert!(
+        !content_lines.iter().any(|l| l.starts_with('-')),
+        "旧内容为空，不该出现删除行：{diff}"
+    );
+    assert!(
+        content_lines.iter().any(|l| l.starts_with("+内容")),
+        "应显示为新增：{diff}"
+    );
+    // 而且必须是"从 0 行开始"的纯新增（`@@ -0,0 +1,N @@`）
+    assert!(
+        diff.contains("@@ -0,0 "),
+        "空旧文件的新增应以 -0,0 开头：{diff}"
+    );
+}
+
+#[test]
+fn preview_and_execute_agree_on_which_file_changes() {
+    // 最强的一条：先取预览，再真执行，断言执行的实际结果与预览说的是同一件事。
+    // 两者若解析到不同文件，这里必然对不上。
+    let ws = tmpdir("preview-vs-exec");
+    std::fs::write(ws.join("agree.txt"), "abc\n").unwrap();
+    let args = json!({"path": "agree.txt", "old": "abc", "new": "XYZ"});
+
+    let (_, diff) = ApplyPatchTool.preview(&args, &ws).expect("应有预览");
+    assert!(diff.contains("-abc") && diff.contains("+XYZ"), "{diff}");
+
+    let out = patch(&ws, SandboxMode::WorkspaceWrite, args);
+    assert!(ok(&out), "执行应成功：{out:?}");
+    // 预览说 ws/agree.txt 会从 abc 变成 XYZ —— 那就必须是这个文件变了
+    assert_eq!(
+        std::fs::read_to_string(ws.join("agree.txt")).unwrap(),
+        "XYZ\n",
+        "预览与实际改动必须作用在同一个文件上"
+    );
+}
+
+#[test]
+fn preview_returns_none_when_there_is_nothing_to_change() {
+    // 内容相同 → 空 diff → 不给预览。这是对的（没有改动可展示），
+    // 但**不能**因此把它和"解析到了别的文件"混为一谈 —— 上面两条用例
+    // 保证的正是"文件不存在时会给出整文件新增的预览"。
+    let ws = tmpdir("preview-noop");
+    std::fs::write(ws.join("same.txt"), "SAME\n").unwrap();
+    let got = ApplyPatchTool.preview(&json!({"path": "same.txt", "new": "SAME\n"}), &ws);
+    assert!(got.is_none(), "无改动不该给预览：{got:?}");
+}
+

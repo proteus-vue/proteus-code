@@ -534,7 +534,7 @@ impl Tool for PreviewTool {
     fn name(&self) -> &str { "apply_patch" }
     fn describe(&self) -> String { "apply_patch".into() }
     fn call_kind(&self, _a: &Value) -> CallKind { CallKind::Write }
-    fn preview(&self, _a: &Value) -> Option<(String, String)> {
+    fn preview(&self, _a: &Value, _cwd: &std::path::Path) -> Option<(String, String)> {
         Some(("a.txt".into(), "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n".into()))
     }
     fn execute(&self, _a: &Value, _c: &ToolCtx) -> ToolOutput {
@@ -631,7 +631,7 @@ fn a_failed_write_records_no_file_change() {
         fn name(&self) -> &str { "apply_patch" }
         fn describe(&self) -> String { "x".into() }
         fn call_kind(&self, _a: &Value) -> CallKind { CallKind::Write }
-        fn preview(&self, _a: &Value) -> Option<(String, String)> {
+        fn preview(&self, _a: &Value, _cwd: &std::path::Path) -> Option<(String, String)> {
             Some(("b.txt".into(), "+new\n".into()))
         }
         fn execute(&self, _a: &Value, _c: &ToolCtx) -> ToolOutput {

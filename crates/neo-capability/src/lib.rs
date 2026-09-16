@@ -157,13 +157,20 @@ impl Tool for ApplyPatchTool {
     /// 复用与 `execute` 相同的组装规则（省略 old = 整文件写、给出 old = 精确替换），
     /// 但**纯只读**：不落盘、不改任何状态。算不出改动（参数错、文件读不到）
     /// 就返回 `None` —— 由 `execute` 给出准确错误，预览不必抢这份责任。
-    fn preview(&self, args: &Value) -> Option<(String, String)> {
+    fn preview(&self, args: &Value, cwd: &std::path::Path) -> Option<(String, String)> {
         let path_str = arg_str(args, "path")?;
         let new = args.get("new").and_then(Value::as_str)?;
         let old_text = args.get("old").and_then(Value::as_str);
         let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
 
-        let existing = std::fs::read_to_string(path_str).unwrap_or_default();
+        // 与 `ToolCtx::resolve` **同一套解析规则**：绝对路径原样，相对路径按
+        // cwd（工作区）。预览读的文件必须就是执行将要写的那个 —— 否则用户
+        // 照着预览批准，改的却是另一个文件。
+        let existing = {
+            let p = std::path::Path::new(path_str);
+            let full = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+            std::fs::read_to_string(&full).unwrap_or_default()
+        };
         let after = match old_text {
             None => new.to_string(),
             Some(o) if o.is_empty() => return None,
