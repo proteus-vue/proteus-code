@@ -81,9 +81,25 @@ jobs:
               echo "### 日志尾部（最后 1200 字符）"
               tail -c 1200 /tmp/test-out.log
             } > /tmp/summary.txt
-            # 注释里换行要转义成 %0A，否则只显示第一行
-            msg=$(sed ':a;N;$!ba;s/\n/%0A/g' /tmp/summary.txt)
-            echo "::error title=测试失败::$msg"
+            # ⚠️ 多行注解在 API 里会被截断到只剩标题（实测第一条只回显
+            # "Process completed with exit code 101"，看不到内容）。
+            # 所以**每条失败信息单独发一个单行注解**，并限制长度 ——
+            # 宁可多发几条短的，也不要一条长的被吞掉。
+            grep -E '^test .* FAILED' /tmp/test-out.log | head -5 | while read -r line; do
+              echo "::error title=失败用例::${line:0:900}"
+            done
+            grep -E 'panicked at' /tmp/test-out.log | head -3 | while read -r line; do
+              echo "::error title=panic::${line:0:900}"
+            done
+            grep -E '^error(\[|:)' /tmp/test-out.log | head -6 | while read -r line; do
+              echo "::error title=编译错误::${line:0:900}"
+            done
+            # 若上面都没匹配到（说明不是断言失败也不是编译错误行首），
+            # 把日志尾部作为兜底发出来
+            if ! grep -qE '^test .* FAILED|^error(\[|:)' /tmp/test-out.log; then
+              tail -c 600 /tmp/test-out.log | tr '\n' ' ' | cut -c1-880 > /tmp/tail.txt
+              echo "::error title=日志尾部::$(cat /tmp/tail.txt)"
+            fi
           fi
           exit $code
       # 失败时重跑失败用例并打印**完整输出**（--exact 逐条重跑）。
