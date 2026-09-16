@@ -231,6 +231,20 @@ impl NeoView {
             }
         }
         self.transcript.push_batch(&events);
+        // **D7 目标自动推进**：由"看到最新快照的一方"驱动（与 egui/Web 同一约定）。
+        //
+        // 缺了这一步的后果很隐蔽：目标能设定、子任务清单也画出来了，
+        // 但**永远只有第一个子任务会跑** —— 界面看起来一切正常，
+        // 只是停在那里不动。来源放在 pump（而非 render）是为了
+        // "只有真有事件时才可能推进"，与 egui 宿主一致。
+        //
+        // `should_advance_goal` 自带去重（按 (goal_id, iterations) 记账）：
+        // 否则每收到一批事件都会再下发一次 GoalAdvance，把同一个子任务
+        // 跑很多遍。
+        if self.transcript.should_advance_goal() {
+            self.transcript.mark_advanced();
+            self.handle.send(Op::GoalAdvance);
+        }
         true
     }
 
