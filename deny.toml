@@ -1,0 +1,85 @@
+# cargo-deny 配置：把许可合规变成机器检查。
+#
+# 用法：
+#   cargo install cargo-deny
+#   cargo deny check licenses
+#
+# # 为什么需要它
+#
+# "我们只用宽松许可的依赖"是一句**会腐烂**的话：任何一次 `cargo add` 都可能
+# 拖进一个 GPL 依赖，而 cargo 不会提醒你，编译也不报错。等到要发布时才发现，
+# 那时换依赖的成本远高于现在加一条检查。
+#
+# 这正是"把口头约定变成机器可判"的应用 —— 与本仓其它守卫（依赖方向、
+# 单一 pin、可提取性）同一个思路。
+
+[graph]
+# 只检查真正会被分发的依赖（跳过只用于开发的）
+all-features = false
+no-default-features = false
+
+[licenses]
+# 允许的许可证：全部是宽松许可（允许商用、允许闭源再分发）。
+#
+# 判据不是"法律上能不能用"，而是"会不会给使用者带来义务或风险"：
+# - 宽松许可（MIT/Apache-2.0/BSD/ISC/Zlib/Unicode）：✅
+# - 弱 copyleft（MPL-2.0/LGPL）：⚠️ 需谨慎，见下方 allow 的注释
+# - 强 copyleft（GPL/AGPL）：❌ 一律拒绝 —— 会吓跑商业使用者，
+#   而本项目的开源目标是拿采用率，不是拿传染性。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "bzip2-1.0.6",
+
+    # MPL-2.0 是**文件级** copyleft：只要不修改它的源文件，就没有额外义务。
+    # 保留在这里是因为生态里几个常见包用它，而实际风险为零 ——
+    # 但它是这条清单里唯一需要人看一眼的项，改动它请附理由。
+    "MPL-2.0",
+
+    # OFL-1.1 / Ubuntu-font-1.0 是**字体**许可：允许嵌入与再分发，
+    # 只在"改名发布"上有约束。字体随 GUI 工具链进来，属于不可避免。
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "NCSA",
+]
+
+# 未明确声明的许可证一律拒绝。理由：`license` 字段缺失的包可能是
+# "作者没想过"（可用）也可能是"作者有专门限制"（不可用），机器分辨不了，
+# 所以由人来看一眼再决定是否加白名单。
+confidence-threshold = 0.9
+
+[[licenses.exceptions]]
+# 例外的写法（当前为空）。加例外必须带 name = 理由注释：
+# [[licenses.exceptions]]
+# name = "some-crate"
+# allow = ["MIT"]
+
+# 私有 crate（本仓库内的）不检查 —— 它们自己的许可是本仓的 LICENSE
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# 同一份许可证出现多个版本是常态（依赖图不可避免），不作为错误。
+# 但通配符依赖（`foo = "*"`）会破坏可复现构建，一律拒绝。
+
+[advisories]
+# 已知漏洞检查。CI 里应当开启；本地可选（需要网络拉 advisory 库）。
+vulnerability = "warn"
+unmaintained = "warn"
+yanked = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
