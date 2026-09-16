@@ -1,0 +1,24 @@
+[package]
+name = "neo-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "宿主中立的文本语义：语义色调、显示宽度、Markdown 解析、词法高亮"
+
+# L1 BASE: 不含业务逻辑，也不含任何宿主概念（终端/窗口/浏览器都不认识）。
+#
+# 存在的理由：这些语义**不止一个宿主要用** —— TUI 用它渲染终端，桌面原生
+# GUI 宿主（见 docs/desktop-plan.md 阶段 D）要用同一份 Tone 与 Markdown。
+# 而架构守卫 A3 禁止宿主之间互相依赖，所以共享层必须沉到宿主之下。
+#
+# 依赖纪律：只允许纯 Rust 的解析类依赖。**不得**引入终端控制（ratatui/
+# crossterm）、GUI 框架或任何需要 C 工具链的库 —— 本 crate 是宿主中立的，
+# 一旦依赖某个宿主的技术栈，"中立"就没了。
+[dependencies]
+# default-features=false：只取核心事件流解析；开了默认特性会拖进
+# syntect 的 onig C 后端（见 desktop-plan 阶段 C 的 feature 说明）。
+pulldown-cmark = { version = "0.13.4", default-features = false }

@@ -7,14 +7,22 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "L5 宿主：终端（零依赖，自写 ANSI 渲染）"
+description = "L5 宿主：终端（终端控制零依赖，自写 ANSI 渲染）"
 
 # L5 HOST: TUI。不含业务逻辑，只做渲染 + 输入解析 + 消费事件流。
 #
-# **零依赖**：终端控制用 `stty`（原始终端模式）+ ANSI 转义序列自己写，
+# **终端控制零依赖**：`stty`（原始终端模式）+ ANSI 转义序列全部自己写，
 # 不引 ratatui/crossterm。理由与本项目其它地方一致 —— 调试链要浅：
 # 终端模式设错时，只需查一个文件而不是翻几层 crate 的抽象。
+#
+# ⚠️ 措辞更正（原写"零依赖"）：**文本语义**已下沉到 `neo-text`（Tone /
+# 显示宽度 / Markdown / 词法高亮），因此依赖树里多了 `pulldown-cmark` 及其
+# 三个小依赖。零依赖指的是**终端控制这一层**，不是整个依赖树 ——
+# 写成"零依赖"会与实际不符（阶段 C 迁移引入）。
 [dependencies]
+# 宿主中立的文本语义（语义色调 / 宽度 / Markdown / 高亮）。
+# 与桌面 GUI 宿主共享同一份 —— 所以它必须在宿主之下，不能留在这里。
+neo-text = { path = "../neo-text", version = "0.1.0" }
 neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
 neo-core = { path = "../neo-core", version = "0.1.0" }
 neo-config = { path = "../neo-config", version = "0.1.0" }
@@ -22,4 +30,3 @@ neo-platform = { path = "../neo-platform", version = "0.1.0" }
 neo-capability = { path = "../neo-capability", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-pulldown-cmark = { version = "0.13.4", default-features = false }

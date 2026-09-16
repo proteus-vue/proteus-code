@@ -19,6 +19,13 @@ ROOT = os.environ.get("NEO_ROOT", os.path.join(os.path.dirname(os.path.abspath(_
 LAYER = {
     # 编号 = 真实依赖深度：neo-protocol 零业务依赖，是整个依赖图的基石
     "neo-protocol":      0,  # L0 PROTOCOL（基石）
+    # L1 BASE：宿主中立的文本语义（语义色调 / 显示宽度 / Markdown / 词法高亮）。
+    # 它不是"平台抽象"，但依赖深度与平台同级（只依赖协议层与极小的纯 Rust
+    # 解析库），故共用 1。放这里而不是 SIDE，是为了让它的依赖**也受 A1 检查**
+    # —— SIDE 会跳过方向校验。
+    # 必须沉到宿主之下的原因：TUI 与桌面 GUI 要用同一份 Tone/Markdown，
+    # 而 A3 禁止宿主之间互相依赖。
+    "neo-text":          1,  # L1 BASE（语义色调 / 宽度 / Markdown / 高亮）
     "neo-sandbox":       1,  # L1 PLATFORM
     "neo-platform":      1,  # L1 PLATFORM
     "neo-core":          2,  # L2
@@ -41,6 +48,8 @@ LAYER = {
 }
 SIDE = {"neo-session", "neo-config"}   # 旁挂，任何层可用
 HOSTS = {"neo-host-tui", "neo-host-desktop", "neo-host-web", "neo-exec"}
+# 注意 1 是混合层：既有 L1 PLATFORM（平台抽象：沙箱/剪贴板/通知），
+# 也有 L1 BASE（宿主中立的文本语义）。两者依赖深度相同、互不依赖。
 LAYER_NAME = {0: "L0 protocol", 1: "L1 platform", 2: "L2 core",
               3: "L3 capability", 4: "L4 orchestration", 5: "L5 host"}
 

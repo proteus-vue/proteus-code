@@ -1278,7 +1278,7 @@ dependencies = [
  "neo-core",
  "neo-platform",
  "neo-protocol",
- "pulldown-cmark",
+ "neo-text",
  "serde",
  "serde_json",
 ]
@@ -1417,6 +1417,13 @@ name = "neo-skill-loader"
 version = "0.1.0"
 dependencies = [
  "neo-core",
+]
+
+[[package]]
+name = "neo-text"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
 ]
 
 [[package]]

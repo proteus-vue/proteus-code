@@ -2,6 +2,9 @@
 resolver = "2"
 members = [
   "crates/neo-protocol",
+  # 宿主中立的文本语义（语义色调 / 显示宽度 / Markdown / 词法高亮）。
+  # 独立成 crate 的原因：多个宿主要用同一份，而 A3 禁止宿主互相依赖。
+  "crates/neo-text",
   "crates/neo-sandbox",
   "crates/neo-platform",
   "crates/neo-session",

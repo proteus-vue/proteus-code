@@ -20,20 +20,21 @@
 //! - 保存 `stty -g` 的确切状态并原样写回（不是猜一个"合理默认"）
 
 pub mod appearance;
+// 文本语义（色调 / 宽度 / Markdown / 高亮）已下沉到 `neo-text`：
+// 桌面原生 GUI 宿主要用同一份，而架构守卫 A3 禁止宿主互相依赖。
+// 这里 re-export 保持既有调用点（`markdown::render` / `width::*` / `Tone`）不变。
+pub use neo_text::{markdown, syntax, width, Tone};
 pub mod commands;
 pub mod diffview;
 pub mod editor;
 pub mod input;
 pub mod popup;
-pub mod markdown;
 pub mod mouse;
 pub mod stars;
 pub mod view;
 pub mod whichkey;
-pub mod syntax;
 pub mod theme;
 pub mod trust;
-pub mod width;
 
 use neo_core::{HostBackend, HostCapabilities, DiffSupport, ImageSupport};
 use neo_protocol::{goal_awaiting_advance, latest_goal_id, latest_goal_line, EventMsg, Fact, facts_of};
@@ -526,29 +527,10 @@ const WORDMARK: [&str; 6] = [
 
 /// 词标所需的最小终端宽度（词标宽 + 左侧缩进 + 余量）。
 const WORDMARK_MIN_COLS: usize = 32;
-/// 语义色调。网格只存色调，具体转义由 `Pal::tone` 在输出时展开 ——
-/// 这样"能力降级"只需改一处，不必在每个渲染点判断。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tone {
-    /// 未写入 → 交给星场填充
-    None,
-    Text,
-    Primary,
-    Accent,
-    Success,
-    Error,
-    Warning,
-    Info,
-    Muted,
-    Border,
-    BorderActive,
-    /// 暗色（SGR 2），用于最弱的结构文字
-    Dim,
-    StarDim,
-    StarBright,
-    /// 任意 RGB（logo 渐变）
-    Rgb(u8, u8, u8),
-}
+// `Tone` 已下沉到 `neo-text`（顶部 re-export）。它的定义与"为什么删掉
+// StarDim/StarBright"的说明都在那边 —— 星场那两个变体是终端装饰，不是文本
+// 语义，不该出现在宿主中立的共享层。网格仍然只存色调、`Pal::tone` 在输出时
+// 展开，这条设计没变。
 
 impl Pal {
     /// 只设前景的 SGR；`Tone::None` 返回**空串**而不是 reset。
@@ -606,14 +588,6 @@ impl Pal {
             Tone::Border => self.border.clone(),
             Tone::BorderActive => self.border_active.clone(),
             Tone::Dim => self.dim.clone(),
-            Tone::StarDim => Color::Rgb(self.theme.star_dim.0, self.theme.star_dim.1, self.theme.star_dim.2)
-                .fg(self.mode, &self.theme),
-            Tone::StarBright => Color::Rgb(
-                self.theme.star_bright.0,
-                self.theme.star_bright.1,
-                self.theme.star_bright.2,
-            )
-            .fg(self.mode, &self.theme),
             Tone::Rgb(r, g, b) => Color::Rgb(r, g, b).fg(self.mode, &self.theme),
             Tone::None => self.reset.clone(),
         }
@@ -1090,6 +1064,17 @@ struct Grid {
     put_limit: usize,
 }
 
+/// 星场亮度 → 色调。星色是**主题装饰**，在这里取具体 RGB 交给共享层的
+/// `Tone::Rgb`，而不是在 `neo-text` 的语义枚举里开"星星"变体 ——
+/// 装饰不得进入语义（PROJECT_MEMORY §4.32）。
+fn star_tone(theme: &theme::Theme, bright: appearance::Brightness) -> Tone {
+    let (r, g, b) = match bright {
+        appearance::Brightness::Bright => theme.star_bright,
+        appearance::Brightness::Dim => theme.star_dim,
+    };
+    Tone::Rgb(r, g, b)
+}
+
 impl Grid {
     fn new(cols: usize, rows: usize) -> Self {
         let n = cols.saturating_mul(rows);
@@ -1236,31 +1221,14 @@ impl Grid {
                 }
                 if let Some((ch, bright)) = bg.cell(r, c, self.cols) {
                     self.ch[i] = ch;
-                    self.tone[i] = match bright {
-                        appearance::Brightness::Bright => Tone::StarBright,
-                        appearance::Brightness::Dim => Tone::StarDim,
-                    };
+                    // 装饰色由本方从主题取值传入（`Tone::Rgb`），
+                    // 而不是让共享层的语义枚举认识"星星"这个概念。
+                    self.tone[i] = star_tone(theme, bright);
                 }
             }
         }
     }
 
-    /// 旧的星场入口（保留给测试与向后兼容）。
-    #[allow(dead_code)]
-    fn fill_stars(&mut self) {
-        for r in 0..self.rows {
-            for c in 0..self.cols {
-                let i = r * self.cols + c;
-                if self.tone[i] != Tone::None {
-                    continue;
-                }
-                if let Some((ch, bright)) = stars::cell(r, c, self.cols) {
-                    self.ch[i] = ch;
-                    self.tone[i] = if bright { Tone::StarBright } else { Tone::StarDim };
-                }
-            }
-        }
-    }
 
     /// 输出：按色调分段，避免逐字符上色。
     fn lines(&self, p: &Pal) -> Vec<String> {

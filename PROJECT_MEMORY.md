@@ -450,7 +450,7 @@ Allow / Always Allow / Reject → **高风险或全自动模式下工具栏持�
 
 ## 1.5 crate 命名：全部 `neo-`，以及两处**必须**保留 `dsh`
 
-23 个 crate 一律 `neo-`（`neo-protocol` / `neo-core` / `neo-host-web` …），
+24 个 crate 一律 `neo-`（`neo-protocol` / `neo-core` / `neo-host-web` …），
 不再用 `dsh-` 前缀 —— 内核对 DSH 的借鉴是**思想**，不是包名延续。
 
 两处**刻意不动**（动了反而是错的）：
@@ -2935,7 +2935,7 @@ L5→L3，`neo-capability` 不能依赖宿主）。
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 643 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web HTTP 集成）
+cargo test --workspace      # 659 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web HTTP 集成）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫 + 执行效率）
 ```
 

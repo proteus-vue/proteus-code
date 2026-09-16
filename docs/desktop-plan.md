@@ -217,6 +217,29 @@ egui 路线已确认能开窗，观感留待阶段 D 实现时由真人验收。
 **TUI 迁移单独一步、单独验证**——它跑着 600+ 测试门禁且有视觉行为，不与新 GUI 混在一次改动里。迁移期会有短暂的双实现并存，如实记录。
 （本轮按此纪律只改了 `markdown.rs` 一个文件，并把 `diff.rs` 作为独立提交 —— 没有把多个替换混在一次改动里。）
 
+### ✅ `neo-text` 抽取已完成（阶段 D 的前置）
+
+**落到 `crates/neo-text`（L1 BASE，24 个 crate）**：`Tone` + `width` + `syntax` + `markdown`。
+用 `git mv` 搬（保留历史），TUI 侧 `pub use neo_text::{markdown, syntax, width, Tone};`
+re-export —— 现有 73 处 `width::*`、258 处 `Tone` 调用点**一行未改**。
+
+`Tone` 的宿主中立化（就是本表要的"去掉终端专有变体"）：
+- **删掉 `StarDim` / `StarBright`**。它们是终端星场的**装饰**，不是文本语义 ——
+  GUI 宿主没有星场，也不会查 `theme.star_dim`。改由调用方经 `Tone::Rgb` 传具体
+  颜色（TUI 侧新增一个 `star_tone(theme, brightness)` 从自己主题取值）。
+  这是 PROJECT_MEMORY §4.32「装饰不得进入语义」在跨 crate 边界上的又一次应用。
+- 顺带**删掉死代码 `Grid::fill_stars`**（16 行，无调用点，是星场重构后的遗留）。
+  它的存在正好说明为什么该删：它和 `fill_background` 里的星场写入点**重复实现了
+  同一件事**，留着就是下一个"改了这里忘了那里"的来源。
+
+**顺带更正 TUI 的依赖声明**：`Cargo.toml` 原写"**零依赖**"，但文本语义下沉后依赖树里
+必然多了 `pulldown-cmark`。改为"**终端控制零依赖**"并说明零依赖指的是哪一层 ——
+把"零依赖"当成整个依赖树的属性是不准确的（阶段 C 引入）。
+
+**架构守卫同步**：`check_architecture.py` 的 `LAYER` 登记 `neo-text: 1`（与 L1 PLATFORM
+同级；放 `LAYER` 而非 `SIDE` 是为了让它的依赖**也受 A1 检查** —— `SIDE` 会跳过方向校验）。
+已用"注入违规依赖"验证过守卫确实会拦（`neo-text(L1) -> neo-core(L2)` 报 A1 失败）。
+
 ---
 
 ## 阶段 D · `neo-host-egui`（L5 新宿主）

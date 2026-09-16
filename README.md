@@ -172,8 +172,8 @@ neo exec "用一句话回答 1+1" --mode plan
 # 需要 Rust —— 版本由 rust-toolchain.toml 钉定（1.95.0），rustup 会自动选用
 cargo run -p neo-code-cli -- tui --provider mock   # 不装 PATH，直接用 cargo 跑 TUI
 
-cargo test --workspace     # 643 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web HTTP 集成）
-cargo check --workspace    # 23 个 crate，零 unsafe、零 warning
+cargo test --workspace     # 659 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web HTTP 集成）
+cargo check --workspace    # 24 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试
 ```
@@ -203,9 +203,10 @@ cd website && npm install && npm run dev    # 或 npm run build → dist/web
 
 ```
 proteus-code/                  ← 项目本体是 Rust 内核
-├── Cargo.toml                 workspace（23 crates）
+├── Cargo.toml                 workspace（24 crates）
 ├── crates/                    ★ 内核与宿主
 │   ├── neo-protocol/          L0 线协议（Op / EventMsg / 双轴枚举），零业务依赖
+│   ├── neo-text/              L1 基础：宿主中立的文本语义（色调 / 宽度 / Markdown / 高亮）
 │   ├── neo-sandbox/           L1 平台（命令包裹：Seatbelt / Landlock+bwrap / ACL）
 │   ├── neo-platform/          L1 平台（进程加固 / fs notify / git）
 │   ├── neo-core/              ★ L2 内核：turn/step 主循环 + 三维闸门 + 4 个 SPI 契据
