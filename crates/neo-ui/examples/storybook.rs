@@ -182,6 +182,63 @@ impl Storybook {
                 }),
             },
             Story {
+                title: "UsageBars · 用量条形图（自绘）",
+                note: "走渲染缝的自绘表面（不是文字）。柱高按全局最大值缩放、\
+                       非零至少 1px（否则小值会被抹掉），柱宽有上限（否则单根\n\
+                       占满整行、看起来像色带而不是图表）。",
+                body: Box::new(|| {
+                    // 展示一组有形状的数据：递增 + 一个陡增
+                    let bars = vec![
+                        neo_ui_render::UsageBar::new(1200, 300),
+                        neo_ui_render::UsageBar::new(1800, 900),
+                        neo_ui_render::UsageBar::new(2600, 1500),
+                        neo_ui_render::UsageBar::new(11500, 2600),
+                        neo_ui_render::UsageBar::new(900, 200),
+                        neo_ui_render::UsageBar::new(3000, 1100),
+                    ];
+                    v_flex()
+                        .gap_1()
+                        .child(usage_demo_element(bars))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_color(neo_ui::neo_color(Tone::Info))
+                                        .child("■ 输入"),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(neo_ui::neo_color(Tone::Accent))
+                                        .child("■ 输出"),
+                                ),
+                        )
+                        .into_any_element()
+                }),
+            },
+            Story {
+                title: "SegmentedProgress · 分段进度（自绘）",
+                note: "每个子任务一段，段内表达走到第几阶段（共 5 步）。\n\
+                       零进度只画底色（与'刚开始'区分），完成的段画满（不留空隙）。",
+                body: Box::new(|| {
+                    let segs = vec![
+                        neo_ui_render::ProgressSegment::new(5, 5), // 完成
+                        neo_ui_render::ProgressSegment::new(3, 5), // 审查中
+                        neo_ui_render::ProgressSegment::new(1, 5), // 刚开始
+                        neo_ui_render::ProgressSegment::new(0, 5), // 未开始
+                    ];
+                    v_flex()
+                        .gap_1()
+                        .child(progress_demo_element(segs))
+                        .child(
+                            div()
+                                .text_color(neo_ui::neo_color(Tone::Muted))
+                                .child("四段：完成 / 审查中 / 刚开始 / 未开始"),
+                        )
+                        .into_any_element()
+                }),
+            },
+            Story {
                 title: "组件库组件（来自依赖）",
                 note: "库自己**不重复实现**按钮这类通用控件，直接用组件库的。\
                        展示台把它们也列出来，是为了说明'哪些是自研、哪些是现成'的边界。",
@@ -200,6 +257,57 @@ impl Storybook {
             },
         ]
     }
+}
+
+
+/// 展示用的用量图元素（与宿主里的同构：经渲染缝绘制）。
+fn usage_demo_element(bars: Vec<neo_ui_render::UsageBar>) -> neo_ui_kit::gpui::AnyElement {
+    use neo_ui_render::{usage_bars, RenderBackend};
+    let input_color = neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Info);
+    let output_color = neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Accent);
+    let prepaint = move |bounds: neo_ui_kit::gpui::Bounds<neo_ui_kit::gpui::Pixels>,
+                         _w: &mut neo_ui_kit::gpui::Window,
+                         _cx: &mut neo_ui_kit::gpui::App| {
+        let scene = usage_bars(
+            &bars,
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+            input_color,
+            output_color,
+        );
+        (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
+    };
+    neo_ui_kit::gpui::canvas(prepaint, |bounds, (_, paint), window, _cx| {
+        paint.draw(bounds.origin, window);
+    })
+    .w_full()
+    .h(px(48.))
+    .into_any_element()
+}
+
+/// 展示用的分段进度元素。
+fn progress_demo_element(segs: Vec<neo_ui_render::ProgressSegment>) -> neo_ui_kit::gpui::AnyElement {
+    use neo_ui_render::{segmented_progress, RenderBackend};
+    let track = neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Border);
+    let fill = neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Success);
+    let prepaint = move |bounds: neo_ui_kit::gpui::Bounds<neo_ui_kit::gpui::Pixels>,
+                         _w: &mut neo_ui_kit::gpui::Window,
+                         _cx: &mut neo_ui_kit::gpui::App| {
+        let scene = segmented_progress(
+            &segs,
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+            track,
+            fill,
+        );
+        (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
+    };
+    neo_ui_kit::gpui::canvas(prepaint, |bounds, (_, paint), window, _cx| {
+        paint.draw(bounds.origin, window);
+    })
+    .w_full()
+    .h(px(10.))
+    .into_any_element()
 }
 
 impl Render for Storybook {
