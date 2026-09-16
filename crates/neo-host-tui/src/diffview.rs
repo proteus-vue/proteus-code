@@ -721,4 +721,77 @@ index 1234567..89abcde 100644
             }
         }
     }
+
+    /// 端到端往返：**生产者**（`neo-capability` 的 `unified_diff`）的输出，
+    /// 必须能被**消费者**（本模块的 `parse`）正确解析。
+    ///
+    /// 为什么要跨 crate 测这一条：这两个模块各自都有测试，但都只对着
+    /// **自己假定的格式**——生产端改了 hunk 头格式、消费端按空白切 token
+    /// 找行号，两边单测都会绿，拼起来却会跳错行。分层方向是 L5→L3，
+    /// 所以这个断言只能放在 TUI 侧（capability 不能依赖宿主）。
+    #[test]
+    fn parses_diffs_produced_by_the_capability_layer() {
+        use neo_capability::diff::unified_diff;
+
+        // 造一段"前面插了行、后面又改了行"的改动，逼出两个 hunk 且新旧行号错位
+        let old: String = (1..=30).map(|i| format!("L{i}\n")).collect();
+        let mut new = String::new();
+        for i in 1..=30 {
+            if i == 5 {
+                new.push_str("INSERTED\n");
+            }
+            if i == 25 {
+                new.push_str("CHANGED\n");
+                continue;
+            }
+            new.push_str(&format!("L{i}\n"));
+        }
+
+        let (text, truncated) = unified_diff(&old, &new, "src/demo.rs");
+        assert!(!truncated, "这个规模不该被截断");
+
+        let d = parse(&text);
+        assert_eq!(d.files.len(), 1, "应解析出一个文件：{text}");
+        assert_eq!(d.files[0].path, "src/demo.rs");
+        assert_eq!(d.files[0].hunks.len(), 2, "应解析出两个 hunk：{text}");
+        assert_eq!(d.files[0].adds, 2, "一行插入 + 一行替换：{text}");
+        assert_eq!(d.files[0].dels, 1, "一行被替换：{text}");
+
+        // 关键：第二个 hunk 的**新旧起始行号必须错开 1**（前面插了一行）。
+        // 这正是产端旧实现的 bug 所在，也验证消费端确实读到了正确的数字。
+        let h2 = &d.files[0].hunks[1];
+        let header_line = d.lines[h2.start].text.clone();
+        let (o, n) = parse_hunk_header(&header_line);
+        assert_eq!(n, o + 1, "末个 hunk 在插入之后，新侧起始应比旧侧大 1：{header_line}");
+    }
+
+    /// 大文件摘要路径的输出也要能被解析（且不被说明文字里的数字带偏）。
+    #[test]
+    fn parses_the_oversized_summary_path_without_being_misled_by_prose() {
+        use neo_capability::diff::unified_diff;
+
+        // 超过 MAX_ALIGN_LINES(2000) 触发摘要路径
+        let n = 2600;
+        let old: String = (0..n).map(|i| format!("old {i}\n")).collect();
+        let new: String = (0..n).map(|i| format!("new {i}\n")).collect();
+        let (text, truncated) = unified_diff(&old, &new, "huge.txt");
+        assert!(truncated);
+
+        let d = parse(&text);
+        assert_eq!(d.files.len(), 1, "摘要也应被解析为一个文件：{text}");
+        assert_eq!(d.files[0].hunks.len(), 1, "摘要应只有一个 hunk：{text}");
+
+        // 若说明文字里出现裸的 "+7000" 之类 token，解析器会把它当行号。
+        // 首个内容行的新侧行号随之错乱——这里断言它没有被带偏。
+        let first_content = d
+            .lines
+            .iter()
+            .find(|l| matches!(l.kind, Kind::Del | Kind::Add | Kind::Context))
+            .expect("摘要应有内容行");
+        let new_no = first_content.new_no.unwrap_or(1);
+        assert!(
+            new_no <= 2,
+            "首个内容行的新侧行号被说明文字带偏了：{new_no}（应是 1 附近）：{text}"
+        );
+    }
 }

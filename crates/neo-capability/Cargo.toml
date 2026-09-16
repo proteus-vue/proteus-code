@@ -16,6 +16,7 @@ neo-core = { path = "../neo-core", version = "0.1.0" }
 neo-config = { path = "../neo-config", version = "0.1.0" }
 neo-sandbox = { path = "../neo-sandbox", version = "0.1.0" }
 serde_json = { workspace = true }
+similar = { version = "3.2.0", default-features = false, features = ["std", "text"] }
 
 [dev-dependencies]
 neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
