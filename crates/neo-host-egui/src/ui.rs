@@ -370,6 +370,13 @@ pub struct App {
     status: String,
     /// 是否折叠思考块（全局开关，与逐块折叠叠加）
     show_reasoning: bool,
+    /// 启动时自动提交的任务（一次性）。
+    ///
+    /// 来源是 `NEO_GUI_PROMPT` 环境变量 —— 供**冒烟验证**用：把
+    /// 「启动 + 提交 + 渲染」合成一次运行，验证者截图即可，不必手工点输入框
+    /// （egui 自绘画布不通过 accessibility 暴露可写文本，自动化输入进不去）。
+    /// 与 AGENTS.md 里 `PROTEUS_CODE_SMOKE` / `PROTEUS_CODE_QUERY` 的约定同源。
+    auto_prompt: Option<String>,
 }
 
 impl App {
@@ -382,6 +389,7 @@ impl App {
             palette: GuiPalette::neo(),
             status,
             show_reasoning: true,
+            auto_prompt: std::env::var("NEO_GUI_PROMPT").ok().filter(|s| !s.trim().is_empty()),
         }
     }
 
@@ -815,6 +823,12 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // 冒烟钩子：首帧把 NEO_GUI_PROMPT 的内容当作一次提交（只做一次）
+        if let Some(text) = self.auto_prompt.take() {
+            self.input = text;
+            self.submit();
+        }
+
         // 每帧推进：收事件（非阻塞）+ 推进一轮（Pump）
         self.pump();
         if self.transcript.running {
@@ -862,6 +876,15 @@ pub fn run(handle: KernelHandle, title: &str, status: String) -> Result<(), Stri
         opts,
         Box::new(move |cc| {
             crate::theme::install(&cc.egui_ctx);
+            // ⚠️ 中文字体必须在界面出第一帧**之前**装上：egui 默认字体不含
+            // CJK 字形，漏装的表现是"界面能开、中文全是豆腐块"（真机截图发现）。
+            // 状态行只承载"工作区/模式/模型"；字体名进去会挤，故仅在**失败**时提示
+            // （成功的路径不需要用户关心，失败却必须说 —— 否则是"能开但看不懂"）。
+            let status = if crate::fonts::install(&cc.egui_ctx).is_some() {
+                status
+            } else {
+                format!("{status} · ⚠ 未找到中文字体，中文可能显示为方块")
+            };
             Ok(Box::new(App::new(handle, status)))
         }),
     )

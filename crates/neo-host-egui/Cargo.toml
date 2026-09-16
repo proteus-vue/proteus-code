@@ -37,6 +37,14 @@ neo-mock = { path = "../neo-mock", version = "0.1.0" }
 # 产出、本宿主流式着色。分层方向 L5→L3 是向下的，合法。
 # （反向约束是 L3 不得依赖宿主 —— 那正是当初把这类测试放在宿主侧的原因。）
 neo-capability = { path = "../neo-capability", version = "0.1.0" }
+# 端到端测试用**生产装配函数**（neo_exec::build_kernel）建内核，而不是自己
+# 拼 Kernel::new —— 自己拼会漏掉 compactor / goal orchestrator 的接线
+# （本文件第一版就漏了编排器，GoalSet 直接报 GoalUnavailable）。
+#
+# 这是**测试专用**的依赖，且只借"装配"不借"渲染"：build_kernel 是各宿主
+# 共用的装配入口（neo-code-cli 为所有宿主调它），不存在"两个宿主共享渲染逻辑"
+# 那种会让 T6 等价退化成循环论证的问题。
+neo-exec = { path = "../neo-exec", version = "0.1.0" }
 neo-config = { path = "../neo-config", version = "0.1.0" }
 neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
 neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }

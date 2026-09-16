@@ -30,7 +30,7 @@
 | `apply_patch` 落盘 | ✅ **已实现**（经 `ctx.write_file` 走沙箱，唯一匹配校验，真机验证落盘） |
 | Web 宿主（零依赖 HTTP + SSE） | ✅ **已实现**（`neo-host-web`；`POST /api/turn` 提交、`GET /api/events` SSE、`/api/approve` 审批、`/api/goal` 编排）。**端点需访问令牌**：启动时生成 256 位随机令牌，除内置页面外一切路径都校验（含不存在的路径，未鉴权者枚举不出路由）；令牌经 URL fragment 下发、页面自动接在每个请求上，程序化客户端可用 `X-Neo-Token` 头。**HTTP 层有 23 项集成测试**（真实监听端口 + 真实路由，只把内核侧换成假内核）：页面/404、引用解析、SSE 线格式与多订阅者扇出、审批 decision 映射与 id 解码、goal 各 action 与 409/400 分支、断连回收、**鉴权 7 项（负向用例 + 路由不可探测 + 页面接线断言）** |
 | **Desktop 宿主**（系统 webview 窗口） | ✅ **已实现**：`neo desktop` 打开系统 webview 窗口（macOS WKWebView / Windows WebView2 / Linux WebKitGTK），**复用 Web 宿主全栈**（本地回环端口 + 内置页面，T6 等价天然成立），窗口关闭即退出。窗口内交互验证需真人实机（进程/服务/SSE 连接已机器验证） |
-| **桌面原生 GUI 宿主**（egui） | ⚠️ **骨架已实现，界面未验收**：`neo desktop` **默认**走原生 GUI（egui/eframe，不经 HTTP、不开端口）；`neo desktop --webview` 保留上一条的 webview 路径。已接上 D2–D7 的数据通路（Markdown 正文 / 思考轨迹 / 工具卡片含参数摘要 / **diff 渲染** / 轮摘要 / Goal 面板）与审批（三档 Allow/Always/Reject，未决时**阻塞输入**），复用 `neo-text` 的同一份文本语义与调色板（含防漂移守卫）。**已机器验证**：能编译、真机开出窗口并存活、驱动层有 `driving` 边界守卫（越界 Pump 不触发多余模型请求，有回归测试）、T6 契约已纳入 conformance。**未验证**：观感（需真人看窗口截图 —— 本机屏幕录制权限被拒，机器测不了） |
+| **桌面原生 GUI 宿主**（egui） | ⚠️ **骨架已实现，界面未验收**：`neo desktop` **默认**走原生 GUI（egui/eframe，不经 HTTP、不开端口）；`neo desktop --webview` 保留上一条的 webview 路径。已接上 D2–D7 的数据通路（Markdown 正文 / 思考轨迹 / 工具卡片含参数摘要 / **diff 渲染** / 轮摘要 / Goal 面板）与审批（三档 Allow/Always/Reject，未决时**阻塞输入**），复用 `neo-text` 的同一份文本语义与调色板（含防漂移守卫）。**已机器验证**：能编译、真机开出窗口并存活、驱动层有 `driving` 边界守卫（越界 Pump 不触发多余模型请求，有回归测试）、T6 契约已纳入 conformance。**已完成视觉验收**（2026-09-16，授权后真机截图）：中文与 D2–D7 全部正确渲染（思考块 / 工具卡片含参数与输出 / 任务清单 / Markdown 代码块高亮 / 引用 / 轮摘要），代码块缩进正确。**过程中抓到并修掉一个机器测不出的缺陷**：egui 默认字体不含 CJK 字形，界面中文全是豆腐块 —— 编译、开窗、驱动测试全绿也照样发生。已加中文字体加载（平台候选表，不打包字体）+ **可机器判定的界面可用性门禁**（`verify_cjk_renderable`，用 `Fonts::has_glyph` 直接查字形，并有反例测试证明它有牙齿）|
 | 上下文压缩（L4 策略） | ✅ **已实现**：`Compactor` seam 在 L2、策略在 L4；`/compact` 端到端，摘要与移除条数可回放 |
 | **Goal 目标编排**（`/goal` 系列） | ✅ **三宿主可用**：TUI `/goal <目标>`、exec `--goal`、Web 目标栏（`/api/goal`）。自动逐阶段推进（Plan→Code→Review→Learn），审查失败回退重做 ≤3 次（含**模型显式叫停**），四项停止条件生效；快照事件落日志，**kill 后重启从日志重建续跑**。审查是硬失败信号 + 模型自评（沉默视为通过）；挂钟停止条件未实现（破坏回放确定性） |
 | **服务商管理**（设置页可增删改） | ✅ **已实现**：设置页内联表单新增/编辑（密钥字段打码、留空不改），删除需确认。密钥存 `~/.neo/provider_keys.json`（**0600**，与配置分离）；`base_url` 自动规范化为裸主机。缺 key 的条目跳过并提示 |
@@ -173,7 +173,7 @@ neo exec "用一句话回答 1+1" --mode plan
 # 需要 Rust —— 版本由 rust-toolchain.toml 钉定（1.95.0），rustup 会自动选用
 cargo run -p neo-code-cli -- tui --provider mock   # 不装 PATH，直接用 cargo 跑 TUI
 
-cargo test --workspace     # 693 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web / 原生 GUI）
+cargo test --workspace     # 705 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web / 原生 GUI）
 cargo check --workspace    # 25 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试

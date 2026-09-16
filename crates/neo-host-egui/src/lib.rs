@@ -26,6 +26,7 @@
 
 pub mod driver;
 pub mod facts;
+pub mod fonts;
 pub mod theme;
 pub mod ui;
 

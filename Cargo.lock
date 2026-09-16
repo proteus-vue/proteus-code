@@ -2700,6 +2700,7 @@ dependencies = [
  "neo-capability",
  "neo-config",
  "neo-core",
+ "neo-exec",
  "neo-llm-deepseek",
  "neo-mock",
  "neo-protocol",

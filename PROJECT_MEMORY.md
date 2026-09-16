@@ -3004,18 +3004,69 @@ GUI 用 `neo_text::markdown::blocks()` 而不是 `render()`，差别是实质的
 **教训：改一个"看起来很小"的渲染决策要回头测所有受影响的形态。** 软换行那一改
 当时只测了段落，列表没覆盖到。
 
-### (e) 诚实边界：观感**没有**验证
+### (e) 观感验收：第一张截图就抓到一个机器测不出的缺陷
 
-机器能验的都验了：编译、真机开出窗口并存活、驱动层三条回归测试（含"越界 Pump
-不触发多余模型请求"，去掉守卫即失败）、T6 契约纳入 conformance、四个 feature
-组合（默认 / `--no-default-features` / 仅 desktop / desktop+egui）都能编译。
+**已授权屏幕录制并完成真机截图验收**（此前那版写着"屏幕录制被拒、观感未验"，
+已作废）。**第一张截图立刻发现**：`NEO` / `Default` / `WorkspaceWrite` 这些拉丁
+文字正常，**所有中文都是 `□`**。egui 自带字体只覆盖 latin + cyrillic（官方文档明写），
+而本项目界面文案是中文 —— **不装中文字体 = 界面不可用**。
 
-**但"好不好看"没验**：本机屏幕录制权限被拒（`request_access` 明确报
-`screen_recording: denied`），截图做不到。**选型实测替代不了视觉验收** ——
-这条边界在阶段 B 就写过，这里仍然成立。信息层次、中英混排、流式追加的观感
-都需要真人看一眼窗口。
+**它躲过了此前所有机器检查**：编译通过、开窗成功、进程存活、驱动层三条回归测试
+全绿、T6 契约通过。因为它不是逻辑错误，而是**字体缺字形**。唯一能发现它的手段
+就是**看一眼屏幕**。
 
-### (f) 一处配置决定要说明
+修法分两层：
+
+1. `fonts.rs`：按**平台候选表**在运行时从系统加载中日韩字体（macOS:
+   Hiragino Sans GB / PingFang / STHeiti；Windows: 微软雅黑；Linux: Noto CJK /
+   文泉驿）。**不把字体打包进仓库** —— 候选都是 20 MB 量级（Hiragino 23 MB、
+   STHeiti 55 MB），入库既让仓库膨胀，也牵扯系统字体的再分发授权。
+   Proportional 与 Monospace **两个 family 都要装**，只装一个则另一半界面照样是方块。
+2. **把"能不能显示中文"变成可机器判定的门禁**（`verify_cjk_renderable`）：
+   用 `Context::run_ui` 在**无头环境**跑一帧装好字体，再用 `Fonts::has_glyph()`
+   逐个查界面里真正会出现的汉字；并配一条**反例测试**（不调 `install` 时必定失败）
+   证明自检有牙齿，不是永远返回 Ok 的摆设。
+   **"只能靠人眼"不是可接受的终局** —— 能把人眼发现的问题转成机器门禁就该转。
+
+踩到的 API 细节：`run_ui` 返回的 `FullOutput` 必须显式处理 `textures_delta`
+（`epaint` 在析构时会 panic 提醒"有未处理的 delta"，它假定调用方是渲染后端）。
+自检不渲染，主动 `clear()` 即可。
+
+**验收结果**：中文与 D2–D7 全部正确渲染 —— 思考块（可折叠）、工具卡片（名字/状态/
+exit/参数摘要/输出）、任务清单（✓ ▸ · 三态）、Markdown 正文、代码块语法高亮、
+引用竖条、轮摘要、右侧 Goal 面板、底部输入区。代码块缩进正确。
+
+### (f) 端到端界面测试：替代"手工点击"
+
+验收时试过用 CUA 往窗口输文本，**进不去**：egui 是自绘画布，不通过 accessibility
+暴露可写文本值 —— `set_value` 与 `type` 都报 `target_verification_status: mismatched`
+（文字落到了当时的前台应用上）。app 级键盘也被拒（cargo 二进制 `bundle_id` 为 null，
+无法解析成唯一 app）。
+
+**手工点击本来就不是可重复的验证手段**，所以补 `tests/end_to_end.rs`：起**真内核**
+（生产装配函数 `neo_exec::build_kernel`，含 compactor 与 goal orchestrator 的接线）、
+接真驱动线程与 `Transcript`，断言 D2–D7 的内容确实出现。
+
+这一步里有三个"测试自己写错、差点变成假绿"的坑：
+
+1. **自己拼 `Kernel::new` 会漏接线**：第一版手拼内核、没装 goal orchestrator，
+   `GoalSet` 直接报 `GoalUnavailable`。改用生产的 `build_kernel` 后，测试验的是
+   **真实装配**，而不是"只在测试里存在的内核"。
+2. **只发一次 `Op::Pump` 会空等**：`Pump` 只推进一步，多步轮次需要多次；真人界面
+   每帧发一个。第一版只发一次，那个用例因此**跑满 20 秒超时**（其余用例 0.2–0.7 秒）。
+   改成每轮都发后，整个文件 **0.04 秒**。
+   **慢测试通常是"没在模拟真实节奏"，不是被测代码慢。**
+3. **`if has_diff` 式的软断言等于没断言**：D5 原文是"若内核发了 `PatchProposed`
+   就检查界面显示"，但用例用的工具名 `write` 在生产工具集里**不存在**
+   （只有 bash / apply_patch / request_user_input / todo_write），
+   于是那条断言永远不执行。改用真实的 `apply_patch`（唯一会产 diff 的工具）
+   并改成**硬断言**，再用"把 diff 显示摘掉"验证它会失败。
+
+顺手发现：`bash` 的参数名是 `cmd` 不是 `command`；传错键会让它走
+"识别不出 → 保守判 Write"的分支并触发审批 —— 这个保守策略本身是对的
+（宁可多问一次，不可漏放一次写）。
+
+### (g) 一处配置决定要说明
 
 `egui` feature 进了 `default`。理由：`neo desktop` 按计划就该是原生 GUI，若它不在
 默认里，用户不装只会得到一句"未编译"—— 默认行为与文档不符。且 `neo-host-egui`
@@ -3023,6 +3074,10 @@ GUI 用 `neo_text::markdown::blocks()` 而不是 `render()`，差别是实质的
 **不新增 Linux 构建面**，只是让 CLI 的接线分支也进 CI（否则那段
 `#[cfg(feature = "egui")]` 无人编译，正是"腐烂"的成因）。
 想省编译的用户仍可 `--no-default-features` 或 `--no-default-features -F desktop`。
+
+还有一条**冒烟钩子**：`NEO_GUI_PROMPT=<任务>` 会在启动首帧自动提交一次任务 ——
+因为 egui 画布无法自动输入，这是"启动 + 提交 + 渲染"一次跑完、供截图验证的路径
+（与 AGENTS.md 里 `PROTEUS_CODE_SMOKE` / `PROTEUS_CODE_QUERY` 的约定同源）。
 
 ---
 
@@ -3042,7 +3097,7 @@ GUI 用 `neo_text::markdown::blocks()` 而不是 `render()`，差别是实质的
 ## 7. 调试与验证
 
 ```bash
-cargo test --workspace      # 693 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web HTTP / 原生 GUI）
+cargo test --workspace      # 705 测试（内核 / 内存有界性 / SPI / 宿主 / TUI / Web HTTP / 原生 GUI）
 bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 Python 守卫 + 执行效率）
 ```
 
