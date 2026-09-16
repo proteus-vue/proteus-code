@@ -23,9 +23,13 @@ const USAGE: &str = r#"neo —— 用 Rust 重构的编程 Agent 内核
 
 用法：
   neo exec "<任务>" [选项]     无头跑一轮（真实模型 + 真实沙箱）
-  neo serve [选项]             启动 Web 宿主（浏览器打开提示的地址）
+  neo serve [选项]             启动 Web 宿主（用提示打印的完整 URL 打开）
   neo [选项]                   启动 TUI 宿主（需真终端）
   neo --help | --version       查看用法 / 版本
+
+  serve / desktop 的端点需要访问令牌：启动时会打印一条带令牌的完整 URL
+  （形如 http://127.0.0.1:8787/#token=…），必须用它打开页面。令牌只在本次
+  进程生命周期内有效。程序化客户端也可改用请求头 X-Neo-Token。
 
 exec 选项：
   --mode <plan|confirm|default|auto-edit|full>   执行模式（默认 default）
@@ -56,6 +60,26 @@ serve 选项：
   DEEPSEEK_BASE_URL            可选，默认 api.deepseek.com
   DEEPSEEK_MODEL               可选，默认 deepseek-chat
 "#;
+
+/// `--addr` 是否只绑回环。
+///
+/// 只看主机部分：`127.0.0.0/8`、`::1`、`localhost` 算回环；`0.0.0.0`、`::`
+/// 以及任何具体的外部地址都算对外可达。解析不出来时按"对外"处理 ——
+/// 宁可多警告一次，也不要因为格式没料到而漏掉警告。
+fn is_loopback_bind(bind: &str) -> bool {
+    let host = match bind.rsplit_once(':') {
+        // IPv6 字面量形如 [::1]:8787
+        Some((h, _)) => h.trim_start_matches('[').trim_end_matches(']'),
+        None => bind,
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
 
 fn parse_mode(s: &str) -> Result<ExecMode, String> {
     Ok(match s {
@@ -176,6 +200,16 @@ fn cmd_serve(args: &[String]) -> i32 {
         i += 1;
     }
 
+    // 对外监听（非回环）会把工作区写操作暴露到网络上。令牌仍然拦得住
+    // 未授权调用，但那是**明文 HTTP** —— 令牌与全部会话内容在网线上裸奔。
+    // 因此必须显式警告，不能让它悄悄发生（默认值是回环，只有显式 --addr 才走到这）。
+    if !is_loopback_bind(&bind) {
+        eprintln!("[neo] ⚠️  --addr {bind} 不是回环地址 —— 服务将对外网络可达");
+        eprintln!("       令牌能挡住未授权调用，但流量是明文 HTTP：");
+        eprintln!("       令牌与会话内容都会在网络上可被嗅探。请只在可信网络使用，");
+        eprintln!("       或置于带 TLS 的反向代理之后。");
+    }
+
     let Some(models) = build_models(&provider) else {
         return 2;
     };
@@ -204,7 +238,10 @@ fn cmd_serve(args: &[String]) -> i32 {
     eprintln!("[neo] 工作区 {}", workspace.display());
     eprintln!("[neo] 模式   {}", describe_mode(mode));
     eprintln!("[neo] 模型   {model_name}");
-    eprintln!("[neo] Web 宿主 http://{}  （Ctrl-C 退出）", server.addr);
+    // 打印 page_url 而不是裸地址：端点需要访问令牌，令牌在 URL 的 fragment 里
+    // （见 neo_host_web::auth）。用裸地址打开只会得到 401。
+    eprintln!("[neo] Web 宿主 {}  （Ctrl-C 退出）", server.page_url());
+    eprintln!("       必须用上面这条完整 URL 打开 —— 令牌在 # 之后，缺了会被 401 拒");
     eprintln!("       注意：事件流不重放，浏览器页面会先自动连上 SSE 再提交任务");
     // 内核线程在 op 通道关闭前不会退出，join 即"服务于请求直到进程结束"。
     let _ = kernel_thread.join();
@@ -286,8 +323,10 @@ fn cmd_desktop(args: &[String]) -> i32 {
     let opts = ExecOptions { mode, max_steps: 32, ..Default::default() };
     let mut kernel = build_kernel("neo-desktop", &workspace, &opts, models, sandbox, persistence);
 
-    // 只绑回环 + 临时端口：窗口是唯一的预期访问者（安全模型与 serve 一致，
-    // 对外监听需先加鉴权 —— 见诚实清单）。
+    // 只绑回环 + 临时端口。绑回环**不等于**访问控制：本机任意进程都能枚举
+    // 端口，浏览器里的任意网页也能跨源 POST（端点是简单请求，请求会生效）。
+    // 因此窗口加载的是带访问令牌的 page_url —— 恶意网页拿不到令牌
+    // （它在另一个源的 URL 里，跨源 fetch 读不到）。
     let (server, kernel_thread) = match neo_host_web::start("127.0.0.1:0", move |op| {
         kernel
             .submit(op)
@@ -299,7 +338,7 @@ fn cmd_desktop(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let url = format!("http://{}", server.addr);
+    let url = server.page_url();
 
     eprintln!("[neo] 工作区 {}", workspace.display());
     eprintln!("[neo] 模式   {}", describe_mode(mode));

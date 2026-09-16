@@ -20,6 +20,7 @@
 //! 它只做三件事：解析 HTTP、把 Op 转给内核、把事件写成 SSE。
 //! 事件到"用户可见事实"的映射仍在协议层（`facts_of`），与其它宿主一致。
 
+pub mod auth;
 pub mod broadcast;
 pub mod http;
 pub mod page;
@@ -103,18 +104,39 @@ pub fn wire_event(event: &EventMsg) -> String {
 /// 已启动的 Web 宿主。
 pub struct WebServer {
     pub addr: std::net::SocketAddr,
+    /// 本次进程生命周期的访问令牌（见 [`auth`]）。
+    token: String,
     ops: Sender<Op>,
 }
 
 impl WebServer {
     /// 提交一个 Op（供内部或测试使用）。
     pub fn submit(&self, op: Op) -> bool { self.ops.send(op).is_ok() }
+
+    /// 访问令牌（供宿主打印诊断或程序化客户端使用）。
+    pub fn token(&self) -> &str { &self.token }
+
+    /// 给人打开的页面 URL —— **必须用这个入口**，它带着令牌。
+    ///
+    /// 令牌放 fragment（`#` 之后）而不是 query：fragment 不发给服务器、
+    /// 不进 Referer、也不进服务端的请求日志，令牌只留在本地地址栏。
+    ///
+    /// 路径写成显式的 `/`：页面用相对路径（`./api/turn`）发请求，
+    /// 而 `http://host:port#token=` 这种空路径 base 在相对解析上依赖
+    /// RFC 3986 的 merge 规则，显式更稳。
+    pub fn page_url(&self) -> String {
+        format!("http://{}/#token={}", self.addr, self.token)
+    }
 }
 
 /// 启动 Web 宿主。
 ///
 /// `handle_op` 由调用方注入（通常是"把 Op 交给内核线程"），
 /// 因此本 crate **不依赖内核的具体类型**，只依赖 `Op`/`EventMsg` 契据。
+///
+/// 启动时生成一次性访问令牌：**除内置页面外，所有端点都要令牌**
+/// （理由与传递方式见 [`auth`]）。宿主应把 [`WebServer::page_url`]
+/// 而不是裸 `addr` 交给用户/窗口。
 pub fn start<F>(
     bind: &str,
     mut handle_op: F,
@@ -124,6 +146,7 @@ where
 {
     let listener = TcpListener::bind(bind)?;
     let addr = listener.local_addr()?;
+    let token = auth::generate_token();
     let bus = broadcast::Broadcast::new();
     let (op_tx, op_rx): (Sender<Op>, Receiver<Op>) = channel();
 
@@ -161,29 +184,60 @@ where
 
     let bus_for_http = bus.clone();
     let ops = op_tx.clone();
+    let token_for_http = token.clone();
     let http_thread = std::thread::spawn(move || {
         let _ = http::serve(listener, move |stream, req| {
-            route(stream, req, &bus_for_http, &ops, &current_goal);
+            route(stream, req, &bus_for_http, &ops, &current_goal, &token_for_http);
         });
     });
 
-    Ok((WebServer { addr, ops: op_tx }, {
+    Ok((WebServer { addr, token, ops: op_tx }, {
         // 返回内核线程句柄（HTTP 线程随 listener 关闭而结束）
         let _ = http_thread;
         kernel_thread
     }))
 }
 
-/// 路由：只有三个固定路径，用精确匹配即可。
+/// 路由：只有几个固定路径，用精确匹配即可。
 fn route(
     stream: &mut std::net::TcpStream,
     req: http::Request,
     bus: &broadcast::Broadcast,
     ops: &Sender<Op>,
     current_goal: &Arc<Mutex<Option<String>>>,
+    token: &str,
 ) {
     // 路由只看路径部分（query 由具体 handler 自行解析）
     let path_only = req.path.split('?').next().unwrap_or("/").to_string();
+    let is_page = matches!(
+        (req.method.as_str(), path_only.as_str()),
+        ("GET", "/") | ("GET", "/index.html")
+    );
+
+    // ── 鉴权（先于路由）──
+    //
+    // 内置页面不要令牌：它是静态的、无秘密，且必须能被浏览器直接加载
+    // （令牌在 fragment 里，页面自己去取）。除它之外**一切路径**都要令牌 ——
+    // 包括不存在的路径，这样未鉴权的调用者连"哪些路由存在"都问不出来。
+    //
+    // 只绑回环不构成访问控制：本机任意进程、以及浏览器里的任意网页
+    // （端点全是简单请求，恶意页面可跨源 POST 且**请求会生效**）都能到这儿。
+    if !is_page {
+        let got = auth::extract_token(req.query(), req.header("X-Neo-Token"));
+        let authorized = got.map(|t| auth::token_matches(token, t)).unwrap_or(false);
+        if !authorized {
+            let _ = http::write_response(
+                stream,
+                401,
+                "text/plain; charset=utf-8",
+                "缺少或无效的访问令牌。\n\
+                 请用启动时打印的完整 URL 打开页面（令牌在 # 之后）；\n\
+                 程序化客户端可改用请求头 X-Neo-Token。",
+            );
+            return;
+        }
+    }
+
     match (req.method.as_str(), path_only.as_str()) {
         ("GET", "/") | ("GET", "/index.html") => {
             let _ = http::write_response(stream, 200, "text/html; charset=utf-8", page::INDEX_HTML);

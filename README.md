@@ -28,7 +28,7 @@
 | Shell 工具真实执行（经沙箱） | ✅ **已实现**（`bash` 真跑，输出受限） |
 | **真实模型完整推理** | ✅ **已验证**（真实模型 → 真实工具调用 → 真实沙箱 → 真实落盘，端到端跑通） |
 | `apply_patch` 落盘 | ✅ **已实现**（经 `ctx.write_file` 走沙箱，唯一匹配校验，真机验证落盘） |
-| Web 宿主（零依赖 HTTP + SSE） | ✅ **已实现**（`neo-host-web`；`POST /api/turn` 提交、`GET /api/events` SSE、`/api/approve` 审批、`/api/goal` 编排）。**HTTP 层有 16 项集成测试**（真实监听端口 + 真实路由，只把内核侧换成假内核）：页面/404、引用解析、SSE 线格式与多订阅者扇出、审批 decision 映射与 id 解码、goal 各 action 与 409/400 分支、断连回收 |
+| Web 宿主（零依赖 HTTP + SSE） | ✅ **已实现**（`neo-host-web`；`POST /api/turn` 提交、`GET /api/events` SSE、`/api/approve` 审批、`/api/goal` 编排）。**端点需访问令牌**：启动时生成 256 位随机令牌，除内置页面外一切路径都校验（含不存在的路径，未鉴权者枚举不出路由）；令牌经 URL fragment 下发、页面自动接在每个请求上，程序化客户端可用 `X-Neo-Token` 头。**HTTP 层有 23 项集成测试**（真实监听端口 + 真实路由，只把内核侧换成假内核）：页面/404、引用解析、SSE 线格式与多订阅者扇出、审批 decision 映射与 id 解码、goal 各 action 与 409/400 分支、断连回收、**鉴权 7 项（负向用例 + 路由不可探测 + 页面接线断言）** |
 | **Desktop 宿主**（系统 webview 窗口） | ✅ **已实现**：`neo desktop` 打开系统 webview 窗口（macOS WKWebView / Windows WebView2 / Linux WebKitGTK），**复用 Web 宿主全栈**（本地回环端口 + 内置页面，T6 等价天然成立），窗口关闭即退出。窗口内交互验证需真人实机（进程/服务/SSE 连接已机器验证） |
 | 上下文压缩（L4 策略） | ✅ **已实现**：`Compactor` seam 在 L2、策略在 L4；`/compact` 端到端，摘要与移除条数可回放 |
 | **Goal 目标编排**（`/goal` 系列） | ✅ **三宿主可用**：TUI `/goal <目标>`、exec `--goal`、Web 目标栏（`/api/goal`）。自动逐阶段推进（Plan→Code→Review→Learn），审查失败回退重做 ≤3 次（含**模型显式叫停**），四项停止条件生效；快照事件落日志，**kill 后重启从日志重建续跑**。审查是硬失败信号 + 模型自评（沉默视为通过）；挂钟停止条件未实现（破坏回放确定性） |
@@ -154,7 +154,8 @@ npm 用 `npm prefix -g` 下的 `bin`）。
 neo tui --provider selftest --mode default
 # 等价写法：neo --provider selftest --mode default（裸选项默认进 TUI）
 
-# Web 宿主：浏览器打开 http://127.0.0.1:8787（SSE 实时事件流 + 页面内审批）
+# Web 宿主：启动后用它打印的完整 URL 打开（形如 http://127.0.0.1:8787/#token=…）
+#   端点需要访问令牌，裸地址打开会 401 —— 用打印出来的那条
 neo serve --provider selftest --mode default
 
 # 离线跑通（不需要 API key）—— 验证装配 → 内核 → 沙箱 → 落盘
@@ -171,7 +172,7 @@ neo exec "用一句话回答 1+1" --mode plan
 # 需要 Rust —— 版本由 rust-toolchain.toml 钉定（1.95.0），rustup 会自动选用
 cargo run -p neo-code-cli -- tui --provider mock   # 不装 PATH，直接用 cargo 跑 TUI
 
-cargo test --workspace     # 633 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web HTTP 集成）
+cargo test --workspace     # 643 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web HTTP 集成）
 cargo check --workspace    # 23 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试

@@ -55,6 +55,19 @@ const state = document.getElementById('state');
 const subs = document.getElementById('subs');
 const input = document.getElementById('task');
 
+// 访问令牌：从 URL fragment（`#token=...`）读取。
+// 放 fragment 而不是 query —— fragment 不发给服务器、不进 Referer、
+// 也不进服务端请求日志，令牌只留在本地地址栏。宿主打印的 URL 自带它。
+const TOKEN = new URLSearchParams(location.hash.slice(1)).get('token') || '';
+// 用裸地址打开时明确告知该怎么办，而不是让每个请求静默 401
+// （脚本在 body 末尾，log 已就绪，line 是提升的函数声明）
+if (!TOKEN) line('未检测到访问令牌：请用启动时打印的完整 URL 打开（形如 http://127.0.0.1:端口/#token=…）', 'err');
+// 所有 /api/* 都要令牌；EventSource 不能设请求头，故统一走 query
+function apiPath(p) {
+  if (!TOKEN) return p;
+  return p + (p.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
+}
+
 // 待审批的调用 id：内核挂起后必须由用户应答
 let pendingApproval = null;
 // 目标编排：goal = 最新快照（每次 goal_updated 整体覆盖）
@@ -78,12 +91,12 @@ function goalSummary(s) {
 // 一次 advance = 一个完整子任务轮；停止条件由引擎保证。
 async function maybeGoalAdvance() {
   if (!goal || goal.paused || goal.stopped || !(goal.turns_remaining > 0)) return;
-  try { await fetch('./api/goal?action=advance'); }
+  try { await fetch(apiPath('./api/goal?action=advance')); }
   catch (e) { line('目标推进失败：' + e, 'err'); }
 }
 async function goalAction(action) {
   try {
-    const r = await fetch('./api/goal?action=' + action);
+    const r = await fetch(apiPath('./api/goal?action=' + action));
     if (!r.ok) line('目标操作失败：' + (await r.text()), 'err');
   } catch (e) { line('目标操作失败：' + e, 'err'); }
 }
@@ -91,7 +104,7 @@ document.getElementById('goal-set').onclick = async () => {
   const text = goalBox.value.trim();
   if (!text) { line('目标为空', 'ask'); return; }
   try {
-    const r = await fetch('./api/goal', { method: 'POST', body: text });
+    const r = await fetch(apiPath('./api/goal'), { method: 'POST', body: text });
     if (!r.ok) line('目标提交失败：' + (await r.text()), 'err');
   } catch (e) { line('目标提交失败：' + e, 'err'); }
 };
@@ -113,7 +126,7 @@ async function send() {
   input.value = '';
   line('› ' + text, 'dim');
   try {
-    const r = await fetch('./api/turn', { method: 'POST', body: text });
+    const r = await fetch(apiPath('./api/turn'), { method: 'POST', body: text });
     if (!r.ok) line('提交失败：' + (await r.text()), 'err');
   } catch (e) { line('提交失败：' + e, 'err'); }
 }
@@ -127,7 +140,7 @@ input.addEventListener('keydown', (e) => {
     if (answer !== 'y' && answer !== 'n') { line('请输入 y 或 n', 'ask'); return; }
     input.value = '';
     line((answer === 'y' ? '已批准 ' : '已拒绝 ') + pendingApproval, 'ask');
-    fetch('./api/approve?id=' + encodeURIComponent(pendingApproval) + '&allow=' + (answer === 'y'));
+    fetch(apiPath('./api/approve?id=' + encodeURIComponent(pendingApproval) + '&allow=' + (answer === 'y')));
     pendingApproval = null;
     return;
   }
@@ -135,7 +148,7 @@ input.addEventListener('keydown', (e) => {
 });
 
 // SSE：接收事件流
-const es = new EventSource('./api/events');
+const es = new EventSource(apiPath('./api/events'));
 es.onopen = () => { state.textContent = '已连接'; };
 es.onerror = () => { state.textContent = '连接中断，浏览器会自动重连'; };
 es.onmessage = (ev) => {

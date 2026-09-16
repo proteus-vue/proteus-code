@@ -94,9 +94,17 @@ pub struct HostCapabilities {
 
 - **技术**：`wry`（Tauri 的 webview 层，可单独使用，不必引 Tauri 全家桶）
 - **形态**：**单二进制**——Rust 内核 + 内嵌 web 资源。无 Node、无 pnpm、无 profile 安装
-- **与前端通信**：优先用 `wry` 自定义协议直接注入资源（**不开端口**，比回环服务更安全）；仅 `neo-host-web` 才起 axum 回环服务
+- **与前端通信（实际实现，曾是规格漂移点）**：开本地**回环端口**复用 `neo-host-web` 的
+  HTTP/SSE 与内置页面，**不**用 `wry` 自定义协议注入资源。取舍已写成设计决定
+  （`neo-host-desktop/src/window.rs` 模块注释）：收益是 **T6 宿主等价天然成立**（桌面跑的就是
+  Web 宿主，不存在第三套事件消费逻辑要证明等价）+ 零重复界面。
+  ⚠️ 原规格写"优先用自定义协议、**不开端口**"，与实现不符，已按实现更正。
+- **访问控制**：回环端口**不是**访问控制（本机进程可枚举端口、浏览器任意网页可跨源 POST）。
+  窗口加载的是宿主打印的 `page_url()`（带访问令牌的 fragment），令牌见第六节。
 - **窗口 / 菜单 / Dock**：由 Rust 侧（`tao` / `winit`）负责
-- **视觉**：现有 React + 液态玻璃**直接复用**
+- **视觉**：原规格写"复用现有 React + 液态玻璃"——**该前提已不成立**：那份 React 界面在
+  `legacy/`，本 crate 实际加载的是 `neo-host-web` 的单文件页面。本项目已决定另建 Rust 原生
+  GUI 宿主（见 `ADR-0006` 与 `docs/desktop-plan.md`），webview 保留为第二后端。
 
 **平台 webview 矩阵（诚实边界）**：
 
@@ -132,13 +140,29 @@ TUI **无法显示图片、无法弹富交互**，因此是「内核是否真的
 
 ---
 
-## 六、`neo-host-web`（axum + WebSocket）
+## 六、`neo-host-web`（零依赖 HTTP + SSE）
 
-- 渲染层任意前端框架（React/Vue/Svelte），经 WS 消费事件流
-- **内核编译为单二进制后 `neo serve` 即本地服务**，浏览器直连；不需 Electron 也不需 webview
+⚠️ 原规格写"axum + WebSocket"，**实际实现与之不符**，按实现更正：
+
+- **HTTP 与 SSE 都是手写的**（`http.rs` / `broadcast.rs`），不引 axum / hyper。理由与本项目
+  一贯立场一致：**调试链要浅**（需要的只有解析请求行与头、按 Content-Length 读体、写响应），
+  引入生产级 HTTP 栈会带来十几层中间件抽象。事件流用 **SSE**（浏览器原生 `EventSource`）
+  而非 WebSocket —— 单向推送够用，且省掉握手与帧协议。
+- 端点：`GET /`（内置页面）、`POST /api/turn`、`GET /api/events`（SSE）、
+  `GET /api/approve`、`POST|GET /api/goal`、`GET /api/facts`（诊断）。
+- **访问令牌（必需）**：启动时生成 256 位随机令牌，**除内置页面外一切路径**都校验
+  （含不存在的路径 —— 未鉴权者连路由都枚举不出）。令牌经 query `?token=`（浏览器侧
+  唯一通用方式：`EventSource` 设不了请求头）或 `X-Neo-Token` 头传递；宿主打印的
+  `page_url()` 把令牌放在 **fragment**，页面从 `location.hash` 取并自动接在每个请求上。
+  理由：只绑回环**不是**访问控制（本机进程可枚举端口；浏览器任意网页可跨源 POST
+  且请求会生效 —— 端点是简单请求，不触发预检）。见 `auth.rs` 与 `PROJECT_MEMORY §4.61`。
+- **有界性**：请求头 / 体 / 并发连接都有上限；广播队列满了**丢弃慢订阅者**（不无限缓冲）；
+  订阅者断开由服务端读侧探测（不等下一条事件）。
 - 五档执行模式做成显式模式切换器（ZCode UX）
 - `@ # / $` 输入解析器（ZCode 交互核心）
 - Diff 审批面板：hunk 级接受/拒绝
+- **诚实边界**：内置页面刻意极小（证明"同一内核、多宿主"不是纸面说法），不是产品级 UI；
+  令牌是单进程生命周期的一次性令牌，无用户/角色概念；`--addr` 对外监听时流量仍是明文 HTTP。
 
 ---
 

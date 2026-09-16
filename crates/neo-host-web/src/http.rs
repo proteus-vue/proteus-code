@@ -38,6 +38,24 @@ pub struct Request {
     pub method: String,
     pub path: String,
     pub body: String,
+    /// 请求头（名字保留原样，比较时不区分大小写）。首次为鉴权而收集，
+    /// 对诊断也有用 —— 但**不**原样回抛给客户端。
+    pub headers: Vec<(String, String)>,
+}
+
+impl Request {
+    /// 按名字取头（不区分大小写）。同名多个取第一个。
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// `?` 之后的部分（无 query 则为 `None`）。
+    pub fn query(&self) -> Option<&str> {
+        self.path.split_once('?').map(|(_, q)| q)
+    }
 }
 
 /// 解析出错的种类（用于给出合适的 HTTP 状态码）。
@@ -85,6 +103,7 @@ pub fn parse_request<R: Read>(reader: &mut BufReader<R>) -> Result<Request, Pars
     // ── 头（带上限累计）──
     let mut header_bytes = line.len();
     let mut content_length: Option<usize> = None;
+    let mut headers: Vec<(String, String)> = Vec::new();
     loop {
         let mut h = String::new();
         let n = reader.read_line(&mut h).map_err(|_| ParseError::Malformed)?;
@@ -100,9 +119,12 @@ pub fn parse_request<R: Read>(reader: &mut BufReader<R>) -> Result<Request, Pars
             break; // 头结束
         }
         if let Some((k, v)) = t.split_once(':') {
+            let k = k.trim();
+            let v = v.trim();
             if k.eq_ignore_ascii_case("content-length") {
-                content_length = v.trim().parse::<usize>().ok();
+                content_length = v.parse::<usize>().ok();
             }
+            headers.push((k.to_string(), v.to_string()));
         }
     }
 
@@ -120,7 +142,7 @@ pub fn parse_request<R: Read>(reader: &mut BufReader<R>) -> Result<Request, Pars
         }
     };
 
-    Ok(Request { method, path, body })
+    Ok(Request { method, path, body, headers })
 }
 
 /// 写一个普通响应。
@@ -128,6 +150,7 @@ pub fn write_response(out: &mut impl Write, status: u16, content_type: &str, bod
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",

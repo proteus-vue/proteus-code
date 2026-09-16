@@ -28,6 +28,9 @@ use neo_protocol::{ContextRef, Decision, EventMsg, GoalSnapshot, Op, RefKind};
 /// 一个真实监听的 Web 宿主 + 记录收到的 Op 的假内核。
 struct Harness {
     addr: SocketAddr,
+    /// 访问令牌。带令牌的请求走 `get`/`post`/`open_sse`；
+    /// 需要故意不带令牌的负向用例走 `raw`。
+    token: String,
     ops: Arc<Mutex<Vec<Op>>>,
     /// 假内核要"回播"的事件（模拟内核跑完一个 Op 产生的事件流）。
     reply: Arc<Mutex<Vec<EventMsg>>>,
@@ -46,7 +49,45 @@ impl Harness {
             reply_for_kernel.lock().expect("锁中毒").clone()
         })
         .expect("绑定回环端口失败");
-        Self { addr: server.addr, ops, reply, _server: server }
+        let token = server.token().to_string();
+        Self { addr: server.addr, token, ops, reply, _server: server }
+    }
+
+    /// 带令牌的 GET（令牌走 query —— 浏览器侧的通用方式）。
+    fn get(&self, path: &str) -> Resp {
+        request(self.addr, &get_raw(&self.with_token(path)))
+    }
+
+    /// 带令牌的 GET，令牌走请求头（程序化客户端的方式）。
+    fn get_with_token_header(&self, path: &str) -> Resp {
+        request(
+            self.addr,
+            &format!(
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nX-Neo-Token: {}\r\nConnection: close\r\n\r\n",
+                self.token
+            ),
+        )
+    }
+
+    /// 带令牌的 POST。
+    fn post(&self, path: &str, body: &str) -> Resp {
+        request(self.addr, &post_raw(&self.with_token(path), body))
+    }
+
+    /// 打开带令牌的 SSE 连接。
+    fn open_sse(&self) -> (String, BufReader<TcpStream>) {
+        open_sse(self.addr, &self.with_token("/api/events"))
+    }
+
+    /// 把令牌接到路径上（无 query 用 `?`，有则用 `&`）。
+    fn with_token(&self, path: &str) -> String {
+        let sep = if path.contains('?') { '&' } else { '?' };
+        format!("{path}{sep}token={}", self.token)
+    }
+
+    /// 发一个**原样**请求（用于故意不带/带错令牌的负向用例）。
+    fn raw(&self, raw: &str) -> Resp {
+        request(self.addr, raw)
     }
 
     /// 设定假内核下一次的回复。
@@ -116,6 +157,20 @@ fn request(addr: SocketAddr, raw: &str) -> Resp {
     parse_response(&buf)
 }
 
+/// 构造一个 GET 请求行（`path` 已含 query）。
+fn get_raw(path: &str) -> String {
+    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+}
+
+/// 构造一个 POST 请求行（`path` 已含 query）。
+fn post_raw(path: &str, body: &str) -> String {
+    // Content-Length 是**字节数**：正文含中文时 len() 与 chars().count() 不同
+    format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
 fn parse_response(raw: &str) -> Resp {
     let (head, body) = raw.split_once("\r\n\r\n").expect("响应缺少头/体分隔");
     let status = head
@@ -127,26 +182,14 @@ fn parse_response(raw: &str) -> Resp {
     Resp { status, head: head.to_string(), body: body.to_string() }
 }
 
-fn get(path: &str) -> String {
-    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-}
-
-fn post(path: &str, body: &str) -> String {
-    // Content-Length 是**字节数**：正文含中文时 len() 与 chars().count() 不同
-    format!(
-        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-}
-
-/// 打开 SSE 连接，返回 (状态行, 读取器)。
+/// 打开 SSE 连接，返回 (状态行, 读取器)。`path` 已含令牌。
 ///
 /// 服务端在 `subscribe()` **之后**才写 `subscribed` 事件，所以读到它就
 /// 说明订阅已建立 —— 后续提交的 Op 产生的事件一条都不会漏。
-fn open_sse(addr: SocketAddr) -> (String, BufReader<TcpStream>) {
+fn open_sse(addr: SocketAddr, path: &str) -> (String, BufReader<TcpStream>) {
     let s = connect(addr);
     let mut w = s.try_clone().expect("克隆流失败");
-    w.write_all(get("/api/events").as_bytes()).expect("写 SSE 请求失败");
+    w.write_all(get_raw(path).as_bytes()).expect("写 SSE 请求失败");
     let mut reader = BufReader::new(s);
     let mut status = String::new();
     loop {
@@ -180,11 +223,135 @@ fn read_sse_event(reader: &mut BufReader<TcpStream>) -> String {
 }
 
 /// 订阅者数（走真实端点，验证 `/api/facts` 本身）。
-fn subscriber_count(addr: SocketAddr) -> usize {
-    let r = request(addr, &get("/api/facts"));
+fn subscriber_count(h: &Harness) -> usize {
+    let r = h.get("/api/facts");
     assert_eq!(r.status, 200, "/api/facts 应可用");
     let v: serde_json::Value = serde_json::from_str(&r.body).expect("/api/facts 应返回 JSON");
     v["subscribers"].as_u64().expect("subscribers 应是数字") as usize
+}
+
+// ───────────────────────────── 鉴权 ─────────────────────────────
+//
+// 这一节是**安全契约**，不是"顺手测一下"。只绑回环不构成访问控制：
+// 本机任意进程都能枚举端口，浏览器里的任意网页也能跨源 POST（端点是
+// 简单请求、不触发预检，且**请求会生效**）。令牌是唯一的门槛。
+
+/// 宿主必须把 `page_url()`（带令牌）交给用户，而不是裸地址。
+///
+/// 桌面宿主把这个 URL 直接喂给 webview —— 它错了，窗口打开就是一张 401 页。
+#[test]
+fn page_url_carries_the_token_in_the_fragment() {
+    let h = Harness::spawn();
+    let url = h._server.page_url();
+    assert!(url.starts_with("http://"), "应是可直接打开的 URL：{url}");
+    assert!(
+        url.ends_with(&format!("#token={}", h.token)),
+        "令牌必须在 fragment 里（不发给服务器、不进 Referer）：{url}"
+    );
+    assert!(!url.contains("?token="), "令牌不能在 query 里：{url}");
+    // 显式路径：页面用相对路径发请求，空路径 base 的相对解析依赖 merge 规则
+    assert!(url.contains(&format!(":{}/", h.addr.port())), "路径应显式为 /：{url}");
+}
+
+#[test]
+fn the_page_itself_needs_no_token_so_the_browser_can_load_it() {
+    let h = Harness::spawn();
+    // 页面是静态的、无秘密，且必须能被浏览器直接加载（令牌在 fragment 里，
+    // 页面自己去取）。所以裸地址取页面必须成功。
+    let r = h.raw(&get_raw("/"));
+    assert_eq!(r.status, 200, "内置页面不应要求令牌");
+    assert!(r.body.contains("<!doctype html>"));
+}
+
+#[test]
+fn every_api_endpoint_rejects_a_request_without_a_token() {
+    let h = Harness::spawn();
+    // 逐个端点验证 —— 漏掉任何一个，那个端点就是敞开的写入口
+    for (what, r) in [
+        ("POST /api/turn", h.raw(&post_raw("/api/turn", "rm -rf /"))),
+        ("GET /api/events", h.raw(&get_raw("/api/events"))),
+        ("GET /api/approve", h.raw(&get_raw("/api/approve?id=a1&allow=true"))),
+        ("GET /api/facts", h.raw(&get_raw("/api/facts"))),
+        ("POST /api/goal", h.raw(&post_raw("/api/goal", "目标"))),
+        ("GET /api/goal", h.raw(&get_raw("/api/goal?action=advance"))),
+    ] {
+        assert_eq!(r.status, 401, "{what} 未带令牌时必须 401");
+    }
+    // 关键：拒绝必须发生在"送达内核"之前，而不是响应层的事后拦截
+    assert!(h.received().is_empty(), "未鉴权请求绝不能产生任何 Op");
+}
+
+#[test]
+fn an_unknown_path_is_indistinguishable_when_unauthenticated() {
+    let h = Harness::spawn();
+    // 不存在的路径也返回 401 而不是 404：未鉴权调用者连"哪些路由存在"
+    // 都问不出来（否则 404/401 的差别就是一个路由枚举器）。
+    assert_eq!(h.raw(&get_raw("/definitely-not-a-route")).status, 401);
+    assert_eq!(h.raw(&post_raw("/definitely-not-a-route", "x")).status, 401);
+}
+
+#[test]
+fn a_wrong_token_is_rejected_like_no_token_at_all() {
+    let h = Harness::spawn();
+    for bogus in [
+        "0".repeat(64),                 // 长度对但值错
+        h.token[..63].to_string(),      // 前缀正确、长度差一
+        format!("{}0", &h.token[..63]), // 只差最后一位
+        String::new(),                  // 空
+        "short".to_string(),
+    ] {
+        let r = h.raw(&get_raw(&format!("/api/facts?token={bogus}")));
+        assert_eq!(r.status, 401, "令牌 {bogus:?} 不应被接受");
+    }
+    assert!(h.received().is_empty());
+}
+
+#[test]
+fn the_token_is_accepted_via_query_and_via_header() {
+    let h = Harness::spawn();
+    assert_eq!(h.get("/api/facts").status, 200, "query 形式（浏览器侧通用）");
+    assert_eq!(
+        h.get_with_token_header("/api/facts").status,
+        200,
+        "X-Neo-Token 头形式（程序化客户端）"
+    );
+}
+
+/// 令牌必须**自动**接在页面的每个请求上，且放在 fragment 而非 query。
+///
+/// 这是给前端接线上的锁：若有人把 `apiPath()` 从某个 fetch 上摘掉，或者
+/// 把令牌从 fragment 挪到 query，页面会在真实点击时静默 401 —— 那属于
+/// "只在浏览器里才暴露"的一类 bug。这里用源码断言把它钉在 CI 上。
+#[test]
+fn the_builtin_page_plumbs_the_token_onto_every_request() {
+    let html = neo_host_web::page::INDEX_HTML;
+    assert!(
+        html.contains("new URLSearchParams(location.hash.slice(1))"),
+        "令牌必须来自 URL fragment（不发给服务器、不进 Referer）"
+    );
+    assert!(
+        !html.contains("location.search"),
+        "不能从 query 取令牌 —— 那会把令牌发到服务端与 Referer"
+    );
+    for call in [
+        "fetch(apiPath('./api/goal?action=advance'))",
+        "fetch(apiPath('./api/goal?action=' + action))",
+        "fetch(apiPath('./api/goal'), { method: 'POST', body: text })",
+        "fetch(apiPath('./api/turn'), { method: 'POST', body: text })",
+        "new EventSource(apiPath('./api/events'))",
+    ] {
+        assert!(html.contains(call), "页面请求未接令牌：{call}");
+    }
+    // 审批那一条是拼接的，单独查
+    assert!(
+        html.contains("fetch(apiPath('./api/approve?id='"),
+        "审批请求未接令牌"
+    );
+    // EventSource 不能设自定义头 —— 这正是选 query 而非头的原因
+    assert!(
+        !html.contains("new EventSource('./api/events')"),
+        "SSE 必须走 apiPath（EventSource 设不了请求头）"
+    );
 }
 
 // ───────────────────────────── 静态页面 ─────────────────────────────
@@ -193,7 +360,7 @@ fn subscriber_count(addr: SocketAddr) -> usize {
 fn serves_the_builtin_page_at_root_and_index() {
     let h = Harness::spawn();
     for path in ["/", "/index.html"] {
-        let r = request(h.addr, &get(path));
+        let r = h.get(path);
         assert_eq!(r.status, 200, "{path} 应返回内置页面");
         assert_eq!(
             r.header("content-type").as_deref(),
@@ -207,10 +374,10 @@ fn serves_the_builtin_page_at_root_and_index() {
 #[test]
 fn unknown_path_and_wrong_method_are_404() {
     let h = Harness::spawn();
-    assert_eq!(request(h.addr, &get("/nope")).status, 404);
+    assert_eq!(h.get("/nope").status, 404);
     // 路由按 (方法, 路径) 精确匹配：错误方法不会落到同一个处理函数
-    assert_eq!(request(h.addr, &get("/api/turn")).status, 404);
-    assert_eq!(request(h.addr, &post("/api/events", "x")).status, 404);
+    assert_eq!(h.get("/api/turn").status, 404);
+    assert_eq!(h.post("/api/events", "x").status, 404);
 }
 
 // ───────────────────────────── /api/turn ─────────────────────────────
@@ -219,7 +386,7 @@ fn unknown_path_and_wrong_method_are_404() {
 fn turn_submits_userturn_with_refs_parsed_by_the_protocol_layer() {
     let h = Harness::spawn();
     let text = "看下 @src/main.rs 和 $skill-x";
-    assert_eq!(request(h.addr, &post("/api/turn", text)).status, 200);
+    assert_eq!(h.post("/api/turn", text).status, 200);
 
     let ops = h.received();
     assert_eq!(ops.len(), 1, "应恰好提交一个 Op");
@@ -242,7 +409,7 @@ fn turn_submits_userturn_with_refs_parsed_by_the_protocol_layer() {
 #[test]
 fn turn_rejects_a_blank_task() {
     let h = Harness::spawn();
-    assert_eq!(request(h.addr, &post("/api/turn", "   \n  ")).status, 400);
+    assert_eq!(h.post("/api/turn", "   \n  ").status, 400);
     assert!(h.received().is_empty(), "空任务不应提交任何 Op");
 }
 
@@ -251,7 +418,7 @@ fn turn_rejects_a_blank_task() {
 #[test]
 fn sse_streams_subscribed_then_kernel_events_in_wire_format() {
     let h = Harness::spawn();
-    let (status, mut reader) = open_sse(h.addr);
+    let (status, mut reader) = h.open_sse();
     assert!(status.starts_with("HTTP/1.1 200"), "SSE 状态行异常：{status}");
 
     // 先收到订阅确认，客户端据此知道流已建立
@@ -261,7 +428,7 @@ fn sse_streams_subscribed_then_kernel_events_in_wire_format() {
         EventMsg::TurnStarted { turn_id: "t1".into() },
         EventMsg::AgentMessageDelta { delta: "你".into() },
     ]);
-    assert_eq!(request(h.addr, &post("/api/turn", "hi")).status, 200);
+    assert_eq!(h.post("/api/turn", "hi").status, 200);
 
     let first: serde_json::Value =
         serde_json::from_str(&read_sse_event(&mut reader)).expect("事件应是 JSON");
@@ -281,14 +448,14 @@ fn sse_streams_subscribed_then_kernel_events_in_wire_format() {
 #[test]
 fn sse_fans_out_to_every_subscriber() {
     let h = Harness::spawn();
-    let (_, mut a) = open_sse(h.addr);
-    let (_, mut b) = open_sse(h.addr);
+    let (_, mut a) = h.open_sse();
+    let (_, mut b) = h.open_sse();
     assert_eq!(read_sse_event(&mut a), r#"{"kind":"subscribed"}"#);
     assert_eq!(read_sse_event(&mut b), r#"{"kind":"subscribed"}"#);
-    assert_eq!(subscriber_count(h.addr), 2, "两个标签页 = 两个订阅者");
+    assert_eq!(subscriber_count(&h), 2, "两个标签页 = 两个订阅者");
 
     h.set_reply(vec![EventMsg::AgentMessageDone { text: "hi".into() }]);
-    assert_eq!(request(h.addr, &post("/api/turn", "hi")).status, 200);
+    assert_eq!(h.post("/api/turn", "hi").status, 200);
 
     // 同一事件必须抵达两个客户端（多标签页场景）
     for (who, reader) in [("a", &mut a), ("b", &mut b)] {
@@ -309,8 +476,8 @@ fn sse_fans_out_to_every_subscriber() {
 #[test]
 fn a_disconnected_client_releases_its_slot_without_needing_an_event() {
     let h = Harness::spawn();
-    let (_, reader) = open_sse(h.addr);
-    assert_eq!(subscriber_count(h.addr), 1, "连接后应有 1 个订阅者");
+    let (_, reader) = h.open_sse();
+    assert_eq!(subscriber_count(&h), 1, "连接后应有 1 个订阅者");
 
     drop(reader); // 客户端断开，且此后没有任何事件流过
 
@@ -318,7 +485,7 @@ fn a_disconnected_client_releases_its_slot_without_needing_an_event() {
     // 给它若干轮机会；探测本身是事件驱动的，通常第一轮就已回收。
     let mut reclaimed = false;
     for _ in 0..50 {
-        if subscriber_count(h.addr) == 0 {
+        if subscriber_count(&h) == 0 {
             reclaimed = true;
             break;
         }
@@ -337,16 +504,16 @@ fn a_disconnected_client_releases_its_slot_without_needing_an_event() {
 #[test]
 fn probing_does_not_disturb_the_other_live_subscribers() {
     let h = Harness::spawn();
-    let (_, mut gone) = open_sse(h.addr);
-    let (_, mut alive) = open_sse(h.addr);
+    let (_, mut gone) = h.open_sse();
+    let (_, mut alive) = h.open_sse();
     assert_eq!(read_sse_event(&mut gone), r#"{"kind":"subscribed"}"#);
     assert_eq!(read_sse_event(&mut alive), r#"{"kind":"subscribed"}"#);
-    assert_eq!(subscriber_count(h.addr), 2);
+    assert_eq!(subscriber_count(&h), 2);
 
     drop(gone);
     let mut narrowed = false;
     for _ in 0..50 {
-        if subscriber_count(h.addr) == 1 {
+        if subscriber_count(&h) == 1 {
             narrowed = true;
             break;
         }
@@ -356,7 +523,7 @@ fn probing_does_not_disturb_the_other_live_subscribers() {
 
     // 存活者照常收到事件 —— 探测没有把它一起摘掉
     h.set_reply(vec![EventMsg::AgentMessageDone { text: "还活着".into() }]);
-    assert_eq!(request(h.addr, &post("/api/turn", "hi")).status, 200);
+    assert_eq!(h.post("/api/turn", "hi").status, 200);
     let ev: serde_json::Value =
         serde_json::from_str(&read_sse_event(&mut alive)).expect("事件应是 JSON");
     assert_eq!(ev["kind"], "agent_message_done");
@@ -368,8 +535,8 @@ fn probing_does_not_disturb_the_other_live_subscribers() {
 #[test]
 fn approve_maps_the_query_to_a_decision() {
     let h = Harness::spawn();
-    assert_eq!(request(h.addr, &get("/api/approve?id=a1&allow=true")).status, 200);
-    assert_eq!(request(h.addr, &get("/api/approve?id=a2&allow=false")).status, 200);
+    assert_eq!(h.get("/api/approve?id=a1&allow=true").status, 200);
+    assert_eq!(h.get("/api/approve?id=a2&allow=false").status, 200);
 
     assert_eq!(
         h.received(),
@@ -385,7 +552,7 @@ fn approve_maps_the_query_to_a_decision() {
 fn approve_unescapes_percent_encoded_ids() {
     // 审批 id 可能含 `=`，前端按 query 规则编码成 %3D
     let h = Harness::spawn();
-    assert_eq!(request(h.addr, &get("/api/approve?id=a%3Db&allow=true")).status, 200);
+    assert_eq!(h.get("/api/approve?id=a%3Db&allow=true").status, 200);
     assert_eq!(
         h.received(),
         vec![Op::Approve { id: "a=b".into(), decision: Decision::Allow, reason: None }],
@@ -396,7 +563,7 @@ fn approve_unescapes_percent_encoded_ids() {
 #[test]
 fn approve_without_an_id_is_rejected() {
     let h = Harness::spawn();
-    assert_eq!(request(h.addr, &get("/api/approve?allow=true")).status, 400);
+    assert_eq!(h.get("/api/approve?allow=true").status, 400);
     assert!(h.received().is_empty(), "缺 id 不应提交审批 Op");
 }
 
@@ -406,7 +573,7 @@ fn approve_without_an_id_is_rejected() {
 fn goal_set_submits_the_goal_text() {
     let h = Harness::spawn();
     let body = "重构 A\n重构 B";
-    assert_eq!(request(h.addr, &post("/api/goal", body)).status, 200);
+    assert_eq!(h.post("/api/goal", body).status, 200);
     assert_eq!(
         h.received(),
         vec![Op::GoalSet { goal: body.into() }],
@@ -417,17 +584,17 @@ fn goal_set_submits_the_goal_text() {
 #[test]
 fn goal_set_rejects_a_blank_goal() {
     let h = Harness::spawn();
-    assert_eq!(request(h.addr, &post("/api/goal", "  ")).status, 400);
+    assert_eq!(h.post("/api/goal", "  ").status, 400);
     assert!(h.received().is_empty());
 }
 
 #[test]
 fn goal_actions_map_to_ops_and_unknown_actions_are_rejected() {
     let h = Harness::spawn();
-    assert_eq!(request(h.addr, &get("/api/goal?action=advance")).status, 200);
-    assert_eq!(request(h.addr, &get("/api/goal?action=clear")).status, 200);
-    assert_eq!(request(h.addr, &get("/api/goal?action=bogus")).status, 400);
-    assert_eq!(request(h.addr, &get("/api/goal")).status, 400, "缺 action 也是 400");
+    assert_eq!(h.get("/api/goal?action=advance").status, 200);
+    assert_eq!(h.get("/api/goal?action=clear").status, 200);
+    assert_eq!(h.get("/api/goal?action=bogus").status, 400);
+    assert_eq!(h.get("/api/goal").status, 400, "缺 action 也是 400");
 
     assert_eq!(
         h.received(),
@@ -439,7 +606,7 @@ fn goal_actions_map_to_ops_and_unknown_actions_are_rejected() {
 #[test]
 fn goal_pause_without_an_active_goal_is_409() {
     let h = Harness::spawn();
-    let r = request(h.addr, &get("/api/goal?action=pause"));
+    let r = h.get("/api/goal?action=pause");
     assert_eq!(r.status, 409, "没有活动目标时应如实告知，而不是提交一个必然报错的 Op");
     assert!(h.received().is_empty());
 }
@@ -452,19 +619,19 @@ fn goal_pause_without_an_active_goal_is_409() {
 #[test]
 fn pause_and_resume_target_the_goal_from_the_latest_snapshot() {
     let h = Harness::spawn();
-    let (_, mut reader) = open_sse(h.addr);
+    let (_, mut reader) = h.open_sse();
     assert_eq!(read_sse_event(&mut reader), r#"{"kind":"subscribed"}"#);
 
     h.set_reply(vec![EventMsg::GoalUpdated { snapshot: goal_snapshot("goal-7") }]);
-    assert_eq!(request(h.addr, &post("/api/turn", "起个目标")).status, 200);
+    assert_eq!(h.post("/api/turn", "起个目标").status, 200);
     let ev: serde_json::Value =
         serde_json::from_str(&read_sse_event(&mut reader)).expect("事件应是 JSON");
     assert_eq!(ev["kind"], "goal_updated", "同步点：跟踪状态此刻已就位");
 
     // 后续 Op 不产生事件，事件流保持可预测
     h.set_reply(vec![]);
-    assert_eq!(request(h.addr, &get("/api/goal?action=pause")).status, 200);
-    assert_eq!(request(h.addr, &get("/api/goal?action=resume")).status, 200);
+    assert_eq!(h.get("/api/goal?action=pause").status, 200);
+    assert_eq!(h.get("/api/goal?action=resume").status, 200);
     assert_eq!(
         h.received(),
         vec![
@@ -477,9 +644,9 @@ fn pause_and_resume_target_the_goal_from_the_latest_snapshot() {
 
     // 清除目标后不再有活动目标，pause 应退回 409
     h.set_reply(vec![EventMsg::GoalCleared { goal_id: "goal-7".into() }]);
-    assert_eq!(request(h.addr, &post("/api/turn", "清掉")).status, 200);
+    assert_eq!(h.post("/api/turn", "清掉").status, 200);
     let ev: serde_json::Value =
         serde_json::from_str(&read_sse_event(&mut reader)).expect("事件应是 JSON");
     assert_eq!(ev["kind"], "goal_cleared");
-    assert_eq!(request(h.addr, &get("/api/goal?action=pause")).status, 409);
+    assert_eq!(h.get("/api/goal?action=pause").status, 409);
 }
