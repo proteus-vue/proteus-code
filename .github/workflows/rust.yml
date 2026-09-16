@@ -11,8 +11,12 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    # 全量测试编译+运行,给足余量;卡住的 job 不白占配额
-    timeout-minutes: 45
+    # 全量测试编译+运行,给足余量;卡住的 job 不白占配额。
+    #
+    # 45 → 75：新增 gpui 依赖树（wgpu / gtk / accesskit / zed 的十几个 crate）
+    # 进了默认 feature，debug 测试构建明显变长。**超时也是一个候选根因** ——
+    # 被超时杀掉的日志特征正是"尾部全是 Compiling、没有 error 行"。
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -43,8 +47,21 @@ jobs:
       # 缓存 target 目录:全量编译从 ~10 分钟降到增量秒级
       - uses: Swatinem/rust-cache@v2
       # 分步执行:失败阶段从 step 结论即可见,不必认证拉日志
+      # 磁盘与耗时诊断：新增 gpui 依赖树（wgpu / gtk / accesskit 等）后，
+      # debug 测试构建的体积与时间都大幅上涨。若日志在编译中途戛然而止，
+      # 最可能是**磁盘耗尽**或**超时**，而这两者都不会留下 error 行 ——
+      # 那正好解释了"日志尾部全是 Compiling、却没有错误信息"。
+      - name: 环境诊断（磁盘）
+        run: |
+          df -h / /home/runner 2>/dev/null || df -h
+          echo "--- 已用缓存 ---"
+          du -sh ~/.cargo/registry 2>/dev/null || true
+          du -sh target 2>/dev/null || true
+
       - name: 编译检查(全 target)
-        run: cargo check --workspace --all-targets
+        run: |
+          time cargo check --workspace --all-targets
+          df -h / | tail -1
       - name: 全量测试
         # 关掉颜色：CI 日志里 cargo 默认带 ANSI 转义，而 `^error` 这类
         # **行首锚点会因此永远匹配不上**（行其实以 \x1b[1m 开头）。
@@ -95,7 +112,8 @@ jobs:
           # "没进 if" 与 "进了但输出被吞"。
           lines=$(wc -l < /tmp/test-out.log 2>/dev/null || echo 0)
           bytes=$(wc -c < /tmp/test-out.log 2>/dev/null || echo 0)
-          echo "::error title=诊断::exit=$code lines=$lines bytes=$bytes"
+          disk=$(df -h / | tail -1 | tr -s ' ' | cut -d' ' -f4)
+          echo "::error title=诊断::exit=$code lines=$lines bytes=$bytes 剩余磁盘=$disk"
 
           if [ "$code" -ne 0 ]; then
             echo "=== 失败：日志末尾 40 行 ==="
