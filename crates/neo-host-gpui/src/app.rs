@@ -72,6 +72,11 @@ pub struct NeoView {
     notice: Option<String>,
     /// 工作区/模式说明
     status: String,
+    /// 侧栏（目标 + 会话）是否展开。
+    ///
+    /// 默认展开。与 egui 侧的 `sidebar_open` 同名同义 —— 窄窗口下把它收起
+    /// 能把宽度让给转录区（这是转录区唯一可用的横向空间来源）。
+    sidebar_open: bool,
     /// 帮助面板是否打开。
     ///
     /// 与命令面板同构。**内容从共享命令表读**（`neo_driver::commands`），
@@ -232,6 +237,10 @@ impl NeoView {
             //   面板的可见性只能由环境变量驱动）
             model_picker_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("models"),
             help_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("help"),
+            // 脚本化验证用：启动即折叠侧栏（`NEO_GUI_SIDEBAR=off`）。
+            // 与 `NEO_GUI_PANEL` 同族 —— 自绘元素收不到合成点击时，
+            // 需要环境变量驱动一次以便截图核对（理由同 NEO_GUI_EXPAND）。
+            sidebar_open: std::env::var("NEO_GUI_SIDEBAR").ok().as_deref() != Some("off"),
             cmd_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("cmd"),
             terminal_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("terminal"),
             auto_prompt: std::env::var("NEO_GUI_PROMPT")
@@ -538,7 +547,7 @@ impl NeoView {
             }
             // 会话栏（D1）：无独立面板，用"新建/切换"表达
             A::ToggleSidebar => {
-                self.notice = Some("会话列表见右侧面板（本宿主未做左侧栏折叠）".into());
+                self.sidebar_open = !self.sidebar_open;
             }
             A::NewSession => self.new_session(),
             // 清屏：只清**屏幕上的**转录，不动会话日志
@@ -1652,6 +1661,23 @@ impl Render for NeoView {
                                 });
                             }),
                     )
+                    // 侧栏开关：窄窗口下把宽度让给转录区。
+                    // 它与 `/sessions` 命令等价（同一个 Action），有可点入口
+                    // 才不用每次都走命令面板。
+                    .child({
+                        let v = cx.entity().clone();
+                        let label = if self.sidebar_open { "侧栏 ◀" } else { "侧栏 ▶" };
+                        div()
+                            .id("sidebar-toggle")
+                            .text_color(neo_color(Tone::Muted))
+                            .child(label)
+                            .on_click(move |_, _, cx| {
+                                v.update(cx, |this, cx| {
+                                    this.run_action(neo_driver::commands::Action::ToggleSidebar);
+                                    cx.notify();
+                                });
+                            })
+                    })
                     // 高风险档位常驻提示（ZCode 语义：风险状态不能只在切档时弹一次）
                     .child(if matches!(mode, ExecMode::AutoEdit | ExecMode::FullAccess) {
                         div()
@@ -1772,7 +1798,11 @@ impl Render for NeoView {
                                     .child(self.transcript_view(cx))
                             })
                     })
-                    .child(side_panel(self, cx)),
+                    .child(if self.sidebar_open {
+                        side_panel(self, cx).into_any_element()
+                    } else {
+                        div().into_any_element()
+                    }),
             );
 
         // ── 审批对话框（模态覆盖）──
