@@ -62,17 +62,62 @@ impl Default for GpuiBackend {
     }
 }
 
-/// GPUI 后端的绘制产物：一串 GPUI 颜色（真正落成 element 树在阶段 2 做）。
+/// 一个待绘制的矩形（中立坐标，相对所在表面的左上角）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuiQuad {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub color: Color,
+}
+
+/// GPUI 后端的绘制产物：一批可绘制的矩形。
 ///
-/// 阶段 1 只到"中立类型 → 后端类型"这一步。刻意不在这里返回 `AnyElement`：
-/// 那需要 `&mut Window` 参与构造，会把契据污染成"只能从渲染帧内部调用"。
-/// 等阶段 2 接 diff 视图时，再决定这层桥怎么搭 —— 那时才有真实需求约束它。
-#[derive(Debug, Clone, PartialEq)]
+/// # 为什么是"数据 + 一个 draw 方法"，而不是构造 `AnyElement`
+///
+/// 构造 element 需要 `&mut Window`，那会把契据污染成"只能从渲染帧内部调用" ——
+/// 中立层就不中立了。所以 `paint()` 只做**坐标与颜色的翻译**（纯数据、可测），
+/// 真正的绘制留给 [`GpuiPaint::draw`]，由宿主在 gpui 的 `canvas` 回调里调用
+/// （那里才有 `Window`）。
+///
+/// 这条分工也让"翻译对不对"能被单测覆盖 —— 而绘制本身要靠真机看。
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct GpuiPaint {
-    /// 每条指令对应的 GPUI 颜色（`0xRRGGBBAA`），顺序与场景一致。
-    pub colors: Vec<u32>,
-    /// 文字指令的条数（用于断言文字真的被翻译了）。
+    /// 待绘制的矩形（顺序即绘制顺序）。
+    pub quads: Vec<GpuiQuad>,
+    /// 文字指令的条数。文字由宿主用自己的文本系统画（不是 quad），
+    /// 这里只记数，便于断言"文字确实被翻译了、没被丢掉"。
     pub text_ops: usize,
+    /// 每条指令对应的颜色（`0xRRGGBBAA`），顺序与场景一致（含裁剪占位）。
+    /// 保留它是为了"顺序对齐"这条契约仍可被断言（见下方测试）。
+    pub colors: Vec<u32>,
+}
+
+impl GpuiPaint {
+    /// 把矩形画到窗口上。`origin` 是所在表面的左上角（画布 bounds 的原点）。
+    ///
+    /// 坐标在这里从"表面局部坐标"加上 `origin` 变成窗口坐标 —— 这一步是必要的：
+    /// 中立场景不知道自己在窗口的哪个位置。
+    pub fn draw(&self, origin: neo_ui_kit::gpui::Point<neo_ui_kit::gpui::Pixels>, window: &mut neo_ui_kit::gpui::Window) {
+        use neo_ui_kit::gpui::{Bounds, Corners, Edges, point, px, size};
+        for q in &self.quads {
+            let bounds = Bounds::new(
+                point(origin.x + px(q.x), origin.y + px(q.y)),
+                size(px(q.w), px(q.h)),
+            );
+            // 无边框、直角：变更条是"面"不是"卡片"（本项目一贯的视觉纪律：
+            // 底色层是面、边框只是线）
+            window.paint_quad(neo_ui_kit::gpui::quad(
+                bounds,
+                Corners::default(),
+                to_gpui_rgba(q.color),
+                Edges::default(),
+                neo_ui_kit::gpui::transparent_black(),
+                neo_ui_kit::gpui::BorderStyle::default(),
+            ));
+        }
+    }
 }
 
 impl RenderBackend for GpuiBackend {
@@ -93,20 +138,37 @@ impl RenderBackend for GpuiBackend {
     fn paint(&self, scene: &Scene) -> Self::Paint {
         self.painted.set(self.painted.get() + 1);
         let mut colors = Vec::with_capacity(scene.len());
+        let mut quads = Vec::new();
         let mut text_ops = 0;
         for op in scene.ops() {
             match op {
-                crate::scene::Op::FillRect { color, .. }
-                | crate::scene::Op::StrokeRect { color, .. }
-                | crate::scene::Op::FillText { color, .. } => colors.push(color.to_rgba_u32()),
+                crate::scene::Op::FillRect { rect, color } => {
+                    quads.push(GpuiQuad {
+                        x: rect.origin.x,
+                        y: rect.origin.y,
+                        w: rect.size.w,
+                        h: rect.size.h,
+                        color: *color,
+                    });
+                    colors.push(color.to_rgba_u32());
+                }
+                crate::scene::Op::StrokeRect { rect, color, .. } => {
+                    // 阶段 2 的自绘消费者只有填充矩形（变更条）。
+                    // 描边先按填充处理会让它"看起来对但粗一档"，不如显式不画 ——
+                    // 等真有描边需求时再接，那时才知道正确的线宽语义。
+                    // 颜色仍进 colors 以保持顺序契约。
+                    let _ = rect;
+                    colors.push(color.to_rgba_u32());
+                }
+                crate::scene::Op::FillText { color, .. } => {
+                    text_ops += 1;
+                    colors.push(color.to_rgba_u32());
+                }
                 // 裁剪指令没有颜色：留 0 占位以保持"顺序与场景一致"的契约
                 crate::scene::Op::PushClip { .. } | crate::scene::Op::PopClip => colors.push(0),
             }
-            if matches!(op, crate::scene::Op::FillText { .. }) {
-                text_ops += 1;
-            }
         }
-        GpuiPaint { colors, text_ops }
+        GpuiPaint { quads, text_ops, colors }
     }
 }
 

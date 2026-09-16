@@ -23,8 +23,10 @@
 //! 现在不假装已经做到。
 
 pub mod backend;
+pub mod gutter;
 pub mod scene;
 
 pub use backend::GpuiBackend;
 pub use backend::RenderBackend;
+pub use gutter::{change_gutter, GutterMark};
 pub use scene::{Color, Op, Point, Rect, Scene, Size};

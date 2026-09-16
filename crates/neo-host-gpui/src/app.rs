@@ -317,6 +317,50 @@ impl NeoView {
     }
 }
 
+/// 变更条元素：**经渲染缝**绘制（不直接用 gpui 的绘制 API）。
+///
+/// # 为什么这里值得绕一层
+///
+/// 变更条是"自绘表面"（图形，不是文字），正是渲染缝存在的理由。
+/// 直接调 `window.paint_quad` 也能画出来 —— 但那样这条缝就永远没有消费者，
+/// 也就永远验证不了它是否可用（方案称之为"只有一个实现的抽象是信仰"）。
+///
+/// 分工：本函数负责**把 diff 文本映射成中立标记**（这一步依赖 diff 语义，
+/// 只能由认识 diff 的层做），`neo-ui-render` 负责"标记 → 中立场景 → 后端产物"。
+fn gutter_element(diff: &str) -> impl IntoElement {
+    use neo_ui_render::{change_gutter, GutterMark, RenderBackend};
+
+    // diff 文本 → 中立标记（渲染层不认识 diff 语义，这一步必须在宿主做）
+    let marks: Vec<GutterMark> = diff
+        .lines()
+        .map(|line| match neo_driver::transcript::diff_line_kind(line) {
+            neo_driver::transcript::DiffLineKind::Add => GutterMark::Add,
+            neo_driver::transcript::DiffLineKind::Del => GutterMark::Del,
+            // 文件头/hunk 头/说明行都不是"改动内容"，归为 Plain ——
+            // 把它们画进色带会让"改动在哪"失真
+            _ => GutterMark::Plain,
+        })
+        .collect();
+
+    // 场景与后端产物在 prepaint 里算（纯计算，不需要 window）
+    let prepaint = move |bounds: neo_ui_kit::gpui::Bounds<neo_ui_kit::gpui::Pixels>,
+                         _window: &mut neo_ui_kit::gpui::Window,
+                         _cx: &mut neo_ui_kit::gpui::App| {
+        let h = f32::from(bounds.size.height);
+        let scene = change_gutter(&marks, 4.0, h);
+        (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
+    };
+    // 绘制在 paint 里做（那里才有 Window）
+    neo_ui_kit::gpui::canvas(
+        prepaint,
+        |bounds, (_, paint), window, _cx| {
+            paint.draw(bounds.origin, window);
+        },
+    )
+    .w(px(4.))
+    .h_full()
+}
+
 /// 在模型列表里循环到下一个（列表空或只有一个时原样返回）。
 ///
 /// 抽成自由函数便于单测：循环逻辑写错会表现为"切了没反应"或"跳到不存在的模型"。
@@ -359,125 +403,171 @@ fn styled_line(spans: &[(String, Tone)]) -> impl IntoElement {
 }
 
 /// 转录区：把 `Block` 画出来。
-fn transcript_view(blocks: &[Block]) -> impl IntoElement {
-    let mut col = v_flex().gap_1().p_3();
-    for b in blocks {
-        match b {
-            Block::User(t) => {
-                col = col.child(div().text_color(neo_color(Tone::Accent)).child(format!("┃ {t}")));
-            }
-            Block::Assistant(t) => {
-                // Markdown：走共享解析器出块，逐行渲染（换行交给布局引擎）
-                for line in neo_text::markdown::blocks(t) {
-                    col = col.child(styled_line(&line));
+/// 转录区。**是方法而不是自由函数** —— 它需要访问折叠状态、并且要拿实体
+/// 来挂点击回调（思考块的折叠/展开）。自由函数只能拿到数据快照。
+impl NeoView {
+    fn transcript_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let blocks = &self.transcript.blocks;
+        let mut col = v_flex().gap_1().p_3();
+            for (idx, b) in blocks.iter().enumerate() {
+                match b {
+                Block::User(t) => {
+                    col = col.child(div().text_color(neo_color(Tone::Accent)).child(format!("┃ {t}")));
                 }
-            }
-            Block::Reasoning(t) => {
-                col = col.child(
-                    div()
+                Block::Assistant(t) => {
+                    // Markdown：走共享解析器出块，逐行渲染（换行交给布局引擎）
+                    for line in neo_text::markdown::blocks(t) {
+                        col = col.child(styled_line(&line));
+                    }
+                }
+                Block::Reasoning(t) => {
+                    // 折叠语义与 egui 宿主**完全一致**（同一份状态）：
+                    //   折叠 = 全局开关关掉 **或** 这一块被单独折叠
+                    // 全局关掉是"我现在不想看思考"，逐块折叠是"这一块太长"——
+                    // 两个独立的意图，必须叠加而不是互相覆盖。
+                    let collapsed = !self.show_reasoning
+                        || self.transcript.collapsed_reasoning.contains(&idx);
+                    let arrow = if collapsed { "▸" } else { "▾" };
+                    let head = format!("{arrow} 思考（{} 字）", t.chars().count());
+                    let v = cx.entity().clone();
+                    // 标题可点击：切换**这一块**的折叠
+                    let header = div()
+                        .id(("reasoning-head", idx))
                         .text_color(neo_color(Tone::Muted))
-                        .child(format!("▾ 思考（{} 字）：{t}", t.chars().count())),
-                );
-            }
-            Block::Tool(c) => {
-                let state = if !c.done {
-                    "执行中"
-                } else if c.exit_code == Some(0) {
-                    "完成"
-                } else {
-                    "失败"
-                };
-                let tone = if !c.done {
-                    Tone::Info
-                } else if c.exit_code == Some(0) {
-                    Tone::Success
-                } else {
-                    Tone::Error
-                };
-                col = col.child(h_flex().gap_2().child(
-                    div()
-                        .text_color(neo_color(Tone::Primary))
-                        .child(format!("▸ {}", c.name)),
-                ).child(div().text_color(neo_color(tone)).child(state)));
-                if !c.args.is_empty() {
-                    col = col.child(
-                        div().text_color(neo_color(Tone::Muted)).child(c.args.clone()),
-                    );
+                        .child(head)
+                        .on_click(move |_, _, cx| {
+                            v.update(cx, |this, cx| {
+                                if this.transcript.collapsed_reasoning.contains(&idx) {
+                                    this.transcript.collapsed_reasoning.remove(&idx);
+                                } else {
+                                    this.transcript.collapsed_reasoning.insert(idx);
+                                }
+                                cx.notify();
+                            });
+                        });
+                    col = col.child(header);
+                    if !collapsed {
+                        col = col.child(
+                            div().text_color(neo_color(Tone::Muted)).child(t.clone()),
+                        );
+                    }
                 }
-                let body = if c.stderr.is_empty() { &c.stdout } else { &c.stderr };
-                if !body.trim().is_empty() {
-                    col = col.child(
-                        div()
-                            .text_color(neo_color(if c.stderr.is_empty() {
-                                Tone::Text
-                            } else {
-                                Tone::Error
-                            }))
-                            .child(body.clone()),
-                    );
-                }
-                if c.truncated {
-                    col = col.child(
-                        div()
-                            .text_color(neo_color(Tone::Warning))
-                            .child("（输出已截断）"),
-                    );
-                }
-            }
-            Block::Diff { path, diff } => {
-                col = col.child(
-                    div()
-                        .text_color(neo_color(Tone::Info))
-                        .child(format!("改动 {path}")),
-                );
-                for line in diff.lines() {
-                    let tone = match neo_driver::transcript::diff_line_kind(line) {
-                        neo_driver::transcript::DiffLineKind::Add => Tone::Success,
-                        neo_driver::transcript::DiffLineKind::Del => Tone::Error,
-                        neo_driver::transcript::DiffLineKind::Hunk => Tone::Info,
-                        neo_driver::transcript::DiffLineKind::Meta => Tone::Muted,
-                        _ => Tone::Text,
+                Block::Tool(c) => {
+                    let state = if !c.done {
+                        "执行中"
+                    } else if c.exit_code == Some(0) {
+                        "完成"
+                    } else {
+                        "失败"
                     };
-                    col = col.child(div().text_color(neo_color(tone)).child(line.to_string()));
+                    let tone = if !c.done {
+                        Tone::Info
+                    } else if c.exit_code == Some(0) {
+                        Tone::Success
+                    } else {
+                        Tone::Error
+                    };
+                    col = col.child(h_flex().gap_2().child(
+                        div()
+                            .text_color(neo_color(Tone::Primary))
+                            .child(format!("▸ {}", c.name)),
+                    ).child(div().text_color(neo_color(tone)).child(state)));
+                    if !c.args.is_empty() {
+                        col = col.child(
+                            div().text_color(neo_color(Tone::Muted)).child(c.args.clone()),
+                        );
+                    }
+                    let body = if c.stderr.is_empty() { &c.stdout } else { &c.stderr };
+                    if !body.trim().is_empty() {
+                        col = col.child(
+                            div()
+                                .text_color(neo_color(if c.stderr.is_empty() {
+                                    Tone::Text
+                                } else {
+                                    Tone::Error
+                                }))
+                                .child(body.clone()),
+                        );
+                    }
+                    if c.truncated {
+                        col = col.child(
+                            div()
+                                .text_color(neo_color(Tone::Warning))
+                                .child("（输出已截断）"),
+                        );
+                    }
                 }
-            }
-            Block::TurnSummary { input_tokens, output_tokens } => {
-                col = col.child(
-                    div()
-                        .text_color(neo_color(Tone::Muted))
-                        .child(format!("· 本轮完成（{input_tokens} in / {output_tokens} out）")),
-                );
-            }
-            Block::Files(files) => {
-                for (p, add, del) in files {
+                Block::Diff { path, diff } => {
+                    col = col.child(
+                        div()
+                            .text_color(neo_color(Tone::Info))
+                            .child(format!("改动 {path}")),
+                    );
+                    // **渲染缝的第一个真实消费者**：变更条是自绘表面（不是文字），
+                    // 所以它走 `RenderBackend`。
+                    //
+                    // ⚠️ 它必须与 diff **正文**并排、且占满正文的高度 ——
+                    // 第一版把它放进了标题行，于是 `h_full()` 只等于一行文本高，
+                    // 变更条被压成 4×14px 的一小块（真机截图看出来的）：
+                    // 那个尺寸表达不了"改动分布"这个唯一的用途。
+                    let mut body = v_flex().gap_0();
+                    for line in diff.lines() {
+                        let tone = match neo_driver::transcript::diff_line_kind(line) {
+                            neo_driver::transcript::DiffLineKind::Add => Tone::Success,
+                            neo_driver::transcript::DiffLineKind::Del => Tone::Error,
+                            neo_driver::transcript::DiffLineKind::Hunk => Tone::Info,
+                            neo_driver::transcript::DiffLineKind::Meta => Tone::Muted,
+                            _ => Tone::Text,
+                        };
+                        body = body.child(div().text_color(neo_color(tone)).child(line.to_string()));
+                    }
+                    col = col.child(
+                        h_flex()
+                            .items_start()
+                            .gap_0()
+                            .child(gutter_element(diff))
+                            .child(body),
+                    );
+                }
+                Block::TurnSummary { input_tokens, output_tokens } => {
                     col = col.child(
                         div()
                             .text_color(neo_color(Tone::Muted))
-                            .child(format!("  {p} +{add} -{del}")),
+                            .child(format!("· 本轮完成（{input_tokens} in / {output_tokens} out）")),
                     );
                 }
-            }
-            Block::Todos(items) => {
-                for it in items {
-                    let (mark, tone) = match it.status {
-                        neo_protocol::TodoStatus::Completed => ("✓", Tone::Success),
-                        neo_protocol::TodoStatus::InProgress => ("▸", Tone::Info),
-                        neo_protocol::TodoStatus::Pending => ("·", Tone::Muted),
-                    };
-                    col = col.child(
-                        div()
-                            .text_color(neo_color(tone))
-                            .child(format!("{mark} {}", it.content)),
-                    );
+                Block::Files(files) => {
+                    for (p, add, del) in files {
+                        col = col.child(
+                            div()
+                                .text_color(neo_color(Tone::Muted))
+                                .child(format!("  {p} +{add} -{del}")),
+                        );
+                    }
                 }
-            }
-            Block::Notice { text, tone } => {
-                col = col.child(div().text_color(neo_color(*tone)).child(text.clone()));
+                Block::Todos(items) => {
+                    for it in items {
+                        let (mark, tone) = match it.status {
+                            neo_protocol::TodoStatus::Completed => ("✓", Tone::Success),
+                            neo_protocol::TodoStatus::InProgress => ("▸", Tone::Info),
+                            neo_protocol::TodoStatus::Pending => ("·", Tone::Muted),
+                        };
+                        col = col.child(
+                            div()
+                                .text_color(neo_color(tone))
+                                .child(format!("{mark} {}", it.content)),
+                        );
+                    }
+                }
+                Block::Notice { text, tone } => {
+                    col = col.child(div().text_color(neo_color(*tone)).child(text.clone()));
+                }
             }
         }
+        col
     }
-    col
 }
+
 
 /// **D7**：右侧面板 —— 目标 + 会话列表（D1）。
 ///
@@ -793,7 +883,6 @@ impl Render for NeoView {
             self.pump_step();
         }
 
-        let blocks = self.transcript.blocks.clone();
         let running = self.transcript.running;
         let mode = self.mode;
         let model = self.model.clone();
@@ -887,7 +976,7 @@ impl Render for NeoView {
                             .flex_1()
                             .h_full()
                             .overflow_y_scrollbar()
-                            .child(transcript_view(&blocks)),
+                            .child(self.transcript_view(cx)),
                     )
                     .child(side_panel(self, cx)),
             );
