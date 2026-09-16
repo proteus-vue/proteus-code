@@ -98,9 +98,31 @@ impl Harness {
         *self.reply.lock().expect("锁中毒") = events;
     }
 
-    /// 目前收到的全部 Op（按提交顺序）。
+    /// 目前收到的全部 Op（按提交顺序）。**不等待**。
+    ///
+    /// ⚠️ 刚发完请求就读它是有**竞态**的：HTTP 线程把 Op 投进通道后就回 200，
+    /// 而"记录 Op"发生在**内核线程**收到它的时候。两者之间没有同步点，
+    /// 负载高时测试会在内核线程还没跑之前读到空列表。
+    ///
+    /// 这条竞态真实发生过：单跑该文件 40 次全绿，但在 `cargo test --workspace`
+    /// 的全量并行下偶发失败。所以断言"收到了 Op"一律用 [`Self::wait_for_ops`]。
     fn received(&self) -> Vec<Op> {
         self.ops.lock().expect("锁中毒").clone()
+    }
+
+    /// 等到**至少** `n` 个 Op 到达（有界轮询），返回当时收到的全部。
+    ///
+    /// 有界（不是死等）：超时就返回现状，让断言给出真实数字 ——
+    /// 这样"真的没提交"与"还没到"在失败信息里能区分开。
+    fn wait_for_ops(&self, n: usize) -> Vec<Op> {
+        for _ in 0..200 {
+            let ops = self.received();
+            if ops.len() >= n {
+                return ops;
+            }
+            std::thread::sleep(Duration::from_millis(5)); // 有界等待
+        }
+        self.received()
     }
 }
 
@@ -399,7 +421,7 @@ fn turn_submits_userturn_with_refs_parsed_by_the_protocol_layer() {
     let text = "看下 @src/main.rs 和 $skill-x";
     assert_eq!(h.post("/api/turn", text).status, 200);
 
-    let ops = h.received();
+    let ops = h.wait_for_ops(1);
     assert_eq!(ops.len(), 1, "应恰好提交一个 Op");
     match &ops[0] {
         Op::UserTurn { text: got, refs } => {
@@ -550,8 +572,8 @@ fn approve_maps_the_query_to_a_decision() {
     assert_eq!(h.get("/api/approve?id=a2&allow=false").status, 200);
 
     assert_eq!(
-        h.received(),
-        vec![
+        h.wait_for_ops(2).as_slice(),
+        &vec![
             Op::Approve { id: "a1".into(), decision: Decision::Allow, reason: None },
             Op::Approve { id: "a2".into(), decision: Decision::Deny, reason: None },
         ],
@@ -565,8 +587,8 @@ fn approve_unescapes_percent_encoded_ids() {
     let h = Harness::spawn();
     assert_eq!(h.get("/api/approve?id=a%3Db&allow=true").status, 200);
     assert_eq!(
-        h.received(),
-        vec![Op::Approve { id: "a=b".into(), decision: Decision::Allow, reason: None }],
+        h.wait_for_ops(1).as_slice(),
+        &vec![Op::Approve { id: "a=b".into(), decision: Decision::Allow, reason: None }],
         "id 必须先解码再提交，否则回不到那个挂起的审批"
     );
 }
@@ -586,8 +608,8 @@ fn goal_set_submits_the_goal_text() {
     let body = "重构 A\n重构 B";
     assert_eq!(h.post("/api/goal", body).status, 200);
     assert_eq!(
-        h.received(),
-        vec![Op::GoalSet { goal: body.into() }],
+        h.wait_for_ops(1).as_slice(),
+        &vec![Op::GoalSet { goal: body.into() }],
         "多行正文 = 多子任务，必须原样送达"
     );
 }
@@ -608,8 +630,8 @@ fn goal_actions_map_to_ops_and_unknown_actions_are_rejected() {
     assert_eq!(h.get("/api/goal").status, 400, "缺 action 也是 400");
 
     assert_eq!(
-        h.received(),
-        vec![Op::GoalAdvance, Op::GoalClear],
+        h.wait_for_ops(2).as_slice(),
+        &vec![Op::GoalAdvance, Op::GoalClear],
         "非法 action 必须被拒，不能落到内核"
     );
 }
@@ -644,8 +666,8 @@ fn pause_and_resume_target_the_goal_from_the_latest_snapshot() {
     assert_eq!(h.get("/api/goal?action=pause").status, 200);
     assert_eq!(h.get("/api/goal?action=resume").status, 200);
     assert_eq!(
-        h.received(),
-        vec![
+        h.wait_for_ops(3).as_slice(),
+        &vec![
             Op::UserTurn { text: "起个目标".into(), refs: vec![] },
             Op::GoalPause { goal_id: "goal-7".into() },
             Op::GoalResume { goal_id: "goal-7".into() },

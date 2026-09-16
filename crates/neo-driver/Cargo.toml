@@ -27,6 +27,10 @@ description = "GUI 宿主的共享内核驱动：内核独占线程 + 边界守�
 [dependencies]
 neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
 neo-core = { path = "../neo-core", version = "0.1.0" }
+# 唤醒信号的通道。为什么不用 std 的 mpsc：响应式宿主要在自己的**渲染路径**里
+# 非阻塞取信号，而 `async_channel` 的 `try_recv` 语义清晰且它本就在依赖树里
+# （gpui 自己依赖它），不为这一处引入新的依赖来源。
+async-channel = "2"
 # 转录模型需要：宿主中立的语义色调（Tone）与工具参数摘要的 JSON 解析。
 # 这两条依赖都是**下行**的（neo-text 在 L1），不引入新的层级关系。
 neo-text = { path = "../neo-text", version = "0.1.0" }

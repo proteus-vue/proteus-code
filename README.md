@@ -31,6 +31,7 @@
 | Web 宿主（零依赖 HTTP + SSE） | ✅ **已实现**（`neo-host-web`；`POST /api/turn` 提交、`GET /api/events` SSE、`/api/approve` 审批、`/api/goal` 编排）。**端点需访问令牌**：启动时生成 256 位随机令牌，除内置页面外一切路径都校验（含不存在的路径，未鉴权者枚举不出路由）；令牌经 URL fragment 下发、页面自动接在每个请求上，程序化客户端可用 `X-Neo-Token` 头。**HTTP 层有 23 项集成测试**（真实监听端口 + 真实路由，只把内核侧换成假内核）：页面/404、引用解析、SSE 线格式与多订阅者扇出、审批 decision 映射与 id 解码、goal 各 action 与 409/400 分支、断连回收、**鉴权 7 项（负向用例 + 路由不可探测 + 页面接线断言）** |
 | **Desktop 宿主**（系统 webview 窗口） | ✅ **已实现**：`neo desktop` 打开系统 webview 窗口（macOS WKWebView / Windows WebView2 / Linux WebKitGTK），**复用 Web 宿主全栈**（本地回环端口 + 内置页面，T6 等价天然成立），窗口关闭即退出。窗口内交互验证需真人实机（进程/服务/SSE 连接已机器验证） |
 | **桌面原生 GUI 宿主**（egui） | ⚠️ **骨架已实现，界面未验收**：`neo desktop` **默认**走原生 GUI（egui/eframe，不经 HTTP、不开端口）；`neo desktop --webview` 保留上一条的 webview 路径。已接上 D2–D7 的数据通路（Markdown 正文 / 思考轨迹 / 工具卡片含参数摘要 / **diff 渲染** / 轮摘要 / Goal 面板）与审批（三档 Allow/Always/Reject，未决时**阻塞输入**），复用 `neo-text` 的同一份文本语义与调色板（含防漂移守卫）。**已机器验证**：能编译、真机开出窗口并存活、驱动层有 `driving` 边界守卫（越界 Pump 不触发多余模型请求，有回归测试）、T6 契约已纳入 conformance。**已完成视觉验收**（2026-09-16，授权后真机截图）：中文与 D2–D7 全部正确渲染（思考块 / 工具卡片含参数与输出 / 任务清单 / Markdown 代码块高亮 / 引用 / 轮摘要），代码块缩进正确。**真机全流程已验证**（打字 → 回车提交 → 审批 diff → 批准 → 文件真实落盘 → 输入框恢复）。**过程中抓到并修掉三个机器测不出的缺陷**：egui 默认字体不含 CJK 字形，界面中文全是豆腐块 —— 编译、开窗、驱动测试全绿也照样发生。已加中文字体加载（平台候选表，不打包字体）+ **可机器判定的界面可用性门禁**（`verify_cjk_renderable`，用 `Fonts::has_glyph` 直接查字形，并有反例测试证明它有牙齿）；**审批前的 diff 曾可能与实际改动不是同一个文件**（preview 按进程 CWD 读、execute 按工作区解析，`--workspace` 非进程目录时指向不同文件 —— 用户照着预览批准却改了别的文件），已修为共用同一解析规则并补 4 条回归测试；输入框补自动聚焦（否则必须先点一下才能打字）。**已补 D11**：状态栏执行模式下拉 + `Shift+Tab` 循环（对齐 ZCode），高风险档位在工具栏**常驻**风险提示，模型可运行时切换。**已补 D9**：`Cmd/Ctrl+K` 覆盖式命令面板（搜索过滤、↑↓ 选择、Enter 执行、Esc 关闭，11 条命令）。**已补 D1**：左侧会话栏（列表 + 当前项高亮 + 新建，可切回；当前会话即使尚未落盘也显示）。**已补 D8**：底部命令台（`/terminal` 开关），命令走 `Op::Shell` **不经模型**、经沙箱、与模型工具调用同一条执行路径 |
+| **桌面 GPUI 宿主**（下一代 UI） | ⚠️ **阶段 1 可用，能力未对齐**：`neo desktop --gpui` 打开 GPUI 窗口（真机验证：窗口 + 品牌主题 + 中文 + 转录区 + 审批 + 状态行，真内核端到端跑通）。它一行 gpui 依赖都不直接声明 —— 全部经 UI 栈取用（单一 pin，门禁强制）。**刻意不进 default**：能力还少于 egui，进默认会让 `neo desktop` 倒退；等覆盖 parity 清单后转正、并删除 egui |
 | 上下文压缩（L4 策略） | ✅ **已实现**：`Compactor` seam 在 L2、策略在 L4；`/compact` 端到端，摘要与移除条数可回放 |
 | **Goal 目标编排**（`/goal` 系列） | ✅ **三宿主可用**：TUI `/goal <目标>`、exec `--goal`、Web 目标栏（`/api/goal`）。自动逐阶段推进（Plan→Code→Review→Learn），审查失败回退重做 ≤3 次（含**模型显式叫停**），四项停止条件生效；快照事件落日志，**kill 后重启从日志重建续跑**。审查是硬失败信号 + 模型自评（沉默视为通过）；挂钟停止条件未实现（破坏回放确定性） |
 | **服务商管理**（设置页可增删改） | ✅ **已实现**：设置页内联表单新增/编辑（密钥字段打码、留空不改），删除需确认。密钥存 `~/.neo/provider_keys.json`（**0600**，与配置分离）；`base_url` 自动规范化为裸主机。缺 key 的条目跳过并提示 |
@@ -173,7 +174,7 @@ neo exec "用一句话回答 1+1" --mode plan
 # 需要 Rust —— 版本由 rust-toolchain.toml 钉定（1.95.0），rustup 会自动选用
 cargo run -p neo-code-cli -- tui --provider mock   # 不装 PATH，直接用 cargo 跑 TUI
 
-cargo test --workspace     # 788 个测试（内核 conformance / 内存有界性 / SPI / 宿主 / TUI / Web / 原生 GUI）
+cargo test --workspace     # 788 个测试
 cargo check --workspace    # 25 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试
@@ -204,10 +205,15 @@ cd website && npm install && npm run dev    # 或 npm run build → dist/web
 
 ```
 proteus-code/                  ← 项目本体是 Rust 内核
-├── Cargo.toml                 workspace（25 crates）
+├── Cargo.toml                 workspace（31 crates）
 ├── crates/                    ★ 内核与宿主
 │   ├── neo-protocol/          L0 线协议（Op / EventMsg / 双轴枚举），零业务依赖
 │   ├── neo-text/              L1 基础：宿主中立的文本语义（色调 / 宽度 / Markdown / 高亮）
+│   ├── neo-ui-kit/            L1 UI 门面（唯一 pin GPUI 的地方）
+│   ├── neo-ui-render/         L2 UI 渲染缝（中立颜色/几何 + RenderBackend）
+│   ├── neo-ui-behavior/       L3 UI 行为层（焦点仲裁 / 按键路由，与后端解耦）
+│   ├── neo-ui/                L4 UI 设计系统（品牌主题 + 组件）
+│   ├── neo-driver/            L3 GUI 共享内核驱动（driving 边界守卫所在）
 │   ├── neo-sandbox/           L1 平台（命令包裹：Seatbelt / Landlock+bwrap / ACL）
 │   ├── neo-platform/          L1 平台（进程加固 / fs notify / git）
 │   ├── neo-core/              ★ L2 内核：turn/step 主循环 + 三维闸门 + 4 个 SPI 契据
@@ -216,6 +222,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 │   ├── neo-host-tui/          L5 宿主：终端
 │   ├── neo-host-desktop/      L5 宿主：系统 webview（替代 Electron）
 │   ├── neo-host-egui/         L5 宿主：桌面原生 GUI（egui；neo desktop 默认走它）
+│   ├── neo-host-gpui/         L5 宿主：桌面 GPUI（下一代 UI；--gpui 试用）
 │   ├── neo-host-web/          L5 宿主：浏览器（零依赖 HTTP + SSE，含内置页面）
 │   ├── neo-exec/              L5 宿主：无头 / CI
 │   ├── neo-code-cli/          `neo` 入口（multitool）

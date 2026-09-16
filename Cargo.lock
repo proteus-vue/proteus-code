@@ -5220,6 +5220,7 @@ dependencies = [
  "neo-exec",
  "neo-host-desktop",
  "neo-host-egui",
+ "neo-host-gpui",
  "neo-host-tui",
  "neo-host-web",
  "neo-llm-deepseek",
@@ -5260,6 +5261,7 @@ dependencies = [
 name = "neo-driver"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "neo-config",
  "neo-core",
  "neo-llm-deepseek",
@@ -5402,6 +5404,7 @@ dependencies = [
  "neo-core",
  "neo-host-desktop",
  "neo-host-egui",
+ "neo-host-gpui",
  "neo-host-tui",
  "neo-host-web",
  "neo-protocol",

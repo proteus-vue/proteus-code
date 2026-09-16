@@ -21,7 +21,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # neo-host-desktop(wry/tao)在 Linux 上编译需要 webkit2gtk/gtk 系统包
+      # 两个 GUI 宿主的 Linux 构建前置：
+      #   - neo-host-desktop(wry/tao) 需要 webkit2gtk / gtk
+      #   - neo-host-gpui(GPUI) 需要 xkbcommon / wayland / x11 / fontconfig
+      #     （GPUI 的 X11 走纯 Rust 的 x11rb、Wayland 走 dlopen，所以是
+      #      运行时 dlopen 而非编译期链接；这里仍显式装上是**保守选择** ——
+      #      少装一个包会让 CI 在链接期报错，多装一个只是几 MB 下载）
       - name: 安装 Linux 系统依赖
         run: |
           sudo apt-get update
@@ -31,7 +36,10 @@ jobs:
             libxkbcommon-dev \
             libxdo-dev \
             libssl-dev \
-            librsvg2-dev
+            librsvg2-dev \
+            libwayland-dev \
+            libx11-dev \
+            libfontconfig1-dev
       # 缓存 target 目录:全量编译从 ~10 分钟降到增量秒级
       - uses: Swatinem/rust-cache@v2
       # 分步执行:失败阶段从 step 结论即可见,不必认证拉日志

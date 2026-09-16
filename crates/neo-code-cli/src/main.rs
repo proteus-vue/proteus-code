@@ -46,10 +46,13 @@ desktop 选项：
   --workspace <dir>            工作区（默认当前目录）
   --provider <...>             模型后端（同 serve）
   --mode <...>                 执行模式（同 serve）
-  --webview                    用系统 webview 窗口（默认是原生 GUI）
-                               默认 = 原生 GUI（egui，不经 HTTP、不开端口）
-                               --webview = 系统 webview 指向内置 Web 宿主
-                               两者窗口关闭即退出
+  --gpui                       用 GPUI 窗口（NEO 的下一代 UI，阶段 1）
+  --webview                    用系统 webview 窗口
+                               三种窗口实现，都不经 HTTP、不开端口：
+                                 默认      = egui（当前能力最全）
+                                 --gpui    = GPUI（界面能力尚少于 egui，试用）
+                                 --webview = 系统 webview 指向内置 Web 宿主
+                               窗口关闭即退出
 
 serve 选项：
   --addr <host:port>           监听地址（默认 127.0.0.1:8787）
@@ -250,7 +253,7 @@ fn cmd_serve(args: &[String]) -> i32 {
     0
 }
 
-/// 启动桌面窗口（系统 webview）。
+/// 启动桌面窗口（三种实现：egui 默认 / --gpui / --webview）。
 ///
 /// 窗口只是壳：完整复用 Web 宿主（本地回环端口 + 内置页面），
 /// T6 宿主等价因此天然成立 —— 桌面跑的就是 Web 宿主，没有第三套
@@ -267,14 +270,18 @@ fn cmd_desktop(args: &[String]) -> i32 {
     // 直接 `neo` 时被要求 DEEPSEEK_API_KEY（真实反馈）。
     let mut provider = String::new();
     let mut mode = ExecMode::Default;
-    // 默认走**原生 GUI**（egui）；--webview 回退到系统 webview 版。
-    // ADR-0006：不押注单一方案，两条路都保留。
+    // 桌面宿主的三种窗口实现：
+    //   默认      → egui（当前能力最全）
+    //   --gpui    → GPUI（NEO 的下一代 UI，阶段 1 opt-in）
+    //   --webview → 系统 webview（复用 Web 宿主，ADR-0006 保留的第二后端）
     let mut use_webview = false;
+    let mut use_gpui = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--webview" => use_webview = true,
+            "--gpui" => use_gpui = true,
             "--workspace" => {
                 i += 1;
                 match args.get(i) {
@@ -339,6 +346,55 @@ fn cmd_desktop(args: &[String]) -> i32 {
     // 与 webview 版相比少了整条 HTTP/SSE 链路 —— 那条链路存在的原因是
     // "窗口是个浏览器"，原生宿主不需要它（也顺带没有了"本地端口谁能访问"
     // 这个问题）。
+    // ── GPUI 宿主（`--gpui`）──────────────────────────────────────
+    //
+    // 放在 egui 分支**之前**：显式指定优先。两条路的装配完全一样
+    // （同一个 build_kernel / 同一份 sessions / 同一个驱动），差别只在谁渲染。
+    #[cfg(feature = "gpui")]
+    if use_gpui {
+        let models = kernel
+            .available_models()
+            .into_iter()
+            .map(|m| (m.name, m.description, m.production))
+            .collect::<Vec<_>>();
+        let _ = &models; // GPUI 版暂未接模型 picker（阶段 2）
+
+        let (handle, cmd_rx, batch_tx) = neo_driver::channel();
+        // 响应式宿主：事件到达时要主动唤醒重绘（gpui 不出帧就不画）。
+        // 信号式（非 Send 的 gpui 上下文由宿主在自己线程消费）。
+        let wake = neo_driver::WakeSignal::new();
+        let kernel_thread =
+            neo_driver::spawn(kernel, cmd_rx, batch_tx, Some(wake.hook()));
+
+        let sessions_dir = workspace.join(".neo/sessions");
+        let store = neo_session_store::SessionStore::open(&sessions_dir);
+        let _sessions: Option<Box<dyn neo_session::SessionControl>> =
+            Some(Box::new(Sessions::new(handle.clone(), store)));
+
+        eprintln!("[neo] 桌面窗口（GPUI；阶段 1，界面能力尚少于 egui）");
+        let status = format!("{} · {}", workspace.display(), neo_exec::mode_short(mode));
+        let result = neo_host_gpui::run(
+            handle,
+            "NEO".to_string(),
+            status,
+            mode,
+            model_name.clone(),
+            wake,
+        );
+        let _ = kernel_thread.join();
+        if let Err(e) = result {
+            eprintln!("[neo] {e}");
+            return 1;
+        }
+        return 0;
+    }
+    #[cfg(not(feature = "gpui"))]
+    if use_gpui {
+        eprintln!("[neo] 本二进制未编译 GPUI 宿主（构建时缺 feature `gpui`）。");
+        eprintln!("      重装并保留该 feature：cargo install neo-code-cli --features gpui");
+        return 2;
+    }
+
     #[cfg(feature = "egui")]
     if !use_webview {
         // 模型列表要在**装配期**取：`kernel` 一旦 move 进驱动线程，UI 就只剩
@@ -729,6 +785,7 @@ impl KernelAccess for KernelHandle {
     }
 }
 
+// 两个 GUI 宿主用的是**同一个**句柄类型（都来自 neo-driver），所以一个 impl 够。
 impl KernelAccess for neo_driver::KernelHandle {
     fn with_kernel<R: Send + 'static>(
         &self,

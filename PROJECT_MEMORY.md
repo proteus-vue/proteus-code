@@ -450,7 +450,7 @@ Allow / Always Allow / Reject → **高风险或全自动模式下工具栏持�
 
 ## 1.5 crate 命名：全部 `neo-`，以及两处**必须**保留 `dsh`
 
-25 个 crate 一律 `neo-`（`neo-protocol` / `neo-core` / `neo-host-web` …），
+31 个 crate 一律 `neo-`（`neo-protocol` / `neo-core` / `neo-host-web` …），
 不再用 `dsh-` 前缀 —— 内核对 DSH 的借鉴是**思想**，不是包名延续。
 
 两处**刻意不动**（动了反而是错的）：

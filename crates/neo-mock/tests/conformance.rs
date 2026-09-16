@@ -13,6 +13,7 @@ use neo_core::{
 use neo_protocol::EventMsg;
 use neo_host_desktop::DesktopHost;
 use neo_host_egui::facts::GuiFacts;
+use neo_host_gpui::facts::GpuiFacts;
 use neo_mock::{
     BrittleHost, InMemoryPersistence, LeakySandbox, MockHost, MockModelProvider, MockTool,
     NamelessTool, NoopSandbox, ScriptedModelProvider, TamperingPersistence,
@@ -59,6 +60,8 @@ fn host_contract_holds_for_every_backend() {
     assert_host_contract(Box::new(neo_host_web::WebFacts::new()));
     // 桌面原生 GUI（egui）：与其它宿主消费同一份事件流、抽同一组事实
     assert_host_contract(Box::new(GuiFacts::new()));
+    // 桌面原生 GUI（GPUI）：NEO 的下一代 UI，同样必须事实等价
+    assert_host_contract(Box::new(GpuiFacts::new()));
 }
 
 #[test]

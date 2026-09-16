@@ -71,6 +71,69 @@ pub struct KernelHandle {
 /// 而漏改的那次会静默造成多余的真实模型请求（要花钱）。
 pub type OnBatch = Arc<dyn Fn() + Send + Sync>;
 
+/// 事件到达的**信号**：驱动线程投递，宿主消费。
+///
+/// # 为什么是"信号"而不是"直接调用宿主的 notify"
+///
+/// gpui 的上下文（`AsyncApp` / `Context`）**不是 `Send`** —— 它跑在 UI 线程的
+/// 单线程运行时里。驱动线程无法直接持有它并调用 `cx.notify()`。
+///
+/// 所以这里只投递一个**无锁信号**（`async_channel` 的无界通道，`Send`），
+/// 宿主在自己的渲染路径里消费它并 `cx.notify()`。这样：
+/// - 驱动线程只做"投递"，不认识 UI 类型；
+/// - 宿主在自己的线程上做 UI 操作（gpui 的要求）；
+/// - 不需要轮询 —— 信号是事件驱动的（`try_recv` 在 render 里是非阻塞的，
+///   且 **render 本身由 notify 触发**，不会空转）。
+#[derive(Clone)]
+pub struct WakeSignal {
+    tx: async_channel::Sender<()>,
+    rx: async_channel::Receiver<()>,
+}
+
+impl Default for WakeSignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WakeSignal {
+    pub fn new() -> Self {
+        let (tx, rx) = async_channel::unbounded();
+        Self { tx, rx }
+    }
+
+    /// 驱动线程侧：投递一个唤醒信号（通道满/关闭时静默忽略 —— 信号是"提醒"，
+    /// 不是一个必须送达的消息；丢了最多晚一帧重绘）。
+    pub fn notify(&self) {
+        let _ = self.tx.try_send(());
+    }
+
+    /// 宿主侧：消费掉所有待处理信号（非阻塞）。返回是否曾有信号。
+    ///
+    /// 一次收干：多个信号只需一次重绘。
+    pub fn take(&self) -> bool {
+        let mut any = false;
+        while self.rx.try_recv().is_ok() {
+            any = true;
+        }
+        any
+    }
+
+    /// 宿主侧：**异步等待**下一个信号（用于事件驱动的重绘循环）。
+    ///
+    /// 返回 `None` 表示发送端已全部丢弃（宿主该退出了）。
+    /// 这是"不轮询"的关键：`recv().await` 真正挂起线程，不消耗 CPU。
+    pub async fn recv(&self) -> Option<()> {
+        self.rx.recv().await.ok()
+    }
+
+    /// 交给驱动线程的钩子形态。
+    pub fn hook(&self) -> OnBatch {
+        let me = self.clone();
+        Arc::new(move || me.notify()) as OnBatch
+    }
+}
+
 const DEAD: &str = "内核线程已退出";
 
 impl KernelHandle {

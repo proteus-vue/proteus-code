@@ -47,6 +47,13 @@ pub struct NeoView {
     notice: Option<String>,
     /// 工作区/模式说明
     status: String,
+    /// 启动时自动提交的任务（一次性）。来源 `NEO_GUI_PROMPT`。
+    ///
+    /// 与 egui 宿主的同名钩子同源（AGENTS.md 里 `PROTEUS_CODE_SMOKE` 的约定）：
+    /// 把「启动 + 提交 + 渲染」合成一次运行，让验证者截图即可。
+    /// **gpui 与 egui 的画布都无法靠自动化工具输入文本**，所以这条钩子是
+    /// 端到端验证唯一可脚本化的路径。
+    auto_prompt: Option<String>,
 }
 
 impl NeoView {
@@ -60,6 +67,9 @@ impl NeoView {
             pending: None,
             notice: None,
             status,
+            auto_prompt: std::env::var("NEO_GUI_PROMPT")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
         }
     }
 
@@ -322,8 +332,20 @@ fn approval_dialog(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElemen
 impl Render for NeoView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 1) 收事件（非阻塞）
+        // 冒烟钩子：首帧把 NEO_GUI_PROMPT 当作一次提交（只做一次）
+        if let Some(text) = self.auto_prompt.take() {
+            self.input = text;
+            self.submit();
+            cx.notify();
+        }
+
+        // 1) 收事件（非阻塞）
         let changed = self.pump();
-        // 2) 若有变化，把界面标记为需要重绘 —— 响应式宿主的核心一步
+        // 2) 有变化 → 标记需要重绘（响应式宿主的核心一步）。
+        //
+        // 注意这里**不消费** wake 信号：信号的作用是"让视图被唤醒一次"，
+        // 而唤醒后的重绘由 notify 驱动。消费动作留给宿主入口（见 `run`），
+        // 这样信号与 pump 的职责不重叠。
         if changed {
             cx.notify();
         }
@@ -475,7 +497,9 @@ pub fn run(
     status: String,
     mode: ExecMode,
     model: String,
-    wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    // 唤醒信号：驱动线程投递，本宿主在渲染路径里消费（gpui 上下文非 Send，
+    // 驱动线程不能直接调 cx.notify）。
+    wake: neo_driver::WakeSignal,
 ) -> Result<(), String> {
     let view_holder: Arc<std::sync::Mutex<Option<Entity<NeoView>>>> =
         Arc::new(std::sync::Mutex::new(None));
@@ -484,17 +508,34 @@ pub fn run(
         .with_assets(neo_ui_kit::assets::Assets)
         .run(move |cx| {
             neo_ui_kit::init(cx);
+            // 唤醒循环：信号到达 → 通知视图重绘。
+            //
+            // 这是响应式宿主的**唯一**重绘触发点（gpui 不出帧就不画）。
+            // 用 `cx.spawn` 挂一个后台等待：信号驱动，不轮询、不空转 ——
+            // `WakeSignal` 的通道是 async 的，`recv().await` 会真正挂起。
+            {
+                let wake = wake.clone();
+                let holder = view_holder.clone();
+                let async_cx = cx.to_async();
+                cx.spawn(async move |_| {
+                    while wake.recv().await.is_some() {
+                        let view = holder
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        if let Some(view) = view {
+                            async_cx.update(|cx| cx.notify(view.entity_id()));
+                        }
+                    }
+                })
+                .detach();
+            }
             // 品牌主题：NEO 的紫（从 `neo-text` 的调色板派生，不写字面量）
             neo_ui::apply_neo_theme(cx);
 
             let view = cx.new(|_cx| NeoView::new(handle.clone(), status, mode, model));
             *view_holder.lock().unwrap_or_else(|e| e.into_inner()) = Some(view.clone());
 
-            // 唤醒钩子：事件到达 → notify 视图 → 重绘。
-            // 这是响应式宿主唯一的重绘触发点（gpui 不出帧就不画）。
-            if let Some(wake) = wake {
-                wake();
-            }
 
             let view_for_window = view.clone();
             cx.spawn(async move |cx| {

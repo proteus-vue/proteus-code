@@ -6,6 +6,8 @@ use std::time::Duration;
 
 fn main() {
     let (handle, cmd_rx, batch_tx) = neo_driver::channel();
+    // 响应式宿主的唤醒信号：本冒烟不接真内核，用默认值即可
+    let wake = neo_driver::WakeSignal::new();
     // 不启动真内核：用一个不消费 Op 的驱动线程占位（窗口渲染不依赖它）
     let _thread = std::thread::spawn(move || {
         for _msg in cmd_rx.iter() {
@@ -33,7 +35,7 @@ fn main() {
         "/tmp · default".to_string(),
         neo_protocol::ExecMode::Default,
         "mock".to_string(),
-        None,
+        wake,
     );
     if let Err(e) = r {
         eprintln!("[smoke] 失败：{e}");
