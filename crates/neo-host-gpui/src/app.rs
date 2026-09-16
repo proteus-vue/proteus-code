@@ -72,6 +72,12 @@ pub struct NeoView {
     notice: Option<String>,
     /// 工作区/模式说明
     status: String,
+    /// 模型选择器是否打开。
+    ///
+    /// 与命令面板同构（覆盖式面板 + 可点选），但**内容不同**：它要显示
+    /// 每个模型的说明与"是否桩"。此前 gpui 只有一个左右切换的按钮 ——
+    /// 用户看不到有哪些可选、更看不出 `mock` 是桩（切过去以为模型坏了）。
+    model_picker_open: bool,
     /// 命令面板是否打开（D9）。
     cmd_open: bool,
     /// **D7** 目标输入框内容（每行一个子任务）。
@@ -132,7 +138,7 @@ pub struct NeoView {
     /// 会话控制（D1）。`None` = 本装配未接会话库，侧栏如实说明。
     sessions: Option<Box<dyn neo_session::SessionControl>>,
     /// 可选模型（启动时从装配层取；`ShowModels` 在它们之间循环）。
-    models: Vec<String>,
+    models: Vec<neo_driver::transcript::ModelChoice>,
     /// 是否折叠思考轨迹（D3）。
     show_reasoning: bool,
     /// **D6** 轮次计时。
@@ -178,7 +184,7 @@ impl NeoView {
     fn new(
         handle: KernelHandle,
         sessions: Option<Box<dyn neo_session::SessionControl>>,
-        models: Vec<String>,
+        models: Vec<neo_driver::transcript::ModelChoice>,
         status: String,
         mode: ExecMode,
         model: String,
@@ -218,6 +224,7 @@ impl NeoView {
             // 调试开关：启动即展开某个面板，便于脚本化截图验证
             // （与 NEO_GUI_PROMPT 同一理由：画布无法靠自动化工具输入，
             //   面板的可见性只能由环境变量驱动）
+            model_picker_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("models"),
             cmd_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("cmd"),
             terminal_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("terminal"),
             auto_prompt: std::env::var("NEO_GUI_PROMPT")
@@ -344,6 +351,19 @@ impl NeoView {
         );
         self.search_state = Some(state);
         self.search_subs = vec![sub];
+    }
+
+    /// 切换模型（选择器点选时调用）。
+    fn pick_model(&mut self, name: &str) {
+        self.model = name.to_string();
+        self.model_picker_open = false;
+        self.handle.send(Op::ConfigureSession {
+            patch: neo_protocol::SessionPatch {
+                model: Some(name.to_string()),
+                ..Default::default()
+            },
+        });
+        self.notice = Some(format!("已切换到 {name}"));
     }
 
     /// 目标控制（暂停/恢复/清除）。
@@ -489,15 +509,13 @@ impl NeoView {
                 self.notice = Some("已请求打断".into());
             }
             A::ShowModels => {
-                self.model = next_model(&self.model, &self.models);
-                let m = self.model.clone();
-                self.handle.send(Op::ConfigureSession {
-                    patch: neo_protocol::SessionPatch {
-                        model: Some(m.clone()),
-                        ..Default::default()
-                    },
-                });
-                self.notice = Some(format!("已切换到 {m}"));
+                // 打开**选择器**而不是直接切到下一个模型。
+                //
+                // 原先是"循环到下一个"（照 egui 的按钮语义），现在改成列出
+                // 全部可选：盲切的问题是想切到第 3 个得按 2 次，且途中会经过
+                // 桩模型（真按下去就切过去了）。两个入口做同一件事、行为不同
+                // 比只有一个入口更糟，所以统一到这里。
+                self.model_picker_open = !self.model_picker_open;
             }
             A::CycleMode => self.cycle_mode(),
             A::ToggleReasoning => {
@@ -643,20 +661,6 @@ fn gutter_element(diff: &str) -> impl IntoElement {
     )
     .w(px(4.))
     .h_full()
-}
-
-/// 在模型列表里循环到下一个（列表空或只有一个时原样返回）。
-///
-/// 抽成自由函数便于单测：循环逻辑写错会表现为"切了没反应"或"跳到不存在的模型"。
-fn next_model(current: &str, models: &[String]) -> String {
-    if models.len() <= 1 {
-        return current.to_string();
-    }
-    match models.iter().position(|m| m == current) {
-        Some(i) => models[(i + 1) % models.len()].clone(),
-        // 当前模型不在列表里（比如注册表变了）：回到第一个
-        None => models[0].clone(),
-    }
 }
 
 /// 把一行带色调的片段渲染成一个元素（复用 `neo-text` 的 Markdown 解析）。
@@ -1187,6 +1191,68 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
 }
 
 /// **D9**：命令面板（覆盖式）。返回 None 表示未打开。
+/// 模型选择器：列出全部模型，带说明与"是否桩"的标记。
+///
+/// 与命令面板同构（覆盖式、可点选）。**不显示模型名列表就让人左右切换**
+/// 是 gpui 侧此前的做法 —— 用户看不到有哪些可选，更看不出某个是桩。
+fn model_picker(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
+    if !view.model_picker_open {
+        return None;
+    }
+    let mut col = v_flex()
+        .w(px(420.))
+        .gap_1()
+        .p_3()
+        .bg(neo_ui::panel_bg())
+        .child(
+            div()
+                .text_color(neo_color(Tone::Text))
+                .child("选择模型（点选切换）"),
+        );
+
+    if view.models.is_empty() {
+        col = col.child(
+            div()
+                .text_color(neo_color(Tone::Muted))
+                .child("没有可用模型"),
+        );
+    }
+
+    for m in &view.models {
+        let is_current = m.name == view.model;
+        let name = m.name.clone();
+        let v = cx.entity().clone();
+        // 桩标记用**文字**而不是只靠颜色：颜色可能被主题吃掉，
+        // 而"这个模型不能真跑任务"是必须传达到的信息。
+        let label = m.display_name();
+        let mut row = h_flex()
+            .gap_2()
+            .id(format!("model-{}", m.name))
+            .child(div().text_color(neo_color(if is_current {
+                Tone::Accent
+            } else {
+                Tone::Text
+            }))
+            .child(if is_current { format!("● {label}") } else { format!("  {label}") }))
+            .on_click(move |_, _, cx| {
+                let name = name.clone();
+                v.update(cx, |this, cx| {
+                    this.pick_model(&name);
+                    cx.notify();
+                });
+            });
+        if !m.description.is_empty() {
+            row = row.child(
+                div()
+                    .text_color(neo_color(Tone::Muted))
+                    .child(m.description.clone()),
+            );
+        }
+        col = col.child(row);
+    }
+    Some(col)
+}
+
 fn command_palette(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
     if !view.cmd_open {
         return None;
@@ -1454,6 +1520,7 @@ impl Render for NeoView {
 
         let view_entity = cx.entity().clone();
         let view_for_submit = cx.entity().clone();
+        let view_for_model = cx.entity().clone();
 
         let mut root = v_flex()
             .size_full()
@@ -1488,7 +1555,14 @@ impl Render for NeoView {
                     .child(
                         div()
                             .text_color(neo_color(Tone::Muted))
-                            .child(format!("模型：{model}")),
+                            .id("model-open")
+                            .child(format!("模型：{model} ▾"))
+                            .on_click(move |_, _, cx| {
+                                view_for_model.update(cx, |this, cx| {
+                                    this.model_picker_open = !this.model_picker_open;
+                                    cx.notify();
+                                });
+                            }),
                     )
                     // 高风险档位常驻提示（ZCode 语义：风险状态不能只在切档时弹一次）
                     .child(if matches!(mode, ExecMode::AutoEdit | ExecMode::FullAccess) {
@@ -1682,6 +1756,11 @@ impl Render for NeoView {
 
             if secondary && key == "k" {
                 v.update(cx, |this, cx| this.toggle_cmd(cx));
+            } else if key == "escape" && v.read(cx).model_picker_open {
+                v.update(cx, |this, cx| {
+                    this.model_picker_open = false;
+                    cx.notify();
+                });
             } else if key == "escape" && cmd_open {
                 // Esc 的语义："关掉最上面那层"。面板没开时**不作声** ——
                 // 不做任何事好过误关别的东西。
@@ -1700,6 +1779,15 @@ impl Render for NeoView {
         });
 
         // ── 命令面板（D9）：覆盖在主区之上 ──
+        if let Some(p) = model_picker(self, cx) {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(48.))
+                    .left(px(120.))
+                    .child(p),
+            );
+        }
         if let Some(p) = command_palette(self, cx) {
             root = root.child(
                 div()
@@ -1719,7 +1807,7 @@ impl Render for NeoView {
 pub fn run(
     handle: KernelHandle,
     sessions: Option<Box<dyn neo_session::SessionControl>>,
-    models: Vec<String>,
+    models: Vec<neo_driver::transcript::ModelChoice>,
     title: String,
     status: String,
     mode: ExecMode,
@@ -1813,41 +1901,4 @@ pub fn run(
 /// 供测试与调用方检查工具参数摘要（转发共享实现，避免宿主各写一套）。
 pub use neo_driver::transcript::summarize_args as summarize_tool_args;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 模型循环：必须真的换到下一个，且**回绕**到第一个。
-    ///
-    /// 抽成自由函数就是为了能这样测 —— 循环写错的症状是"切了没反应"
-    /// 或"跳到不存在的模型"，而两者在真机上都只表现为"模型名没变"。
-    #[test]
-    fn next_model_cycles_and_wraps() {
-        let models: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
-        assert_eq!(next_model("a", &models), "b");
-        assert_eq!(next_model("b", &models), "c");
-        assert_eq!(next_model("c", &models), "a", "应回绕到第一个");
-    }
-
-    /// 只有一个模型（或列表为空）时**原样返回**。
-    ///
-    /// 这条是防"给用户一个切不动的按钮"：单 provider 是常见配置
-    /// （离线用 mock/selftest 时就是），那时切换应当是无操作而不是 panic 或跳到空值。
-    #[test]
-    fn next_model_is_a_noop_with_a_single_model() {
-        let one: Vec<String> = vec!["only".into()];
-        assert_eq!(next_model("only", &one), "only");
-        let empty: Vec<String> = vec![];
-        assert_eq!(next_model("x", &empty), "x", "空列表不该 panic");
-    }
-
-    /// 当前模型**不在列表里**（注册表变了/是启动时的旧名）时回到第一个。
-    ///
-    /// 不能返回"下一个"——那要先知道它是第几个，而它根本不在表里。
-    #[test]
-    fn next_model_falls_back_to_the_first_when_current_is_unknown() {
-        let models: Vec<String> = vec!["a".into(), "b".into()];
-        assert_eq!(next_model("ghost", &models), "a");
-    }
-}
 

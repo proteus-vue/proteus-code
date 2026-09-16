@@ -352,11 +352,17 @@ fn cmd_desktop(args: &[String]) -> i32 {
     // （同一个 build_kernel / 同一份 sessions / 同一个驱动），差别只在谁渲染。
     #[cfg(feature = "gpui")]
     if use_gpui {
-        // 模型名列表：装配期取一次（kernel 随后被 move 进驱动线程）
-        let models: Vec<String> = kernel
+        // 模型清单：装配期取一次（kernel 随后被 move 进驱动线程）。
+        //
+        // ⚠️ 取**完整信息**（说明 + 是否桩），不只取名字：宿主的选择器要标出
+        // 桩 provider（mock/selftest 跑不了真实任务），还要能显示说明。
+        // 只传名字的后果是用户切到桩之后以为模型坏了。
+        let models: Vec<neo_driver::transcript::ModelChoice> = kernel
             .available_models()
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| {
+                neo_driver::transcript::ModelChoice::new(m.name, m.description, m.production)
+            })
             .collect();
 
         let (handle, cmd_rx, batch_tx) = neo_driver::channel();

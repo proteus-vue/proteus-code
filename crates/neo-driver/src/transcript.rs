@@ -504,6 +504,47 @@ pub fn run_in_progress(blocks: &[Block], run: &ToolRun) -> bool {
         .any(|b| matches!(b, Block::Tool(c) if !c.done))
 }
 
+/// 模型清单里的一项（供宿主的模型选择器展示）。
+///
+/// # 为什么需要具名类型而不是 `(String, String, bool)`
+///
+/// 三元组在调用处只能写成 `models[0].2`，读的人必须回翻定义才知道那是
+/// "是否可用于真实任务"。而这一项**恰好是不能丢的**：`mock` / `selftest`
+/// 这类桩 provider 跑不了真实任务，用户切过去会以为模型坏了。
+///
+/// # 为什么放在共享层
+///
+/// 两个 GUI 宿主 + TUI 都要展示同一份清单，且"桩要标出来"这条规则必须一致 ——
+/// 各宿主自己拼会漂移出"同一个模型在某个宿主里被标成桩、在另一个里没有"
+/// 这种最难解释的不一致。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    /// 注册名（切换时用它）。
+    pub name: String,
+    /// 人类可读说明（可能为空）。
+    pub description: String,
+    /// 是否可用于真实任务。`false` = 桩（mock/selftest/demo 之类）。
+    pub production: bool,
+}
+
+impl ModelChoice {
+    pub fn new(name: impl Into<String>, description: impl Into<String>, production: bool) -> Self {
+        Self { name: name.into(), description: description.into(), production }
+    }
+
+    /// 展示名：桩要**显式标出**。
+    ///
+    /// 只显示名字的话，用户切到 `mock` 会以为模型坏了（它回的是固定文本）；
+    /// 标一个"（桩）"就说明了那是在演示链路、不是模型在答。
+    pub fn display_name(&self) -> String {
+        if self.production {
+            self.name.clone()
+        } else {
+            format!("{}（桩）", self.name)
+        }
+    }
+}
+
 /// 一次搜索命中：块下标 + 该块内的字节区间（**可多个**）。
 ///
 /// 只在**思考块**里搜（D3 的原始需求是"思考轨迹可搜索"）。
