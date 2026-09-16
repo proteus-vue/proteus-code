@@ -74,6 +74,16 @@ pub struct NeoView {
     status: String,
     /// 命令面板是否打开（D9）。
     cmd_open: bool,
+    /// **D7** 目标输入框内容（每行一个子任务）。
+    ///
+    /// 缺了它，gpui 宿主**根本没有设定目标的入口** —— 面板上写着
+    /// "未设定（用 /goal 设定）"，而界面上并不存在能设定它的地方（`/goal`
+    /// 是 TUI 的命令行语法），用户被告知了一条走不通的路。
+    goal_input: String,
+    /// 目标输入框（惰性建，理由同任务输入框）。**多行**（`TextareaState`）：
+    /// 目标天然是多行的（每行一个子任务），单行框会把换行吃掉。
+    goal_state: Option<Entity<neo_ui_kit::component::input::TextareaState>>,
+    goal_subs: Vec<neo_ui_kit::gpui::Subscription>,
     /// **D3 思考轨迹搜索**串。
     ///
     /// 搜的是"想不起来的某段推理"，所以范围**只到思考块**：
@@ -170,6 +180,9 @@ impl NeoView {
             transcript: Transcript::new(),
             input: String::new(),
             reasoning_query: String::new(),
+            goal_input: String::new(),
+            goal_state: None,
+            goal_subs: Vec::new(),
             focus_report: std::env::var("NEO_GUI_FOCUS").is_ok(),
             composer_blocked_last: false,
             focus_intent: neo_ui_behavior::FocusIntent::new(),
@@ -296,6 +309,53 @@ impl NeoView {
         );
         self.search_state = Some(state);
         self.search_subs = vec![sub];
+    }
+
+    /// 目标控制（暂停/恢复/清除）。
+    ///
+    /// 与 egui 宿主同一个做法：都经 `Op` 走内核，不在宿主侧臆测目标状态
+    ///（宿主自己改 `goal` 会与内核的快照漂移）。
+    fn goal_action(&mut self, op: Op) {
+        self.handle.send(op);
+    }
+
+    /// **D7** 设定目标（多行输入：每行一个子任务，由内核拆解）。
+    fn set_goal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.goal_input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.handle.send(Op::GoalSet { goal: text });
+        self.notice = Some("已提交目标（等待内核拆解）".into());
+        // 清空输入框，理由同任务输入框（否则同一目标会被再提交一次）
+        self.goal_input.clear();
+        if let Some(state) = self.goal_state.clone() {
+            state.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    /// 惰性建目标输入框（多行：目标天然是多行的）。
+    fn ensure_goal_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.goal_state.is_some() {
+            return;
+        }
+        let state = cx.new(|cx| {
+            neo_ui_kit::component::input::TextareaState::new(window, cx)
+                .placeholder("每行一个子任务")
+        });
+        let sub = cx.subscribe_in(
+            &state,
+            window,
+            |this, state, ev: &InputEvent, _window, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.goal_input = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+            },
+        );
+        self.goal_state = Some(state);
+        self.goal_subs = vec![sub];
     }
 
     fn submit(&mut self) {
@@ -937,11 +997,28 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
 
     match &view.transcript.goal {
         None => {
+            // **必须在这里能设定**：面板写着"未设定（用 /goal 设定）"却
+            // 不给输入框，用户就被指去了一条 GUI 里走不通的路
+            //（`/goal` 是 TUI 的命令行语法）。
             col = col.child(
                 div()
                     .text_color(neo_color(Tone::Muted))
-                    .child("未设定（用 /goal 设定）"),
+                    .child("未设定：填子任务后开始"),
             );
+            if let Some(state) = view.goal_state.clone() {
+                let v = cx.entity().clone();
+                col = col
+                    .child(div().child(
+                        neo_ui_kit::component::input::Textarea::new(&state)
+                            .appearance(false)
+                            .h(px(72.)),
+                    ))
+                    .child(Button::new("goal-start").label("开始").on_click(
+                        move |_, window, cx| {
+                            v.update(cx, |this, cx| this.set_goal(window, cx));
+                        },
+                    ));
+            }
         }
         Some(g) => {
             // 恒用协议层的 summary()：各宿主自己拼会漂移出"同一个目标长两副样子"
@@ -959,6 +1036,43 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
                     div()
                         .text_color(neo_color(tone))
                         .child(format!("{mark} {}", s.title)),
+                );
+            }
+            // **暂停 / 恢复 / 清除**：目标一旦立起来，没有这三个按钮就只能靠
+            // 重开窗口才能停下它 —— 而目标会持续自动推进（花真钱）。
+            // 此前 gpui 侧只有"设定"没有"控制"，是 D7 只做了一半。
+            {
+                let goal_id = g.goal_id.clone();
+                let v_pause = cx.entity().clone();
+                let v_clear = cx.entity().clone();
+                let paused = g.paused;
+                col = col.child(
+                    h_flex()
+                        .gap_2()
+                        .pt_1()
+                        .child(
+                            Button::new("goal-pause")
+                                // 已暂停时按钮文案换成"恢复"，避免用户点了
+                                // 一个语义相反却看不出来的按钮
+                                .label(if paused { "恢复" } else { "暂停" })
+                                .on_click(move |_, _, cx| {
+                                    let id = goal_id.clone();
+                                    v_pause.update(cx, |this, _| {
+                                        this.goal_action(if paused {
+                                            Op::GoalResume { goal_id: id }
+                                        } else {
+                                            Op::GoalPause { goal_id: id }
+                                        });
+                                    });
+                                }),
+                        )
+                        .child(Button::new("goal-clear").label("清除").on_click(
+                            move |_, _, cx| {
+                                v_clear.update(cx, |this, _| {
+                                    this.goal_action(Op::GoalClear);
+                                });
+                            },
+                        )),
                 );
             }
         }
@@ -1209,6 +1323,7 @@ impl Render for NeoView {
         // 0) 输入框（惰性；第一次渲染时 window 才可用）
         self.ensure_input(window, cx);
         self.ensure_search(window, cx);
+        self.ensure_goal_input(window, cx);
 
         // 审批刚答完 → 把焦点还回输入框（用户接着就要打字）。
         // 只在**恢复那一刻**抢一次：每帧都抢会让用户没法把焦点移到搜索框。

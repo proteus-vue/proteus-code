@@ -121,7 +121,7 @@ ZCode 官方文档把界面写得很细（[zcode.z.ai/en/docs](https://zcode.z.a
 | D4 | 工具调用**分组** + 参数摘要 | 两者 | ✅ **已实现**（gpui 侧：卡片含名字/状态/exit/参数摘要/输出/截断标注；**同轮连续调用折叠成组**，组头给「✓/✗/⏳ + N 次调用」，点开逐张展开。分组判定在共享层 `neo-driver::transcript::tool_runs` —— 两个宿主必须用同一套判定，否则同一个转录在两处长得不一样，所以逻辑从第一天就放在共享层。<br>**egui 侧只有卡片、未接分组**：egui 已冻结（只修 bug，等 gpui 覆盖齐了删除），不为它加新功能；将来若真需要，接的是同一个函数，不会长出第二套判定） | ✅ `ToolCallBegin{name,arguments}` |
 | D5 | **diff 渲染** | 两者 | ✅ **已实现**（按行着色；顺带修掉"预览与执行可能不是同一文件"的缺陷） | ✅ `PatchProposed{path,diff}` |
 | D6 | 每轮**执行摘要 + 耗时** | ZCode | ✅ **两个 GUI 宿主都已实现**（token + 耗时。耗时**刻意不进共享转录模型**——挂钟时间会破坏回放确定性，故做成可注入时间的纯逻辑 `neo-ui-behavior::clock`） | ✅ `TurnComplete`（耗时由宿主计时） |
-| D7 | 右侧 summary / Goal 面板 | ZCode | ✅ **两个 GUI 宿主都已实现**（目标卡片 + 子任务清单 + 暂停/恢复/清除） | ✅ `GoalUpdated{snapshot}` |
+| D7 | 右侧 summary / Goal 面板 | ZCode | ✅ **两个 GUI 宿主都已实现**（目标卡片 + 子任务清单 + **设定入口** + 暂停/恢复/清除）。<br>补过两处"只做了一半"：gpui 侧原先**没有设定目标的入口**（面板写着"未设定（用 /goal 设定）"，而 `/goal` 是 TUI 的命令行语法，GUI 里走不通 —— 等于指了条死路），也**没有暂停/恢复/清除**（目标会持续自动推进并花真钱，却只能重开窗口才停得下来）。真机逐个验证过：三个按钮都真的发出对应 `Op`，日志里有 `goal_pause`/`goal_resume`/`goal_cleared`，按钮文案跟随内核状态在"暂停/恢复"间切换 | ✅ `GoalUpdated{snapshot}` |
 | D8 | 底部终端面板 | ZCode | ⚠️ **两宿主已做命令台**（`Cmd+K` → `/terminal` 开关；输入命令走 `Op::Shell`：**不经模型**、走沙箱、输出上限一致，真机验证日志为 `op {"shell"...}` + `tool_call_end exit 0`）。**与 ZCode 的关键差别**：它用 `node-pty` 起真 PTY（可跑 vim/htop 这类全屏交互程序），我们是**每条命令一个进程、无 PTY** —— 所以面板叫「命令台」不叫「终端」，边界如实呈现 | ✅ 无需新后端能力（原写「需新功能」是过时判断） |
 | D9 | 命令中心（`Cmd+K`） | ZCode | ⚠️ **两宿主已做 commands 一类**（覆盖式面板 + 搜索过滤 + 键盘导航 + 11 条命令，每条都有可观察效果，有测试逐个守着）。**conversations / files 两类未做** —— 它们需要会话库与文件索引，属 D1 范畴 | 纯前端（已兑现） |
 | D10 | 审批：**阻塞 composer** + 三档 + 风险常驻 | ZCode | ✅ **已实现**（三档 Allow/Always/Reject；未决时输入框 `disabled`；高风险档位在状态栏**常驻**风险提示） | 部分（`ApprovalRequest`） |
