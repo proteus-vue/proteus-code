@@ -109,7 +109,7 @@ ZCode 官方文档把界面写得很细（[zcode.z.ai/en/docs](https://zcode.z.a
 | D1 | 左侧任务/工作区栏（状态、`+/-` 行数、分组） | ZCode | ⚠️ **两个 GUI 宿主都做会话栏**（egui 在左侧 / gpui 在右侧面板，含列表+当前项高亮+新建+可切回）（列表 + 当前项高亮 + 新建 + 可切回；当前会话即使尚未落盘也会显示）。**未做**：按工作区分组、运行/未读/失败状态圆点、`+/-` 行数、Grouped/Workspace/Timeline 视图、Archive、搜索 —— 这些需要会话元数据里有工作区与运行状态，当前 `SessionStore` 只存 id/标题/记录数（**列出来但显示不出来是比不列更糟的假象**，故不做） | 部分 |
 | D2 | 转录区 Markdown 渲染 | 两者 | ✅ **已实现**（共享 `neo-text::markdown::blocks`，代码块带语法高亮、列表/引用/链接齐） | ✅ `AgentMessageDelta` |
 | D3 | **思考轨迹**（可折叠、可搜索） | ZCode | ✅ **已实现**（可折叠 + 显示字数；**搜索未做**） | ✅ `ReasoningDelta` |
-| D4 | 工具调用**分组** + 参数摘要 | 两者 | ✅ **已实现**（卡片含名字/状态/exit/参数摘要/输出/截断标注；**调用分组未做**） | ✅ `ToolCallBegin{name,arguments}` |
+| D4 | 工具调用**分组** + 参数摘要 | 两者 | ✅ **已实现**（卡片含名字/状态/exit/参数摘要/输出/截断标注；**同轮连续调用折叠成组**，组头给「✓/✗/⏳ + N 次调用」，点开逐张展开。分组判定在共享层 `neo-driver::transcript::tool_runs` —— 两个宿主必须是同一套，否则同一个转录在两处长得不一样） | ✅ `ToolCallBegin{name,arguments}` |
 | D5 | **diff 渲染** | 两者 | ✅ **已实现**（按行着色；顺带修掉"预览与执行可能不是同一文件"的缺陷） | ✅ `PatchProposed{path,diff}` |
 | D6 | 每轮**执行摘要 + 耗时** | ZCode | ✅ **两个 GUI 宿主都已实现**（token + 耗时。耗时**刻意不进共享转录模型**——挂钟时间会破坏回放确定性，故做成可注入时间的纯逻辑 `neo-ui-behavior::clock`） | ✅ `TurnComplete`（耗时由宿主计时） |
 | D7 | 右侧 summary / Goal 面板 | ZCode | ✅ **两个 GUI 宿主都已实现**（目标卡片 + 子任务清单 + 暂停/恢复/清除） | ✅ `GoalUpdated{snapshot}` |

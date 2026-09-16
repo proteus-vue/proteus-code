@@ -66,6 +66,28 @@ pub struct NeoView {
     clock: neo_ui_behavior::TurnClock,
     /// 每轮耗时（按 `TurnComplete` 出现顺序追加，与 `Block::TurnSummary` 对齐）。
     turn_durations: Vec<Option<std::time::Duration>>,
+    /// 脚本化验证用：强制展开所有工具组（`NEO_GUI_EXPAND`）。
+    ///
+    /// 为什么需要它：分组标题是自绘的行，**不进无障碍树**，而 gpui 窗口在
+    /// WindowServer 里没有稳定身份（`bundle_id` 为空）→ 自动化点击这条路
+    /// 走不通（实测报 "no stable WindowServer app/window identity"）。
+    /// 于是展开态的渲染就只能靠人眼点、或者靠这个开关。与
+    /// `NEO_GUI_PROMPT` / `NEO_GUI_PANEL` 同一个理由：canvas 收不到
+    /// 合成输入，脚本化验证必须留一个入口。
+    force_expand_groups: bool,
+    /// 冒烟截图用的就绪信号（`NEO_GUI_SHOT`）。
+    ///
+    /// 外部脚本无法直接问"这一轮跑完了吗"，只能用固定 `sleep` 猜 —— 猜短了
+    /// 截到半截画面，猜长了白等。改成：**这一轮真正结束时把窗口标题改成
+    /// `NEO-SMOKE-READY`**，标题可以从系统里读到，于是等待变成有条件的。
+    /// 值 = 是否已经观察到"跑起来过"（否则首帧的状态就满足"不在运行"）。
+    shot_armed: Option<bool>,
+    // **D4** 工具组的折叠状态**不在这里** —— 它按块下标记账，必须与
+    // `clear_view` 一起被清理，所以和 `collapsed_reasoning` 同放共享层
+    // （见 `neo_driver::transcript::Transcript::expanded_tool_runs`）。
+    //
+    // 默认**折叠**大于 1 的组：连续 5 次工具调用各带参数与输出会把转录淹掉，
+    // 而用户此刻要看的是正文。单个调用不做分组外壳（套一层反而多一次点击）。
     /// 启动时自动提交的任务（一次性）。来源 `NEO_GUI_PROMPT`。
     ///
     /// 与 egui 宿主的同名钩子同源（AGENTS.md 里 `PROTEUS_CODE_SMOKE` 的约定）：
@@ -95,6 +117,8 @@ impl NeoView {
             show_reasoning: true,
             clock: neo_ui_behavior::TurnClock::new(),
             turn_durations: Vec::new(),
+            force_expand_groups: std::env::var("NEO_GUI_EXPAND").is_ok(),
+            shot_armed: std::env::var("NEO_GUI_SHOT").ok().map(|_| false),
             transcript: Transcript::new(),
             input: String::new(),
             mode,
@@ -433,15 +457,101 @@ fn styled_line(spans: &[(String, Tone)]) -> impl IntoElement {
     )
 }
 
+/// 单个工具调用的卡片。
+///
+/// 抽成自由函数，是为了让"组内展开"与"零散单次调用"复用同一份渲染 ——
+/// 两处各画一遍，迟早会画出两种样子（同一个工具在折叠与展开时颜色不同）。
+fn tool_card(c: &neo_driver::transcript::ToolCard) -> impl IntoElement {
+    let state = if !c.done {
+        "执行中"
+    } else if c.exit_code == Some(0) {
+        "完成"
+    } else {
+        "失败"
+    };
+    let tone = if !c.done {
+        Tone::Info
+    } else if c.exit_code == Some(0) {
+        Tone::Success
+    } else {
+        Tone::Error
+    };
+    // 左缩进：让"属于同一组"这件事在视觉上成立，而不只靠上面那行标题
+    let mut col = v_flex().gap_1().pl_3().child(
+        h_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_color(neo_color(Tone::Primary))
+                    .child(format!("▸ {}", c.name)),
+            )
+            .child(div().text_color(neo_color(tone)).child(state)),
+    );
+    if !c.args.is_empty() {
+        col = col.child(
+            div()
+                .text_color(neo_color(Tone::Muted))
+                .child(c.args.clone()),
+        );
+    }
+    // stderr 非空时**只**显示 stderr：两者拼在一起，用户分不清哪句是失败的
+    // 原因、哪句是之前的正常输出。内核已按此约定填这两个字段。
+    let body = if c.stderr.is_empty() { &c.stdout } else { &c.stderr };
+    // 裁掉**尾部**空白再显示：命令行输出几乎总以换行结尾，原样画出来就是
+    // 卡片底部多一个空行，一张张叠起来节奏全乱（真机截图看出来的）。
+    // 只裁尾部 —— 前导缩进是输出内容的一部分（缩进的日志/JSON 有意义）。
+    let body = body.trim_end();
+    if !body.is_empty() {
+        col = col.child(
+            div()
+                .text_color(neo_color(if c.stderr.is_empty() {
+                    Tone::Text
+                } else {
+                    Tone::Error
+                }))
+                .child(body.to_string()),
+        );
+    }
+    if c.truncated {
+        // 截断必须**说出来**：内核如实截了，界面不说，用户就以为那是全部。
+        // 内存有界是内核义务，如实上报是界面义务。
+        col = col.child(
+            div()
+                .text_color(neo_color(Tone::Warning))
+                .child("（输出已截断）"),
+        );
+    }
+    col
+}
+
 /// 转录区：把 `Block` 画出来。
 /// 转录区。**是方法而不是自由函数** —— 它需要访问折叠状态、并且要拿实体
 /// 来挂点击回调（思考块的折叠/展开）。自由函数只能拿到数据快照。
 impl NeoView {
     fn transcript_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let blocks = &self.transcript.blocks;
+        // **D4 工具分组**：连续的工具调用合成一组。
+        //
+        // 判定逻辑在共享层（`neo_driver::transcript::tool_runs`），宿主只做展示决策 ——
+        // 两个宿主必须给出同一套分组，否则同一个转录在两个窗口里长得不一样，
+        // 那是最难向用户解释的一类不一致。
+        //
+        // **只有 ≥2 个调用的组才有外壳**：单个调用套一层"1 次工具调用"，
+        // 只是多一次点击，没有半点信息增量。
+        let mut group_of: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut group_runs: std::collections::HashMap<usize, neo_driver::transcript::ToolRun> =
+            std::collections::HashMap::new();
+        for run in neo_driver::transcript::tool_runs(blocks) {
+            if run.len >= 2 {
+                for i in run.start..run.start + run.len {
+                    group_of.insert(i, run.start);
+                }
+                group_runs.insert(run.start, run);
+            }
+        }
         let mut col = v_flex().gap_1().p_3();
-            for (idx, b) in blocks.iter().enumerate() {
-                match b {
+        for (idx, b) in blocks.iter().enumerate() {
+            match b {
                 Block::User(t) => {
                     col = col.child(div().text_color(neo_color(Tone::Accent)).child(format!("┃ {t}")));
                 }
@@ -483,51 +593,59 @@ impl NeoView {
                         );
                     }
                 }
-                Block::Tool(c) => {
-                    let state = if !c.done {
-                        "执行中"
-                    } else if c.exit_code == Some(0) {
-                        "完成"
+                // 组内非首块：跳过（已由组的首块代表整组渲染）。
+                //
+                // 在渲染层做而不是把 `Block` 预先合并：合并会让"展开某一组"
+                // 变成要改数据，而分组是纯展示决策。
+                Block::Tool(_) if group_of.get(&idx).is_some_and(|s| *s != idx) => {}
+
+                Block::Tool(_) if group_runs.contains_key(&idx) => {
+                    let run = &group_runs[&idx];
+                    let expanded =
+                        self.force_expand_groups || self.transcript.expanded_tool_runs.contains(&idx);
+                    let all_ok = neo_driver::transcript::run_all_succeeded(blocks, run);
+                    let in_progress = neo_driver::transcript::run_in_progress(blocks, run);
+                    // 整组的色调取决于**最坏的那个**：一组绿字里藏着一个失败，
+                    // 用户必然漏看 —— 这是信息层次里最容易骗人的一处。
+                    let (mark, tone) = if in_progress {
+                        ("⏳", Tone::Info)
+                    } else if all_ok {
+                        ("✓", Tone::Success)
                     } else {
-                        "失败"
+                        ("✗", Tone::Error)
                     };
-                    let tone = if !c.done {
-                        Tone::Info
-                    } else if c.exit_code == Some(0) {
-                        Tone::Success
-                    } else {
-                        Tone::Error
-                    };
-                    col = col.child(h_flex().gap_2().child(
+                    let arrow = if expanded { "▾" } else { "▸" };
+                    let v = cx.entity().clone();
+                    col = col.child(
                         div()
-                            .text_color(neo_color(Tone::Primary))
-                            .child(format!("▸ {}", c.name)),
-                    ).child(div().text_color(neo_color(tone)).child(state)));
-                    if !c.args.is_empty() {
-                        col = col.child(
-                            div().text_color(neo_color(Tone::Muted)).child(c.args.clone()),
-                        );
-                    }
-                    let body = if c.stderr.is_empty() { &c.stdout } else { &c.stderr };
-                    if !body.trim().is_empty() {
-                        col = col.child(
-                            div()
-                                .text_color(neo_color(if c.stderr.is_empty() {
-                                    Tone::Text
-                                } else {
-                                    Tone::Error
-                                }))
-                                .child(body.clone()),
-                        );
-                    }
-                    if c.truncated {
-                        col = col.child(
-                            div()
-                                .text_color(neo_color(Tone::Warning))
-                                .child("（输出已截断）"),
-                        );
+                            .id(("tool-group", idx))
+                            .text_color(neo_color(tone))
+                            .child(format!("{arrow} {mark} {} 次工具调用", run.tool_count()))
+                            .on_click(move |_, _, cx| {
+                                v.update(cx, |this, cx| {
+                                    // `HashSet::remove` 返回"是否真的移除了"，
+                                    // 正好当作折叠/展开的切换，不必先查再插。
+                                    if !this.transcript.expanded_tool_runs.remove(&idx) {
+                                        this.transcript.expanded_tool_runs.insert(idx);
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                    if expanded {
+                        for b in &blocks[run.start..run.start + run.len] {
+                            if let Block::Tool(c) = b {
+                                col = col.child(tool_card(c));
+                            }
+                        }
                     }
                 }
+
+                // 单个调用：直接一张卡，不套组外壳（套一层反而多一次点击）。
+                Block::Tool(c) => {
+                    col = col.child(tool_card(c));
+                }
+
                 Block::Diff { path, diff } => {
                     col = col.child(
                         div()
@@ -906,7 +1024,7 @@ fn approval_dialog(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElemen
 }
 
 impl Render for NeoView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 1) 收事件（非阻塞）
         // 冒烟钩子：首帧把 NEO_GUI_PROMPT 当作一次提交（只做一次）
         if let Some(text) = self.auto_prompt.take() {
@@ -924,6 +1042,16 @@ impl Render for NeoView {
         // 这样信号与 pump 的职责不重叠。
         if changed {
             cx.notify();
+        }
+        // 冒烟就绪：先等到"确实运行过"，再等运行结束 —— 只判断后者的话，
+        // 提交与 `TurnStarted` 到达之间的那一帧就会被误判成已完成。
+        if let Some(armed) = self.shot_armed {
+            if self.transcript.running {
+                self.shot_armed = Some(true);
+            } else if armed && self.transcript.pending.is_none() {
+                self.shot_armed = None;
+                window.set_window_title("NEO-SMOKE-READY");
+            }
         }
         // 3) 轮次进行中：推进一步。
         //

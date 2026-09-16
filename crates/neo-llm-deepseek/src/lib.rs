@@ -1489,9 +1489,19 @@ impl ModelProvider for ScriptedProvider {
 
 /// 便利构造：一次工具调用增量（供 `--provider selftest` 的脚本使用）。
 pub fn tool_call(name: &str, args: serde_json::Value) -> ModelDelta {
+    tool_call_n(0, name, args)
+}
+
+/// 同上，但带序号 —— **一轮内多次调用必须用不同的 `seq`**。
+///
+/// 工具调用是靠 `id` 配对的：同名工具调用两次而 id 相同，第二遍的
+/// `ToolCallEnd` 会认领错卡片（界面上表现为第一次永远停在"执行中"）。
+/// 真实模型每次调用给的都是新的 id，桩必须同样如此 —— 这是脚本自己的
+/// 契约，不是可以省掉的细节。
+pub fn tool_call_n(seq: usize, name: &str, args: serde_json::Value) -> ModelDelta {
     ModelDelta::ToolCall(ToolInvocation {
         // 确定性 id：自检模式必须可回放，不能用随机数
-        id: format!("selftest-{name}"),
+        id: format!("selftest-{seq}-{name}"),
         name: name.to_string(),
         arguments: args,
     })

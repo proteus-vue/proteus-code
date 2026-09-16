@@ -39,7 +39,7 @@ exec 选项：
   --goal <目标文本>            目标模式：按行拆子任务，自动逐阶段推进
                                直到完成或触发停止条件（与任务描述互斥）
   --json                       输出 JSON（便于脚本消费）
-  --provider <deepseek|mock|selftest|demo>   模型后端（默认 deepseek）
+  --provider <deepseek|mock|demo|selftest|multitool>   模型后端（默认 deepseek）
                                 selftest = 按脚本调用一次工具，验证完整链路（无需 key）
 
 desktop 选项：
@@ -1167,6 +1167,20 @@ fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
             )]],
             "selftest 脚本执行完毕（工具是否成功见上方工具行与失败原因）。",
         ).with_name("selftest"))));
+    // 一轮内**连续多次**工具调用：D4 工具分组的唯一可离线复现的触发条件。
+    //
+    // 分组只在"同一轮里 ≥2 个调用"时出现（轮摘要会把两轮隔开），所以
+    // 单次调用的 selftest 与只回正文的 mock 都验不到它 —— 缺了这个桩，
+    // "分组到底长什么样"就只能靠读代码想象。
+    entries.push(mk("multitool", "演示工具分组：一轮内连续 3 次调用", 0, false,
+        std::sync::Arc::new(neo_llm_deepseek::ScriptedProvider::scripted(
+            vec![vec![
+                neo_llm_deepseek::tool_call_n(0, "bash", serde_json::json!({"cmd": "echo 第一次"})),
+                neo_llm_deepseek::tool_call_n(1, "bash", serde_json::json!({"cmd": "echo 第二次"})),
+                neo_llm_deepseek::tool_call_n(2, "bash", serde_json::json!({"cmd": "echo 第三次"})),
+            ]],
+            "multitool 脚本执行完毕：上面 3 次调用属于同一轮，应当折叠成一组。",
+        ).with_name("multitool"))));
 
     // ── 用户级注册表里的服务商（providers.json）──────────────────────
     //

@@ -92,6 +92,13 @@ pub struct Transcript {
     pub running: bool,
     /// 已折叠的思考块（按块下标）。
     pub collapsed_reasoning: std::collections::HashSet<usize>,
+    /// 已**展开**的工具组（按组的起始块下标）。
+    ///
+    /// 与 `collapsed_reasoning` 同一个地址，理由也同一个：它们都是"按块下标
+    /// 记的折叠状态"。放进宿主会漏掉 `clear_view` 的清理 —— 清屏后块下标
+    /// 从 0 重新开始，残留的下标会与新块撞上，于是某个组莫名其妙是展开的
+    /// （而这种 bug 只在"清除后恰好又生成了同下标的组"时出现，最难查）。
+    pub expanded_tool_runs: std::collections::HashSet<usize>,
     /// 累计 token。
     pub total_in: u64,
     pub total_out: u64,
@@ -159,9 +166,16 @@ impl Transcript {
                 }));
             }
             EventMsg::ToolCallEnd { id, exit_code, stdout, stderr, truncated } => {
-                // 按 id 配对（ToolCallEnd 只带 id，名字在 Begin 里）
-                if let Some(card) = self.blocks.iter_mut().rev().find_map(|b| match b {
-                    Block::Tool(c) if c.id == *id => Some(c),
+                // 按 id 配对（ToolCallEnd 只带 id，名字在 Begin 里）。
+                //
+                // 取**最早的那个未完成**卡，而不是最后一个匹配的：同一个 id
+                // 出现两次时（provider 给了重复 id），从后往前找会让第一张卡
+                // 永远停在"执行中" —— 界面上是一条永远不结束的工具行，
+                // 而用户没有任何办法知道它其实早就跑完了。
+                //
+                // 顺序也天然正确：内核按调用顺序发 End，逐个认领即一一对应。
+                if let Some(card) = self.blocks.iter_mut().find_map(|b| match b {
+                    Block::Tool(c) if c.id == *id && !c.done => Some(c),
                     _ => None,
                 }) {
                     card.done = true;
@@ -266,6 +280,7 @@ impl Transcript {
     pub fn clear_view(&mut self) {
         self.blocks.clear();
         self.collapsed_reasoning.clear();
+        self.expanded_tool_runs.clear();
     }
 
     /// 记下"已为该快照请求推进"，避免重复下发。
@@ -399,3 +414,241 @@ pub fn diff_line_kind(line: &str) -> DiffLineKind {
     }
     DiffLineKind::Meta
 }
+
+/// 一段**连续的工具调用**（用于分组显示）。
+///
+/// # 它解决的问题
+///
+/// 模型连续调 5 次工具时，5 张卡片（每张含参数摘要与输出）会把转录淹掉，
+/// 用户反而看不到正文。ZCode 的做法是把它们**分成组**呈现。
+///
+/// # 判定放在共享层（纯逻辑、可测）
+///
+/// "哪些块构成一组"是**对 `&[Block]` 的纯计算**，与渲染后端无关 ——
+/// 所以它在共享层，两个 GUI 宿主用同一套判定（否则同一个转录在两个宿主里
+/// 分组不同，那是最难解释的一类不一致）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRun {
+    /// 该组第一个块在 `blocks` 里的下标。
+    pub start: usize,
+    /// 该组包含的块数（≥1）。
+    pub len: usize,
+}
+
+impl ToolRun {
+    /// 工具总数（每组都是纯 Tool 块，所以等于 len）。
+    pub fn tool_count(&self) -> usize {
+        self.len
+    }
+}
+
+/// 把连续的 `Tool` 块切成组。返回每组的起止。
+///
+/// 只认**紧邻**的连续（中间夹任何别的块就断开）—— 那正是"一次连续的工具爆发"
+/// 的语义：中间有正文说明模型已经回到对话了。
+pub fn tool_runs(blocks: &[Block]) -> Vec<ToolRun> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < blocks.len() {
+        if !matches!(blocks[i], Block::Tool(_)) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < blocks.len() && matches!(blocks[i], Block::Tool(_)) {
+            i += 1;
+        }
+        out.push(ToolRun { start, len: i - start });
+    }
+    out
+}
+
+/// 组内所有工具是否都已完成，且都成功。
+///
+/// 供渲染层决定组标题的色调：**只要有失败就不能显示成"成功色"** ——
+/// 一组绿字里藏着一个失败，用户会漏看（这是信息层次里最容易骗人的一处）。
+pub fn run_all_succeeded(blocks: &[Block], run: &ToolRun) -> bool {
+    blocks[run.start..run.start + run.len].iter().all(|b| match b {
+        Block::Tool(c) => c.done && c.exit_code == Some(0),
+        _ => true,
+    })
+}
+
+/// 组是否还在执行中（有未完成的工具）。
+pub fn run_in_progress(blocks: &[Block], run: &ToolRun) -> bool {
+    blocks[run.start..run.start + run.len]
+        .iter()
+        .any(|b| matches!(b, Block::Tool(c) if !c.done))
+}
+
+#[cfg(test)]
+mod tool_group_tests {
+    use super::*;
+    use neo_protocol::EventMsg;
+
+    fn tool(id: &str, ok: bool) -> Vec<EventMsg> {
+        vec![
+            EventMsg::ToolCallBegin {
+                id: id.into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"cmd": "ls"}),
+            },
+            EventMsg::ToolCallEnd {
+                id: id.into(),
+                exit_code: if ok { 0 } else { 1 },
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+            },
+        ]
+    }
+
+    /// 清屏必须连**按块下标记的**折叠状态一起清 —— 否则清屏后块下标从 0
+    /// 重来，残留的下标会与新块撞上，某个组莫名其妙是展开的。
+    #[test]
+    fn clear_view_forgets_expanded_groups() {
+        let mut t = Transcript::new();
+        t.push_batch(&tool("a", true));
+        t.push_batch(&tool("b", true));
+        t.expanded_tool_runs.insert(0);
+        t.collapsed_reasoning.insert(0);
+        t.clear_view();
+        assert!(t.expanded_tool_runs.is_empty(), "清屏后不应残留展开状态");
+        assert!(t.collapsed_reasoning.is_empty(), "清屏后不应残留折叠状态");
+    }
+
+    /// 三条 Begin 用**同一个 id**（provider 没给唯一 id）—— 界面上不能出现
+    /// "永远执行中"的卡片。
+    ///
+    /// 这是从真机截图反推出来的：桩把同名调用都发成 `selftest-bash`，
+    /// 于是第二、三次的 End 反复认领最后一张卡，前两张停在 ⏳。
+    /// 配对改成"认领最早的未完成卡"后，每次 End 都能落到一张真正在等的卡上。
+    #[test]
+    fn duplicate_ids_each_claim_their_own_card() {
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            events.push(EventMsg::ToolCallBegin {
+                id: "dup".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"cmd": "ls"}),
+            });
+        }
+        for _ in 0..3 {
+            events.push(EventMsg::ToolCallEnd {
+                id: "dup".into(),
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+            });
+        }
+        let t = transcript_with(events);
+        let done = t
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Tool(c) if c.done))
+            .count();
+        assert_eq!(done, 3, "三条重复 id 的调用应各自收到一次 End");
+    }
+
+    fn transcript_with(events: Vec<EventMsg>) -> Transcript {
+        let mut t = Transcript::new();
+        t.push_batch(&events);
+        t
+    }
+
+    #[test]
+    fn consecutive_tool_calls_form_one_run() {
+        let mut ev = Vec::new();
+        for i in 0..4 {
+            ev.extend(tool(&format!("c{i}"), true));
+        }
+        let t = transcript_with(ev);
+        let runs = tool_runs(&t.blocks);
+        assert_eq!(runs.len(), 1, "4 次连续调用应为 1 组：{:?}", t.blocks);
+        assert_eq!(runs[0].tool_count(), 4);
+    }
+
+    /// **中间夹了别的块就断开** —— 那说明模型回到了对话，
+    /// 前后不是"同一次工具爆发"。
+    #[test]
+    fn a_non_tool_block_splits_the_runs() {
+        let mut ev = Vec::new();
+        ev.extend(tool("c1", true));
+        ev.extend(tool("c2", true));
+        ev.push(EventMsg::AgentMessageDone { text: "做完了".into() });
+        ev.extend(tool("c3", true));
+        let t = transcript_with(ev);
+        let runs = tool_runs(&t.blocks);
+        assert_eq!(runs.len(), 2, "被正文断成两组：{:?}", t.blocks);
+        assert_eq!(runs[0].tool_count(), 2);
+        assert_eq!(runs[1].tool_count(), 1);
+    }
+
+    #[test]
+    fn lone_tool_calls_are_their_own_runs() {
+        let mut ev = Vec::new();
+        ev.extend(tool("c1", true));
+        ev.push(EventMsg::AgentMessageDone { text: "中间".into() });
+        ev.extend(tool("c2", true));
+        ev.push(EventMsg::AgentMessageDone { text: "再中间".into() });
+        ev.extend(tool("c3", true));
+        let t = transcript_with(ev);
+        assert_eq!(tool_runs(&t.blocks).len(), 3, "三处孤立调用 = 三组");
+    }
+
+    #[test]
+    fn no_tools_means_no_runs() {
+        let t = transcript_with(vec![
+            EventMsg::UserSubmitted { text: "问".into() },
+            EventMsg::AgentMessageDone { text: "答".into() },
+        ]);
+        assert!(tool_runs(&t.blocks).is_empty());
+    }
+
+    /// 组标题的色调判据：**有失败就不能算成功**。
+    ///
+    /// 这条防的是"一组绿字里藏着一个失败" —— 信息层次里最容易骗人的一处。
+    #[test]
+    fn a_run_with_any_failure_is_not_reported_as_succeeded() {
+        let mut ev = Vec::new();
+        ev.extend(tool("c1", true));
+        ev.extend(tool("c2", false)); // 一个失败
+        ev.extend(tool("c3", true));
+        let t = transcript_with(ev);
+        let runs = tool_runs(&t.blocks);
+        assert_eq!(runs.len(), 1);
+        assert!(
+            !run_all_succeeded(&t.blocks, &runs[0]),
+            "含失败的组不能报成功：{:?}",
+            t.blocks
+        );
+        assert!(!run_in_progress(&t.blocks, &runs[0]), "都结束了");
+    }
+
+    #[test]
+    fn a_run_with_an_unfinished_tool_is_in_progress() {
+        let t = transcript_with(vec![EventMsg::ToolCallBegin {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: serde_json::Value::Null,
+        }]);
+        let runs = tool_runs(&t.blocks);
+        assert_eq!(runs.len(), 1);
+        assert!(run_in_progress(&t.blocks, &runs[0]), "未完成的工具 → 组在执行中");
+        assert!(!run_all_succeeded(&t.blocks, &runs[0]));
+    }
+
+    #[test]
+    fn all_successful_run_is_reported_as_succeeded() {
+        let mut ev = Vec::new();
+        for i in 0..3 {
+            ev.extend(tool(&format!("c{i}"), true));
+        }
+        let t = transcript_with(ev);
+        let runs = tool_runs(&t.blocks);
+        assert!(run_all_succeeded(&t.blocks, &runs[0]));
+        assert!(!run_in_progress(&t.blocks, &runs[0]));
+    }
+}
+
