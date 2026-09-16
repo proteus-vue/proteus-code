@@ -314,6 +314,15 @@ fn mode_is_risky(mode: neo_protocol::ExecMode) -> bool {
     matches!(mode, M::AutoEdit | M::FullAccess)
 }
 
+/// 焦点请求目标（见 [`App::focus_request`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusTarget {
+    /// 任务输入框
+    Composer,
+    /// 命令台输入框
+    Terminal,
+}
+
 /// 工具参数摘要：单行、有长度上限。
 ///
 /// # 为什么必须自己摘要而不是 `to_string()` 整个 JSON
@@ -416,8 +425,19 @@ pub struct App {
     status: String,
     /// 是否折叠思考块（全局开关，与逐块折叠叠加）
     show_reasoning: bool,
-    /// 输入框是否曾经取得过焦点（首帧要抢一次）。
-    composer_focused_once: bool,
+    /// **下一个该拿焦点的控件**（一次性请求）。
+    ///
+    /// # 为什么用单一请求而不是几个布尔
+    ///
+    /// 曾经用两个独立布尔（`composer_focused_once` / `terminal_wants_focus`）
+    /// 各自在 `draw` 里 `request_focus()`。它们是**竞争关系**而顺序又取决于
+    /// 面板绘制次序（composer 画在 terminal 之后，于是它总是赢）——
+    /// 真机表现：从命令台敲的命令被当任务发给了模型（日志里是 `begin_turn`
+    /// 而不是 `shell`），白花一次模型请求。
+    ///
+    /// 改成"单一请求 + 谁最后设置谁生效"，竞争就不存在了：每一帧至多一个
+    /// 控件去抢焦点。
+    focus_request: Option<FocusTarget>,
     /// 上一帧是否处于"被审批阻塞"状态（用于检测"刚恢复可用"）。
     composer_blocked_last: bool,
     /// 当前执行模式。
@@ -432,6 +452,12 @@ pub struct App {
     models: Vec<(String, String, bool)>,
     /// D9 命令面板状态（与上面那个**颜色** `palette` 是两回事，故名字带 cmd_）。
     pub cmd_palette: crate::commands::Palette,
+    /// **D8**：底部终端面板是否展开。
+    terminal_open: bool,
+
+    /// 终端输入框内容（独立于任务输入：两者语义完全不同 ——
+    /// 一个交给模型，一个**不经模型**直接执行）。
+    terminal_input: String,
     /// D1：会话控制（列举 / 切换 / 新建 / 删除）。
     ///
     /// `Option` 是刻意的：测试与"未接会话库"的装配可以不给 —— 那时侧栏
@@ -504,13 +530,16 @@ impl App {
             cmd_palette: crate::commands::Palette::default(),
             sessions,
             sidebar_open: true,
+            terminal_open: false,
+
+            terminal_input: String::new(),
             cmd_palette_focused_once: false,
             pending_cmd_k: false,
             pending_esc: false,
             show_help: false,
             quit_requested: false,
             show_reasoning: true,
-            composer_focused_once: false,
+            focus_request: Some(FocusTarget::Composer), // 首帧：输入框拿焦点
             __test_last_focus: None,
             composer_blocked_last: false,
             auto_prompt: std::env::var("NEO_GUI_PROMPT").ok().filter(|s| !s.trim().is_empty()),
@@ -600,6 +629,20 @@ impl App {
         self.notice = Some((format!("已切换到 {name}"), std::time::Instant::now()));
     }
 
+    /// **D8**：执行一条用户直输的命令（不经模型）。
+    ///
+    /// 走 `Op::Shell` —— 内核把它交给**与模型工具调用同一条**执行路径
+    /// （沙箱、输出上限、截断标记、落盘全部一致），所以这里不必也不该
+    /// 自己起进程。用户的显式命令不再问审批（等价于用户自己在 shell 里敲它）。
+    fn run_terminal_command(&mut self) {
+        let cmd = self.terminal_input.trim().to_string();
+        if cmd.is_empty() {
+            return;
+        }
+        self.terminal_input.clear();
+        self.handle.send(neo_protocol::Op::Shell { command: cmd });
+    }
+
     /// **D1**：切换到另一个会话。
     ///
     /// 关键：内核换会话后返回的是**历史事件流**，宿主用它**替换**转录 ——
@@ -659,6 +702,22 @@ impl App {
     fn run_action(&mut self, action: crate::commands::Action) {
         use crate::commands::Action as A;
         match action {
+            A::ToggleTerminal => {
+                self.terminal_open = !self.terminal_open;
+                // 开 → 焦点给终端（ZCode 的 Cmd+J 语义）；
+                // 关 → 目光回到任务输入框（终端输入框已经不在了，焦点留在它上面
+                // 等于键盘输入无处可去）。
+                //
+                // 用**单一请求**表达，所以不存在"两个控件争焦点"的问题：
+                // 后设置的那个生效，与绘制顺序无关。
+                self.focus_request = Some(if self.terminal_open {
+                    FocusTarget::Terminal
+                } else {
+                    FocusTarget::Composer
+                });
+                let st = if self.terminal_open { "显示" } else { "隐藏" };
+                self.notice = Some((format!("终端已{st}"), std::time::Instant::now()));
+            }
             A::ToggleSidebar => {
                 self.sidebar_open = !self.sidebar_open;
                 let st = if self.sidebar_open { "显示" } else { "隐藏" };
@@ -832,6 +891,85 @@ impl App {
         if let Some(name) = pick_model {
             self.set_model(name);
         }
+    }
+
+    /// **D8**：底部终端面板。
+    ///
+    /// 对标 ZCode 的 `Cmd/Ctrl+J` 内置终端。**与它的关键差别**：ZCode 用
+    /// `node-pty` 起一个真 PTY（可跑 vim/htop 这类全屏交互程序），我们走
+    /// `Op::Shell` —— **每条命令一个进程、无 PTY**。所以这里**不能**做成
+    /// "交互式终端"，只能做"命令执行台"：输入一条、跑完、看输出。
+    ///
+    /// 这个边界必须如实呈现，不能假装是终端：真的 PTY 需要引入
+    /// `portable-pty` 之类的依赖（还有窗口尺寸、信号、全屏应用兼容一堆事），
+    /// 不在本轮范围。面板标题写"命令台"而不是"终端"，就是这个原因。
+    fn draw_terminal(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("命令台")
+                    .color(self.palette.color(Tone::Info))
+                    .strong(),
+            );
+            ui.label(
+                egui::RichText::new("（每条命令一个进程，走沙箱；不是交互式终端）")
+                    .color(self.palette.color(Tone::Muted))
+                    .small(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("收起").clicked() {
+                    self.terminal_open = false;
+                }
+            });
+        });
+
+        // 输出：复用转录里的工具卡片（`Op::Shell` 产出的是同一对
+        // ToolCallBegin/ToolCallEnd 事件），所以**不另存一份终端历史** ——
+        // 两份历史必然漂移（清屏时一份清了一份没清之类）。
+        egui::ScrollArea::vertical()
+            .id_salt("neo_terminal_out")
+            .max_height(180.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let cards: Vec<ToolCard> = self
+                    .transcript
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        Block::Tool(c) => Some(c.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if cards.is_empty() {
+                    ui.label(
+                        egui::RichText::new("还没有执行过命令")
+                            .color(self.palette.color(Tone::Muted))
+                            .small(),
+                    );
+                }
+                for c in cards {
+                    self.draw_tool(ui, &c);
+                }
+            });
+
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.terminal_input)
+                    .hint_text("输入命令后回车执行（不经模型）")
+                    .id(egui::Id::new("neo_terminal_in")),
+            );
+            // 刚打开面板时抢一次焦点（之后不再抢，否则用户没法把焦点移到别处）
+            if self.focus_request == Some(FocusTarget::Terminal) {
+                resp.request_focus();
+                self.focus_request = None;
+            }
+
+            // 同 composer 用 `lost_focus()`（回车即放弃焦点）
+            if (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                || ui.button("执行").clicked()
+            {
+                self.run_terminal_command();
+            }
+        });
     }
 
     /// **D1**：左侧会话栏。
@@ -1020,6 +1158,16 @@ impl App {
         if close {
             self.cmd_palette.close();
             self.cmd_palette_focused_once = false;
+            // 关闭覆盖层后把焦点还给输入框（不还回去的话键盘输入无处可去
+            // —— 真机表现为"打字没反应"）。
+            //
+            // ⚠️ **只在动作没指定焦点时才还**：`/terminal` 这类命令自己会指定
+            // 焦点目标（要交给终端输入框），而无条件归还会把它的请求覆盖掉
+            // —— 执行顺序是"先 run_action、后 close"，后写的赢。
+            // 这个覆盖曾让"打开命令台后敲的命令仍被当成任务发给模型"。
+            if self.focus_request.is_none() {
+                self.focus_request = Some(FocusTarget::Composer);
+            }
         }
     }
 
@@ -1060,6 +1208,7 @@ impl App {
             });
         if close {
             self.show_help = false;
+            self.focus_request = Some(FocusTarget::Composer); // 焦点还给输入框
         }
     }
 
@@ -1410,13 +1559,18 @@ impl App {
             // 注意只在**恢复那一刻**抢一次焦点：每帧都抢会让用户没法把焦点
             // 移到别处（比如右侧目标输入框）。
             let just_unblocked = self.composer_blocked_last && !blocked;
-            if !blocked && (!self.composer_focused_once || just_unblocked) {
+            if !blocked
+                && (self.focus_request == Some(FocusTarget::Composer) || just_unblocked)
+            {
                 edit.request_focus();
-                self.composer_focused_once = true;
+                self.focus_request = None;
             }
             self.composer_blocked_last = blocked;
 
-            // 回车提交：egui 在单行 TextEdit 里按回车会 lost_focus
+            // 回车提交。egui 的单行 TextEdit 在按回车时**放弃焦点**，
+            // 所以判据是 `lost_focus() && Enter` —— 那是 egui 的标准写法。
+            // （不要改成 `has_focus()`：回车那一刻焦点已经交出去了，
+            // `has_focus()` 恰好是 false，会变成永远不提交。）
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 submit_now = true;
             }
@@ -1528,8 +1682,14 @@ impl App {
         }
         if self.pending_esc {
             self.pending_esc = false;
-            self.cmd_palette.close();
-            self.cmd_palette_focused_once = false;
+            if self.cmd_palette.open {
+                self.cmd_palette.close();
+                self.cmd_palette_focused_once = false;
+                // 同上：关掉覆盖层要把焦点还给输入框。
+                // 只在"确实关了一个覆盖层"时做 —— Esc 在别处（比如关对话框）
+                // 不该抢焦点。
+                self.focus_request = Some(FocusTarget::Composer);
+            }
         }
         if self.pending_cmd_k {
             self.pending_cmd_k = false;
@@ -1537,6 +1697,7 @@ impl App {
             if self.cmd_palette.open {
                 self.cmd_palette.close();
                 self.cmd_palette_focused_once = false;
+                self.focus_request = Some(FocusTarget::Composer); // 焦点还给输入框
             } else {
                 self.cmd_palette.open();
             }
@@ -1568,6 +1729,14 @@ impl App {
         egui::Panel::right("neo_goal")
             .default_size(240.0)
             .show(ui, |ui| self.draw_goal_panel(ui));
+        // 终端在 composer **之上**：先加的先占底部边缘（egui 的 panel 语义），
+        // 于是从上到下的视觉顺序是 转录 / 终端 / 输入框 —— 输入框永远贴着底边，
+        // 位置稳定，不会因为开合终端而跳动。
+        if self.terminal_open {
+            egui::Panel::bottom("neo_terminal")
+                .default_size(220.0)
+                .show(ui, |ui| self.draw_terminal(ui));
+        }
         egui::Panel::bottom("neo_composer").show(ui, |ui| self.draw_composer(ui));
 
         egui::CentralPanel::default().show(ui, |ui| self.draw_transcript(ui));
@@ -2615,6 +2784,153 @@ mod tests {
         // 帮助面板
         app.show_help = true;
         run_frame(&ctx, &mut app, vec![]);
+    }
+    // ─────────── D8：底部命令台 ───────────
+
+    /// 命令台执行：`Op::Shell`，且**输入框随后清空**（便于连着敲下一条）。
+    #[test]
+    fn terminal_command_submits_and_clears_input() {
+        let (mut app, _rx, _tx) = render_test_app();
+        app.terminal_input = "ls -la".into();
+        app.run_terminal_command();
+        assert!(app.terminal_input.is_empty(), "执行后应清空，便于连敲下一条");
+    }
+
+    /// 空命令不上报（避免产生一条空命令的工具事件）。
+    #[test]
+    fn empty_terminal_command_is_a_noop() {
+        let (mut app, _rx, _tx) = render_test_app();
+        app.terminal_input = "   ".into();
+        app.run_terminal_command();
+        assert_eq!(app.terminal_input.trim(), "", "空命令应被忽略");
+    }
+
+    /// `/terminal` 开关面板。
+    #[test]
+    fn toggle_terminal_flips_visibility() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let before = app.terminal_open;
+        app.run_action(crate::commands::Action::ToggleTerminal);
+        assert_ne!(app.terminal_open, before, "开关命令应切换终端面板");
+    }
+
+    /// **命令台与任务输入框是两条独立通道**：
+    /// 终端的命令不经模型（`Op::Shell`），任务才交给模型（`BeginTurn`）。
+    /// 混淆会让"我想直接跑条命令"变成"花一次模型请求"。
+    #[test]
+    fn terminal_and_composer_are_separate_channels() {
+        let (mut app, _rx, _tx) = render_test_app();
+        // 往终端里敲不影响任务输入框
+        app.terminal_input = "git status".into();
+        app.input = "帮我看看代码".into();
+        app.run_terminal_command();
+        assert_eq!(app.input, "帮我看看代码", "执行终端命令不该动任务输入框");
+        assert!(app.terminal_input.is_empty(), "只清终端自己的输入框");
+    }
+
+    /// 终端面板打开时跑帧不 panic（含"还没跑过任何命令"）。
+    #[test]
+    fn drawing_the_open_terminal_does_not_panic() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        app.terminal_open = true;
+        run_frame(&ctx, &mut app, vec![]);
+        // 有工具卡片时也要能画
+        app.transcript.push_batch(&[
+            EventMsg::ToolCallBegin {
+                id: "shell-0".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"cmd": "ls"}),
+            },
+            EventMsg::ToolCallEnd {
+                id: "shell-0".into(),
+                exit_code: 0,
+                stdout: "a.txt".into(),
+                stderr: String::new(),
+                truncated: false,
+            },
+        ]);
+        run_frame(&ctx, &mut app, vec![]);
+    }
+    /// 关闭命令面板后，**焦点必须回到输入框**。
+    ///
+    /// 真机抓到的缺陷：`Cmd+K` 开面板 → `Esc` 关掉，之后**两个输入框都没有焦点**，
+    /// 键盘输入无处可去（表现为"打字没反应"，用户完全不知道发生了什么）。
+    /// 覆盖层拿走过焦点，关掉时必须还回去 —— 这是模态 UI 的基本礼节。
+    #[test]
+    fn closing_the_palette_returns_focus_to_the_composer() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        // 先让输入框拿到焦点
+        run_frame(&ctx, &mut app, vec![]);
+        assert_eq!(app.__test_last_focus, Some(egui::Id::new("neo_composer")));
+
+        // 开面板（焦点转到搜索框）
+        app.cmd_palette.open();
+        run_frame(&ctx, &mut app, vec![]);
+        for _ in 0..3 {
+            run_frame(&ctx, &mut app, vec![]);
+        }
+        assert_ne!(
+            app.__test_last_focus,
+            Some(egui::Id::new("neo_composer")),
+            "前置：面板打开时焦点在搜索框"
+        );
+
+        // 关掉 → 焦点应回到输入框
+        app.cmd_palette.close();
+        app.focus_request = Some(FocusTarget::Composer); // 与真实关闭路径一致
+        for _ in 0..3 {
+            run_frame(&ctx, &mut app, vec![]);
+        }
+        assert_eq!(
+            app.__test_last_focus,
+            Some(egui::Id::new("neo_composer")),
+            "关掉覆盖层后焦点必须回到输入框（否则打字没反应）"
+        );
+    }
+    /// 打开命令台后，**焦点应在终端输入框**（ZCode 的 `Cmd+J` 语义）。
+    ///
+    /// 真机实测：打开面板后焦点仍在任务输入框 —— 用户得再点一下终端输入框
+    /// 才能敲命令（而我用 AXPress 点击时 egui 甚至收不到焦点转移，
+    /// 于是"在终端里敲的命令"被当成任务发给了模型）。
+    /// 打开即聚焦可以消掉这一整类问题。
+    #[test]
+    fn opening_the_terminal_moves_focus_to_its_input() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        run_frame(&ctx, &mut app, vec![]); // composer 先拿焦点
+
+        app.run_action(crate::commands::Action::ToggleTerminal);
+        assert!(app.terminal_open);
+        for _ in 0..3 {
+            run_frame(&ctx, &mut app, vec![]);
+        }
+        assert_eq!(
+            app.__test_last_focus,
+            Some(egui::Id::new("neo_terminal_in")),
+            "打开命令台后焦点应在终端输入框，否则敲的命令会进错通道"
+        );
+    }
+
+    /// 关掉命令台后焦点回到任务输入框（否则打字又没反应）。
+    #[test]
+    fn closing_the_terminal_returns_focus_to_the_composer() {
+        let (mut app, _rx, _tx) = render_test_app();
+        let ctx = new_ctx();
+        app.run_action(crate::commands::Action::ToggleTerminal);
+        for _ in 0..3 {
+            run_frame(&ctx, &mut app, vec![]);
+        }
+        app.run_action(crate::commands::Action::ToggleTerminal); // 关
+        for _ in 0..3 {
+            run_frame(&ctx, &mut app, vec![]);
+        }
+        assert_eq!(
+            app.__test_last_focus,
+            Some(egui::Id::new("neo_composer")),
+            "关掉命令台后焦点应回到任务输入框"
+        );
     }
 }
 

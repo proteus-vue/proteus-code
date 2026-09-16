@@ -508,6 +508,73 @@ fn shell_op_runs_the_command_through_the_sandbox() {
     );
 }
 
+/// 连续执行多条 `!cmd`，**每次调用的 id 必须不同**。
+///
+/// 回归测试：`Op::Shell` 曾在 id 里嵌 `turn_counter`，而 shell 路径
+/// **不递增那个计数器**（它不在任何轮次里）——于是连着两条 `!cmd` 都拿到
+/// `shell-0`。id 的用途正是标识一次调用（工具结果按 id 与调用配对），
+/// 重复的 id 会让"哪条输出属于哪条命令"无法判断。
+#[test]
+fn consecutive_shell_commands_get_distinct_call_ids() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(RecordingTool { seen: Arc::new(std::sync::Mutex::new(Vec::new())) }));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("unused")),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+
+    let mut ids = Vec::new();
+    for cmd in ["echo one", "echo two", "echo three"] {
+        let events = k.submit(Op::Shell { command: cmd.into() }).unwrap();
+        let id = events.iter().find_map(|e| match e {
+            EventMsg::ToolCallBegin { id, .. } => Some(id.clone()),
+            _ => None,
+        });
+        ids.push(id.expect("应有 ToolCallBegin"));
+    }
+    let mut uniq = ids.clone();
+    uniq.sort();
+    uniq.dedup();
+    assert_eq!(
+        uniq.len(),
+        ids.len(),
+        "每条 shell 命令的调用 id 必须唯一（重复会让输出配对错乱）：{ids:?}"
+    );
+}
+
+/// 轮次与 shell 命令**互不干扰**：轮次照常从 turn-1 开始编号。
+///
+/// 若为了修 shell 的 id 而让 shell 也去递增 `turn_counter`，轮次号会被
+/// shell 命令"偷走"——这会破坏回放与审批 id 的确定性。
+#[test]
+fn shell_commands_do_not_consume_turn_numbers() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(RecordingTool { seen: Arc::new(std::sync::Mutex::new(Vec::new())) }));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("答")),
+        tools,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+
+    // 先跑两条 shell，再起一轮 —— 轮次号仍应是 turn-1
+    for cmd in ["echo a", "echo b"] {
+        k.submit(Op::Shell { command: cmd.into() }).unwrap();
+    }
+    let events = k.submit(Op::UserTurn { text: "hi".into(), refs: vec![] }).unwrap();
+    let turn_id = events.iter().find_map(|e| match e {
+        EventMsg::TurnStarted { turn_id } => Some(turn_id.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        turn_id.as_deref(),
+        Some("turn-1"),
+        "shell 命令不该占用轮次号（回放与审批 id 依赖它确定）"
+    );
+}
+
 #[test]
 fn shell_op_missing_argument_fails_loudly() {
     // 空命令不该 panic，也不该假装成功

@@ -788,6 +788,13 @@ pub struct Kernel {
     steps_this_turn: usize,
     turn_counter: u64,
     step_counter: u64,
+    /// 用户直输 shell 命令的序号（`Op::Shell`）。
+    ///
+    /// 单独一个计数器，因为它在**任何轮次之外**：`!ls` 不发 turn、也不驱动模型
+    /// （见 `Op::Shell` 的处理）。曾用 `turn_counter` 当 id 的一部分，
+    /// 而 shell 路径不递增它 —— 连续两条 `!cmd` 会拿到**同一个 id**
+    /// （都是 `shell-0`），而 id 的用途正是标识一次调用（工具结果按 id 配对）。
+    shell_counter: u64,
     usage_in: u64,
     usage_out: u64,
     pending: Option<PendingApproval>,
@@ -855,6 +862,7 @@ impl Kernel {
             steps_this_turn: 0,
             turn_counter: 0,
             step_counter: 0,
+            shell_counter: 0,
             usage_in: 0,
             usage_out: 0,
             pending: None,
@@ -963,8 +971,13 @@ impl Kernel {
                 // 与模型请求的工具调用走**同一条**执行路径（execute_one），
                 // 因此沙箱、输出上限、截断标记、落盘全部自动一致 ——
                 // 不为"用户直输的命令"另开一条旁路。
+                //
+                // id 用**自己的**计数器：shell 在任何轮次之外，用 `turn_counter`
+                // 会让连续两条命令拿到同一个 id（那个计数器在这里不递增）。
+                let id = format!("shell-{}", self.shell_counter);
+                self.shell_counter += 1;
                 let call = ToolInvocation {
-                    id: format!("shell-{}", self.turn_counter),
+                    id,
                     name: "bash".to_string(),
                     // 参数名必须与 BashTool 读取的键一致（`cmd`）。
                     // 曾经这里写成 "command"，工具拿不到参数直接失败 ——
@@ -1526,6 +1539,7 @@ impl Kernel {
         // 从现在起的轮次号独立（每个会话自己的轮次序列）
         self.turn_counter = 0;
         self.step_counter = 0;
+        self.shell_counter = 0;
         self.steps_this_turn = 0;
         let logs = self.persistence.load().unwrap_or_default();
         self.rebuild_from_log(&logs)
