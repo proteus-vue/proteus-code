@@ -4657,5 +4657,6 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 | **Windows 无预编译产物** | `release.yml` 只出 macOS（双架构）+ Linux x86_64；且 Windows 沙箱未实现，故未纳入。Windows 用户当前需 `cargo install`（受限档位仍 fail-closed） |
 | **npm 包尚未真正发布** | 包装层、平台包、`publish-npm` job 均已就绪并本地端到端验证（真实 `npm install -g` 跑通）。发布需仓库 secret `NPM_TOKEN`，打 tag 即自动发（见 §0） |
 | **crates.io 未发布（刻意不做）** | 元数据齐备、`cargo package` 全部通过，但决定不发布：`cargo install --git` 已覆盖该用户群，而 23 个包需长期版本同步。理由见 §0(a2) |
+| **`changeset release` 每次红（设置问题，非代码）** | 机器人分支能推（`origin/changeset-release/main` 存在且为 `chore(release): v0.2.0`），但 `gh pr create` 失败、Actions 里零 PR —— 根因是仓库设置「Allow GitHub Actions to create and approve pull requests」未勾选（GitHub 默认关闭，`pull-requests: write` 也放行不了）。**改代码无解**，需在 Settings → Actions → General 勾上（组织仓库还要 org 级放行）。它让 `changeset release` 长期显示红色，别误判成代码回归；`rust`/`efficiency` 是绿的。已写进 `docs/RELEASE.md` §5 |
 
 **下一步优先级建议**：Desktop 的 webview 窗口层（需要平台图形栈与 GUI 验证，动手前先做窗口壳的设计决定）。

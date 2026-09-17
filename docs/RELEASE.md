@@ -273,6 +273,7 @@ job，npm 那一步可能被跳过而整体仍显示绿色。
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
+| **`changeset release` 红了，但代码没毛病** | 机器人推分支成功、**开 PR 失败** | 见下方"Version PR 开不出来" |
 | **Release 全绿但 npm 上什么都没有** | `publish-npm` job 判定无凭证而跳过了发布 | 现在这一步会**直接失败**并打印诊断表（见下方"最常踩的坑"）。看该 job 的日志 |
 | 日志说"没有任何可用的 npm 凭证" | token 加成 Variable 而非 Secret（最常见） | Settings → Secrets and variables → Actions → **Secrets** 页放 `NPM_TOKEN`；仅用无密钥方案则改用 §2 |
 | `EOTP` / 要求 OTP | granular token 没勾 Bypass 2FA | 重建 token 并勾选；或改用 Trusted Publishing |
@@ -285,6 +286,34 @@ job，npm 那一步可能被跳过而整体仍显示绿色。
 | 版本漂移报错 | 传入版本与 `Cargo.toml` 不符 | 按报错提示统一两者（正常流程不会发生） |
 | Trusted Publishing 认证失败 | workflow 文件名不符 / Environment 不一致 / 自托管 runner | 逐项核对 §2.1；自托管 runner 不支持 |
 | 加了凭证但不想在本次发 | —— | 把仓库变量 `NPM_SKIP_PUBLISH` 设为 `true` 可显式跳过 |
+
+### Version PR 开不出来（`changeset release` 每次都红）
+
+**症状**：`changeset release` workflow 每次 push `main` 都失败，且 `Actions`
+里**一个 PR 都没有**。`开或更新 Version PR` 步骤红，而它前面的
+`当前版本与待发碎片` 是绿的。
+
+**判定依据（可自查，不需要 admin）**：
+
+```bash
+# 1. 机器人分支是**存在**的，且指向一个 chore(release) 提交 —— 说明 git push 成功
+git ls-remote origin 'refs/heads/changeset-release/*'
+git log --oneline origin/changeset-release/main | head -1   # 形如 "chore(release): v0.2.0"
+# 2. 但没有任何 PR（开 PR 这一步失败了）
+```
+
+两者同时成立 = 失败点在 **`gh pr create`**，而不是推分支、也不是版本计算。
+
+**原因**：仓库设置 **Settings → Actions → General → Workflow permissions →
+「Allow GitHub Actions to create and approve pull requests」未勾选**。
+GitHub 默认**关闭**该开关，于是 `GITHUB_TOKEN`（即使 workflow 已声明
+`pull-requests: write`）**不能创建 PR** —— 报
+`GitHub Actions is not permitted to create or approve pull requests.`。
+组织仓库还可能在 org 级策略里再拦一层。
+
+**处理**：勾上该开关（组织仓库需 org owner 在 org 设置里放行同样的开关）。
+这是**设置问题，改代码无解** —— 因此它会让 `changeset release` 长期显示红色，
+而 `rust` / `efficiency` 仍为绿：**别把它误当成代码回归**。
 
 ### 最常踩的坑：token 加成了 Variable
 
