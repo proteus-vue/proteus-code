@@ -143,6 +143,22 @@ else
   echo "  [SKIP] 未找到 ${MB}"
 fi
 
+# ── 6. CI 失败摘要（可读性守卫）─────────────────────────────────────────
+#
+# 为什么它也进门禁：**读不到原因的 CI = 白跑一轮**。失败日志的注解通道
+# 有两个硬约束（每个 step 只保留前 10 条 error 注解；日志里满是
+# `Compiling thiserror` / `test result: ok. 0 failed` 这类"像错误的正常行"），
+# 一旦有人把模式改回 `grep -i 'error|failed'`，配额会被噪声吃光，
+# 真因又被静默丢弃。故用自检装置把它钉住（含链接期失败这类不带 `^error`
+# 前缀的行 —— 曾整条 Linux 依赖树缺库因此漏判）。
+hr; echo "#  CI 失败摘要：注解通道是否仍能读到真因"; hr
+DIGEST="$ROOT/scripts/ci-failure-digest.sh"
+if [ -f "$DIGEST" ]; then
+  if bash "$DIGEST" --selftest; then :; else fail=$((fail+1)); fi
+else
+  echo "  [SKIP] 未找到 ${DIGEST}"
+fi
+
 echo
 echo "============================================================"
 if [ "$fail" -eq 0 ]; then echo "✅ 全部门禁通过"; exit 0

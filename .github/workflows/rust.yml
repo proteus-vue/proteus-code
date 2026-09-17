@@ -73,6 +73,11 @@ jobs:
         # 关掉颜色：CI 日志里 cargo 默认带 ANSI 转义，而 `^error` 这类
         # **行首锚点会因此永远匹配不上**（行其实以 \x1b[1m 开头）。
         # 我为此白跑了一轮 —— 我的诊断 grep 用了 ^error，结果什么都匹配不到。
+        #
+        # 失败时由 `scripts/ci-failure-digest.sh` 把原因压成注解（该脚本头部
+        # 详述了注解通道的 10 条上限与两类"像错误的正常行"噪声 —— 上一版的
+        # 内联 grep 用 `-i 'error|failed'`，10 条配额被 `Compiling thiserror` 与
+        # `test result: ok. 0 failed` 吃光，真正的 FAILED 行一条都没发出去）。
         env:
           CARGO_TERM_COLOR: never
         run: |
@@ -99,47 +104,30 @@ jobs:
             tail -c 2500 /tmp/test-out.log
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # ⚠️ **同时**输出为 `::error::` 注解。
+          # 一层保障不够：把日志**同时**压成注解 —— 注解（check-run annotations）
+          # 是**免认证可读**的，而 job 日志与 STEP SUMMARY 都要 admin 权限
+          # （实测 403 "Must have admin rights"）。一次 CI 失败的价值全在
+          # "能不能定位"，读不到就等于白跑一轮。
           #
-          # 为什么不能只写 STEP SUMMARY：那个字段**需要 admin 权限**才能通过
-          # API 读到（实测 403 "Must have admin rights"），而失败摘要恰恰是
-          # 最需要被读到的内容。注解（check-run annotations）是**免认证可读**的
-          # —— 本次就是靠它读到了 Node 版本警告，这证明通道可用。
-          #
-          # 一次 CI 失败的价值全在"能不能定位"，读不到就等于白跑一轮。
-          # 失败时把日志尾部**无条件**做成注解。
-          #
-          # 前两版按 grep 分类（失败用例/panic/编译错误），但实测注解一条都没
-          # 出现 —— 说明日志里这三种行首都没有匹配到，而我无法从这里知道
-          # 究竟长什么样。**先保证能看到原始输出，再谈分类**：
-          # 无条件取尾部 12 行，每行一个注解（注解是唯一免认证可读的通道）。
-          # 先无条件报告**诊断元信息**：退出码、日志行数与大小。
-          # 这是为了排除"if 块没进入"这类脚本自身的问题 ——
-          # 前几版加了注解却一条都没出现，而没有元信息就无法区分
-          # "没进 if" 与 "进了但输出被吞"。
+          # ⚠️ 不要在 workflow 里内联 grep。上一版就是这么写的，两个坑：
+          #   1. `grep -i 'error|failed'` 会命中 `Compiling thiserror` 与
+          #      `test result: ok. 0 failed` 两类**噪声**；
+          #   2. 每个 step 只保留**前 10 条** error 注解，其余静默丢弃。
+          #   两者叠加 = 10 条配额全给噪声，真正的 FAILED 行一条都发不出去。
+          # 故逻辑集中在 `scripts/ci-failure-digest.sh`（按价值排序 + 双通道
+          # 各 10 条 + 行首锚定大小写敏感 + 单行化），并**可本地用日志回放验证**。
           lines=$(wc -l < /tmp/test-out.log 2>/dev/null || echo 0)
           bytes=$(wc -c < /tmp/test-out.log 2>/dev/null || echo 0)
           disk=$(df -h / | tail -1 | tr -s ' ' | cut -d' ' -f4)
-          echo "::error title=诊断::exit=$code lines=$lines bytes=$bytes 剩余磁盘=$disk"
 
           if [ "$code" -ne 0 ]; then
             echo "=== 失败：日志末尾 40 行 ==="
             tail -40 /tmp/test-out.log
             echo "=== 注解输出（供 API 读取）==="
-            # **优先发错误行**：编译失败的日志尾部常常全是 "Compiling ..."，
-            # 只发尾部会看不到真正的原因。先找 error/warning/FAILED 行，
-            # 再补尾部（两者都发，因为可能都没有）。
-            # 去掉 ANSI 颜色码，否则注解里是乱码转义。
-            # ⚠️ **先去 ANSI 再 grep**（上一版顺序反了，导致 ^error 匹配不到）
-            sed -E 's/\x1b\[[0-9;]*m//g' /tmp/test-out.log > /tmp/plain.log
-            grep -aiE 'error|could not compile|failed to run|cannot find|panicked at|FAILED' /tmp/plain.log \
-              | head -15 | while IFS= read -r line; do
-              echo "::error title=错误::${line:0:800}"
-            done
-            tail -30 /tmp/plain.log | while IFS= read -r line; do
-              [ -z "$line" ] && continue
-              echo "::error title=尾部::${line:0:800}"
-            done
+            NEO_CI_EXIT="$code" NEO_CI_LINES="$lines" NEO_CI_BYTES="$bytes" NEO_CI_DISK="$disk" \
+              bash scripts/ci-failure-digest.sh /tmp/test-out.log
+          else
+            echo "::notice title=诊断::exit=0 lines=$lines bytes=$bytes 剩余磁盘=$disk"
           fi
           exit $code
       # 失败时重跑失败用例并打印**完整输出**（--exact 逐条重跑）。
