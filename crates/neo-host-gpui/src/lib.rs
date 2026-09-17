@@ -25,3 +25,7 @@ pub mod app;
 pub mod facts;
 
 pub use app::run;
+// composer 状态的**生产构造点**（`app::new_composer_state` 的转发）。
+// 导出给回归用例，让它们钉住"我们实际用的那份配置"，而不是在测试里手写一份
+// —— 否则产品代码改了配置，用例照样绿。见 `tests/composer_multiline.rs`。
+pub use app::{composer_input, composer_state_for_test};

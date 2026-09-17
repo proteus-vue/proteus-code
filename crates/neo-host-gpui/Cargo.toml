@@ -49,3 +49,8 @@ neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }
 neo-capability = { path = "../neo-capability", version = "0.1.0" }
 neo-exec = { path = "../neo-exec", version = "0.1.0" }
 serde_json = { workspace = true }
+# UI 测试基建（无头窗口）—— 只为 composer 的**多行语义**回归用例打开。
+# 它是本宿主的运行时依赖（非 dev），这里重复声明只是为了在**测试构建**里
+# 打开 `test-support`：那会编进 release 二进制，所以绝不能加在 [dependencies]
+# 里（见根 Cargo.toml 的说明）。与 `neo-ui/tests/ime_regression.rs` 同一做法。
+neo-ui-kit = { path = "../neo-ui-kit", version = "0.1.0", features = ["test-support"] }

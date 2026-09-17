@@ -71,11 +71,16 @@ ZCode 官方文档把界面写得很细（[zcode.z.ai/en/docs](https://zcode.z.a
 ### 1.3 Composer（输入区）与模式
 
 - `@` 引用文件、"添加上下文"、"**变更前确认**"开关、模型选择、发送。
+- **多行输入**：composer 支持换行编辑与多行提示词（贴代码、列要点）。
 - 模型 picker `Ctrl/Cmd+M`；**Thought Level picker `Ctrl/Cmd+T`**；执行模式循环 **`Shift+Tab`**（输入框聚焦时）。
 - 四种执行模式：Ask before changes（默认）/ Edit automatically / Plan / Full access。
 
 > 对照本项目：这四档与我们内核的 `ExecMode` 五档（plan/confirm/default/auto-edit/full）**是同一类东西**，
 > 可直接做映射，不需要发明新概念。
+>
+> **多行已对齐**（gpui 宿主）：Enter 提交、`Shift+Enter` 换行，高度
+> `auto_grow(1, 6)`。细节见 §4.64(aw) —— 补的过程中抓到一个"回车既提交又留下
+> 一个换行"的真缺陷（平台把 Enter 又当文本送了一遍）。
 
 ---
 

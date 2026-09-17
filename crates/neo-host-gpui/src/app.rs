@@ -23,7 +23,7 @@ use neo_ui::neo_color;
 use neo_ui_kit::component::{
     button::Button,
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     v_flex, Root,
 };
 use neo_ui_kit::component::scroll::ScrollableElement as _;
@@ -38,6 +38,75 @@ enum FocusTarget {
     Composer,
 }
 
+/// 任务输入框（composer）的**唯一构造点**。
+///
+/// 抽成函数而不是写在 `ensure_input` 里，是为了让回归用例能钉住**我们的配置**
+/// （`tests/composer_multiline.rs`）—— 只测组件默认值证明不了我们用对了它。
+/// 这里的每一行都是一条语义，改动即改行为：
+///
+/// - `submit_on_enter(true)`：**Enter 提交、Shift+Enter 换行**。组件据此决定
+///   "插不插换行"，并把两者都报成 `InputEvent::PressEnter { shift }` ——
+///   宿主只按 `shift` 分流，不自己解析按键（否则就有了第二套判定）。
+///   不设它（默认 `false`）时 Enter 也换行，于是**永远提交不了**。
+/// - `auto_grow(1, 6)`：从 1 行长到 6 行，超出后内部滚动 —— 贴一段代码
+///   不该把转录区顶没，而只给 1 行又让多行输入失去意义。
+fn new_composer_state(
+    window: &mut Window,
+    cx: &mut neo_ui_kit::gpui::Context<TextareaState>,
+) -> TextareaState {
+    TextareaState::new(window, cx)
+        .submit_on_enter(true)
+        .auto_grow(1, 6)
+        .placeholder("输入任务后回车提交（Shift+Enter 换行；@文件 / $技能 可用）")
+}
+
+/// composer 的输入元素（**生产唯一构造点**，`pub` 以便回归用例复用同一份接线）。
+///
+/// # 为什么要拦住 Enter 的"插入字符"通道（端到端实测抓到的真缺陷）
+///
+/// `submit_on_enter(true)`（见 `new_composer_state`）让 Enter 走**提交**语义：
+/// 组件不插换行，而是把 `InputEvent::PressEnter { shift }` 报给宿主。但平台还会
+/// 把同一个 Enter **再当作文本输入送一遍** —— macOS 平台层给 Enter 设的
+/// `key_char` 就是 `"\n"`（`gpui-pre-macos` 的 `events.rs`；测试里
+/// `with_simulated_ime` 同理），而组件在"提交"分支里会 `cx.propagate()`，
+/// 于是这个 `\n` 照样被插进框里。
+///
+/// 现象：**回车既提交、又留下一个换行** —— 输入框看起来没清干净（光标停在第二
+/// 行），下一个任务接着往下写。屏幕不报错、不崩溃，最难发现的那类退化。
+///
+/// 修法：在冒泡经过这里时 `stop_propagation()`，于是 `dispatch_keystroke` 跳过
+/// key_char 分支。`PressEnter` 在**那之前**就已派发，所以提交不受影响 ——
+/// 回归用例同时钉住这两条（`tests/composer_multiline.rs`）。
+/// Shift+Enter **不拦**：它本就该插换行，且组件在换行分支里不 propagate。
+///
+/// `modals_open`：命令面板/帮助/模型选择器开着时不拦 —— 那些面板自己要拿 Enter
+/// 确认（见根容器的 `KeyArbiter`）。由调用方在渲染时算好传进来，这样本函数
+/// 是纯接线、可被测试直接复用。
+pub fn composer_input(
+    state: &Entity<TextareaState>,
+    modals_open: bool,
+) -> impl IntoElement {
+    div()
+        .flex_1()
+        .on_key_down(move |ev, _window, cx| {
+            if modals_open {
+                return;
+            }
+            if ev.keystroke.key.as_str() == "enter" && !ev.keystroke.modifiers.shift {
+                cx.stop_propagation();
+            }
+        })
+        .child(
+            // 多行：高度由 `auto_grow(1, 6)` 决定（见 `new_composer_state`），
+            // 所以**不设固定 `.h()`** —— 设了就固定住不再长。
+            Textarea::new(state)
+                // 无边框外观：它是应用里唯一的输入区，套一个框反而像网页表单，
+                // 与转录区的连续排版割裂。
+                .appearance(false)
+                .aria_label("任务输入"),
+        )
+}
+
 /// 界面状态（Entity）。
 pub struct NeoView {
     handle: KernelHandle,
@@ -48,15 +117,19 @@ pub struct NeoView {
     /// （`NEO_GUI_PROMPT` 直接写字符串）都走它，读起来是普通 `String`，
     /// 不必到处传 `window`。
     input: String,
-    /// **真实文本输入框**（gpui 的 `InputState`）。
+    /// **真实文本输入框**（gpui 的 `TextareaState`，多行）。
     ///
     /// ⚠️ 曾经这里是**纯展示**的一行 `div` —— 于是 gpui 宿主根本没法用键盘
     /// 输入任务，只能靠 `NEO_GUI_PROMPT` 喂（egui 侧一直是真 `TextEdit`）。
     /// 这是 gpui 转正最主要的拦路石，比任何 D 项都硬。
     ///
-    /// 惰性创建：`InputState::new` 要 `&mut Window`，而视图实体在窗口之前
+    /// ⚠️ 又曾经是**单行** `InputState`：`Shift+Enter` 什么都不做（既不换行
+    /// 也不提交），而 composer 天然要能写多行提示词（贴代码、列要点）。
+    /// 多行的语义由 `submit_on_enter` 一处决定，见 `ensure_input`。
+    ///
+    /// 惰性创建：`TextareaState::new` 要 `&mut Window`，而视图实体在窗口之前
     /// 就建好了 —— 所以第一次渲染时补上。
-    input_state: Option<Entity<InputState>>,
+    input_state: Option<Entity<TextareaState>>,
     /// 输入框事件订阅。**必须持有**：`Subscription` 一 drop 就退订，
     /// 表现为"打字没反应"或"回车不提交"。
     input_subs: Vec<neo_ui_kit::gpui::Subscription>,
@@ -303,15 +376,13 @@ impl NeoView {
 
     /// 惰性建输入框并订阅它的事件。
     ///
-    /// 只在第一次渲染时做 —— `InputState::new` 需要 `&mut Window`，
+    /// 只在第一次渲染时做 —— `TextareaState::new` 需要 `&mut Window`，
     /// 而视图实体先于窗口存在。
     fn ensure_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.input_state.is_some() {
             return;
         }
-        let state = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("输入任务后回车提交（@文件 / $技能 可用）")
-        });
+        let state = cx.new(|cx| new_composer_state(window, cx));
         // 订阅必须在**持有 Subscription** 的前提下才有意义（drop 即退订）
         let sub = cx.subscribe_in(
             &state,
@@ -322,9 +393,8 @@ impl NeoView {
                     cx.notify();
                 }
                 InputEvent::PressEnter { shift, .. } => {
-                    // Shift+Enter 不提交：单行框里它也不换行，但至少不该发送
-                    //（多行输入是下一步；现在让 shift 回车"什么都不做"比
-                    //  "以为是换行其实发出去了"安全）。
+                    // `shift` 为真 = **组件已经插入了换行**（见 `submit_on_enter`），
+                    // 该换行就留在框里，不提交。
                     if *shift {
                         return;
                     }
@@ -2014,19 +2084,13 @@ impl Render for NeoView {
                 .input_state
                 .clone()
                 .expect("输入框应在第一次渲染时建好（见 ensure_input）");
+            let modals_open = self.cmd_open || self.help_open || self.model_picker_open;
             h_flex()
                 .gap_2()
                 .px_3()
                 .py_2()
-                .child(
-                    div().flex_1().child(
-                        Input::new(&state)
-                            // 无边框外观：它是应用里唯一的输入区，套一个框
-                            // 反而像网页表单，与转录区的连续排版割裂
-                            .appearance(false)
-                            .aria_label("任务输入"),
-                    ),
-                )
+                .items_end() // 发送按钮贴底：输入框长高时按钮不该跟着浮到中间
+                .child(composer_input(&state, modals_open))
                 .child(Button::new("send").label("发送").on_click(
                     move |_, window, cx| {
                         view_for_submit.update(cx, |this, cx| {
@@ -2211,6 +2275,19 @@ pub fn run(
 
 /// 供测试与调用方检查工具参数摘要（转发共享实现，避免宿主各写一套）。
 pub use neo_driver::transcript::summarize_args as summarize_tool_args;
+
+/// 供回归用例构造**与生产同一份**的 composer 状态。
+///
+/// 为什么必须走这个出口，而不是让测试自己 `TextareaState::new(...)`：
+/// 那样测的是"我在测试里手写的那份配置"，产品代码哪天把
+/// `submit_on_enter(true)` 去掉，用例照样绿 —— 于是最关键的
+/// "Enter 到底提不提交"没人守。
+pub fn composer_state_for_test(
+    window: &mut Window,
+    cx: &mut neo_ui_kit::gpui::Context<TextareaState>,
+) -> TextareaState {
+    new_composer_state(window, cx)
+}
 
 #[cfg(test)]
 mod tests {

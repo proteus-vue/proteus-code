@@ -4555,6 +4555,50 @@ Landlock+bwrap 实现），命令根本不执行，`exit_code` 因此是 `-1` �
 
 ---
 
+### (aw) gpui composer 多行：补功能时抓到一个"回车留下换行"的真缺陷
+
+缺口表里"gpui 宿主无多行输入（`Shift+Enter` 什么都不做）"本轮补掉了。
+换 `TextareaState` + `submit_on_enter(true)` + `auto_grow(1, 6)` 即可，
+但**真正花时间的是一个读文档看不出来的缺陷**。
+
+#### 组件契约说要"提交"，可平台又把它当文本送了一遍
+
+上游 `enter()` 的逻辑很清楚：多行 + `submit_on_enter` 时，非 Shift 的 Enter
+走提交分支（不插换行），并且**两种情况都** `cx.emit(PressEnter { shift })`。
+看起来配好 `submit_on_enter(true)` 就完事了。实测却在输入框里留下了一个 `\n`。
+
+原因在**组件之外**：`dispatch_keystroke` 在事件未被 `stop_propagation` 时，
+会把 `keystroke.key_char` 交给输入处理器 —— 而 Enter 的 `key_char`
+**平台层给的就是 `"\n"`**（macOS 见 `gpui-pre-macos/src/events.rs`；测试里
+`with_simulated_ime` 同款）。组件在提交分支里调了 `cx.propagate()`，
+于是"提交"与"插入换行"**同时发生**。
+
+**发现方式**：无头探针刺订阅 `InputEvent`，看到
+`[Change, PressEnter(shift=false), Change value="任务\n"]` ——
+提交事件**在**、换行也**在**。这一条序列直接把范围锁死在"事件之后还有一次文本插入"，
+比读代码猜快得多。
+
+**修法**：在 `composer_input` 里对非 Shift 的 Enter `stop_propagation()`。
+`PressEnter` 在此之前已派发，故提交不受影响；`dispatch_keystroke` 因此跳过
+key_char 分支。Shift+Enter 不拦（它本就该换行，且组件那条分支不 propagate）。
+
+#### 三条做法值得复用
+
+1. **行为默认值不能当契约**：`submit_on_enter` 的**默认是 `false`**，
+   而它在我们这里是**必须为 true** 的语义（否则 Enter 也换行 = 永远提交不了）。
+   所以配了回归用例专门钉这一条，而不是相信"组件会做对"。
+2. **生产接线抽成一个函数给测试复用**（`composer_input` / `new_composer_state`）：
+   测试若自己拼一份等价元素，产品把 `stop_propagation` 删掉它也照样绿。
+   实测牙齿：删 `submit_on_enter` → 用例红；删 `stop_propagation` → 用例红。
+3. **无头用例 + 真机各验一次，各管一段**：
+   无头钉住可判定的语义（4 条用例）；真机（.app + 合成按键）钉住整条链路 ——
+   会话日志里出现 `{"begin_turn":{"text":"first\nsecond"}}` 与 `user_submitted`，
+   这才是"多行文本真的进了内核"的证据。**注意**：合成键盘要求 `.app`
+   （裸二进制 `bundle_id` 为 null，见 §4.64(t)），所以真机验证必须先跑
+   `scripts/make-app.sh`。
+
+---
+
 ## 效率复盘：这一轮跑了 2 小时+，主要成本是我自己造成的
 
 用户明确指出效率太低。按 `ai-efficiency-rules` 的六类违规逐条对照：
@@ -4636,7 +4680,7 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 | **egui 未删（阶段 3 剩余）** | gpui 已转正为默认，但 egui 保留作回退通道。**删除的前置条件**（三条全满足才删）：① 至少一个发布周期里 gpui 作为默认无 P0/P1 问题；② 有人在真实工作中用它连续数小时（当前只有我按脚本走的验证，证明"路径可用"不等于"长时间稳定"）；③ 确认 egui 无 gpui 缺失且需要的独有能力（现查为：无）。**不擅自删的另一理由**：保留对照物才能判断新问题是 gpui 的还是内核的 |
 | ~~**gpui 侧栏不可折叠**~~ **已补** | egui 有 `sidebar_open`，gpui 是固定面板。补了状态 + 状态栏开关（与 `/sessions` 同一个 Action）。程序化验证：折叠后面板区像素全为页面底色 |
 | ~~**gpui 模型选择器缺信息**~~ **已补** | 此前是左右盲切按钮（看不到有哪些可选、看不出哪个是桩）。改为选择器面板：列出全部 + 说明 + 桩标"（桩）"+ 当前项高亮。装配层改传 `ModelChoice`（此前只传名字，宿主没有信息可标）；`A::ShowModels` 与它统一，旧的 `next_model` 已删 |
-| **gpui 宿主无多行输入** | 输入框是单行（`Input`）。ZCode 的 composer 支持多行与换行编辑；`Shift+Enter` 当前**什么都不做**（既不换行也不提交，`Textarea` 是下一步） |
+| ~~**gpui 宿主无多行输入**~~ **已补** | 已换成 `TextareaState`：**Enter 提交、Shift+Enter 换行**（`submit_on_enter(true)`），高度 `auto_grow(1, 6)`。补的过程中抓到一个**只有端到端才看得见**的真缺陷：平台会把 Enter 当文本再送一遍（macOS 平台层给 Enter 的 `key_char` 是 `"\n"`），而组件在提交分支里 `cx.propagate()` —— 于是**回车既提交、又留下一个换行**。修法：冒泡时 `stop_propagation()`（提交事件在那之前已派发）。真机证据：会话日志 `{"begin_turn":{"text":"first\nsecond"}}` + `user_submitted`，按回车后输入框无残留换行。见 §4.64(aw) |
 | ~~**许可证选择待拍板**~~ **已定** | 用户拍板：可开源集（5 个 crate）用 **Apache-2.0**（含明确专利授权），宿主与内核保持 MIT。已落地：显式 license 字段 + 标准全文 LICENSE + README 说明；提取集 38 个 Apache-2.0 依赖**都不带 NOTICE**，故 §4(d) 义务不触发（已写进 THIRD-PARTY-LICENSES.md）。仍未做：`cargo-deny` 需在 CI 安装后跑全量（本地脚本已覆盖主要能力） |
 | **NOTICE 依赖上游包内容** | §4(d) 义务的判定依据是"上游是否随包发布 NOTICE"。本脚本查的是本地 registry 目录 —— 若某包在上游带 NOTICE 而随包未分发，会漏判。彻底做法是用 `cargo-about` 读包元数据。当前实测 38 个包全无 NOTICE，风险低但非零 |
 | **Linux 桌面宿主的运行时库** | gpui 在 Linux 靠 **dlopen** 加载 `libxkbcommon` / `libwayland` / `libX11` —— **编译不需要**这些包，但运行时缺了会直接 panic（`Library libxkbcommon.so could not be loaded.`）。预编译 Linux 产物不含桌面（精简版）故不受影响；自行 `cargo install` 的 Linux 用户需要先装它们。README 已写明 |
