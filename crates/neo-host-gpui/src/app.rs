@@ -760,6 +760,63 @@ fn gutter_element(diff: &str) -> impl IntoElement {
     .h_full()
 }
 
+/// **自绘 diff 背景带**（渲染缝的第四个消费者）：让"哪些行改了"一眼扫得出。
+///
+/// # 分工：**缝画底、宿主画字**
+///
+/// 底带是矩形填充（缝的强项），文字仍在 element 树里（保住 gpui 的文本整形、
+/// 字形缓存与 element diff）。所以本函数只负责底，正文由调用方用普通
+/// `div` 叠在上面。
+///
+/// # 对齐：靠**同一个行高**，不靠调间距
+///
+/// gpui 里 `absolute` 定位的元素**不参与父容器的布局**，所以这层底垫在下面
+/// 不会把文字顶走。但"底的一行"与"字的一行"要严丝合缝，靠的是两边共用
+/// 一个行高：
+/// - 底：`i * lh`（本函数，由 `diff_backdrop` 保证）；
+/// - 字：文本容器设 `.line_height(lh)` 且每行 `.whitespace_nowrap()`
+///   —— 那样"一行文字"恰好占 `lh` 高。
+///
+/// `lh` 取 `Window::line_height()`（当前文本样式的真实行高），两边同源。
+/// **不要**改成"看起来差不多"的魔数：换字号/换字体立刻错开，
+/// 而错位的背景带会把改动标到错误的行上，比不画更糟。
+fn diff_backdrop_element(diff: &str, line_height: f32) -> impl IntoElement {
+    use neo_ui_render::{diff_backdrop, DiffBand, RenderBackend};
+
+    // diff 文本 → 中立"行种类"（渲染层不认识 diff 语法，这一步只在宿主做）
+    let bands: Vec<DiffBand> = diff
+        .lines()
+        .map(|line| match neo_driver::transcript::diff_line_kind(line) {
+            neo_driver::transcript::DiffLineKind::Add => DiffBand::Add,
+            neo_driver::transcript::DiffLineKind::Del => DiffBand::Del,
+            neo_driver::transcript::DiffLineKind::Hunk => DiffBand::Hunk,
+            // 文件头（`---`/`+++`）与我们自己追加的说明行都不是"改动内容"，
+            // 给它们上色会让"改动落在哪"失真。
+            _ => DiffBand::Context,
+        })
+        .collect();
+
+    // 场景与后端产物在 prepaint 里算（纯计算，不需要 window）
+    let prepaint = move |bounds: neo_ui_kit::gpui::Bounds<neo_ui_kit::gpui::Pixels>,
+                         _window: &mut neo_ui_kit::gpui::Window,
+                         _cx: &mut neo_ui_kit::gpui::App| {
+        let scene = diff_backdrop(&bands, f32::from(bounds.size.width), line_height);
+        (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
+    };
+    // 绘制在 paint 里做（那里才有 Window）
+    neo_ui_kit::gpui::canvas(
+        prepaint,
+        |bounds, (_, paint), window, _cx| {
+            paint.draw(bounds.origin, window);
+        },
+    )
+    .absolute()
+    .top(px(0.))
+    .left(px(0.))
+    .right(px(0.))
+    .h_full()
+}
+
 /// 目标阶段 → 进度段（`0..=5` 步中的第几步）。
 ///
 /// 五个阶段（Plan→Code→Review→Learn→Done）天然是一个有序的推进过程，
@@ -956,7 +1013,10 @@ fn tool_card(c: &neo_driver::transcript::ToolCard) -> impl IntoElement {
 /// 转录区。**是方法而不是自由函数** —— 它需要访问折叠状态、并且要拿实体
 /// 来挂点击回调（思考块的折叠/展开）。自由函数只能拿到数据快照。
 impl NeoView {
-    fn transcript_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `line_height`：当前文本样式的真实行高，由 `render` 传入（那里有 `Window`）。
+    /// diff 背景带的 y 与文字容器的 `.line_height()` 都必须用它 —— 两边同源才
+    /// 对得齐（见 `diff_backdrop_element` 的对齐说明）。
+    fn transcript_view(&self, cx: &mut Context<Self>, line_height: f32) -> impl IntoElement {
         let blocks = &self.transcript.blocks;
         // **D4 工具分组**：连续的工具调用合成一组。
         //
@@ -1106,7 +1166,14 @@ impl NeoView {
                     // 第一版把它放进了标题行，于是 `h_full()` 只等于一行文本高，
                     // 变更条被压成 4×14px 的一小块（真机截图看出来的）：
                     // 那个尺寸表达不了"改动分布"这个唯一的用途。
-                    let mut body = v_flex().gap_0();
+                    //
+                    // 行高从**当前文本样式**取（不是魔数）：底带的 y 由它算，
+                    // 文字容器的 `.line_height(lh)` 也用它 —— 两边同源才对得齐。
+                    let lh = line_height;
+                    let mut body = v_flex()
+                        .gap_0()
+                        // 文字容器的行高 = 底带用的行高（对齐靠这一句）
+                        .line_height(px(lh));
                     for line in diff.lines() {
                         let tone = match neo_driver::transcript::diff_line_kind(line) {
                             neo_driver::transcript::DiffLineKind::Add => Tone::Success,
@@ -1115,14 +1182,28 @@ impl NeoView {
                             neo_driver::transcript::DiffLineKind::Meta => Tone::Muted,
                             _ => Tone::Text,
                         };
-                        body = body.child(div().text_color(neo_color(tone)).child(line.to_string()));
+                        body = body.child(
+                            div()
+                                // 不折行：折行会让"一行文字"占两行高，底带立刻错位。
+                                // 长行由横向滚动/裁切处理，不是靠折行。
+                                .whitespace_nowrap()
+                                .text_color(neo_color(tone))
+                                .child(line.to_string()),
+                        );
                     }
+                    // 正文叠在**底带之上**：底带 `absolute` 不参与布局（不顶走文字），
+                    // 且它没有落在无障碍树里 —— 底带只是视觉层，不承载信息，
+                    // 语义由文字与变更条承担。
+                    let body_with_backdrop = div()
+                        .relative()
+                        .child(diff_backdrop_element(diff, lh))
+                        .child(body);
                     col = col.child(
                         h_flex()
                             .items_start()
                             .gap_0()
                             .child(gutter_element(diff))
-                            .child(body),
+                            .child(body_with_backdrop),
                     );
                 }
                 Block::TurnSummary { input_tokens, output_tokens } => {
@@ -1750,6 +1831,10 @@ fn approval_dialog(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElemen
 
 impl Render for NeoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 当前文本样式的真实行高：diff 背景带的 y 与文字行高都取自它。
+        // 在 render 里取一次并向下传，而不是在深层函数里各取一次 ——
+        // 后者要求每个函数都拿到 `Window`，会把签名污染到整条链路。
+        let line_height = f32::from(window.line_height());
         // 0) 输入框（惰性；第一次渲染时 window 才可用）
         self.ensure_input(window, cx);
         self.ensure_search(window, cx);
@@ -2031,7 +2116,7 @@ impl Render for NeoView {
                                     .track_scroll(&handle)
                                     .overflow_y_scroll()
                                     .vertical_scrollbar(&handle)
-                                    .child(self.transcript_view(cx))
+                                    .child(self.transcript_view(cx, line_height))
                             })
                     })
                     .child(if self.sidebar_open {

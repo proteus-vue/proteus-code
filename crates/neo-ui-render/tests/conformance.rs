@@ -59,6 +59,21 @@ fn real_world_scenes() -> Vec<(&'static str, Scene)> {
             "变更条（含新增/删除/未改三种标记）",
             change_gutter(&[GutterMark::Add, GutterMark::Del, GutterMark::Plain], 12.0, 60.0),
         ),
+        (
+            "diff 背景带（第四个消费者：新增/删除/上下文/hunk 混排）",
+            neo_ui_render::diff_backdrop(
+                &[
+                    neo_ui_render::DiffBand::Hunk,
+                    neo_ui_render::DiffBand::Context,
+                    neo_ui_render::DiffBand::Del,
+                    neo_ui_render::DiffBand::Add,
+                    neo_ui_render::DiffBand::Context,
+                    neo_ui_render::DiffBand::Add,
+                ],
+                320.0,
+                18.0,
+            ),
+        ),
         ("空场景（消费者拿到空列表）", Scene::new()),
         (
             "退化输入（全零 / 零尺寸）",

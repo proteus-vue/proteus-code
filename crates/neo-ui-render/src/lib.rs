@@ -42,6 +42,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod backend;
+pub mod diff;
 pub mod gutter;
 pub mod headless;
 pub mod progress;
@@ -55,6 +56,8 @@ pub use backend::{unsupported_ops, GpuiQuad, GpuiStroke};
 // 渲染缝的**第二个实现**（无头）：把"只有一个实现的抽象是信仰"兑现成"两个
 // 实现的设计"。它与 GpuiBackend 的能力矩阵刻意不同（文字正好相反）。
 pub use headless::{color_seq_of_scene, HeadlessBackend, HeadlessCmd, HeadlessPaint};
+// 自绘 diff 背景带（P2 自绘 DiffView 的第一层：底）。第四个缝的消费者。
+pub use diff::{diff_backdrop, DiffBand, DiffBandStyle};
 pub use gutter::{change_gutter, GutterMark};
 pub use scene::{Color, Op, Point, Rect, Scene, Size};
 pub use progress::{segmented_progress, ProgressSegment};

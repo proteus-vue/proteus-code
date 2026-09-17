@@ -274,6 +274,38 @@ impl Storybook {
                 }),
             },
             Story {
+                title: "DiffBackdrop · diff 行背景带（自绘）",
+                note: "diff 正文的**行底带**：新增/删除各一色、hunk 头更淡（它是位置标记\n\
+                       而非改动）。只给逐行彩色文字时，颜色只标了单行语义、给不出\"改动落在\n\
+                       哪几段\"的形状 —— 而看 diff 的第一个问题恰是那个形状。\n\
+                       对齐靠\"底带与文字共用同一个行高\"，不是调间距（见模块头部说明）。",
+                body: Box::new(|| {
+                    use neo_ui_render::DiffBand;
+                    let bands = vec![
+                        DiffBand::Context,
+                        DiffBand::Hunk,
+                        DiffBand::Del,
+                        DiffBand::Del,
+                        DiffBand::Add,
+                        DiffBand::Context,
+                        DiffBand::Add,
+                        DiffBand::Add,
+                    ];
+                    v_flex()
+                        .gap_1()
+                        .child(diff_backdrop_demo_element(bands))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(div().text_color(neo_ui::neo_color(Tone::Success)).child("■ 新增"))
+                                .child(div().text_color(neo_ui::neo_color(Tone::Error)).child("■ 删除"))
+                                .child(div().text_color(neo_ui::neo_color(Tone::Info)).child("■ hunk 头"))
+                                .child(div().text_color(neo_ui::neo_color(Tone::Muted)).child("□ 上下文（无底）")),
+                        )
+                        .into_any_element()
+                }),
+            },
+            Story {
                 title: "渲染缝 · 两个后端（同场景 → 不同产物）",
                 note: "这条缝有**两个**后端：GpuiBackend（真窗口）与 HeadlessBackend\n\
                        （无 GPU，可跑 CI）。下面列出无头后端对同一个用量场景导出的 SVG ——\n\
@@ -406,6 +438,64 @@ fn gutter_demo_element(marks: Vec<neo_ui_render::GutterMark>) -> neo_ui_kit::gpu
     .w_full()
     .h(px(96.))
     .into_any_element()
+}
+
+/// 展示用的 diff 行背景带（与宿主里的同构：底带走缝、文字仍在 element 树）。
+///
+/// 这里用**代表符号 + 固定行高**代替真实 diff 文本：展示台的重点是"底带的形状
+/// 与对齐"，而不是再渲染一遍 diff 解析。行高 18pt 与宿主取值的量级一致。
+fn diff_backdrop_demo_element(bands: Vec<neo_ui_render::DiffBand>) -> neo_ui_kit::gpui::AnyElement {
+    use neo_ui_render::{diff_backdrop, RenderBackend};
+    const LH: f32 = 18.0;
+    let labels: Vec<&str> = bands
+        .iter()
+        .map(|b| match b {
+            neo_ui_render::DiffBand::Add => "+ 新增的一行",
+            neo_ui_render::DiffBand::Del => "- 被删除的一行",
+            neo_ui_render::DiffBand::Hunk => "@@ -1,5 +1,6 @@",
+            neo_ui_render::DiffBand::Context => "  未改的上下文行",
+        })
+        .collect();
+    let tones: Vec<Tone> = bands
+        .iter()
+        .map(|b| match b {
+            neo_ui_render::DiffBand::Add => Tone::Success,
+            neo_ui_render::DiffBand::Del => Tone::Error,
+            neo_ui_render::DiffBand::Hunk => Tone::Info,
+            neo_ui_render::DiffBand::Context => Tone::Text,
+        })
+        .collect();
+
+    let prepaint = move |bounds: neo_ui_kit::gpui::Bounds<neo_ui_kit::gpui::Pixels>,
+                         _w: &mut neo_ui_kit::gpui::Window,
+                         _cx: &mut neo_ui_kit::gpui::App| {
+        let scene = diff_backdrop(&bands, f32::from(bounds.size.width), LH);
+        (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
+    };
+    let mut texts = v_flex().gap_0().line_height(px(LH));
+    for (label, tone) in labels.iter().zip(tones) {
+        texts = texts.child(
+            div()
+                .whitespace_nowrap()
+                .text_color(neo_ui::neo_color(tone))
+                .child(label.to_string()),
+        );
+    }
+    neo_ui_kit::gpui::div()
+        .relative()
+        .w_full()
+        .child(
+            neo_ui_kit::gpui::canvas(prepaint, |bounds, (_, paint), window, _cx| {
+                paint.draw(bounds.origin, window);
+            })
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .right(px(0.))
+            .h_full(),
+        )
+        .child(texts)
+        .into_any_element()
 }
 
 impl Render for Storybook {
