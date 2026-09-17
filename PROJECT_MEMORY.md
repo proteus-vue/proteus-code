@@ -4492,6 +4492,69 @@ gpui 的 Linux 依赖树里有包在**链接期**要求 `-lxkbcommon-x11`，
 
 ---
 
+### (av) 昨天记的"根因"只对了一半：补库修掉了链接失败，Linux 仍然红
+
+补上 `libxkbcommon-x11-dev` 后逻辑能链接了，但 **CI 还是失败**。上一轮把
+"尾部全是 Compiling、没有 error 行"解释成超时/磁盘/链接缺库，都对不上真实形状：
+本轮日志**有 5 条以上 `test result: ok` 行**（说明测试**跑起来了**）、末尾
+`exit=101`、且**没有 error 行** —— 这是"某个测试用例断言失败"的形状，
+不是编译/链接失败。**我上一轮把它归到"编译期"这一类，方向就是错的。**
+
+#### 读不到真因的第二层原因：注解通道的 10 条上限
+
+上一轮我加了三版 `::error::` 注解，却只看到噪声。真正原因有两个，叠加：
+
+1. **每个 step 只保留前 10 条 error 注解**，其余**静默丢弃**；
+2. 内联 grep 用了 `-i 'error|failed'`，于是 `Compiling thiserror`（含 `error`
+   子串）与 `test result: ok. 0 failed`（含 `failed` 子串）**都命中**。
+
+噪声排在最前 → 10 条配额被吃光 → 真正的 `FAILED` 一条都发不出去。
+我用真实日志形状在本地复现出了 CI 还回的那 10 条（4 条 `Compiling` +
+5 条 `test result: ok`），确认**不是"grep 没匹配上"**，是匹配得太宽。
+
+修法（commit 32f228e4）：抽出 `scripts/ci-failure-digest.sh` ——
+按价值排序（失败用例名 → panic 上下文 → 编译错误 → 链接期失败）、
+模式**行首锚定且大小写敏感**、error/warning 各 10 条（两条独立配额）、
+消息压成单行。关键是**它可用日志在本地回放**，不必"推一次 CI 才知道写没写对"；
+并带 `--selftest`（进 `verify.sh` 第 6 段）—— 把模式改回旧的 `-i` 写法会立刻变红。
+
+#### 真实根因：用例拿"平台相关的沙箱能力"当前提
+
+修好读取通道后，注解一次就点名了：
+
+```
+失败用例: tool_cards_carry_name_args_and_output
+panic: left: Some(-1)  right: Some(0)   (crates/neo-host-egui/tests/end_to_end.rs:191)
+```
+
+`tool_cards_carry_name_args_and_output` 用 `ExecMode::Default`（→ 沙箱档
+`WorkspaceWrite`）**真的跑** `bash echo`。而 `LocalSandbox::supports` 里
+受限档是 `cfg!(target_os = "macos")` —— **Linux 上 fail-closed**（尚无
+Landlock+bwrap 实现），命令根本不执行，`exit_code` 因此是 `-1` 而不是 `0`。
+
+**本机复现（这是关键的一步）**：临时把 `supports()` 的受限档改成 `false`
+（即模拟 Linux 的 fail-closed），`cargo test -p neo-host-egui --test end_to_end`
+立刻得到 **1 failed / 5 passed**，失败点正是 `Some(-1)` vs `Some(0)` ——
+与 CI 首次给出的**逐字一致**。有了这个，修复就不再是猜。
+
+修法（commit ef1c3c5e）：该用例改用 `FullAccess` 档（沙箱档
+`DangerFullAccess` 三平台恒可用），**不跳过 Linux**（跳过会让 CI 失去意义）。
+用例的主语是界面数据通路（卡片带不带名字/参数/输出），与沙箱档位无关；
+拿一个平台相关的产品能力当测试前提，本身就是错的。其余用 `Default` 档的用例
+（如"审批前 diff"）不受影响 —— 它们在**执行前**就挂起审批。
+
+#### 两条可复用结论
+
+- **"日志里没有 error 行"不等于"编译期失败"**：先看有没有 `test result: ok`
+  行 —— 有就说明测试跑起来了，那是**用例失败**，该找 `FAILED`/`panic`。
+  上一轮我据"尾部只有 Compiling"就归到编译期，白追了一整轮。
+- **平台相关的产品能力不能当测试前提**：`Default` 档在 macOS 可用、
+  在 Linux fail-closed —— 用它当"能跑命令"的前提，等于把 CI 变成平台彩票。
+  要么用三平台都成立的档位，要么显式按平台分派（像
+  `neo-sandbox-local/src/lib.rs` 的测试那样 `#[cfg]` 分开写）。
+
+---
+
 ## 效率复盘：这一轮跑了 2 小时+，主要成本是我自己造成的
 
 用户明确指出效率太低。按 `ai-efficiency-rules` 的六类违规逐条对照：
@@ -4521,8 +4584,16 @@ gpui 的 Linux 依赖树里有包在**链接期**要求 `-lxkbcommon-x11`，
 **下次遇到读不到 CI 结果时，正确的一步**（写在最前面，别再推导）：
 1. 先确认 `gh` 或 token —— 没有就**立刻**决定用注解通道；
 2. 注解通道要能读到东西，需要：`set +e`（否则失败处理不执行）、
-   `CARGO_TERM_COLOR: never`（否则行首锚点失配）、**单行**注解（多行被截断）；
+   `CARGO_TERM_COLOR: never`（否则行首锚点失配）、**单行**注解（多行被截断）、
+   **模式行首锚定且大小写敏感**（`-i 'error|failed'` 会被 `Compiling thiserror`
+   与 `test result: ok. 0 failed` 吃光 **10 条**注解配额 —— 见 §4.64(av)）；
 3. 这三条现在都在 `.github/workflows/rust.yml` 里，直接用，不要重新发明。
+   摘要逻辑已抽成 `scripts/ci-failure-digest.sh`，**可以先本地回放日志**，
+   不要用"推一轮 CI 看注解对不对"来迭代（那是 10 分钟/轮的空转）。
+
+**匿名 GitHub API 每小时 60 次**，而轮询 run 状态是最容易把它耗光的动作。
+要等 CI 时：**用 `/rate_limit` 探测**（它不消耗配额）而不是持续 `curl` run；
+或先算好"预计完成时间"再一次性读取。为等配额而 `sleep` 一小时是本末倒置。
 
 ---
 
@@ -4569,7 +4640,7 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 | ~~**许可证选择待拍板**~~ **已定** | 用户拍板：可开源集（5 个 crate）用 **Apache-2.0**（含明确专利授权），宿主与内核保持 MIT。已落地：显式 license 字段 + 标准全文 LICENSE + README 说明；提取集 38 个 Apache-2.0 依赖**都不带 NOTICE**，故 §4(d) 义务不触发（已写进 THIRD-PARTY-LICENSES.md）。仍未做：`cargo-deny` 需在 CI 安装后跑全量（本地脚本已覆盖主要能力） |
 | **NOTICE 依赖上游包内容** | §4(d) 义务的判定依据是"上游是否随包发布 NOTICE"。本脚本查的是本地 registry 目录 —— 若某包在上游带 NOTICE 而随包未分发，会漏判。彻底做法是用 `cargo-about` 读包元数据。当前实测 38 个包全无 NOTICE，风险低但非零 |
 | **Linux 桌面宿主的运行时库** | gpui 在 Linux 靠 **dlopen** 加载 `libxkbcommon` / `libwayland` / `libX11` —— **编译不需要**这些包，但运行时缺了会直接 panic（`Library libxkbcommon.so could not be loaded.`）。预编译 Linux 产物不含桌面（精简版）故不受影响；自行 `cargo install` 的 Linux 用户需要先装它们。README 已写明 |
-| **Linux 构建未验证** | 本地交叉检查不可行（macOS 无 Linux C 工具链，`cc-rs` 直接报缺 `x86_64-linux-gnu-gcc`），只能靠 CI 首跑。已本地排除一类风险：UI 栈五个 crate 的平台相关 `cfg` 为 0，其余 crate 的 `cfg(target_os)` 都是有意的三平台分支 |
+| ~~**Linux 构建未验证**~~ **CI 已能跑通测试** | 本地交叉检查不可行（macOS 无 Linux C 工具链，`cc-rs` 直接报缺 `x86_64-linux-gnu-gcc`），只能靠 CI。已定位并修掉两个 Linux-only 拦路石：① 链接期缺 `libxkbcommon-x11-dev`（`cargo check` 不链接故只在 test 阶段暴露）；② 用例拿 `ExecMode::Default`（→ 受限沙箱档，Linux fail-closed）当"能跑命令"的前提。后者已在本机用"模拟 Linux fail-closed"复现并修（§4.64(av)） |
 | **IME 只验了组件契约** | 已有 3 条自动化回归用例（preedit 删除后重输、连续合成、基建自证），钉住我们依赖的组件契约。但**真输入法**（装中文输入法敲键、候选框跟光标）未验：本用例不驱动系统输入法进程，真机还可能在奇怪时机连发 unmark |
 | **高 DPI 只验了整数倍两档** | 1x / 2x 实测通过（清晰、中文正常、无错位）。但 macOS 的 fractional scaling（125%/150%）是"高分辨率渲染再缩放"的**不同机制**，本机没有对应的可用模式，无法验证 —— 不能由整数倍结果推断 |
 | **Desktop 打包：有脚本，未产品化** | `scripts/make-app.sh` 已能产出可用 .app（Info.plist + `CFBundleIdentifier` + ad-hoc 签名）—— 它同时是**GUI 键盘自动化验证的前提**（裸二进制 `bundle_id` 为 null，合成键盘投不进去，见 §4.64(t)）。**仍未做**：图标、Apple 签名与公证（正式分发必需）；Windows 无对应脚本 |
