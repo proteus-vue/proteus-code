@@ -4929,3 +4929,44 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 | **`changeset release` 每次红（设置问题，非代码）** | 机器人分支能推（`origin/changeset-release/main` 存在且为 `chore(release): v0.2.0`），但 `gh pr create` 失败、Actions 里零 PR —— 根因是仓库设置「Allow GitHub Actions to create and approve pull requests」未勾选（GitHub 默认关闭，`pull-requests: write` 也放行不了）。**改代码无解**，需在 Settings → Actions → General 勾上（组织仓库还要 org 级放行）。它让 `changeset release` 长期显示红色，别误判成代码回归；`rust`/`efficiency` 是绿的。已写进 `docs/RELEASE.md` §5 |
 
 **下一步优先级建议**：Desktop 的 webview 窗口层（需要平台图形栈与 GUI 验证，动手前先做窗口壳的设计决定）。
+
+---
+
+## 会话接续点（2026-09-17 收尾）
+
+今天这一线（渲染缝 + diff + gpui composer）共 12 个提交，全部已推送，`rust` /
+`efficiency` 两个 workflow 全绿（`changeset release` 仍红，见上表：是仓库设置）。
+测试 922 → 967，本机 `scripts/verify.sh` 全部门禁通过，工作区干净、与远端同步。
+
+### 明天可以直接接着做的三件事（按我的建议排序）
+
+1. **D12 文件树 / 内置浏览器 / Repo Wiki** —— parity 清单里**唯一还是 ❌ 的项**，
+   也是"从'能看'到'能干活'"差别最大的一项。**动手前需先定**文件索引的边界
+   （扫盘范围 / 忽略规则 / 是否 watch 变更），那是新能力，不是纯接线。
+2. **D5 剩余两项**：并排（side-by-side）视图、跳转上/下一处改动。
+   并排视图还能**顺带让折叠活起来**（每侧上下文比单栏多）。
+3. **删 egui（阶段 3 收尾）** —— 三条前置条件写在缺口表里，**需用户拍板**
+   （不擅自删：保留对照物才能判断新问题是 gpui 的还是内核的）。
+
+### ⏳ 有一件事**等用户决定**（别自己定）
+
+**是否把审批预览的 diff 上下文从 `CONTEXT = 3` 提到 10？**
+
+- 上下文：`neo-capability/src/diff.rs` 的 `CONTEXT = 3` **无注释说明取值理由**
+  （未经审视的 unix 默认），它是 §4.64(az) 里"折叠休眠"的直接原因。
+- 已量化风险：**不进模型上下文**（`PatchProposed` 只走事件流渲染，模型看到的是
+  `ToolResult`，改它不加 token 成本）、**生产调用方只有审批预览一处**、
+  现有测试几乎不依赖具体行数。
+- **为什么没顺手动**：它会同时改变 **TUI 宿主 diffview** 的观感（共享同一生产者），
+  属"审批时给用户看多宽的上下文"这个**产品决定**，不该由补 UI 组件的任务顺带定。
+
+### 这一线的经验（详见 §4.64(ax)(ay)(az)(ba)）
+
+- **"实现了" ≠ "生效了"**：折叠逻辑写完才发现对自家 diff 永不触发（每 hunk 只带
+  3 行上下文）。**新增路径必须问"触发条件在当前数据下成立吗"**。
+- **有损抽象在新需求下会变成正确性 bug**：`DiffBand` 原为"改动色 / 其它"二分，
+  折叠需要区分"未改上下文"与"文件头 / 截断说明"，故补成完整分类。
+- **字体相关的视觉手段必须在中文上实测**：粗体在 CJK 上无真字面（第三次被
+  同类问题咬，前两次是 egui 字体与豆腐块）→ 改用底色（可像素断言）。
+- **GUI 验证不抢用户焦点**：`screencapture -l <窗口ID>` 按窗口截图 + `open -g`
+  后台启动 + `NEO_GUI_PROMPT` 自动提交，全程不需要键盘注入（已写成效率规范第零条）。
