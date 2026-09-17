@@ -450,6 +450,233 @@ pub fn diff_line_kind(line: &str) -> DiffLineKind {
     DiffLineKind::Meta
 }
 
+/// 单行内**被改动的片段**（字节范围，相对该行原文）。
+///
+/// 范围以**字节**计，因为渲染层要拿它去切 `&str`。⚠️ 见 [`inline_emphasis`]
+/// 里关于"char 索引 ≠ 字节偏移"的说明 —— 中文/emoji 下这两者差得很远。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InlineEmphasis {
+    /// 该行内需要强调的片段（按出现顺序，互不重叠、升序）。
+    pub ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl InlineEmphasis {
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+}
+
+/// 参与行内比对的**最长字符数**。超过则放弃行内高亮（整行着色）。
+///
+/// # 为什么需要上限
+///
+/// 行内比对是字符级 O(n·m) 的动态规划。一行几万字符（压缩过的 JS、长 base64）
+/// 会让它退化成秒级卡顿 —— 而这类行**本来就没有"改了一个词"可言**，
+/// 整行着色反而是更诚实的呈现。
+///
+/// 取 2000：正常源码行远小于它，而 2000×2000 的 DP 仍在毫秒级。
+pub const MAX_INLINE_CHARS: usize = 2000;
+
+/// 这一行是不是 `git` 的 **"文件末尾无换行"标记**（`\ No newline at end of file`）。
+///
+/// # 为什么必须单独识别它（真机实测抓到的）
+///
+/// 我们自己的 `apply_patch` 就常产出它：旧文件无尾换行时，`similar` 会在
+/// `-` 块与 `+` 块**之间**插一行这个标记。而它在 [`diff_line_kind`] 里落在
+/// `Meta`（既不是 Del 也不是 Add）—— 于是"Del 块紧跟 Add 块"这个配对条件
+/// **被它打断**，行内强调在最常见的一类改动（整文件重写且末尾无换行）上
+/// **永远不生效**，而屏幕上完全看不出来（只是"没有强调"）。
+///
+/// 修法：配对时**跳过**它（它不携带内容，只是相邻性的说明），但仍拒绝跨
+/// `Context` 配对 —— 上下文行意味着两段真的不相邻。
+fn is_no_newline_marker(line: &str) -> bool {
+    line.trim_start().starts_with("\\ No newline")
+}
+
+/// 计算一段 diff 的**行内强调区间**，下标与入参 `lines` 一一对应。
+///
+/// # 它解决什么
+///
+/// 只按行着色时，一行 200 字符里改了一个词，**整行都是绿的** —— 用户还是得
+/// 自己逐字找。GitHub / Zed / ZCode 都会把**行内真正变化的那几个字**再强调一次。
+///
+/// # 配对规则（照 unified diff 的形状）
+///
+/// unified diff 把一处替换写成"先 N 行 `-`、再 N 行 `+`"（中间不夹其它种类）。
+/// 所以：遇到一段连续 `Del` 紧跟一段连续 `Add`，就**按序配对**
+/// （第 1 个 Del 配第 1 个 Add），只比内容（去掉行首的 `-`/`+` 标记）。
+/// 配不上的（纯增 / 纯删 / 数量不等）不产生强调 —— 那种情况整行着色已经够了。
+///
+/// 中间只允许夹 `\ No newline at end of file` 这类**无内容标记**（见
+/// [`is_no_newline_marker`]）；夹了上下文行则视为不相邻，不配对。
+///
+/// # ⚠️ 两个必须做对的地方（都是静默出错的那类）
+///
+/// 1. **`similar` 的 `from_chars` 返回的是 char 下标，不是字节偏移**。
+///    实测 `-中文旧内容`：6 个 char / 16 字节。若把 char 下标直接当字节用，
+///    切出来的不是那一段 —— 中文与 emoji 下会切在字符中间（`&str` 切片甚至
+///    **直接 panic**）。所以这里用 `char_indices` 建立 char→byte 映射。
+/// 2. **必须跳过行首标记**：`-`/`+` 不是内容，把它算进比对会得到
+///    "每个 `-` 都变成了 `+`"这种占满全行的假强调。
+pub fn inline_emphasis(lines: &[&str]) -> Vec<Option<InlineEmphasis>> {
+    let kinds: Vec<DiffLineKind> = lines.iter().map(|l| diff_line_kind(l)).collect();
+    let mut out: Vec<Option<InlineEmphasis>> = vec![None; lines.len()];
+
+    let mut i = 0;
+    while i < lines.len() {
+        if kinds[i] != DiffLineKind::Del {
+            i += 1;
+            continue;
+        }
+        let del_start = i;
+        while i < lines.len() && kinds[i] == DiffLineKind::Del {
+            i += 1;
+        }
+        let del_end = i;
+
+        // 只在"无内容标记"上向前看 —— 遇到任何别的种类（含 Context）就停，
+        // 因为那意味着这两段不相邻。
+        let mut j = i;
+        while j < lines.len() && is_no_newline_marker(lines[j]) {
+            j += 1;
+        }
+        let add_start = j;
+        let mut k = j;
+        while k < lines.len() && kinds[k] == DiffLineKind::Add {
+            k += 1;
+        }
+        let add_end = k;
+        i = add_end.max(i);
+
+        // 没有紧跟的 Add 块 → 这不是一处替换（纯删除 / 被上下文隔开）
+        if add_start == add_end {
+            continue;
+        }
+        let pairs = (del_end - del_start).min(add_end - add_start);
+        for k in 0..pairs {
+            let d = del_start + k;
+            let a = add_start + k;
+            if let Some((dr, ar)) = emphasize_pair(lines[d], lines[a]) {
+                out[d] = Some(InlineEmphasis { ranges: dr });
+                out[a] = Some(InlineEmphasis { ranges: ar });
+            }
+        }
+    }
+    out
+}
+
+/// 比对一对（旧行, 新行），返回两侧要强调的字节范围。
+///
+/// 任一侧超长、或内容完全相同（不该发生，但防御）时返回 `None`。
+fn emphasize_pair(
+    old_line: &str,
+    new_line: &str,
+) -> Option<(Vec<std::ops::Range<usize>>, Vec<std::ops::Range<usize>>)> {
+    // 内容 = 去掉行首标记（`-`/`+`）。标记占 1 字节（都是 ASCII），
+    // 但**不假设**它一定存在 —— 防御式取下界。
+    let (old_body, old_mark_len) = strip_marker(old_line);
+    let (new_body, new_mark_len) = strip_marker(new_line);
+
+    if old_body == new_body {
+        return None;
+    }
+    let old_chars = old_body.chars().count();
+    let new_chars = new_body.chars().count();
+    if old_chars > MAX_INLINE_CHARS || new_chars > MAX_INLINE_CHARS {
+        return None; // 太长不比对（见 MAX_INLINE_CHARS 的说明）
+    }
+
+    // ⚠️ `from_chars` 的区间是 **char 下标**；下面一律先经 char→byte 映射，
+    //    绝不把 char 下标直接当字节用（中文/emoji 下会切碎甚至 panic）。
+    let diff = similar::TextDiff::from_chars(old_body, new_body);
+
+    let old_to_byte = char_to_byte_map(old_body);
+    let new_to_byte = char_to_byte_map(new_body);
+
+    let mut old_ranges = Vec::new();
+    let mut new_ranges = Vec::new();
+    for op in diff.ops() {
+        use similar::DiffTag;
+        match op.tag() {
+            DiffTag::Equal => {}
+            DiffTag::Delete => {
+                push_mapped(&mut old_ranges, &old_to_byte, op.old_range(), old_mark_len)
+            }
+            DiffTag::Insert => {
+                push_mapped(&mut new_ranges, &new_to_byte, op.new_range(), new_mark_len)
+            }
+            DiffTag::Replace => {
+                push_mapped(&mut old_ranges, &old_to_byte, op.old_range(), old_mark_len);
+                push_mapped(&mut new_ranges, &new_to_byte, op.new_range(), new_mark_len);
+            }
+        }
+    }
+    // 合并相邻/重叠片段：`similar` 可能把连续替换切成多个 op，
+    // 分开渲染会得到若干"本该连成一片"的碎块（视觉上像噪点）。
+    coalesce(&mut old_ranges);
+    coalesce(&mut new_ranges);
+    Some((old_ranges, new_ranges))
+}
+
+/// 去掉行首的 diff 标记，返回 `(内容, 标记字节数)`。
+fn strip_marker(line: &str) -> (&str, usize) {
+    let mut it = line.char_indices();
+    match it.next() {
+        Some((_, c)) if c == '-' || c == '+' || c == ' ' => {
+            let rest_start = it.next().map(|(i, _)| i).unwrap_or(line.len());
+            (&line[rest_start..], rest_start)
+        }
+        _ => (line, 0),
+    }
+}
+
+/// char 下标 → 字节偏移的映射表（长度 = char 数 + 1，末项是字节总长）。
+///
+/// 用 `char_indices` 而不是 `c.len_utf8()` 累加：前者由标准库保证与切片边界
+/// 一致，后者要自己保证 —— 而这正是 UTF-8 切片的经典出错点。
+fn char_to_byte_map(s: &str) -> Vec<usize> {
+    let mut map: Vec<usize> = s.char_indices().map(|(b, _)| b).collect();
+    map.push(s.len());
+    map
+}
+
+/// 把一个 char 区间映射成字节区间并追加（含行首标记的偏移修正）。
+fn push_mapped(
+    out: &mut Vec<std::ops::Range<usize>>,
+    map: &[usize],
+    char_range: std::ops::Range<usize>,
+    mark_bytes: usize,
+) {
+    // 越界防御：`map` 的末项是字节总长，`char_range.end` 至多等于 char 数。
+    let (Some(&start), Some(&end)) = (map.get(char_range.start), map.get(char_range.end)) else {
+        return;
+    };
+    if start >= end {
+        return; // 空区间不产生强调
+    }
+    out.push((start + mark_bytes)..(end + mark_bytes));
+}
+
+/// 合并相邻或重叠的区间（原地）。
+fn coalesce(ranges: &mut Vec<std::ops::Range<usize>>) {
+    if ranges.len() < 2 {
+        return;
+    }
+    ranges.sort_by_key(|r| r.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
+    for r in ranges.drain(..) {
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end => {
+                if r.end > last.end {
+                    last.end = r.end;
+                }
+            }
+            _ => merged.push(r),
+        }
+    }
+    *ranges = merged;
+}
+
 /// 一段**连续的工具调用**（用于分组显示）。
 ///
 /// # 它解决的问题
@@ -621,6 +848,260 @@ pub fn search_reasoning(blocks: &[Block], query: &str) -> Vec<ReasoningHit> {
 /// 这是"搜索结果与可见内容必须对得上"的最小保证。
 pub fn blocks_to_expand(hits: &[ReasoningHit]) -> std::collections::HashSet<usize> {
     hits.iter().map(|h| h.block).collect()
+}
+
+#[cfg(test)]
+mod inline_emphasis_tests {
+    use super::*;
+
+    /// 取某行强调出的**文本片段**（测试断言读起来是"强调了哪几个字"，
+    /// 而不是一堆字节下标 —— 后者看不出对错）。
+    fn emphasized(lines: &[&str], idx: usize) -> Vec<String> {
+        let all = inline_emphasis(lines);
+        all[idx]
+            .as_ref()
+            .map(|e| {
+                e.ranges
+                    .iter()
+                    .map(|r| lines[idx][r.clone()].to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 一处行内替换：只强调变化的那几个字，其余不算。
+    #[test]
+    fn a_single_word_change_is_emphasized_not_the_whole_line() {
+        let lines = vec!["-let x = 1;", "+let y = 1;"];
+        assert_eq!(emphasized(&lines, 0), vec!["x"]);
+        assert_eq!(emphasized(&lines, 1), vec!["y"]);
+    }
+
+    /// **CJK 是本节最容易错的地方**：`similar::from_chars` 给的是 **char 下标**，
+    /// 而中文一行 6 个 char / 16 字节。若把 char 下标当字节用，切片会切在字符
+    /// 中间（`&str` 甚至直接 panic），或强调到完全无关的位置。
+    ///
+    /// 这条用例就是为那个陷阱写的：断言**切出来的字符串是完整的汉字**。
+    #[test]
+    fn cjk_change_emphasizes_whole_characters_not_shredded_bytes() {
+        let lines = vec!["-中文旧内容", "+中文新内容"];
+        assert_eq!(emphasized(&lines, 0), vec!["旧"]);
+        assert_eq!(emphasized(&lines, 1), vec!["新"]);
+    }
+
+    /// emoji（4 字节）+ 中文 + ASCII 混排 —— 字节/char 差异最大的情形。
+    #[test]
+    fn mixed_emoji_and_cjk_stays_on_character_boundaries() {
+        // ⚠️ 必须一侧 `-` 一侧 `+`：只有 Del→Add 才配对（两侧都是 `+` 不构成替换）
+        let lines = vec!["-准备 🚀 发布", "+准备 🚀 上线"];
+        assert_eq!(emphasized(&lines, 0), vec!["发布"]);
+        assert_eq!(emphasized(&lines, 1), vec!["上线"]);
+        // 反向也成立
+        let rev = vec!["-准备 🚀 上线", "+准备 🚀 发布"];
+        assert_eq!(emphasized(&rev, 0), vec!["上线"]);
+        assert_eq!(emphasized(&rev, 1), vec!["发布"]);
+    }
+
+    /// 行首的 `-`/`+` 标记**不是内容**，不能被算成"变化"。
+    ///
+    /// 若不跳过标记，比对会看到"-"→"+"，于是强调一个根本不存在的差异
+    /// （表现是整行或行首被点亮）。
+    #[test]
+    fn the_line_marker_is_not_part_of_the_comparison() {
+        let lines = vec!["-same", "+same"];
+        assert!(
+            emphasized(&lines, 0).is_empty(),
+            "内容相同则无强调（标记不算内容）"
+        );
+        assert!(emphasized(&lines, 1).is_empty());
+    }
+
+    /// 纯新增 / 纯删除**不产生行内强调** —— 那种情况整行着色已经表达清楚了。
+    #[test]
+    fn pure_insertions_and_deletions_have_no_inline_emphasis() {
+        let lines = vec!["@@ -1 +1 @@", "-旧", "+新甲乙丙", "+又一行"];
+        let all = inline_emphasis(&lines);
+        // 「-旧 / +新甲乙丙」配成一对 → 会强调；但第二个 `+又一行` 无配对 → 无强调
+        assert!(
+            all[3].is_none(),
+            "没有配对的 Add（纯新增）不该有行内强调"
+        );
+        // Hunk 头永远无强调
+        assert!(all[0].is_none());
+    }
+
+    /// 数量不等时按**序配对到较少的一侧**，多出来的不强行配对。
+    #[test]
+    fn uneven_delete_add_counts_pair_only_the_minimum() {
+        let lines = vec!["-aaa", "-bbb", "+aaa2"];
+        let all = inline_emphasis(&lines);
+        assert!(all[0].is_some(), "第 1 个 Del 配第 1 个 Add");
+        assert!(all[1].is_none(), "第 2 个 Del 没有配对 → 无强调");
+        assert!(all[2].is_some(), "Add 侧配上了");
+    }
+
+    /// **`\ No newline at end of file` 夹在中间不打断配对。**
+    ///
+    /// 这条是**真机实测抓到的缺陷**：我们自己的 `apply_patch` 在旧文件无尾换行时
+    /// 会产出这个标记，而它在 `diff_line_kind` 里是 `Meta` —— 于是"Del 块紧跟
+    /// Add 块"的配对被打断，行内强调在这类**最常见的改动**上永远不生效，
+    /// 且屏幕上只表现为"没有强调"，完全看不出是 bug。
+    #[test]
+    fn the_no_newline_marker_does_not_break_pairing() {
+        let lines = vec![
+            "--- a/f.txt",
+            "+++ b/f.txt",
+            "@@ -1 +1 @@",
+            "-旧的一整行内容",
+            "\\ No newline at end of file",
+            "+新的一整行内容",
+        ];
+        let all = inline_emphasis(&lines);
+        assert!(
+            all[3].is_some() && all[5].is_some(),
+            "中间夹着 `\\ No newline` 标记时，Del/Add 仍应配对（否则整文件重写永不强调）"
+        );
+        // 标记行自己不该被强调（它不是内容）
+        assert!(all[4].is_none(), "标记行不该被强调");
+    }
+
+    /// 但**上下文行**仍然打断配对 —— 那种情况两段确实不相邻。
+    ///
+    /// 与上一条成对：说明"跳过"只针对无内容标记，不是放宽成"随便跨"。
+    #[test]
+    fn a_context_line_still_breaks_pairing_even_though_a_marker_does_not() {
+        let lines = vec!["-旧", " 中间未改", "+新"];
+        let all = inline_emphasis(&lines);
+        assert!(
+            all[0].is_none() && all[2].is_none(),
+            "被上下文隔开的两段不是同一处替换"
+        );
+    }
+
+    /// 中间夹了 Context 就不是同一处替换 —— 不配对。
+    #[test]
+    fn a_context_line_between_blocks_breaks_the_pairing() {
+        let lines = vec!["-旧值", " 未改的上下文", "+新值"];
+        let all = inline_emphasis(&lines);
+        assert!(all[0].is_none(), "被 Context 隔开就不是同一处替换");
+        assert!(all[2].is_none());
+    }
+
+    /// 超长行**放弃**行内比对（返回 None），不卡也不猜。
+    #[test]
+    fn an_overlong_line_skips_inline_comparison() {
+        let big_old = format!("-{}", "a".repeat(MAX_INLINE_CHARS + 10));
+        let big_new = format!("+{}", "a".repeat(MAX_INLINE_CHARS + 11));
+        let lines = vec![big_old.as_str(), big_new.as_str()];
+        let all = inline_emphasis(&lines);
+        assert!(
+            all[0].is_none() && all[1].is_none(),
+            "超长行应跳过行内比对（{MAX_INLINE_CHARS} 字符上限），而不是退化成卡顿"
+        );
+    }
+
+    /// **绝不重叠、绝不超过行长** —— 渲染层拿这些区间去切 `&str`，
+    /// 越界或重叠都会 panic 或画出错乱的强调块。
+    #[test]
+    fn ranges_never_overlap_and_never_exceed_the_line() {
+        let lines = vec![
+            "-let a = 1; let b = 2;",
+            "+let a = 9; let b = 8;",
+            "-x",
+            "+y",
+        ];
+        let all = inline_emphasis(&lines);
+        for (i, e) in all.iter().enumerate() {
+            let Some(e) = e else { continue };
+            let mut prev_end = 0usize;
+            for r in &e.ranges {
+                assert!(r.start < r.end, "空区间不该出现（行 {i}）");
+                assert!(r.end <= lines[i].len(), "区间越界（行 {i}）");
+                assert!(
+                    r.start >= prev_end,
+                    "区间重叠或乱序（行 {i}）：{:?} 与上一个的 end={prev_end}",
+                    e.ranges
+                );
+                assert!(
+                    lines[i].is_char_boundary(r.start) && lines[i].is_char_boundary(r.end),
+                    "区间必须落在字符边界上（行 {i}），否则切片会 panic"
+                );
+                prev_end = r.end;
+            }
+        }
+    }
+
+    /// 被**未改内容**隔开的改动是两段 —— 不合并（合并会把未改的空格也点亮）。
+    #[test]
+    fn runs_separated_by_unchanged_text_stay_separate() {
+        let lines = vec!["-alpha beta gamma", "+alpha BETA GAMMA"];
+        let all = inline_emphasis(&lines);
+        let e = all[0].as_ref().expect("应强调");
+        assert_eq!(
+            e.ranges.len(),
+            2,
+            "`beta` 与 `gamma` 之间那个未改的空格不该被点亮，故是两段：{:?}",
+            e.ranges
+        );
+        assert_eq!(emphasized(&lines, 0), vec!["beta", "gamma"]);
+    }
+
+    /// `coalesce` 把**真正相邻/重叠**的区间合并（防止渲染出碎块）。
+    ///
+    /// 直接测这个纯函数：`similar` 正常情况下已经把连续替换并成一个 op，
+    /// 所以这条是**防御性**的（见函数注释）。用一个会重叠的输入验证它确实生效 ——
+    /// 否则它就是一段永远没被执行的代码。
+    #[test]
+    fn coalesce_merges_adjacent_and_overlapping_ranges() {
+        let mut r = vec![0..3, 3..6, 5..9, 20..22];
+        coalesce(&mut r);
+        assert_eq!(r, vec![0..9, 20..22], "相邻与重叠应并成一段，跳空的不动");
+
+        let mut single = vec![4..5];
+        coalesce(&mut single);
+        assert_eq!(single, vec![4..5], "单元素不应被改动");
+
+        let mut empty: Vec<std::ops::Range<usize>> = Vec::new();
+        coalesce(&mut empty);
+        assert!(empty.is_empty());
+    }
+
+    /// **真机用例**：整文件重写时只有一个字不同 —— 强调应落在那个字上。
+    ///
+    /// 这条用真机观察到的**确切字符串**，因为它是"行内强调到底有没有算出来"
+    /// 的证据；纯构造的用例可能恰好绕开真实形状。
+    #[test]
+    fn the_real_selftest_diff_emphasizes_the_changed_character() {
+        let lines = vec![
+            "--- a/selftest.txt",
+            "+++ b/selftest.txt",
+            "@@ -1 +1 @@",
+            "-由 selftest provider 经 apply_patch 写入？",
+            "\\ No newline at end of file",
+            "+由 selftest provider 经 apply_patch 写入。",
+        ];
+        let all = inline_emphasis(&lines);
+        for (idx, want) in [(3usize, "？"), (5usize, "。")] {
+            let e = all[idx]
+                .as_ref()
+                .unwrap_or_else(|| panic!("第 {idx} 行应被强调"));
+            let got: Vec<String> = e.ranges.iter().map(|r| lines[idx][r.clone()].to_string()).collect();
+            assert_eq!(got, vec![want.to_string()], "第 {idx} 行强调内容不对：{got:?}");
+        }
+    }
+
+    /// 退化与边界输入不 panic。
+    #[test]
+    fn degenerate_inputs_do_not_panic() {
+        assert!(inline_emphasis(&[]).is_empty());
+        assert!(inline_emphasis(&[""]).len() == 1);
+        // 只有标记、没有内容
+        let all = inline_emphasis(&["-", "+"]);
+        assert_eq!(all.len(), 2);
+        // `-` 与 `---`（文件头）不配对
+        let all = inline_emphasis(&["--- a/f", "+++ b/f"]);
+        assert!(all.iter().all(|e| e.is_none()), "文件头不该被行内强调");
+    }
 }
 
 #[cfg(test)]

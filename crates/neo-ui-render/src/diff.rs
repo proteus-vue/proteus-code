@@ -77,6 +77,22 @@ pub struct DiffBandStyle {
     /// 折叠标记行的底色（淡，但比 hunk 头明显一点：它是"可点击展开"的把手，
     /// 需要被看出来是个控件而不是一行灰字）。
     pub fold: Color,
+    /// **行内**强调（某个片段真的变了）时，压在行底色之上的更浓色。
+    ///
+    /// # 为什么行内强调用"更浓的底"而不是粗体
+    ///
+    /// 第一版用的是 `FontWeight::BOLD`，真机上看不出差别 —— 而这不是实现问题：
+    /// **CJK 字形普遍没有真正的粗体字面**，字体系统要么 synthesize（很轻微）、
+    /// 要么直接取常规字面。于是"加粗"在中文内容上约等于没做，而本项目的用户
+    /// 恰恰大量使用中文（与 §4.64(e) 豆腐块那一课同源：都是"中文在字体层
+    /// 被特殊对待"）。
+    ///
+    /// 底色则**与字体无关**：颜色是确定的像素，任何字形都看得出来，
+    /// 而且它可被断言（像素值），不依赖"看起来粗了一点"这种主观判断。
+    /// GitHub / Zed 的行内高亮同样是"行底色 + 变更片段更浓一档"。
+    pub add_emphasis: Color,
+    /// 删除行的行内强调底（见 [`Self::add_emphasis`]）。
+    pub del_emphasis: Color,
 }
 
 impl Default for DiffBandStyle {
@@ -107,6 +123,19 @@ impl DiffBandStyle {
             del: tint(neo_text::Tone::Error, 32),
             hunk: tint(neo_text::Tone::Info, 14),
             fold: tint(neo_text::Tone::Info, 26),
+            // 行内强调：同色系、**更浓**（约 2.4× 行底），确保在行底之上仍明显可辨。
+            // 只提高 alpha、不换色相 —— 换色会让"这行是新增还是删除"更难判。
+            add_emphasis: tint(neo_text::Tone::Success, 76),
+            del_emphasis: tint(neo_text::Tone::Error, 76),
+        }
+    }
+
+    /// 行内强调色（按该行的种类）。非改动行没有行内强调可言 → `None`。
+    pub fn emphasis_for(&self, band: DiffBand) -> Option<Color> {
+        match band {
+            DiffBand::Add => Some(self.add_emphasis),
+            DiffBand::Del => Some(self.del_emphasis),
+            _ => None,
         }
     }
 
@@ -247,6 +276,46 @@ mod tests {
         assert_ne!(DiffBand::Context, DiffBand::Header);
         assert_ne!(DiffBand::Context, DiffBand::Meta);
         assert_ne!(DiffBand::Header, DiffBand::Meta);
+    }
+
+    /// **行内强调必须比所在行的底更浓**，且半透明（不能盖掉文字）。
+    ///
+    /// 这条是可判定的：强调若不够浓，在行底之上看不出来 —— 而"看起来粗了一点"
+    /// 是无法断言的（那正是第一版用粗体时踩的坑：CJK 没有粗体字面，真机上
+    /// 看不出差别，且没有测试能抓住）。
+    #[test]
+    fn inline_emphasis_is_noticeably_darker_than_the_line_band() {
+        let st = DiffBandStyle::from_neo_palette();
+        for (band, line, emph) in [
+            (DiffBand::Add, st.add, st.add_emphasis),
+            (DiffBand::Del, st.del, st.del_emphasis),
+        ] {
+            assert!(
+                emph.a > line.a,
+                "{band:?}: 行内强调 alpha ({}) 必须大于行底 alpha ({})",
+                emph.a,
+                line.a
+            );
+            // 至少浓 2 倍，否则在行底之上难以分辨
+            assert!(
+                emph.a >= line.a * 2,
+                "{band:?}: 强调只有 {} vs 行底 {}，差距不够（要求 ≥2×）",
+                emph.a,
+                line.a
+            );
+            // 仍要半透明：不透明会盖住文字
+            assert!(emph.a < 200, "{band:?}: 强调 alpha {} 过高，会把文字盖住", emph.a);
+            // 同色系（只提浓、不换色相）——换了会让"增/删"更难判
+            assert_eq!(
+                (emph.r, emph.g, emph.b),
+                (line.r, line.g, line.b),
+                "{band:?}: 强调应与行底同色相（只提高 alpha）"
+            );
+        }
+        // 非改动行没有行内强调
+        assert!(st.emphasis_for(DiffBand::Context).is_none());
+        assert!(st.emphasis_for(DiffBand::Header).is_none());
+        assert!(st.emphasis_for(DiffBand::Hunk).is_none());
     }
 
     /// 折叠标记行**有底**且与上下文不同 —— 它需要被看成"可展开的把手"。

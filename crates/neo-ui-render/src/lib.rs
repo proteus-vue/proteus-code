@@ -53,6 +53,9 @@ pub use backend::GpuiBackend;
 pub use backend::RenderBackend;
 // 「本后端画不画得出这条指令」+ 检查器：让"静默丢掉"变成可断言、可进门禁的事实。
 pub use backend::{unsupported_ops, GpuiQuad, GpuiStroke};
+// 中立 `Color` → gpui `Rgba`。宿主需要它把「缝里的中立颜色」交给 gpui 的
+// element（`.bg()` / `.text_color()`）—— 那是**文字**所在的层，不走缝。
+pub use backend::to_gpui_rgba;
 // 渲染缝的**第二个实现**（无头）：把"只有一个实现的抽象是信仰"兑现成"两个
 // 实现的设计"。它与 GpuiBackend 的能力矩阵刻意不同（文字正好相反）。
 pub use headless::{color_seq_of_scene, HeadlessBackend, HeadlessCmd, HeadlessPaint};

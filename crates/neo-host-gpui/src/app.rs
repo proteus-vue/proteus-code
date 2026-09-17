@@ -816,6 +816,56 @@ fn diff_display_rows(
     (bands, rows, display_bands)
 }
 
+/// 把一行按**强调区间**切成若干段，返回 `(文本, 是否强调)`。
+///
+/// # 为什么需要它（行内高亮的最后一步）
+///
+/// 只按行着色时，一行 200 字符里改了一个词，**整行都是绿的** —— 用户还得自己
+/// 逐字找。行内强调就是把真正变化的那几个字再点亮一次。
+///
+/// "哪些字变了"由共享层（`neo_driver::transcript::inline_emphasis`）算出，
+/// 两个 GUI 宿主共用同一套判定（否则同一份 diff 在两处强调的位置不同）；
+/// 这里只负责**把它切成可直接渲染的段**。
+///
+/// # 切分按**字节边界**，且不信任输入
+///
+/// 区间来自共享层（那边有测试保证落在 char 边界上）。这里仍做越界/乱序检查 ——
+/// 不是不信任，而是这段代码跑在**渲染路径**上：一个越界切片会 panic 掉整帧，
+/// 表现为"窗口突然空白"，比"少高亮一处"严重得多。所以防御地退回整行普通显示。
+fn split_by_emphasis<'a>(
+    line: &'a str,
+    emphasis: Option<&neo_driver::transcript::InlineEmphasis>,
+) -> Vec<(&'a str, bool)> {
+    let Some(e) = emphasis else {
+        return vec![(line, false)];
+    };
+    if e.is_empty() {
+        return vec![(line, false)];
+    }
+    let mut out = Vec::with_capacity(e.ranges.len() * 2 + 1);
+    let mut cursor = 0usize;
+    for r in &e.ranges {
+        // 越界 / 乱序 / 空区间 → 放弃强调（整行普通显示），绝不 panic 整帧。
+        //
+        // ⚠️ `r.start >= r.end` 这一条**不能省**：只判越界的话，`3..1` 这种倒序
+        // 区间会通过检查，然后在下面 `&line[r.clone()]` 上 panic（切片要求
+        // start <= end）。本仓库的测试就是这么抓出它的 —— 缺了这条，
+        // 一个上游手滑就能崩掉整个窗口。
+        if r.start >= r.end || r.start < cursor || r.end > line.len() {
+            return vec![(line, false)];
+        }
+        if r.start > cursor {
+            out.push((&line[cursor..r.start], false));
+        }
+        out.push((&line[r.clone()], true));
+        cursor = r.end;
+    }
+    if cursor < line.len() {
+        out.push((&line[cursor..], false));
+    }
+    out
+}
+
 /// **自绘 diff 背景带**（渲染缝的第四个消费者）：让"哪些行改了"一眼扫得出。
 ///
 /// # 分工：**缝画底、宿主画字**
@@ -1238,6 +1288,16 @@ impl NeoView {
                     // diff 文本 → 显示行（分类 + 折叠）抽成纯函数，见其说明。
                     let (bands, rows, display_bands) = diff_display_rows(&lines, &expanded);
 
+                    // **行内强调**：把"真正变化的字"再点亮一次。判定在共享层
+                    // （`inline_emphasis`），两个 GUI 宿主共用同一套 —— 否则同一份
+                    // diff 在两处强调的位置不同（那是最难解释的一类不一致）。
+                    //
+                    // ⚠️ 入参是**全部 diff 行**（配对要跨行看），不是折叠后的显示行；
+                    // 下标与 `lines` 一一对应，所以下面用原始行下标取。
+                    let emphases = neo_driver::transcript::inline_emphasis(&lines);
+                    // 强调样式从**统一来源**取（与自绘底带同一份调色板派生）
+                    let emph_style = neo_ui_render::DiffBandStyle::from_neo_palette();
+
                     let mut body = v_flex()
                         .gap_0()
                         // 文字容器的行高 = 底带用的行高（对齐靠这一句）
@@ -1253,14 +1313,38 @@ impl NeoView {
                                     neo_ui_render::DiffBand::Meta => Tone::Muted,
                                     _ => Tone::Text,
                                 };
-                                body = body.child(
-                                    div()
-                                        // 不折行：折行会让"一行文字"占两行高，
-                                        // 底带立刻错位。长行由裁切/横向滚动处理。
-                                        .whitespace_nowrap()
-                                        .text_color(neo_color(tone))
-                                        .child(line.to_string()),
-                                );
+                                // 切段：改动处用**粗体**强调。为什么不用另一种颜色 ——
+                                // 那会让"这一行是绿的（新增）"这条信息被冲淡；忽明忽暗的
+                                // 色相也让"哪行是增、哪行是删"更难扫。粗体只加强、不改语义。
+                                //
+                                // ⚠️ **必须放在 `h_flex` 里**：外层 `body` 是**纵向** flex，
+                                // 直接把各段塞进去会让每一段各占一行（真机上看到的正是
+                                // "行首的 `-` 单独一行、内容另起一行"）。段是**同一行的
+                                // 片段**，所以要用横向容器让它们并排。
+                                let mut row_el = h_flex()
+                                    .gap_0()
+                                    // 不折行：折行会让"一行文字"占两行高，底带立刻错位。
+                                    // 长行由裁切/横向滚动处理。
+                                    .whitespace_nowrap()
+                                    .text_color(neo_color(tone));
+                                // 强调色：**更浓的行底**，压在变更片段下面。
+                                // 用 `.bg()` 而不是自己算宽度再画矩形 —— div 会按
+                                // 文本自身尺寸撑开，不必测量（少一处会随字体/字号
+                                // 漂移的计算）。行高由父容器统一给定，所以这块底
+                                // 与底带同高。
+                                let emph_bg = emph_style.emphasis_for(bands[*i]);
+                                for (text, is_emph) in
+                                    split_by_emphasis(line, emphases[*i].as_ref())
+                                {
+                                    let mut seg = div().child(text.to_string());
+                                    if is_emph {
+                                        if let Some(bg) = emph_bg {
+                                            seg = seg.bg(neo_ui_render::to_gpui_rgba(bg));
+                                        }
+                                    }
+                                    row_el = row_el.child(seg);
+                                }
+                                body = body.child(row_el);
                             }
                             neo_ui_behavior::FoldRow::Fold { range } => {
                                 // 把手：点一下展开（再点收起）。文案给出**确切行数** ——
@@ -2507,6 +2591,89 @@ mod tests {
             turns_remaining: 0,
             budget_used: 0,
         }
+    }
+
+    /// 切段：强调区间之外的部分仍要原样输出（不能只输出强调部分）。
+    #[test]
+    fn splitting_keeps_the_whole_line_and_marks_only_the_emphasis() {
+        use neo_driver::transcript::InlineEmphasis;
+        let line = "-let x = 1;";
+        // 「x」在 `-let ` 之后：字节 5..6
+        let e = InlineEmphasis { ranges: vec![5..6] };
+        let parts = split_by_emphasis(line, Some(&e));
+        assert_eq!(
+            parts,
+            vec![("-let ", false), ("x", true), (" = 1;", false)],
+            "整行必须完整保留，只有中间那段被强调"
+        );
+        // 拼回去必须与原文**逐字相等**（切段不该增删任何字符）
+        let joined: String = parts.iter().map(|(t, _)| *t).collect();
+        assert_eq!(joined, line);
+    }
+
+    /// 没有强调 → 整行一段（不产生多余元素）。
+    #[test]
+    fn no_emphasis_yields_one_plain_segment() {
+        assert_eq!(split_by_emphasis("-x", None), vec![("-x", false)]);
+        let empty = neo_driver::transcript::InlineEmphasis { ranges: vec![] };
+        assert_eq!(split_by_emphasis("-x", Some(&empty)), vec![("-x", false)]);
+    }
+
+    /// **越界 / 乱序的区间必须被拒**（退回整行），绝不能在渲染路径上 panic。
+    ///
+    /// 这条防的是"一帧崩掉整窗口"：切段跑在 render 里，一个越界切片会 panic
+    /// 整个界面，远比"少高亮一处"严重。区间来自共享层、本该合法，
+    /// 但渲染路径上的代码不该信任上游（防御式）。
+    #[test]
+    fn invalid_ranges_are_rejected_instead_of_panicking() {
+        use neo_driver::transcript::InlineEmphasis;
+        let line = "-abc"; // 4 字节
+        for bad in [
+            InlineEmphasis { ranges: vec![2..99] },      // 越界
+            InlineEmphasis { ranges: vec![3..1] },       // 倒序
+            InlineEmphasis { ranges: vec![2..3, 1..2] }, // 乱序
+            InlineEmphasis { ranges: vec![99..100] },    // 完全在外
+        ] {
+            let parts = split_by_emphasis(line, Some(&bad));
+            assert_eq!(
+                parts,
+                vec![(line, false)],
+                "非法区间应退回整行普通显示，而不是 panic：{bad:?}"
+            );
+        }
+    }
+
+    /// 强调片段在行首 / 行尾：两侧不留空段。
+    #[test]
+    fn emphasis_at_the_edges_produces_no_empty_segments() {
+        use neo_driver::transcript::InlineEmphasis;
+        let line = "abc";
+        let head = split_by_emphasis(line, Some(&InlineEmphasis { ranges: vec![0..1] }));
+        assert_eq!(head, vec![("a", true), ("bc", false)]);
+        let tail = split_by_emphasis(line, Some(&InlineEmphasis { ranges: vec![2..3] }));
+        assert_eq!(tail, vec![("ab", false), ("c", true)]);
+        let all = split_by_emphasis(line, Some(&InlineEmphasis { ranges: vec![0..3] }));
+        assert_eq!(all, vec![("abc", true)], "全是强调则只有一个段");
+        // 任何情况下都没有空文本段（渲染空 div 是浪费，也让断言读起来含糊）
+        for parts in [head, tail, all] {
+            assert!(parts.iter().all(|(t, _)| !t.is_empty()), "不该产生空段");
+        }
+    }
+
+    /// 切段必须落在**字符边界**上（中文/emoji）—— 否则 `&line[..]` 直接 panic。
+    #[test]
+    fn splitting_respects_character_boundaries_for_cjk() {
+        let line = "-中文旧内容";
+        // 用共享层的真实判定拿区间（它保证落在 char 边界）
+        let lines = vec!["-中文旧内容", "+中文新内容"];
+        let em = neo_driver::transcript::inline_emphasis(&lines);
+        let parts = split_by_emphasis(line, em[0].as_ref());
+        let joined: String = parts.iter().map(|(t, _)| *t).collect();
+        assert_eq!(joined, line, "中文行切段后必须逐字还原");
+        assert!(
+            parts.iter().any(|(t, e)| *e && *t == "旧"),
+            "应强调「旧」这个完整的汉字：{parts:?}"
+        );
     }
 
     /// **接线契约 1**：分类必须**完整** —— 文件头与截断说明不能被当成上下文。

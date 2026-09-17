@@ -274,10 +274,13 @@ impl Storybook {
                 }),
             },
             Story {
-                title: "DiffBackdrop · diff 行背景带（自绘）",
+                title: "DiffBackdrop · diff 行底带 + 行内强调（自绘）",
                 note: "diff 正文的**行底带**：新增/删除各一色、hunk 头更淡（它是位置标记\n\
                        而非改动）。只给逐行彩色文字时，颜色只标了单行语义、给不出\"改动落在\n\
                        哪几段\"的形状 —— 而看 diff 的第一个问题恰是那个形状。\n\
+                       **行内强调**（下方「写入」→「上线」两行）：真正变化的字再压一层更浓的\n\
+                       底。为什么不用粗体：CJK 字形普遍没有真粗体字面，加粗约等于没做；\n\
+                       底色与字体无关，且能用像素断言（真机实测 29 → 89，差 60）。\n\
                        对齐靠\"底带与文字共用同一个行高\"，不是调间距（见模块头部说明）。",
                 body: Box::new(|| {
                     use neo_ui_render::DiffBand;
@@ -291,6 +294,7 @@ impl Storybook {
                         DiffBand::Add,
                         DiffBand::Add,
                     ];
+
                     v_flex()
                         .gap_1()
                         .child(diff_backdrop_demo_element(bands))
@@ -447,16 +451,18 @@ fn gutter_demo_element(marks: Vec<neo_ui_render::GutterMark>) -> neo_ui_kit::gpu
 fn diff_backdrop_demo_element(bands: Vec<neo_ui_render::DiffBand>) -> neo_ui_kit::gpui::AnyElement {
     use neo_ui_render::{diff_backdrop, RenderBackend};
     const LH: f32 = 18.0;
-    let labels: Vec<&str> = bands
+    // 每行拆成 (前缀, 被强调片段, 后缀)：中间那段会压上"行内强调"底色，
+    // 与宿主真机用的是**同一份样式来源**（`DiffBandStyle`），浓淡一致。
+    let labels: Vec<(&str, &str, &str)> = bands
         .iter()
         .map(|b| match b {
-            neo_ui_render::DiffBand::Add => "+ 新增的一行",
-            neo_ui_render::DiffBand::Del => "- 被删除的一行",
-            neo_ui_render::DiffBand::Hunk => "@@ -1,5 +1,6 @@",
-            neo_ui_render::DiffBand::Header => "--- a/示例.txt",
-            neo_ui_render::DiffBand::Meta => "… 另有 3 处改动未显示",
-            neo_ui_render::DiffBand::Fold => "⋯ 未改 12 行（点击展开）",
-            neo_ui_render::DiffBand::Context => "  未改的上下文行",
+            neo_ui_render::DiffBand::Add => ("+ 准备 ", "上线", " 发布"),
+            neo_ui_render::DiffBand::Del => ("- 准备 ", "下线", " 发布"),
+            neo_ui_render::DiffBand::Hunk => ("@@ -1,5 +1,6 @@", "", ""),
+            neo_ui_render::DiffBand::Header => ("--- a/示例.txt", "", ""),
+            neo_ui_render::DiffBand::Meta => ("… 另有 3 处改动未显示", "", ""),
+            neo_ui_render::DiffBand::Fold => ("⋯ 未改 12 行（点击展开）", "", ""),
+            neo_ui_render::DiffBand::Context => ("  未改的上下文行", "", ""),
         })
         .collect();
     let tones: Vec<Tone> = bands
@@ -472,20 +478,37 @@ fn diff_backdrop_demo_element(bands: Vec<neo_ui_render::DiffBand>) -> neo_ui_kit
         })
         .collect();
 
+    // 闭包要 `move` 走一份 bands（prepaint 的生命周期要求），但下面渲染文字
+    // 还要用原列表 → 克隆一份给闭包，保持"同一个列表"的来源不分裂。
+    let bands_for_paint = bands.clone();
     let prepaint = move |bounds: neo_ui_kit::gpui::Bounds<neo_ui_kit::gpui::Pixels>,
                          _w: &mut neo_ui_kit::gpui::Window,
                          _cx: &mut neo_ui_kit::gpui::App| {
-        let scene = diff_backdrop(&bands, f32::from(bounds.size.width), LH);
+        let scene = diff_backdrop(&bands_for_paint, f32::from(bounds.size.width), LH);
         (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
     };
+    let style = neo_ui_render::DiffBandStyle::from_neo_palette();
     let mut texts = v_flex().gap_0().line_height(px(LH));
-    for (label, tone) in labels.iter().zip(tones) {
-        texts = texts.child(
-            div()
-                .whitespace_nowrap()
-                .text_color(neo_ui::neo_color(tone))
-                .child(label.to_string()),
-        );
+    for (((pre, emph, post), tone), band) in labels.iter().zip(tones).zip(&bands) {
+        // 横向排列：三段必须并排（外层是纵向 flex，直接塞会各占一行）
+        let mut row = h_flex()
+            .gap_0()
+            .whitespace_nowrap()
+            .text_color(neo_ui::neo_color(tone));
+        row = row.child(div().child(pre.to_string()));
+        if !emph.is_empty() {
+            if let Some(bg) = style.emphasis_for(*band) {
+                row = row.child(
+                    div()
+                        .bg(neo_ui_render::to_gpui_rgba(bg))
+                        .child(emph.to_string()),
+                );
+            }
+        }
+        if !post.is_empty() {
+            row = row.child(div().child(post.to_string()));
+        }
+        texts = texts.child(row);
     }
     neo_ui_kit::gpui::div()
         .relative()

@@ -5296,6 +5296,7 @@ dependencies = [
  "neo-sandbox-local",
  "neo-text",
  "serde_json",
+ "similar",
 ]
 
 [[package]]

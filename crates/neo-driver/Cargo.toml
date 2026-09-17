@@ -35,6 +35,15 @@ async-channel = "2"
 # 这两条依赖都是**下行**的（neo-text 在 L1），不引入新的层级关系。
 neo-text = { path = "../neo-text", version = "0.1.0" }
 serde_json = { workspace = true }
+# 字符级 diff —— 行内高亮的比对用。
+#
+# 为什么放在这里，而不是复用 `neo-capability`（那里也有 `similar`）：
+# 两个 GUI 宿主都把本 crate 当**运行时**依赖，而 `neo-capability` 只出现在
+# 它们的**测试**里（往返测试用真实生产者）。行内比对是"同一份 diff 在两个
+# 宿主里强调同一处"的支点，必须让两个宿主都拿得到 —— 放这里它们自动共享，
+# 不必给每个宿主各加一条运行时依赖。
+# 与 `neo-capability` 同一份声明（zero 运行时依赖，本就在依赖树里）。
+similar = { version = "3.2.0", default-features = false, features = ["std", "text"] }
 
 # 驱动线程的单测用离线桩（内存持久化 / 脚本化 provider / 写工具）
 [dev-dependencies]
