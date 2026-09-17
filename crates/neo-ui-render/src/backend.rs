@@ -12,7 +12,7 @@
 //! 同一个界面在不同后端上**排版就会不一致**。所以这个方法从一开始就在契约里，
 //! 而不是等第二个后端出现才补。
 
-use crate::scene::{Color, Scene, Size};
+use crate::scene::{Color, Op, Scene, Size};
 
 /// 一个渲染后端。
 ///
@@ -34,7 +34,43 @@ pub trait RenderBackend: Send + 'static {
 
     /// 把中立场景翻译成该后端的绘制产物。
     fn paint(&self, scene: &Scene) -> Self::Paint;
+
+    /// 本后端**画不画得出**这条指令。
+    ///
+    /// # 为什么把它做成契约的一部分
+    ///
+    /// `paint()` 遇到画不出的 op 只有两种做法，都不好：
+    /// 静默丢掉 —— 表现为"某块东西在界面上不见了"，最难查；
+    /// panic —— 把整帧搞崩。
+    ///
+    /// 所以把"支持哪些"变成**可查询的事实**，再由 [`unsupported_ops`] 统一报告。
+    /// 于是"场景里有后端画不出的东西"从一个隐形事实，变成**可断言、可进门禁**的
+    /// 命题 —— 反过来也逼着中立指令集（[`Op`]）不要长出没人能画的词汇。
+    ///
+    /// 实现里**必须诚实**：报 `true` 就真的会画出来。
+    fn supported(&self, op: &Op) -> bool;
 }
+
+/// 列出场景里**该后端画不出**的指令下标。
+///
+/// 用于两处：
+/// 1. 组件自测 —— 断言自己产生的场景**全部可画**（否则那个组件在某个后端上
+///    会静默少一块）；
+/// 2. conformance —— 中立词汇表里若有"任何后端都画不出"的指令，这里会暴露。
+///
+/// 取泛型而不是 `&dyn RenderBackend`：契据带关联类型 `Paint`（刻意如此，
+/// 见 [`RenderBackend`]），而 `dyn` 必须把它钉死 —— 那会白拿一个只在
+/// 这个辅助函数里出现的类型参数。泛型在这里零成本。
+pub fn unsupported_ops<B: RenderBackend + ?Sized>(backend: &B, scene: &Scene) -> Vec<usize> {
+    scene
+        .ops()
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| !backend.supported(op))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 
 /// GPUI 后端。
 ///
@@ -72,7 +108,18 @@ pub struct GpuiQuad {
     pub color: Color,
 }
 
-/// GPUI 后端的绘制产物：一批可绘制的矩形。
+/// 一条待描边的矩形（线宽 > 0）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuiStroke {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub width: f32,
+    pub color: Color,
+}
+
+/// GPUI 后端的绘制产物：一批填充矩形 + 一批描边 + 文字指令计数。
 ///
 /// # 为什么是"数据 + 一个 draw 方法"，而不是构造 `AnyElement`
 ///
@@ -84,10 +131,18 @@ pub struct GpuiQuad {
 /// 这条分工也让"翻译对不对"能被单测覆盖 —— 而绘制本身要靠真机看。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GpuiPaint {
-    /// 待绘制的矩形（顺序即绘制顺序）。
+    /// 待填充的矩形（顺序即绘制顺序）。
     pub quads: Vec<GpuiQuad>,
-    /// 文字指令的条数。文字由宿主用自己的文本系统画（不是 quad），
-    /// 这里只记数，便于断言"文字确实被翻译了、没被丢掉"。
+    /// 待描边的矩形 —— 与填充分开存：gpui 的 `quad` 用 `Edges` 表达边框，
+    /// 与"填充一块面"是不同的绘制参数，混在一个列表里会丢掉线宽。
+    pub strokes: Vec<GpuiStroke>,
+    /// 文字指令的条数。
+    ///
+    /// ⚠️ **本后端画不出文字**（`supported` 对 `FillText` 报 `false`）：gpui 的
+    /// 文字要经 `TextSystem::shape_line` 整形后逐个 `paint_glyph`，需要字体上下文，
+    /// 而本后端的产物是**纯数据**（见上）。这里只记数，是为了让
+    /// "文字确实被翻译到了、没被悄悄丢掉"仍可被断言 —— 配合 `unsupported_ops`
+    /// 就能区分"计数了但画不出"与"根本没翻译"。
     pub text_ops: usize,
     /// 每条指令对应的颜色（`0xRRGGBBAA`），顺序与场景一致（含裁剪占位）。
     /// 保留它是为了"顺序对齐"这条契约仍可被断言（见下方测试）。
@@ -117,6 +172,22 @@ impl GpuiPaint {
                 neo_ui_kit::gpui::BorderStyle::default(),
             ));
         }
+        for s in &self.strokes {
+            let bounds = Bounds::new(
+                point(origin.x + px(s.x), origin.y + px(s.y)),
+                size(px(s.w), px(s.h)),
+            );
+            // 描边 = 四条边等宽 + 透明填充。用 `quad` 的 border 通道而不是四周画
+            // 四条实心条：后者在拐角会重叠（半透明色下看得见"角更亮"）。
+            window.paint_quad(neo_ui_kit::gpui::quad(
+                bounds,
+                Corners::default(),
+                neo_ui_kit::gpui::transparent_black(),
+                Edges::all(px(s.width)),
+                to_gpui_rgba(s.color),
+                neo_ui_kit::gpui::BorderStyle::default(),
+            ));
+        }
     }
 }
 
@@ -135,10 +206,28 @@ impl RenderBackend for GpuiBackend {
         Size::new(cols * size * 0.6, size * 1.35)
     }
 
+    /// 诚实地报出画得出来什么。
+    ///
+    /// **`FillText` 报 `false`** —— 不是遗漏，是这一版的真实边界：gpui 的文字要
+    /// 经 `TextSystem::shape_line` 整形再 `paint_glyph`，需要字体上下文，而本后端的
+    /// 产物是纯数据（见 `GpuiPaint`）。现在**没有任何自绘消费者产生文字指令**
+    /// （`FillRect` + `PushClip` 足够画变更条 / 用量条 / 分段进度），
+    /// 所以这条边界当前不影响任何界面 —— 但它是真的，必须报出来。
+    ///
+    /// 报 `true` 的必须真的画得出：`paint()` 里 `StrokeRect` 走 `strokes`
+    /// 并在 `draw()` 里经 `quad` 的 border 通道画出来。
+    fn supported(&self, op: &Op) -> bool {
+        match op {
+            Op::FillRect { .. } | Op::StrokeRect { .. } | Op::PushClip { .. } | Op::PopClip => true,
+            Op::FillText { .. } => false,
+        }
+    }
+
     fn paint(&self, scene: &Scene) -> Self::Paint {
         self.painted.set(self.painted.get() + 1);
         let mut colors = Vec::with_capacity(scene.len());
         let mut quads = Vec::new();
+        let mut strokes = Vec::new();
         let mut text_ops = 0;
         for op in scene.ops() {
             match op {
@@ -152,15 +241,24 @@ impl RenderBackend for GpuiBackend {
                     });
                     colors.push(color.to_rgba_u32());
                 }
-                crate::scene::Op::StrokeRect { rect, color, .. } => {
-                    // 阶段 2 的自绘消费者只有填充矩形（变更条）。
-                    // 描边先按填充处理会让它"看起来对但粗一档"，不如显式不画 ——
-                    // 等真有描边需求时再接，那时才知道正确的线宽语义。
-                    // 颜色仍进 colors 以保持顺序契约。
-                    let _ = rect;
+                crate::scene::Op::StrokeRect { rect, color, width } => {
+                    // 线宽为 0 的描边画不出任何东西 —— 按"不产生绘制指令"处理，
+                    // 但仍占一个颜色位（顺序契约），否则后续 op 的颜色会整体错位。
+                    if *width > 0.0 {
+                        strokes.push(GpuiStroke {
+                            x: rect.origin.x,
+                            y: rect.origin.y,
+                            w: rect.size.w,
+                            h: rect.size.h,
+                            width: *width,
+                            color: *color,
+                        });
+                    }
                     colors.push(color.to_rgba_u32());
                 }
                 crate::scene::Op::FillText { color, .. } => {
+                    // 计数但不产出绘制指令：本后端画不出文字（见 `supported`）。
+                    // 留计数是为了让"翻译到了但画不出"与"根本没翻译"可区分。
                     text_ops += 1;
                     colors.push(color.to_rgba_u32());
                 }
@@ -168,7 +266,7 @@ impl RenderBackend for GpuiBackend {
                 crate::scene::Op::PushClip { .. } | crate::scene::Op::PopClip => colors.push(0),
             }
         }
-        GpuiPaint { quads, text_ops, colors }
+        GpuiPaint { quads, strokes, text_ops, colors }
     }
 }
 
@@ -263,5 +361,78 @@ mod tests {
         let big = b.measure_text("abc", 20.0);
         assert!(big.w > small.w && big.h > small.h, "字号翻倍应让尺寸翻倍");
         assert!((big.w - small.w * 2.0).abs() < 0.01, "应为线性");
+    }
+
+    /// **契约：`supported` 必须诚实** —— 报 `true` 的就真的产出绘制指令。
+    ///
+    /// 这条是"静默丢东西"的反面保险：若有人把 `StrokeRect` 改成不画，却忘了把
+    /// `supported` 改成 `false`，场景里就会出现"声称能画、实际不见"的指令 ——
+    /// 那正是本契约要防的事。
+    #[test]
+    fn supported_claims_match_what_paint_actually_produces() {
+        let b = GpuiBackend::new();
+        let ops = [
+            Op::FillRect { rect: Rect::new(0.0, 0.0, 4.0, 4.0), color: Color::rgb(1, 1, 1) },
+            Op::StrokeRect {
+                rect: Rect::new(0.0, 0.0, 4.0, 4.0),
+                color: Color::rgb(2, 2, 2),
+                width: 1.0,
+            },
+            Op::FillText {
+                text: "x".into(),
+                origin: crate::scene::Point::new(0.0, 0.0),
+                color: Color::rgb(3, 3, 3),
+                size: 12.0,
+            },
+        ];
+        let mut s = Scene::new();
+        for op in &ops {
+            s.push(op.clone());
+        }
+        let paint = b.paint(&s);
+
+        assert!(b.supported(&ops[0]), "填充矩形必须支持");
+        assert_eq!(paint.quads.len(), 1, "声称支持填充 → 必须真的有填充指令");
+
+        assert!(b.supported(&ops[1]), "描边必须支持（这一版真的画）");
+        assert_eq!(paint.strokes.len(), 1, "声称支持描边 → 必须真的有描边指令");
+        assert_eq!(paint.strokes[0].width, 1.0, "线宽要原样带过去，不能被吞");
+
+        assert!(!b.supported(&ops[2]), "文字本后端画不出，必须诚实报 false");
+        assert!(paint.quads.is_empty() || paint.text_ops == 1, "文字不得变成矩形");
+        assert_eq!(paint.text_ops, 1, "画不出也要计数，以区分'翻译了'与'没翻译'");
+    }
+
+    /// **零线宽的描边不该产出绘制指令**（画不出任何东西），
+    /// 但**必须仍占一个颜色位** —— 否则后续 op 的颜色整体错位。
+    #[test]
+    fn zero_width_stroke_is_skipped_without_breaking_color_alignment() {
+        let mut s = Scene::new();
+        s.push(Op::StrokeRect {
+            rect: Rect::new(0.0, 0.0, 4.0, 4.0),
+            color: Color::rgb(9, 9, 9),
+            width: 0.0,
+        });
+        s.push(Op::FillRect { rect: Rect::new(0.0, 0.0, 1.0, 1.0), color: Color::rgb(1, 2, 3) });
+        let paint = GpuiBackend::new().paint(&s);
+
+        assert!(paint.strokes.is_empty(), "零线宽画不出东西，不该产生描边指令");
+        assert_eq!(paint.colors.len(), 2, "顺序契约：每个 op 一个位置");
+        assert_eq!(paint.colors[1], 0x01_02_03_ff, "填充色仍在下标 1，没被挤歪");
+    }
+
+    /// `unsupported_ops`：把"后端画不出什么"变成可查询的事实。
+    #[test]
+    fn unsupported_ops_reports_the_text_boundary() {
+        let mut s = Scene::new();
+        s.push(Op::FillRect { rect: Rect::new(0.0, 0.0, 1.0, 1.0), color: Color::rgb(0, 0, 0) });
+        s.push(Op::FillText {
+            text: "画不出的文字".into(),
+            origin: crate::scene::Point::new(0.0, 0.0),
+            color: Color::rgb(255, 255, 255),
+            size: 12.0,
+        });
+        let bad = unsupported_ops(&GpuiBackend::new(), &s);
+        assert_eq!(bad, vec![1], "应指出下标 1 的文字指令画不出");
     }
 }

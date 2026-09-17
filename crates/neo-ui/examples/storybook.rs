@@ -239,6 +239,83 @@ impl Storybook {
                 }),
             },
             Story {
+                title: "ChangeGutter · 变更条（自绘）",
+                note: "diff 左侧的改动分布条：每格按行数比例分配高度、每格至少 1px\n\
+                       （否则长 diff 里的小改动会被取整抹掉 —— '有改动却看不见'更糟）。\n\
+                       它是渲染缝的**第一个**消费者。",
+                body: Box::new(|| {
+                    use neo_ui_render::GutterMark;
+                    // 一段有形状的改动分布：集中几处 + 稀疏几处
+                    let marks = vec![
+                        GutterMark::Plain,
+                        GutterMark::Add,
+                        GutterMark::Add,
+                        GutterMark::Plain,
+                        GutterMark::Del,
+                        GutterMark::Plain,
+                        GutterMark::Plain,
+                        GutterMark::Add,
+                        GutterMark::Del,
+                        GutterMark::Del,
+                        GutterMark::Del,
+                        GutterMark::Plain,
+                    ];
+                    v_flex()
+                        .gap_1()
+                        .child(gutter_demo_element(marks))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(div().text_color(neo_ui::neo_color(Tone::Success)).child("■ 新增"))
+                                .child(div().text_color(neo_ui::neo_color(Tone::Error)).child("■ 删除"))
+                                .child(div().text_color(neo_ui::neo_color(Tone::Muted)).child("□ 未改")),
+                        )
+                        .into_any_element()
+                }),
+            },
+            Story {
+                title: "渲染缝 · 两个后端（同场景 → 不同产物）",
+                note: "这条缝有**两个**后端：GpuiBackend（真窗口）与 HeadlessBackend\n\
+                       （无 GPU，可跑 CI）。下面列出无头后端对同一个用量场景导出的 SVG ——\n\
+                       它不是示意图，是第二个后端**真的产出的东西**。\n\
+                       两者对同一场景的画布指令逐项一致（由 conformance 断言）。",
+                body: Box::new(|| {
+                    use neo_ui_render::{usage_bars, HeadlessBackend, RenderBackend};
+                    let scene = usage_bars(
+                        &[neo_ui_render::UsageBar::new(900, 200), neo_ui_render::UsageBar::new(400, 120)],
+                        96.0,
+                        24.0,
+                        neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Info),
+                        neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Accent),
+                    );
+                    let svg = HeadlessBackend::new().paint(&scene).to_svg(96.0, 24.0);
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(neo_ui::neo_color(Tone::Muted))
+                                .child(format!(
+                                    "无头后端导出 {} 条绘制指令 · SVG {} 字节",
+                                    scene.len(),
+                                    svg.len()
+                                )),
+                        )
+                        .child(
+                            // 直接显示 SVG 源码前几行 —— 可核对，非杜撰
+                            div()
+                                .font_family("monospace")
+                                .text_color(neo_ui::neo_color(Tone::Text))
+                                .child(
+                                    svg.lines()
+                                        .take(5)
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
+                                ),
+                        )
+                        .into_any_element()
+                }),
+            },
+            Story {
                 title: "组件库组件（来自依赖）",
                 note: "库自己**不重复实现**按钮这类通用控件，直接用组件库的。\
                        展示台把它们也列出来，是为了说明'哪些是自研、哪些是现成'的边界。",
@@ -307,6 +384,27 @@ fn progress_demo_element(segs: Vec<neo_ui_render::ProgressSegment>) -> neo_ui_ki
     })
     .w_full()
     .h(px(10.))
+    .into_any_element()
+}
+
+/// 展示用的变更条元素（与宿主里的同构：经渲染缝绘制）。
+fn gutter_demo_element(marks: Vec<neo_ui_render::GutterMark>) -> neo_ui_kit::gpui::AnyElement {
+    use neo_ui_render::{change_gutter, RenderBackend};
+    let prepaint = move |bounds: neo_ui_kit::gpui::Bounds<neo_ui_kit::gpui::Pixels>,
+                         _w: &mut neo_ui_kit::gpui::Window,
+                         _cx: &mut neo_ui_kit::gpui::App| {
+        let scene = change_gutter(
+            &marks,
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+        );
+        (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
+    };
+    neo_ui_kit::gpui::canvas(prepaint, |bounds, (_, paint), window, _cx| {
+        paint.draw(bounds.origin, window);
+    })
+    .w_full()
+    .h(px(96.))
     .into_any_element()
 }
 

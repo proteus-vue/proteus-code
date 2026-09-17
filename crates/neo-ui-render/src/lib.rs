@@ -6,21 +6,33 @@
 //! 那么将来换后端时组件库要重写。设一条中立缝，是"渲染后端可替换"这件事
 //! 在架构上**已经被固定**的保证。
 //!
-//! # 但它现在**不是**成熟抽象（据实标注）
+//! # 它现在是**有两个实现**的缝（但还不是成熟抽象）
 //!
-//! 只有一个实现（[`GpuiBackend`]）。方案文档里那条纪律值得照抄：
+//! 方案文档里那条纪律值得照抄：
 //! **"只有一个实现的抽象是信仰，两个实现的抽象才是设计。"**
+//! 本 crate 长期只有一个实现（[`GpuiBackend`]），那句话也就一直挂着。
+//! 现在有了第二个 —— [`HeadlessBackend`]（无 GPU、可在 CI 跑），
+//! 并且 `tests/conformance.rs` 用**同一份用例**跑它们。于是"后端可替换"
+//! 第一次是被验证过的事实，而不是宣称。
 //!
-//! 因此本 crate 刻意保持小：
+//! **但别把这一步读大了**：无头后端是**对照物 / 测试替身**，不是第二个
+//! 生产渲染路径。方案 Phase 4 要的 VelloBackend 仍未做，且有明确触发条件
+//! （主应用稳定 ≥ 6 个月 + ≥3 个自绘组件 + 专职人力）。
+//! 本 crate 仍然刻意保持小：
 //! - 只有中立类型（[`Color`] / [`Rect`] / [`Op`] / [`Scene`]）与一个 trait；
-//! - **不**提前写第二个 backend（在只有一个实现时，第二个实现的所有假设都会错）；
+//! - **不**提前写生产用的第二个 GPU 后端（在只有一个生产实现时，
+//!   第二个实现的所有假设都会错）；
 //! - **不**给常规组件用 —— 走了会丢掉 GPUI 的 element diff、脏区剔除、
 //!   文本整形与字形缓存（方案称之为"烂尾最常见的起点"）。只有**自绘表面**
 //!   （diff 视图 / 图表 / 自绘画布）才走它。
 //!
-//! 阶段 1 只落一件事：**中立场景能被翻译成某个后端的绘制产物**。
-//! 让自绘组件真正消费它（把产物嵌进 element 树）是阶段 2 接 diff 视图时做的，
-//! 现在不假装已经做到。
+//! # 能力边界是**后端的事实**，不是中立层的属性
+//!
+//! [`RenderBackend::supported`] 报的是**该后端**画得出什么：`GpuiBackend`
+//! 画不出文字（需字体上下文），`HeadlessBackend` 画得出。两个后端能力不同
+//! 这件事本身，就是"这个查询该属于后端"的证明 —— 放进中立层就必然要按
+//! 某一个后端写死。[`unsupported_ops`] 把"场景里有后端画不出的指令"
+//! 变成可断言、可进门禁的事实，而不是一个静默消失的图形。
 
 //! # 完整用法与边界
 //!
@@ -31,12 +43,18 @@
 
 pub mod backend;
 pub mod gutter;
+pub mod headless;
 pub mod progress;
 pub mod scene;
 pub mod usage;
 
 pub use backend::GpuiBackend;
 pub use backend::RenderBackend;
+// 「本后端画不画得出这条指令」+ 检查器：让"静默丢掉"变成可断言、可进门禁的事实。
+pub use backend::{unsupported_ops, GpuiQuad, GpuiStroke};
+// 渲染缝的**第二个实现**（无头）：把"只有一个实现的抽象是信仰"兑现成"两个
+// 实现的设计"。它与 GpuiBackend 的能力矩阵刻意不同（文字正好相反）。
+pub use headless::{color_seq_of_scene, HeadlessBackend, HeadlessCmd, HeadlessPaint};
 pub use gutter::{change_gutter, GutterMark};
 pub use scene::{Color, Op, Point, Rect, Scene, Size};
 pub use progress::{segmented_progress, ProgressSegment};

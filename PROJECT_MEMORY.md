@@ -4599,6 +4599,63 @@ key_char 分支。Shift+Enter 不拦（它本就该换行，且组件那条分�
 
 ---
 
+### (ax) 渲染缝的第二个后端：把"只有一个实现是信仰"兑现成"两个实现是设计"
+
+用户指出"渲染引擎和组件库没大进展"—— 这个判断是对的，而且是可量化的：
+`neo-ui-render` **只有一个 `impl RenderBackend for`**（GpuiBackend），
+而该 crate 的头部自己就写着方案那句
+**"只有一个实现的抽象是信仰，两个实现的抽象才是设计"**。
+本仓的 AGENTS.md 也把"每个 SPI 必须 ≥2 真实后端 + conformance"列为硬约束 ——
+**这条缝自己没达标**（且没登记为 SPI，所以门禁没卡它，属于门禁盲区）。
+
+#### 做了什么
+
+补上 `HeadlessBackend`（无 GPU、可在 CI 跑），并写 `tests/conformance.rs`
+用**同一份用例**跑两个后端（6 条契约）。关键是两个后端的能力矩阵**故意相反**：
+
+| | GpuiBackend | HeadlessBackend |
+|---|---|---|
+| 输出 | gpui 绘制参数 | 显示列表 + **SVG 导出** |
+| 需要 GPU | 是 | **否** |
+| 文字 | **画不出** | **画得出** |
+
+"两者能力不同"这件事本身，就是 `supported()` 该属于**后端**而不是中立层的证明 ——
+放进中立层就必然要按某一个后端写死。
+
+顺带把两处"静默"变成"可断言"：
+- 新增 `unsupported_ops()`：把"场景里有后端画不出的指令"变成可查询的事实；
+- `StrokeRect` 从**静默不画**改为真的画（除零线宽），修掉一处真实的静默丢弃。
+
+#### conformance 当场抓出**两个**我自己写的缺陷（这是第二个实现的价值）
+
+1. **颜色占位规则不一致**：gpui 后端对 `PopClip` 留占位（0），我给无头后端漏了 ——
+   于是同一个场景，两个后端的颜色序列**长度不同**。
+   **两个后端对同一契约有两种实现，正是这条缝存在的意义所在**，而它被跨后端
+   比对当场抓住（`left.len()=7 / right.len()=8`）。
+2. 修 #1 时我在 `paint()` 末尾加的 `debug_assert_eq!(colors.len(), scene.len())`
+   **又一次抓住自己**：`PopClip` 分支当时只 `{}`、忘了推进位。
+
+这两个缺陷都**不会有任何编译错误**，真机上只表现为"颜色莫名错位"。
+**这就是"第二个实现"能买到的东西 —— 不是多一个后端，是多一套发现问题的机制。**
+
+#### 诚实边界（别把这一步读大了）
+
+- 无头后端是**对照物 / 测试替身**，**不是**第二个生产渲染路径。
+  方案 Phase 4 要的 VelloBackend 仍未做，触发条件明确（主应用稳定 ≥6 个月 +
+  ≥3 个自绘组件 + 专职人力）。
+- 与本仓既有约定一致：`neo-mock` 的 noop/mock 同样算各 SPI 的实现
+  （Clipboard 的 System+Noop、Sandbox 的 Noop+Leaky 都是这样）。
+- **组件库层面的真相**：`neo-ui` 是**主题**不是组件库（它自己的 README 就这么写），
+  通用控件来自 `neo-ui-kit`（上游），自研的只有 RichText + 3 个自绘消费者
+  （变更条 / 用量图 / 分段进度）。所以"组件库没进展"这个观察，
+  正确的表述是：**我们的自研面本来就窄**（方案 P0 明说"自研组件应为 0–5 个"），
+  缺的不是数量，是这条缝此前**没被验证过**。
+- 已登记进 `check_spi_conformance.py`（SPI 7 → 8，上限 8 已满）。
+  ⚠️ **SPI 上限到顶了**：下次再想登记新 seam，必须先论证旧的该合并或降级，
+  否则就是在走 DSH "seam 无序增生"的老路。
+
+---
+
 ## 效率复盘：这一轮跑了 2 小时+，主要成本是我自己造成的
 
 用户明确指出效率太低。按 `ai-efficiency-rules` 的六类违规逐条对照：
@@ -4683,6 +4740,8 @@ bash scripts/verify.sh      # 全套门禁（Rust 测试 + 零 warning + 6 个 P
 | ~~**gpui 宿主无多行输入**~~ **已补** | 已换成 `TextareaState`：**Enter 提交、Shift+Enter 换行**（`submit_on_enter(true)`），高度 `auto_grow(1, 6)`。补的过程中抓到一个**只有端到端才看得见**的真缺陷：平台会把 Enter 当文本再送一遍（macOS 平台层给 Enter 的 `key_char` 是 `"\n"`），而组件在提交分支里 `cx.propagate()` —— 于是**回车既提交、又留下一个换行**。修法：冒泡时 `stop_propagation()`（提交事件在那之前已派发）。真机证据：会话日志 `{"begin_turn":{"text":"first\nsecond"}}` + `user_submitted`，按回车后输入框无残留换行。见 §4.64(aw) |
 | ~~**许可证选择待拍板**~~ **已定** | 用户拍板：可开源集（5 个 crate）用 **Apache-2.0**（含明确专利授权），宿主与内核保持 MIT。已落地：显式 license 字段 + 标准全文 LICENSE + README 说明；提取集 38 个 Apache-2.0 依赖**都不带 NOTICE**，故 §4(d) 义务不触发（已写进 THIRD-PARTY-LICENSES.md）。仍未做：`cargo-deny` 需在 CI 安装后跑全量（本地脚本已覆盖主要能力） |
 | **NOTICE 依赖上游包内容** | §4(d) 义务的判定依据是"上游是否随包发布 NOTICE"。本脚本查的是本地 registry 目录 —— 若某包在上游带 NOTICE 而随包未分发，会漏判。彻底做法是用 `cargo-about` 读包元数据。当前实测 38 个包全无 NOTICE，风险低但非零 |
+| ~~**渲染缝只有一个实现（假 SPI）**~~ **已补第二后端** | `neo-ui-render` 此前只有 `GpuiBackend` 一个 `impl`，正是 crate 头部自己引用的"只有一个实现的抽象是信仰"。本轮补 `HeadlessBackend`（无 GPU / 可跑 CI）+ `tests/conformance.rs`（同一份用例跑两个后端，6 条契约），并登记进 SPI 门禁（7 → 8）。**仍未做**：方案 Phase 4 要的第二个**生产**后端（`VelloBackend`：vello + wgpu）—— 它有明确触发条件（主应用稳定 ≥6 个月 + ≥3 个自绘组件稳定运行 + 专职人力，预期 12–18 个月）。**别把无头后端读成"引擎能开源了"**。见 §4.64(ax) |
+| **SPI 数量已达上限 8** | `check_spi_conformance.py` 的 `MAX_SPI = 8` 现已用满。再想登记新 seam 必须先论证旧的可合并/降级，否则就是走 DSH "seam 无序增生"的老路（该上限本就是为防这个设的） |
 | **Linux 桌面宿主的运行时库** | gpui 在 Linux 靠 **dlopen** 加载 `libxkbcommon` / `libwayland` / `libX11` —— **编译不需要**这些包，但运行时缺了会直接 panic（`Library libxkbcommon.so could not be loaded.`）。预编译 Linux 产物不含桌面（精简版）故不受影响；自行 `cargo install` 的 Linux 用户需要先装它们。README 已写明 |
 | ~~**Linux 构建未验证**~~ **CI 已能跑通测试** | 本地交叉检查不可行（macOS 无 Linux C 工具链，`cc-rs` 直接报缺 `x86_64-linux-gnu-gcc`），只能靠 CI。已定位并修掉两个 Linux-only 拦路石：① 链接期缺 `libxkbcommon-x11-dev`（`cargo check` 不链接故只在 test 阶段暴露）；② 用例拿 `ExecMode::Default`（→ 受限沙箱档，Linux fail-closed）当"能跑命令"的前提。后者已在本机用"模拟 Linux fail-closed"复现并修（§4.64(av)） |
 | **IME 只验了组件契约** | 已有 3 条自动化回归用例（preedit 删除后重输、连续合成、基建自证），钉住我们依赖的组件契约。但**真输入法**（装中文输入法敲键、候选框跟光标）未验：本用例不驱动系统输入法进程，真机还可能在奇怪时机连发 unmark |

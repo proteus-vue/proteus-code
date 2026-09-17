@@ -82,6 +82,27 @@ SPI_SPEC = {
         "test": "crates/neo-platform/tests/notify.rs",
         "status": "landed",
     },
+    # 第 8 个 SPI：渲染缝（渲染后端可替换）。**为什么现在才登记** ——
+    # 它长期只有一个实现（GpuiBackend），而 crate 头部自己写着
+    # "只有一个实现的抽象是信仰"。补上无头后端（HeadlessBackend）之后，
+    # "后端可替换"才第一次被**两个实现 + 同一份用例**验证过；
+    # 此时登记才不是空话（方法论文档：未经验证的可替换性是假 SPI）。
+    #
+    # 它值得成为 seam 的理由：自绘表面（diff 视图 / 图表）跨后端时，
+    # 若组件签名直接透出 GUI 类型，换后端就要重写组件库。
+    #
+    # ⚠️ **登记的是"这条缝有 2 个实现"，不是"渲染引擎能开源了"**：
+    #   第二个实现是**无头对照物 / 测试替身**（无 GPU、可跑 CI），
+    #   而方案 Phase 4 要的第二个**生产**后端（VelloBackend）仍未做 ——
+    #   它有明确触发条件（主应用稳定 ≥ 6 个月 + ≥3 个自绘组件 + 专职人力）。
+    #   与本仓既有约定一致：`neo-mock` 的 noop/mock 同样算各 SPI 的实现
+    #  （如 Clipboard 的 System+Noop、Sandbox 的 Noop+Leaky）。
+    "RenderBackend": {
+        "trait": "RenderBackend",
+        "conformance": "T9",
+        "test": "crates/neo-ui-render/tests/conformance.rs",
+        "status": "landed",
+    },
 }
 
 
