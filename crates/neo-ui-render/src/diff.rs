@@ -30,14 +30,21 @@
 
 use crate::scene::{Color, Op, Rect, Scene};
 
-/// 一行的背景带种类（**中立语义**，不含具体色值）。
+/// 一条**显示行**的底带种类（**中立语义**，不含具体色值）。
 ///
-/// 与 [`crate::GutterMark`]（`Plain` / `Add` / `Del`）的关系：那个描述的是
-/// "变更条这一格"（只看有没有改），本枚举描述"这一行的底子"（还要区分
-/// 上下文行与 hunk 头 —— 它们都**不该**有改动色的底）。
+/// # 它描述的是"显示行"，不是"diff 文本行"
+///
+/// 折叠（见 `neo-ui-behavior` 的 `fold`）之后，屏幕上的行与 diff 文本的行
+/// **不再一一对应** —— 一个 `Fold` 行代表被收起来的一整段。所以这个枚举是
+/// "屏幕上这一行长什么样"，这也是它必须完整（而不是"改动色 / 其它"二分）的原因：
+/// 折叠逻辑要能区分"真正未改的上下文行"（可折）与"文件头 / 说明行"（不可折，
+/// 折了会把结构信息藏掉）。
+///
+/// 与 [`crate::GutterMark`]（`Plain` / `Add` / `Del`）的关系：那个描述"变更条
+/// 这一格"（只看有没有改），本枚举描述"这一行的底子"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffBand {
-    /// 上下文行（未改）—— 不画底。
+    /// 上下文行（未改的正文）—— 不画底。**这是唯一可被折叠的种类**。
     Context,
     /// 新增行。
     Add,
@@ -45,6 +52,14 @@ pub enum DiffBand {
     Del,
     /// hunk 头（`@@ … @@`）—— 只给极淡的底，作为"这一段从这开始"的标记。
     Hunk,
+    /// 文件头（`---` / `+++`）。**不画底**：它是结构，不是内容。
+    Header,
+    /// 我们自己追加的说明行（`… 另有 N 处…`、`（改动过大…）`）。不画底，
+    /// 且**不可折叠** —— 折了会让"这个 diff 被截断过"这件事消失。
+    Meta,
+    /// 折叠标记行（**合成行**，不对应任何 diff 文本行）。
+    /// 给一层淡底，让它看起来是"可展开的把手"而不是普通文字。
+    Fold,
 }
 
 /// 一份背景带的样式常量。
@@ -59,6 +74,9 @@ pub struct DiffBandStyle {
     pub del: Color,
     /// hunk 头的底色（更淡 —— 它是位置标记，不是改动）。
     pub hunk: Color,
+    /// 折叠标记行的底色（淡，但比 hunk 头明显一点：它是"可点击展开"的把手，
+    /// 需要被看出来是个控件而不是一行灰字）。
+    pub fold: Color,
 }
 
 impl Default for DiffBandStyle {
@@ -88,16 +106,21 @@ impl DiffBandStyle {
             add: tint(neo_text::Tone::Success, 32),
             del: tint(neo_text::Tone::Error, 32),
             hunk: tint(neo_text::Tone::Info, 14),
+            fold: tint(neo_text::Tone::Info, 26),
         }
     }
 
-    /// 某一类带子用什么颜色；`Context` 无底 → `None`。
+    /// 某一类行的底带颜色；无底 → `None`。
+    ///
+    /// `Context` / `Header` / `Meta` 都**不画底** —— 但它们是三个不同的种类
+    /// （见 [`DiffBand`] 的说明），只是恰好都不需要底。
     pub fn color_for(&self, band: DiffBand) -> Option<Color> {
         match band {
-            DiffBand::Context => None,
+            DiffBand::Context | DiffBand::Header | DiffBand::Meta => None,
             DiffBand::Add => Some(self.add),
             DiffBand::Del => Some(self.del),
             DiffBand::Hunk => Some(self.hunk),
+            DiffBand::Fold => Some(self.fold),
         }
     }
 }
@@ -207,6 +230,45 @@ mod tests {
             assert!(c.a < 128, "{name} 的 alpha 过高（{}）—— 会与文字抢对比度", c.a);
             assert!(c.a > 0, "{name} 的 alpha 为 0 → 等于没画");
         }
+    }
+
+    /// **结构行与上下文行都无底，但它们是不同的种类。**
+    ///
+    /// 这条守的是折叠的正确性：折叠只该收 `Context`。若把 `Header` / `Meta`
+    /// 也归成 `Context`（曾经的实现就是 `_ => Context`），折叠会把文件头与
+    /// "这个 diff 被截断过"的说明一起藏掉 —— 而那是**结构信息**，不是可省的内容。
+    #[test]
+    fn context_header_and_meta_are_distinct_even_though_none_has_a_band() {
+        let st = DiffBandStyle::from_neo_palette();
+        for kind in [DiffBand::Context, DiffBand::Header, DiffBand::Meta] {
+            assert!(st.color_for(kind).is_none(), "{kind:?} 不该有底带");
+        }
+        // 三者互不相等 —— 类型系统保证，但显式钉一次，防止将来有人合并变体
+        assert_ne!(DiffBand::Context, DiffBand::Header);
+        assert_ne!(DiffBand::Context, DiffBand::Meta);
+        assert_ne!(DiffBand::Header, DiffBand::Meta);
+    }
+
+    /// 折叠标记行**有底**且与上下文不同 —— 它需要被看成"可展开的把手"。
+    #[test]
+    fn the_fold_marker_is_visible_as_a_control() {
+        let st = DiffBandStyle::from_neo_palette();
+        let fold = st.color_for(DiffBand::Fold).expect("折叠标记应有底（否则看不出是控件）");
+        assert!(fold.a > 0 && fold.a < 128, "半透明且可见：alpha={}", fold.a);
+        let hunk = st.color_for(DiffBand::Hunk).unwrap();
+        assert_ne!(fold, hunk, "折叠标记不能与 hunk 头同色（一个是控件、一个是位置标记）");
+    }
+
+    /// 合成行（折叠标记）也能正常画底 —— 它不对应任何 diff 文本行，
+    /// 但对渲染层来说就是一行，没有特殊待遇。
+    #[test]
+    fn a_fold_row_gets_its_band_like_any_other_row() {
+        let lh = 16.0;
+        let s = diff_backdrop(&[DiffBand::Add, DiffBand::Fold, DiffBand::Del], 100.0, lh);
+        let r = rects(&s);
+        assert_eq!(r.len(), 3, "三条都有底");
+        assert_eq!(r[1].origin.y, lh, "折叠行在前一行之下");
+        assert_eq!(r[1].size.h, lh);
     }
 
     /// 裁剪配平且裁到"带子总高" —— 多余的区域不该被画上底。

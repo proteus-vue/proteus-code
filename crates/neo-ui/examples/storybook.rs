@@ -453,6 +453,9 @@ fn diff_backdrop_demo_element(bands: Vec<neo_ui_render::DiffBand>) -> neo_ui_kit
             neo_ui_render::DiffBand::Add => "+ 新增的一行",
             neo_ui_render::DiffBand::Del => "- 被删除的一行",
             neo_ui_render::DiffBand::Hunk => "@@ -1,5 +1,6 @@",
+            neo_ui_render::DiffBand::Header => "--- a/示例.txt",
+            neo_ui_render::DiffBand::Meta => "… 另有 3 处改动未显示",
+            neo_ui_render::DiffBand::Fold => "⋯ 未改 12 行（点击展开）",
             neo_ui_render::DiffBand::Context => "  未改的上下文行",
         })
         .collect();
@@ -462,6 +465,9 @@ fn diff_backdrop_demo_element(bands: Vec<neo_ui_render::DiffBand>) -> neo_ui_kit
             neo_ui_render::DiffBand::Add => Tone::Success,
             neo_ui_render::DiffBand::Del => Tone::Error,
             neo_ui_render::DiffBand::Hunk => Tone::Info,
+            neo_ui_render::DiffBand::Header => Tone::Muted,
+            neo_ui_render::DiffBand::Meta => Tone::Muted,
+            neo_ui_render::DiffBand::Fold => Tone::Info,
             neo_ui_render::DiffBand::Context => Tone::Text,
         })
         .collect();

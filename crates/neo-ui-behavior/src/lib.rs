@@ -27,11 +27,16 @@
 #![doc = include_str!("../README.md")]
 
 pub mod clock;
+pub mod fold;
 pub mod focus;
 pub mod keys;
 pub mod scroll;
 
 pub use clock::{format_duration, TurnClock};
+pub use fold::{
+    display_line_count, fold_rows, folded_line_count, FoldRow, FOLD_THRESHOLD,
+    KEEP_AROUND_CHANGE,
+};
 pub use focus::FocusIntent;
 pub use scroll::{FollowTail, ScrollPos};
 // `Verdict` 必须导出：它是 `KeyArbiter::verdict()` 的**返回类型**，

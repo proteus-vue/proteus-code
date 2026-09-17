@@ -99,6 +99,16 @@ pub struct Transcript {
     /// 从 0 重新开始，残留的下标会与新块撞上，于是某个组莫名其妙是展开的
     /// （而这种 bug 只在"清除后恰好又生成了同下标的组"时出现，最难查）。
     pub expanded_tool_runs: std::collections::HashSet<usize>,
+    /// 已**展开**的 diff 折叠区，键 = `(块下标, 被折区间起点)`。
+    ///
+    /// 与 `collapsed_reasoning` / `expanded_tool_runs` 同一个地址，理由也同一个：
+    /// 它们都是"按块下标记的折叠状态"。放进宿主会漏掉 `clear_view` 的清理 ——
+    /// 清屏后块下标从 0 重新开始，残留的键会与新块撞上，于是某个折叠区莫名其妙
+    /// 是展开的（只在"清除后恰好又生成了同块下标 + 同区间起点"时出现，最难查）。
+    ///
+    /// 键里**两个分量都不能省**：一个 diff 块可以有多处被折的未改区，
+    /// 只用块下标会让"展开任一处 = 展开全部"（用户点开一处，另一处也开了）。
+    pub expanded_diff_folds: std::collections::HashSet<(usize, usize)>,
     /// 累计 token。
     pub total_in: u64,
     pub total_out: u64,
@@ -304,6 +314,8 @@ impl Transcript {
         self.blocks.clear();
         self.collapsed_reasoning.clear();
         self.expanded_tool_runs.clear();
+        // 块下标已从 0 重新开始，折叠键必须一并清掉（见字段说明的"撞上"）
+        self.expanded_diff_folds.clear();
     }
 
     /// 记下"已为该快照请求推进"，避免重复下发。
@@ -785,9 +797,14 @@ mod tool_group_tests {
         t.push_batch(&tool("b", true));
         t.expanded_tool_runs.insert(0);
         t.collapsed_reasoning.insert(0);
+        t.expanded_diff_folds.insert((0, 7));
         t.clear_view();
         assert!(t.expanded_tool_runs.is_empty(), "清屏后不应残留展开状态");
         assert!(t.collapsed_reasoning.is_empty(), "清屏后不应残留折叠状态");
+        assert!(
+            t.expanded_diff_folds.is_empty(),
+            "清屏后不应残留 diff 折叠区的展开状态（同样按块下标记）"
+        );
     }
 
     /// 三条 Begin 用**同一个 id**（provider 没给唯一 id）—— 界面上不能出现

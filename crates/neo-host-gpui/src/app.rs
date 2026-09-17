@@ -760,6 +760,62 @@ fn gutter_element(diff: &str) -> impl IntoElement {
     .h_full()
 }
 
+/// diff 文本 → **显示行**：分类（diff 语法 → 中立行种类）+ 折叠（收起成片未改）。
+///
+/// # 为什么抽成函数
+///
+/// 这是"宿主接线"里唯一有判断的部分（其余是把结果塞进 element）。抽出来就能
+/// 无头断言三件事：分类是否**完整**（`Header`/`Meta` 不能被当成 `Context`，
+/// 否则折叠会把文件头与"被截断"的说明藏掉）、折叠是否被真的调用、以及
+/// **底带序列是否与显示行同长**（不同长就会错位）。
+///
+/// 渲染回调里做不了这些断言 —— 那里只能靠真机截图。
+///
+/// 返回 `(每行的中立种类, 显示行, 与显示行一一对应的底带种类)`。
+/// 最后一个与 `rows` 等长是**硬不变量**：底带按它铺、文字按 `rows` 排，
+/// 两者必须同长才不会错位。
+fn diff_display_rows(
+    lines: &[&str],
+    expanded: &std::collections::HashSet<usize>,
+) -> (
+    Vec<neo_ui_render::DiffBand>,
+    Vec<neo_ui_behavior::FoldRow>,
+    Vec<neo_ui_render::DiffBand>,
+) {
+    // 分类必须**完整**：行为层的折叠靠它区分"未改的上下文"（可折）与
+    // "文件头 / 截断说明"（不可折）。写成 `_ => Context` 就会把后两者混进去。
+    let bands: Vec<neo_ui_render::DiffBand> = lines
+        .iter()
+        .map(|line| match neo_driver::transcript::diff_line_kind(line) {
+            neo_driver::transcript::DiffLineKind::Add => neo_ui_render::DiffBand::Add,
+            neo_driver::transcript::DiffLineKind::Del => neo_ui_render::DiffBand::Del,
+            neo_driver::transcript::DiffLineKind::Hunk => neo_ui_render::DiffBand::Hunk,
+            neo_driver::transcript::DiffLineKind::Header => neo_ui_render::DiffBand::Header,
+            neo_driver::transcript::DiffLineKind::Meta => neo_ui_render::DiffBand::Meta,
+            neo_driver::transcript::DiffLineKind::Context => neo_ui_render::DiffBand::Context,
+        })
+        .collect();
+
+    let rows = neo_ui_behavior::fold_rows(&bands, expanded);
+
+    // 折叠**改变了显示行数**，所以底带必须按 `rows` 重算，不能沿用 `bands` ——
+    // 否则底带还按原始行数铺，会与前缀被折掉的文字错位。
+    let display_bands: Vec<neo_ui_render::DiffBand> = rows
+        .iter()
+        .map(|r| match r {
+            neo_ui_behavior::FoldRow::Line(i) => bands[*i],
+            neo_ui_behavior::FoldRow::Fold { .. } => neo_ui_render::DiffBand::Fold,
+        })
+        .collect();
+
+    debug_assert_eq!(
+        rows.len(),
+        display_bands.len(),
+        "底带必须与显示行同长，否则两者错位"
+    );
+    (bands, rows, display_bands)
+}
+
 /// **自绘 diff 背景带**（渲染缝的第四个消费者）：让"哪些行改了"一眼扫得出。
 ///
 /// # 分工：**缝画底、宿主画字**
@@ -768,34 +824,31 @@ fn gutter_element(diff: &str) -> impl IntoElement {
 /// 字形缓存与 element diff）。所以本函数只负责底，正文由调用方用普通
 /// `div` 叠在上面。
 ///
+/// # 入参是**中立行种类**，不是 diff 文本
+///
+/// 由调用方分类（宿主认识 diff 语法，渲染层不认识）。而且折叠**改变了显示行数** ——
+/// 调用方传进来的必须是"折叠后的显示行"，不是原始 diff 行；否则底带会与前缀
+/// 被折掉的文字错位。
+///
 /// # 对齐：靠**同一个行高**，不靠调间距
 ///
 /// gpui 里 `absolute` 定位的元素**不参与父容器的布局**，所以这层底垫在下面
 /// 不会把文字顶走。但"底的一行"与"字的一行"要严丝合缝，靠的是两边共用
 /// 一个行高：
-/// - 底：`i * lh`（本函数，由 `diff_backdrop` 保证）；
+/// - 底：`i * lh`（由 `diff_backdrop` 保证）；
 /// - 字：文本容器设 `.line_height(lh)` 且每行 `.whitespace_nowrap()`
 ///   —— 那样"一行文字"恰好占 `lh` 高。
 ///
 /// `lh` 取 `Window::line_height()`（当前文本样式的真实行高），两边同源。
 /// **不要**改成"看起来差不多"的魔数：换字号/换字体立刻错开，
 /// 而错位的背景带会把改动标到错误的行上，比不画更糟。
-fn diff_backdrop_element(diff: &str, line_height: f32) -> impl IntoElement {
-    use neo_ui_render::{diff_backdrop, DiffBand, RenderBackend};
+fn diff_backdrop_element(
+    bands: &[neo_ui_render::DiffBand],
+    line_height: f32,
+) -> impl IntoElement {
+    use neo_ui_render::{diff_backdrop, RenderBackend};
 
-    // diff 文本 → 中立"行种类"（渲染层不认识 diff 语法，这一步只在宿主做）
-    let bands: Vec<DiffBand> = diff
-        .lines()
-        .map(|line| match neo_driver::transcript::diff_line_kind(line) {
-            neo_driver::transcript::DiffLineKind::Add => DiffBand::Add,
-            neo_driver::transcript::DiffLineKind::Del => DiffBand::Del,
-            neo_driver::transcript::DiffLineKind::Hunk => DiffBand::Hunk,
-            // 文件头（`---`/`+++`）与我们自己追加的说明行都不是"改动内容"，
-            // 给它们上色会让"改动落在哪"失真。
-            _ => DiffBand::Context,
-        })
-        .collect();
-
+    let bands = bands.to_vec();
     // 场景与后端产物在 prepaint 里算（纯计算，不需要 window）
     let prepaint = move |bounds: neo_ui_kit::gpui::Bounds<neo_ui_kit::gpui::Pixels>,
                          _window: &mut neo_ui_kit::gpui::Window,
@@ -1170,33 +1223,87 @@ impl NeoView {
                     // 行高从**当前文本样式**取（不是魔数）：底带的 y 由它算，
                     // 文字容器的 `.line_height(lh)` 也用它 —— 两边同源才对得齐。
                     let lh = line_height;
+                    let lines: Vec<&str> = diff.lines().collect();
+
+                    // 折叠状态按 `(块下标, 区间起点)` 记 —— 一个 diff 可以有多处被折的
+                    // 未改区，只用块下标会让"展开任一处 = 全部展开"。
+                    let expanded: std::collections::HashSet<usize> = self
+                        .transcript
+                        .expanded_diff_folds
+                        .iter()
+                        .filter(|(b, _)| *b == idx)
+                        .map(|(_, s)| *s)
+                        .collect();
+
+                    // diff 文本 → 显示行（分类 + 折叠）抽成纯函数，见其说明。
+                    let (bands, rows, display_bands) = diff_display_rows(&lines, &expanded);
+
                     let mut body = v_flex()
                         .gap_0()
                         // 文字容器的行高 = 底带用的行高（对齐靠这一句）
                         .line_height(px(lh));
-                    for line in diff.lines() {
-                        let tone = match neo_driver::transcript::diff_line_kind(line) {
-                            neo_driver::transcript::DiffLineKind::Add => Tone::Success,
-                            neo_driver::transcript::DiffLineKind::Del => Tone::Error,
-                            neo_driver::transcript::DiffLineKind::Hunk => Tone::Info,
-                            neo_driver::transcript::DiffLineKind::Meta => Tone::Muted,
-                            _ => Tone::Text,
-                        };
-                        body = body.child(
-                            div()
-                                // 不折行：折行会让"一行文字"占两行高，底带立刻错位。
-                                // 长行由横向滚动/裁切处理，不是靠折行。
-                                .whitespace_nowrap()
-                                .text_color(neo_color(tone))
-                                .child(line.to_string()),
-                        );
+                    for row in &rows {
+                        match row {
+                            neo_ui_behavior::FoldRow::Line(i) => {
+                                let line = lines[*i];
+                                let tone = match bands[*i] {
+                                    neo_ui_render::DiffBand::Add => Tone::Success,
+                                    neo_ui_render::DiffBand::Del => Tone::Error,
+                                    neo_ui_render::DiffBand::Hunk => Tone::Info,
+                                    neo_ui_render::DiffBand::Meta => Tone::Muted,
+                                    _ => Tone::Text,
+                                };
+                                body = body.child(
+                                    div()
+                                        // 不折行：折行会让"一行文字"占两行高，
+                                        // 底带立刻错位。长行由裁切/横向滚动处理。
+                                        .whitespace_nowrap()
+                                        .text_color(neo_color(tone))
+                                        .child(line.to_string()),
+                                );
+                            }
+                            neo_ui_behavior::FoldRow::Fold { range } => {
+                                // 把手：点一下展开（再点收起）。文案给出**确切行数** ——
+                                // "⋯" 这种含糊提示会让人不知道折了多少。
+                                let n = neo_ui_behavior::folded_line_count(range);
+                                let start = range.start;
+                                let v = cx.entity().clone();
+                                body = body.child(
+                                    div()
+                                        // 元素 id 要唯一：同一块 diff 里可能有多处折叠区。
+                                        // `ElementId` 只接受 `(&str, usize)` 这类形状，所以把
+                                        // 两个下标**无冲突地**打包进 u64（块下标占高 32 位）。
+                                        // 不用 `a*n+b` 那种乘加：它会在某些取值上撞号，
+                                        // 而 id 撞号的表现是"点一处展开、另一处也动"。
+                                        .id(("diff-fold", ((idx as u64) << 32) | (start as u64)))
+                                        .whitespace_nowrap()
+                                        .text_color(neo_color(Tone::Info))
+                                        .child(format!("⋯ 未改 {n} 行（点击展开）"))
+                                        .on_click(move |_, _, cx| {
+                                            v.update(cx, |this, cx| {
+                                                let key = (idx, start);
+                                                if !this
+                                                    .transcript
+                                                    .expanded_diff_folds
+                                                    .remove(&key)
+                                                {
+                                                    this.transcript
+                                                        .expanded_diff_folds
+                                                        .insert(key);
+                                                }
+                                                cx.notify();
+                                            });
+                                        }),
+                                );
+                            }
+                        }
                     }
                     // 正文叠在**底带之上**：底带 `absolute` 不参与布局（不顶走文字），
                     // 且它没有落在无障碍树里 —— 底带只是视觉层，不承载信息，
                     // 语义由文字与变更条承担。
                     let body_with_backdrop = div()
                         .relative()
-                        .child(diff_backdrop_element(diff, lh))
+                        .child(diff_backdrop_element(&display_bands, lh))
                         .child(body);
                     col = col.child(
                         h_flex()
@@ -2400,6 +2507,113 @@ mod tests {
             turns_remaining: 0,
             budget_used: 0,
         }
+    }
+
+    /// **接线契约 1**：分类必须**完整** —— 文件头与截断说明不能被当成上下文。
+    ///
+    /// 这条守的是折叠的正确性：`Header` / `Meta` 若被归成 `Context`（曾经的
+    /// `_ => Context` 就是这么写的），折叠会把它们一起藏掉 —— 而"这段 diff 属于
+    /// 哪个文件""这个 diff 被截断过"是**结构信息**，藏了会误导。
+    #[test]
+    fn diff_classification_keeps_header_and_meta_distinct() {
+        let lines = vec![
+            "--- a/f.txt",   // Header
+            "+++ b/f.txt",   // Header
+            "@@ -1,3 +1,3 @@", // Hunk
+            " ctx",          // Context
+            "-gone",         // Del
+            "+new",          // Add
+            "… 另有 2 处改动未展示", // Meta
+        ];
+        let (bands, rows, display) = diff_display_rows(&lines, &Default::default());
+
+        assert_eq!(bands[0], neo_ui_render::DiffBand::Header);
+        assert_eq!(bands[1], neo_ui_render::DiffBand::Header);
+        assert_eq!(bands[6], neo_ui_render::DiffBand::Meta);
+        assert_eq!(bands[3], neo_ui_render::DiffBand::Context);
+
+        // 短 diff 不折 → 显示行与原行一一对应
+        assert_eq!(rows.len(), lines.len());
+        assert_eq!(display.len(), rows.len(), "底带必须与显示行同长");
+    }
+
+    /// **接线契约 2**：折叠**真的被调用**了 —— 长片上下文被折起，
+    /// 且底带随之同步缩短（不是只折文字、底带还按原行数铺）。
+    ///
+    /// 用**人工构造**的带长上下文的 diff：我们自己的 `apply_patch` 每 hunk 只带
+    /// 3 行上下文，不会触发折叠（见 `neo-ui-behavior::fold` 头部的说明），
+    /// 所以这条必须绕过生产者、直接喂形状。
+    #[test]
+    fn a_long_context_run_is_folded_and_the_backdrop_stays_aligned() {
+        let mut lines: Vec<String> = vec!["--- a/f.txt".into(), "+++ b/f.txt".into(), "@@ -1,30 +1,30 @@".into()];
+        lines.push("-gone".into());
+        for i in 0..25 {
+            lines.push(format!(" ctx {i}"));
+        }
+        lines.push("+added".into());
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+
+        let (_bands, rows, display) = diff_display_rows(&refs, &Default::default());
+
+        assert!(
+            rows.iter().any(|r| matches!(r, neo_ui_behavior::FoldRow::Fold { .. })),
+            "25 行连续上下文应被折起（阈值 {}）",
+            neo_ui_behavior::FOLD_THRESHOLD
+        );
+        assert_eq!(
+            display.len(),
+            rows.len(),
+            "**底带必须与显示行同长** —— 不同长会让底带与文字错位"
+        );
+        assert!(
+            display.len() < refs.len(),
+            "折叠后显示行应少于原行数：{} vs {}",
+            display.len(),
+            refs.len()
+        );
+        // 折叠行的底带种类必须是 Fold（它要看起来像个可展开的把手）
+        let fold_pos = rows
+            .iter()
+            .position(|r| matches!(r, neo_ui_behavior::FoldRow::Fold { .. }))
+            .unwrap();
+        assert_eq!(display[fold_pos], neo_ui_render::DiffBand::Fold);
+    }
+
+    /// **接线契约 3**：展开态被正确读到 —— 同一个折叠区展开后全部铺开，
+    /// 且**仍保留一个把手**（否则没有收起的入口）。
+    #[test]
+    fn expanding_the_fold_reads_the_expanded_key() {
+        let mut lines: Vec<String> = vec!["@@ -1,30 +1,30 @@".into(), "-gone".into()];
+        for i in 0..25 {
+            lines.push(format!(" ctx {i}"));
+        }
+        lines.push("+added".into());
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+
+        let (_b, collapsed, _d) = diff_display_rows(&refs, &Default::default());
+        let start = collapsed
+            .iter()
+            .find_map(|r| match r {
+                neo_ui_behavior::FoldRow::Fold { range } => Some(range.start),
+                _ => None,
+            })
+            .expect("应有折叠区");
+
+        let mut expanded = std::collections::HashSet::new();
+        expanded.insert(start);
+        let (_b2, rows, display) = diff_display_rows(&refs, &expanded);
+
+        assert!(
+            rows.len() > collapsed.len(),
+            "展开后显示行应变多：{} vs {}",
+            rows.len(),
+            collapsed.len()
+        );
+        assert!(
+            rows.iter().any(|r| matches!(r, neo_ui_behavior::FoldRow::Fold { .. })),
+            "展开态仍要保留把手，否则没法收起"
+        );
+        assert_eq!(display.len(), rows.len(), "底带仍须与显示行同长");
     }
 
     /// 每个子任务一段，且**总步数固定为 5**（阶段枚举的基数）——
