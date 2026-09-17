@@ -36,12 +36,33 @@ use std::time::{Duration, Instant};
 /// `GoalUnavailable`。**用生产装配能让测试验到真实的接线**，而不是验一个
 /// 只在测试里存在的内核。
 fn kernel_with(script: Vec<Vec<ModelDelta>>) -> Kernel {
+    kernel_with_mode(script, ExecMode::Default)
+}
+
+/// 同上，但显式指定执行模式。
+///
+/// # 为什么需要它（这是 CI 上 Linux 唯一失败的用例）
+///
+/// 执行模式决定沙箱档位（`neo_config::resolve`）：`Default → WorkspaceWrite`。
+/// 而 `LocalSandbox` 的**受限档在 Linux 上 fail-closed**（无 Landlock+bwrap
+/// 实现时拒绝执行，见 neo-sandbox-local 头部那张平台表）。于是任何"经默认档
+/// 真的跑一条命令"的用例，在 macOS 上绿、在 Linux 上必红。
+///
+/// 本文件此前正是如此：`tool_cards_carry_name_args_and_output` 用 Default 档
+/// 跑 `bash echo`，于是 Linux CI 稳定失败，而注解通道读不到原因（见
+/// `scripts/ci-failure-digest.sh` 头部）—— 排查成本极高。
+///
+/// **修法不是跳过 Linux**（那会让 CI 失去意义），而是让"验 UI 卡片"的用例
+/// 用**三平台都可用**的 `FullAccess` 档（其沙箱档 `DangerFullAccess` 在
+/// `LocalSandbox::supports` 里恒为 true）。用例的主语是界面数据通路，
+/// 不是沙箱策略 —— 拿一个平台相关的产品能力当测试前提，本身就是错的。
+fn kernel_with_mode(script: Vec<Vec<ModelDelta>>, mode: ExecMode) -> Kernel {
     let models = ModelRegistry::single(Arc::new(
         neo_llm_deepseek::ScriptedProvider::scripted(script, "tail"),
     ));
     let sandbox = Arc::new(neo_sandbox_local::LocalSandbox::new(std::path::Path::new("/tmp")));
     let persistence = Box::new(InMemoryPersistence::new());
-    let opts = ExecOptions { mode: ExecMode::Default, max_steps: 16, ..Default::default() };
+    let opts = ExecOptions { mode, max_steps: 16, ..Default::default() };
     // build_kernel 会注册生产默认工具集（bash / apply_patch / …）+
     // compactor + goal orchestrator —— 测试因此验的是真实装配
     build_kernel("s-gui-e2e", std::path::Path::new("/tmp"), &opts, models, sandbox, persistence)
@@ -51,7 +72,11 @@ fn kernel_with(script: Vec<Vec<ModelDelta>>) -> Kernel {
 ///
 /// 时间上限是**有界的**（不是固定 sleep 等）：轮询直到本轮结束或超时。
 fn run_turn(script: Vec<Vec<ModelDelta>>) -> (Transcript, Vec<EventMsg>) {
-    let kernel = kernel_with(script);
+    run_turn_with_mode(script, ExecMode::Default)
+}
+
+fn run_turn_with_mode(script: Vec<Vec<ModelDelta>>, mode: ExecMode) -> (Transcript, Vec<EventMsg>) {
+    let kernel = kernel_with_mode(script, mode);
 
     let (handle, cmd_rx, batch_tx) = driver::channel();
     let _thread = // egui 是即时模式：自己每帧轮询，不需要唤醒钩子
@@ -157,13 +182,20 @@ fn reasoning_reaches_the_transcript() {
 /// **D4**：工具卡片必须含名字、参数摘要与输出。
 #[test]
 fn tool_cards_carry_name_args_and_output() {
-    // 用**真实工具**（生产默认集里的 bash）+ 只读命令：Default 档放行、无需审批，
-    // 于是能跑到工具结束、验完整张卡片（含真实 stdout）。
-    let (t, events) = run_turn(
+    // 用**真实工具**（生产默认集里的 bash）+ 只读命令。
+    //
+    // ⚠️ 执行模式必须用 `FullAccess`：它对应 `SandboxMode::DangerFullAccess`，
+    // 是 `LocalSandbox` 在 macOS/Linux/Windows 三平台**都**支持的档位。
+    // 用 `Default`（→ `WorkspaceWrite`）会在 Linux 上被 fail-closed 拒掉
+    // （Linux 尚无 Landlock+bwrap 实现），命令根本不执行 —— 本用例曾在
+    // Linux CI 上因此稳定失败，而当时读不到原因。见 `kernel_with_mode` 的说明。
+    // 本用例验的是"卡片有没有带名字/参数/输出"，与沙箱档位无关。
+    let (t, events) = run_turn_with_mode(
         vec![
             vec![neo_mock::tool_call("c1", "bash", serde_json::json!({"cmd": "echo hello-neo"}))],
             vec![ModelDelta::Text("跑完了".into())],
         ],
+        ExecMode::FullAccess,
     );
 
     assert!(
@@ -180,10 +212,11 @@ fn tool_cards_carry_name_args_and_output() {
         .collect();
     assert!(!cards.is_empty(), "应出现工具卡片：{:?}", t.blocks);
     let card = cards[0];
-    // 诊断：若 bash echo 在 Default 档需审批，本轮会挂在 pending 上（卡片未完成）
+    // 诊断：若 bash echo 需审批，本轮会挂在 pending 上（卡片未完成）。
+    // FullAccess 档审批策略是 Never，故必然不挂起。
     assert!(
         t.pending.is_none(),
-        "本用例假设 bash echo 在 Default 档无需审批；实际挂起了审批：{:?}\n事件：{events:?}",
+        "FullAccess 档不应挂起审批：{:?}\n事件：{events:?}",
         t.pending
     );
     assert_eq!(card.name, "bash");
