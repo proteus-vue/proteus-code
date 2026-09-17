@@ -162,9 +162,12 @@ done < <(grep -aE 'could not compile|error: linking with|unable to find library|
 # ── warning 通道：兜底与元信息（不与真正失败抢 error 配额）────────────
 
 # 元信息：退出码/日志规模/磁盘。用来区分"没进诊断分支"与"进了但输出被吞"。
-# 走 warning，因为它是**背景**而非失败本身。
+# 走 warning，因为它是**背景**而非失败本身。规模优先用调用方传入的值
+# （workflow 里已算过），缺省再自行统计。
 if [ -n "${NEO_CI_EXIT:-}" ]; then
-  _push warning "诊断" "exit=${NEO_CI_EXIT} lines=$(wc -l < "$PLAIN" | tr -d ' ') bytes=$(wc -c < "$PLAIN" | tr -d ' ') 磁盘剩余=${NEO_CI_DISK:-?}"
+  _l="${NEO_CI_LINES:-$(wc -l < "$PLAIN" | tr -d ' ')}"
+  _b="${NEO_CI_BYTES:-$(wc -c < "$PLAIN" | tr -d ' ')}"
+  _push warning "诊断" "exit=${NEO_CI_EXIT} lines=${_l} bytes=${_b} 磁盘剩余=${NEO_CI_DISK:-?}"
 fi
 
 # 兜底：尾部非空行。既非用例失败也非编译错误时（例如被信号杀死/OOM），
