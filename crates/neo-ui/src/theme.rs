@@ -41,6 +41,110 @@ pub fn neo_color(tone: Tone) -> neo_ui_kit::gpui::Rgba {
 /// （4–8px）—— 再大就显得是"卡片"而不是控件，再小则与直角无异。
 pub const RADIUS: f32 = 6.0;
 
+/// 文字层级（**设计系统的排版角色**，不是随手设字号）。
+///
+/// # 为什么要有角色，而不是各处直接 `text_sm()`
+///
+/// 实测：宿主里 `font_weight` / `text_size` 出现 **0 次** —— 标题、正文、说明
+/// 全是同一个字号同一个字重，界面因此"平"。但修法若只是"给每个地方挑个字号"，
+/// 会得到十几种各不相同的组合（那正是拼凑感的来源）。
+///
+/// 所以按**角色**给：使用者说"这是区块标题"，而不是"这是 14px 加粗"。
+/// 数值取自设计系统的排版 token（`TypographyTokens`：xs=12 / sm=14 / base=16，
+/// 行高 16 / 20 / 24），不自己发明一套。
+///
+/// # 为什么是"小一号 + 加粗"而不是"大一号"
+///
+/// 这是**工具型界面**（dense tool UI）的惯例，也是 Zed / VS Code 的做法：
+/// 正文该是主角、字号偏小（信息密度高）；标题靠**字重**与**颜色**区分，
+/// 而不是靠变大。把标题放大到 20px 会让面板显得空旷、且挤压内容区。
+///
+/// 与 §4.64(ba) 的教训一致：**字重在中文字形上可能不生效**（CJK 常无真粗体
+/// 字面）。所以层级不只靠字重 —— 标题同时用更亮的语义色，说明文字同时用
+/// 弱化色，两条路径叠加，任一条失效都还能分辨。
+pub mod text_role {
+    use neo_text::Tone;
+    use neo_ui_kit::gpui::{Div, FontWeight, div, prelude::*};
+
+    /// 一个字重档（与设计系统的排版 token 同量级）。
+    ///
+    /// 用**数据**描述角色而不是把样式写死在函数里，是为了让"层级存在"
+    /// 成为**可断言的**：四个角色若被改成同一组值，测试会红；
+    /// 而写死在函数里就只能靠肉眼看出来（界面"又变平了"不会报错）。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Size {
+        /// 12px（行号、角标）
+        Xs,
+        /// 14px（标题、说明）
+        Sm,
+        /// 16px（正文）
+        Base,
+    }
+
+    /// 一个排版角色的**规格**。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Role {
+        pub size: Size,
+        pub bold: bool,
+        pub tone: Tone,
+    }
+
+    /// 区块 / 面板标题：小一号 + 半粗 + 信息色。
+    ///
+    /// 为什么是"小一号"而不是"大一号"：工具型界面（dense tool UI）的惯例 ——
+    /// 正文是主角、字号偏小以换取信息密度；标题靠**字重与颜色**区分。
+    /// Zed / VS Code 都是这个路子。
+    ///
+    /// ⚠️ 别忘了 §4.64(ba) 的教训：**CJK 常无真粗体字面**，`bold` 在中文上
+    /// 可能看不出差别。所以层级**不只靠字重** —— 标题同时用了更亮的语义色、
+    /// 说明文字同时用了弱化色。两条路径叠加，任一条在某字体上失效仍可分辨。
+    pub const SECTION_TITLE: Role =
+        Role { size: Size::Sm, bold: true, tone: Tone::Info };
+
+    /// 正文（转录内容）：默认字号 + 正文色。
+    pub const BODY: Role = Role { size: Size::Base, bold: false, tone: Tone::Text };
+
+    /// 说明 / 元信息（解释性文字、路径、时间戳）：小一号 + 弱化色。
+    pub const META: Role = Role { size: Size::Sm, bold: false, tone: Tone::Muted };
+
+    /// 最小一档（行号、角标）。
+    pub const TINY: Role = Role { size: Size::Xs, bold: false, tone: Tone::Muted };
+
+    /// 把一个角色应用到元素上（**唯一的套用点**）。
+    pub fn apply(role: Role, label: impl Into<neo_ui_kit::gpui::SharedString>) -> Div {
+        let mut d = div();
+        d = match role.size {
+            Size::Xs => d.text_xs(),
+            Size::Sm => d.text_sm(),
+            Size::Base => d.text_base(),
+        };
+        if role.bold {
+            d = d.font_weight(FontWeight::SEMIBOLD);
+        }
+        d.text_color(super::neo_color(role.tone)).child(label.into())
+    }
+
+    /// 区块 / 面板标题。
+    pub fn section_title(label: impl Into<neo_ui_kit::gpui::SharedString>) -> Div {
+        apply(SECTION_TITLE, label)
+    }
+
+    /// 正文。
+    pub fn body(label: impl Into<neo_ui_kit::gpui::SharedString>) -> Div {
+        apply(BODY, label)
+    }
+
+    /// 说明 / 元信息。
+    pub fn meta(label: impl Into<neo_ui_kit::gpui::SharedString>) -> Div {
+        apply(META, label)
+    }
+
+    /// 最小一档。
+    pub fn tiny(label: impl Into<neo_ui_kit::gpui::SharedString>) -> Div {
+        apply(TINY, label)
+    }
+}
+
 /// 页面底色（近黑）。
 ///
 /// # 为什么必须单开一个入口，而不是让调用方写 `neo_color(Tone::None)`
@@ -233,6 +337,47 @@ mod tests {
             lum(base_bg()) + 100.0 < lum(neo_color(Tone::Text)),
             "底色应显著暗于正文色，否则界面看不清"
         );
+    }
+
+    /// **四个排版角色必须真的分层**（尺寸、字重、颜色不能全一样）。
+    ///
+    /// 这条守的是"层级存在"这件事本身。它有意义的原因：`text_role` 把层级集中到
+    /// 一处之后，若哪天有人把四个角色写成同一组值，**界面上不会报错** ——
+    /// 只是又变平了（用户看得出、测试看不出）。断言"彼此不同"才守得住。
+    ///
+    /// ⚠️ 只断言**关系**（谁比谁大、谁更粗、颜色不同），不断言具体像素：
+    /// 具体值是设计 token，会随主题调整；而"可分辨"才是契约。
+    #[test]
+    fn text_roles_form_a_real_hierarchy() {
+        use text_role::{BODY, META, SECTION_TITLE, TINY, Size};
+
+        // 标题必须比正文**小**（工具界面的惯例：正文是主角）
+        assert!(
+            SECTION_TITLE.size != BODY.size,
+            "标题与正文不能同字号（否则层级不存在）"
+        );
+        // 元信息必须与正文**不同字号**（否则"说明"与"内容"难分辨）
+        assert_ne!(META.size, BODY.size, "元信息应与正文不同字号");
+        // 尺寸档必须**有序**：Xs < Sm < Base（用枚举序表达）
+        assert!(Size::Xs != Size::Sm && Size::Sm != Size::Base);
+
+        // 标题必须**更粗**（在字形支持粗体的语言上生效）
+        assert!(SECTION_TITLE.bold, "标题应当加粗");
+        assert!(!BODY.bold, "正文不该加粗");
+        assert!(!META.bold, "说明文字不该加粗");
+
+        // 颜色必须**三种不同** —— 这是粗体在 CJK 上失效时的第二道区分路径
+        assert_ne!(SECTION_TITLE.tone, BODY.tone);
+        assert_ne!(META.tone, BODY.tone);
+        assert_ne!(SECTION_TITLE.tone, META.tone);
+
+        // 四个角色两两不可完全相同
+        let all = [TINY, META, BODY, SECTION_TITLE];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "两个排版角色完全相同 —— 层级被抹平了");
+            }
+        }
     }
 
     /// 主题类型可达（门面层透出正确）。

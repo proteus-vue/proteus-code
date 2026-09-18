@@ -131,7 +131,7 @@ fn text_button(
 ) -> neo_ui_kit::gpui::Div {
     div()
         .px_2()
-        .py(px(2.))
+        .py_0p5()
         .rounded(px(neo_ui::RADIUS))
         .text_color(neo_ui::neo_color(tone))
         .hover(|d| d.bg(neo_ui::neo_color(Tone::Border).opacity(0.45)))
@@ -1848,7 +1848,7 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
                 .id(format!("sess-{id}"))
                 // 列表项形态 + 悬停反馈（实测：这些行此前都"能点但看不出能点"）
                 .px_2()
-                .py(px(2.))
+                .py_0p5()
                 .rounded(px(neo_ui::RADIUS))
                 .when(is_current, |d| d.bg(neo_color(Tone::Border)))
                 .hover(|d| d.bg(neo_color(Tone::Border).opacity(0.45)))
@@ -1921,11 +1921,7 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
         .child(
             h_flex()
                 .gap_2()
-                .child(
-                    div()
-                        .text_color(neo_ui::neo_color(Tone::Info))
-                        .child("文件树"),
-                )
+                .child(neo_ui::text_role::section_title("文件树"))
                 .child(
                     div()
                         .text_color(neo_ui::neo_color(Tone::Muted))
@@ -1948,7 +1944,8 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
                 // ⚠️ 文案必须跟着行为走：点击已从"加入引用"改为"查看内容"
                 //（引用成了预览栏里的独立按钮）。留着旧文案就是**文案与行为不符** ——
                 // 用户会以为点一下就把文件塞进了上下文。
-                .child("点击文件查看内容（预览栏里可加入引用）"),
+                .child("点击文件查看内容（预览栏里可加入引用）")
+                .text_sm()
         );
 
     // **面板可见 ⇒ 索引必须在**。这里补扫而不是只显示"正在扫描…"：
@@ -2014,7 +2011,7 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
                 // 那是"能点"但**看不出能点**的形态，也正是"自绘 UI 粗糙"最直观
                 // 的来源。列表项该有的三件事：内边距、行高、悬停/选中反馈。
                 .px_2()
-                .py(px(3.))
+                .py_1()
                 .rounded(px(neo_ui::RADIUS))
                 .when(selected, |d| d.bg(neo_ui::neo_color(Tone::Border)))
                 // hover 的取值跟设计系统的习惯走（`muted` 半透明），
@@ -2159,8 +2156,7 @@ fn file_preview_pane(view: &mut NeoView, cx: &mut Context<NeoView>) -> impl Into
                             // 行号：等宽右对齐，方便对齐定位
                             div()
                                 .w(px(44.))
-                                .text_color(neo_ui::neo_color(Tone::Muted))
-                                .child(format!("{:>4}", i + 1)),
+                                .child(neo_ui::text_role::tiny(format!("{:>4}", i + 1))),
                         )
                         .child(
                             div()
@@ -2213,11 +2209,7 @@ fn help_panel(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElem
         .gap_1()
         .p_3()
         .bg(neo_ui::panel_bg())
-        .child(
-            div()
-                .text_color(neo_ui::neo_color(Tone::Info))
-                .child("快捷键"),
-        );
+        .child(neo_ui::text_role::section_title("快捷键"));
 
     // 快捷键：**只列真的实现了的**。列一条按不出来的比不列更糟。
     for (k, v) in [
@@ -2243,8 +2235,10 @@ fn help_panel(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElem
     col = col.child(
         div()
             .pt_2()
-            .text_color(neo_ui::neo_color(Tone::Info))
-            .child(format!("命令（{} 条）", neo_driver::commands::COMMANDS.len())),
+            .child(neo_ui::text_role::section_title(format!(
+                "命令（{} 条）",
+                neo_driver::commands::COMMANDS.len()
+            ))),
     );
     for c in neo_driver::commands::COMMANDS {
         col = col.child(
@@ -2322,7 +2316,7 @@ fn model_picker(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoEl
             }))
             .child(if is_current { format!("● {label}") } else { format!("  {label}") }))
             .px_2()
-            .py(px(3.))
+            .py_1()
             .rounded(px(neo_ui::RADIUS))
             .hover(|d| d.bg(neo_color(Tone::Border).opacity(0.45)))
             .on_click(move |_, _, cx| {
@@ -2379,7 +2373,7 @@ fn command_palette(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl Int
             div()
                 .id(format!("cmd-{}", c.name))
                 .px_2()
-                .py(px(3.))
+                .py_1()
                 .rounded(px(neo_ui::RADIUS))
                 .when(sel, |d| d.bg(neo_color(Tone::Border)))
                 .hover(|d| d.bg(neo_color(Tone::Border).opacity(0.45)))
