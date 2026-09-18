@@ -2907,6 +2907,59 @@ mod tests {
         }
     }
 
+    /// **耦合不变量**：审批预览的上下文半径必须**大于**折叠阈值，否则折叠是死的。
+    ///
+    /// # 这条测试的由来（它防的是一次真实发生过的静默失效）
+    ///
+    /// 折叠阈值是 6，而 `unified_diff` 原先只带 3 行上下文 —— 于是折叠
+    /// **实现了却永不触发**（§4.64(az) 记的正是这件事：功能在、路径通、
+    /// 界面不报错、用户永远看不到）。
+    ///
+    /// 后来把上下文提到 10（产品决定：审批时看更多上下文），折叠才活起来。
+    /// 但**两者的耦合此前没有任何东西守着** —— 谁把 `CONTEXT` 调回 6 以下，
+    /// 折叠会再次静默失效，而表现只是"没有折叠把手"，不报错、不崩溃。
+    ///
+    /// 所以把不变量写成断言：任一侧被改动而破坏了它，这里立刻红。
+    #[test]
+    fn fold_threshold_stays_below_the_context_radius() {
+        let context = neo_capability::diff::CONTEXT;
+        let threshold = neo_ui_behavior::FOLD_THRESHOLD;
+        assert!(
+            context > threshold,
+            "审批预览的上下文半径 CONTEXT={context} 必须大于折叠阈值 \
+             FOLD_THRESHOLD={threshold} —— 否则折叠永不触发（静默失效，界面上 \
+             只表现为'没有折叠把手'）。要么调大 CONTEXT，要么调小阈值。"
+        );
+    }
+
+    /// 用**真实生产者**（`unified_diff`）产出的审批预览，折叠应**真的生效**。
+    ///
+    /// 与上一条的区别：上一条断言"参数关系对不对"，这条断言"端到端真的折了" ——
+    /// 参数关系对但接线错了（比如忘了把 bands 传进 `fold_rows`）时，只有这条会红。
+    #[test]
+    fn a_real_approval_preview_actually_folds() {
+        let old: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        let new = old.replace("line 50\n", "line 50 changed\n");
+        let (diff, truncated) = neo_capability::diff::unified_diff(&old, &new, "f.txt");
+        assert!(!truncated, "这个规模不该触发摘要路径");
+
+        let lines: Vec<&str> = diff.lines().collect();
+        let (_bands, rows, display) = diff_display_rows(&lines, &Default::default());
+
+        assert!(
+            rows.iter().any(|r| matches!(r, neo_ui_behavior::FoldRow::Fold { .. })),
+            "真实审批预览（100 行文件改 1 行）应出现折叠把手。实际显示行：{:?}",
+            rows
+        );
+        assert!(
+            rows.len() < lines.len(),
+            "折叠后显示行({}) 应少于原始行数({}) —— 否则折叠等于没生效",
+            rows.len(),
+            lines.len()
+        );
+        assert_eq!(display.len(), rows.len(), "底带必须与显示行同长");
+    }
+
     /// **点击一个文件所产生的效果**（把 closure 里那三行组合起来断言）。
     ///
     /// # 为什么值得单独测

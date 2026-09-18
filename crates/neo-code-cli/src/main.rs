@@ -39,7 +39,7 @@ exec 选项：
   --goal <目标文本>            目标模式：按行拆子任务，自动逐阶段推进
                                直到完成或触发停止条件（与任务描述互斥）
   --json                       输出 JSON（便于脚本消费）
-  --provider <deepseek|mock|demo|selftest|multitool>   模型后端（默认 deepseek）
+  --provider <deepseek|mock|demo|selftest|multitool|edit|usage>   模型后端（默认 deepseek）
                                 selftest = 按脚本调用一次工具，验证完整链路（无需 key）
 
 desktop 选项：
@@ -1202,6 +1202,28 @@ fn build_models(provider: &str) -> Option<neo_core::models::ModelRegistry> {
             ]],
             "multitool 脚本执行完毕：上面 3 次调用属于同一轮，应当折叠成一组。",
         ).with_name("multitool"))));
+    // **部分修改**的演示桩：改大文件里的**一行**，于是审批预览会带上下文
+    //（前后各 `CONTEXT` 行），而不是"整文件重写"那种全是增减行的形状。
+    //
+    // 为什么需要它：其余桩（`selftest` / `multitool`）要么整文件重写、要么
+    // 只有 bash 调用，都**产不出带上下文的 diff**。而没有这个桩，
+    // "审批时到底能看到多少上下文"就只能靠读代码推断 —— 本轮把上下文
+    // 半径从 3 提到 10 这件事**没有一个可离线复现的观察窗口**。
+    // 它同时是"折叠未改区块"唯一可离线触发的场景（需连续 >6 行上下文）。
+    entries.push(mk("edit", "演示部分修改：改大文件里的一行（预览带上下文）", 0, false,
+        std::sync::Arc::new(neo_llm_deepseek::ScriptedProvider::scripted(
+            vec![vec![neo_llm_deepseek::tool_call(
+                "apply_patch",
+                serde_json::json!({
+                    "path": "edit-me.txt",
+                    "old": (1..=40).map(|i| format!("第 {i} 行\n")).collect::<String>(),
+                    "new": (1..=40)
+                        .map(|i| if i == 20 { "第 20 行（已改）\n".to_string() } else { format!("第 {i} 行\n") })
+                        .collect::<String>(),
+                }),
+            )]],
+            "partial 脚本执行完毕：只改了第 20 行，预览里应能看到前后上下文。",
+        ).with_name("edit"))));
     // 报 token 的演示桩：所有其它桩都不发 Usage，于是"用量图表"离线永远
     // 画不出来（token 恒为 0）。图表必须看到形状才能判断对不对。
     entries.push(mk("usage", "演示用量趋势：多轮 token 递增（供用量图表验证）", 0, false,

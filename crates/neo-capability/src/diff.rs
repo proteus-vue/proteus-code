@@ -30,8 +30,32 @@ use similar::TextDiff;
 ///
 /// 它同时是**进不进对齐引擎**的开关：小于它才调 `similar`。
 const MAX_ALIGN_LINES: usize = 2000;
-/// 每个 hunk 保留的上下文行数。
-const CONTEXT: usize = 3;
+/// 每个 hunk 保留的上下文行数（**两侧各这么多**）。
+///
+/// # 为什么是 10，而不是 git 默认的 3
+///
+/// 3 是**未经审视的 unix 默认**（本文件此前就写着一句"每个 hunk 保留的上下文
+/// 行数"，没有任何理由说明）。它对"补丁邮件"这种给人逐行读的场景够用，
+/// 但对**审批预览**不够：用户要据此判断"这次改动对不对"，而 3 行往往
+/// 交代不清上下文（前面是什么函数、这个变量从哪来）。
+///
+/// 改它有两个独立的好处：
+/// 1. 审批时能看到更多上下文（这是**产品意图**：让批准/拒绝的判断更有依据）；
+/// 2. 让渲染层的"折叠未改区块"**真正生效** —— 那个功能此前的阈值是 6 行，
+///    而 3 行上下文永远达不到 6，于是**实现了但永不触发**（见 §4.64(az)）。
+///
+/// # ⚠️ 与渲染层的耦合（改这个值前必读）
+///
+/// 折叠阈值 `neo_ui_behavior::fold::FOLD_THRESHOLD` 是 6：**本常量必须大于它**，
+/// 折叠才会触发。若把这里改回 ≤6，折叠会**静默失效**（界面上只表现为
+/// "没有折叠把手"，不报错）。该不变量有测试钉住
+/// （`neo-host-gpui` 的 `fold_threshold_stays_below_the_context_radius`）。
+///
+/// # 顺带的一个正面副作用
+///
+/// 半径变大也会让**相邻改动合并进同一个 hunk**（相距 < 2×半径 的改动不再被拆成
+/// 两个 `@@` 头），所以 `@@` 头的数量反而变少 —— 可读性提升，不只是变长。
+pub const CONTEXT: usize = 10;
 /// 最多输出多少个 hunk（避免超长 diff 撑爆终端与内存）。
 const MAX_HUNKS: usize = 60;
 /// 摘要路径每侧最多列出多少行样本（超出只报数量）。
@@ -216,30 +240,38 @@ mod tests {
     /// hunk 头定位与跳转，这个错会直接变成跳错位置。
     #[test]
     fn hunk_header_tracks_old_and_new_line_numbers_separately() {
-        // 早段插入一行，晚段（足够远，成另一个 hunk）改一行。
+        // 早段插入一行，晚段（**足够远**，保证成另一个 hunk）改一行。
         // 于是末个 hunk 位于插入之后：新侧起始必须比旧侧**大 1**。
         // 旧实现把两侧起始都写成同一个值，这里会失败。
-        let old: String = (1..=30).map(|i| format!("L{i}\n")).collect();
+        //
+        // ⚠️ 距离**由 CONTEXT 推出**而不是写死：两个改动相距必须 > 2×半径，
+        // 否则会被合并进同一个 hunk（半径 3 时相距 20 行足够，半径 10 时不够 ——
+        // 本测试曾因此红）。这样调 `CONTEXT` 不会再打断它。
+        let far = 10 + 2 * CONTEXT; // 改动位置：与早段相隔 > 2×半径
+        let n = far + CONTEXT + 10; // 文件要够长，让晚段 hunk 有完整上下文
+        let old: String = (1..=n).map(|i| format!("L{i}\n")).collect();
         let mut new = String::new();
-        for i in 1..=30 {
+        for i in 1..=n {
             if i == 5 {
                 new.push_str("INSERTED\n"); // 早段插入
             }
-            if i == 25 {
-                new.push_str("CHANGED\n"); // 晚段改动，替换原 L25
+            if i == far {
+                new.push_str("CHANGED\n"); // 晚段改动，替换原那一行
                 continue;
             }
             new.push_str(&format!("L{i}\n"));
         }
         let (d, _) = unified_diff(&old, &new, "f.txt");
         let heads: Vec<&str> = d.lines().filter(|l| l.starts_with("@@")).collect();
-        assert_eq!(heads.len(), 2, "应有两个相距较远的 hunk：{d}");
+        assert_eq!(heads.len(), 2, "应有两个相距较远的 hunk（距离 {far}）：{d}");
 
+        // 首个 hunk 在插入**之前** → 新旧两侧的起始行号必须相同。
+        // 不写死具体数字（那会随 CONTEXT 变），断言**关系** —— 而关系正是
+        // 本测试要守的东西（旧 bug 是把两侧写成同一个值，那在第二个 hunk 上错）。
         let (os1, _, ns1, _) = first_hunk_header(heads[0]).expect("首个 hunk 头");
         assert_eq!(
-            (os1, ns1),
-            (2, 2),
-            "首个 hunk 在插入之前，两侧起始一致（含 3 行上下文）：{}",
+            os1, ns1,
+            "首个 hunk 在插入之前，两侧起始应一致：{}",
             heads[0]
         );
 

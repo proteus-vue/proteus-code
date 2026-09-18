@@ -733,14 +733,19 @@ index 1234567..89abcde 100644
     fn parses_diffs_produced_by_the_capability_layer() {
         use neo_capability::diff::unified_diff;
 
-        // 造一段"前面插了行、后面又改了行"的改动，逼出两个 hunk 且新旧行号错位
-        let old: String = (1..=30).map(|i| format!("L{i}\n")).collect();
+        // 造一段"前面插了行、后面又改了行"的改动，逼出两个 hunk 且新旧行号错位。
+        //
+        // ⚠️ 两个改动的**距离由 `CONTEXT` 推出**（必须 > 2×半径才会分成两个 hunk）。
+        // 写死 20 行在半径 3 时够、半径 10 时会被合并成一个 hunk —— 本测试曾因此红。
+        let far = 10 + 2 * neo_capability::diff::CONTEXT;
+        let n = far + neo_capability::diff::CONTEXT + 10;
+        let old: String = (1..=n).map(|i| format!("L{i}\n")).collect();
         let mut new = String::new();
-        for i in 1..=30 {
+        for i in 1..=n {
             if i == 5 {
                 new.push_str("INSERTED\n");
             }
-            if i == 25 {
+            if i == far {
                 new.push_str("CHANGED\n");
                 continue;
             }
