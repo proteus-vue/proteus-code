@@ -109,6 +109,51 @@ pub const NEO: Palette = Palette {
 mod tests {
     use super::*;
 
+    /// **对比度守卫（WCAG AA）**：正文色与说明色在两种底色上都要够看。
+    ///
+    /// # 为什么要有它
+    ///
+    /// "暗色主题下的对比度"是**最容易被静默破坏**的一类观感：把 `muted` 调暗一点
+    /// 看起来"更雅致"，而实际是让说明文字与行号在暗底上变得难读 ——
+    /// 没有报错、没有崩溃，只有用户觉得"费眼"。
+    ///
+    /// 它也是 §4.64(bf) 里我**如实标注为"未测"**的那一项：本轮把它补上，
+    /// 并固化成断言，而不是"我算过一次没问题"。
+    ///
+    /// 阈值取 WCAG AA 正文标准 4.5:1。⚠️ 这是**偏保守**的选择：
+    /// `muted` 在设计上就是"次要信息"，AA 对次要文字允许 3:1
+    ///（何况小字号另有豁免）。用 4.5 意味着将来调色时几乎不可能误伤。
+    #[test]
+    fn text_and_muted_stay_readable_on_both_backgrounds() {
+        fn lum(c: (u8, u8, u8)) -> f64 {
+            fn ch(v: u8) -> f64 {
+                let v = v as f64 / 255.0;
+                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            }
+            0.2126 * ch(c.0) + 0.7152 * ch(c.1) + 0.0722 * ch(c.2)
+        }
+        fn ratio(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> f64 {
+            let (a, b) = (lum(fg), lum(bg));
+            let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+            (hi + 0.05) / (lo + 0.05)
+        }
+
+        for (name, bg) in [("base（纯黑）", NEO.bg_base), ("panel（面板底）", NEO.bg_panel)] {
+            for (what, fg) in [
+                ("text（正文）", NEO.text),
+                ("muted（说明/行号）", NEO.muted),
+                ("info（区块标题）", NEO.info),
+            ] {
+                let r = ratio(fg, bg);
+                assert!(
+                    r >= 4.5,
+                    "{what} 在 {name} 上的对比度只有 {r:.2}:1（WCAG AA 要求 ≥4.5:1）—— \
+                     调暗颜色会让说明文字与行号变得难读，而这一点不会报错、只会费眼"
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_semantic_tone_resolves_to_a_color() {
         // 关键不变量：**没有色调会落空**。漏一个就是"某个界面元素在不同宿主里
