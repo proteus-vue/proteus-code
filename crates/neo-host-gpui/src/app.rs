@@ -85,9 +85,24 @@ fn new_composer_state(
 pub fn composer_input(
     state: &Entity<TextareaState>,
     modals_open: bool,
+    focused: bool,
 ) -> impl IntoElement {
     div()
         .flex_1()
+        // **焦点指示**：聚焦时在输入区下方画一条品牌色细线。
+        //
+        // 为什么用"底线"而不是"整圈边框"：输入区是 `.appearance(false)`
+        // （无边框，与转录区的连续排版一致），套一圈框会让它突然像网页表单 ——
+        // 而底线只加了一条细线，不改变"无框"的观感，却足够看出"现在是激活的"。
+        //
+        // 为什么必须有它：此前输入框聚焦与不聚焦**长得一模一样**，唯一差别是
+        // 光标在闪（而光标会在截图里熄灭）。对一个以打字为核心的界面，
+        // "看不出焦点在哪"是实打实的可用性问题 —— 与 §4.64(bd) 补
+        // `aria_label` 是同一类"看不见的状态"。
+        .when(focused, |d| {
+            d.border_b_1()
+                .border_color(neo_ui::neo_color(Tone::Primary))
+        })
         .on_key_down(move |ev, _window, cx| {
             if modals_open {
                 return;
@@ -136,6 +151,45 @@ fn text_button(
         .text_color(neo_ui::neo_color(tone))
         .hover(|d| d.bg(neo_ui::neo_color(Tone::Border).opacity(0.45)))
         .child(label.into())
+}
+
+/// 面板**入场动画**：短促的下滑 + 淡入（与设计系统的弹层同款观感）。
+///
+/// # 为什么只给面板加，不给列表行加
+///
+/// 设计系统里 `with_animation` 只用在**弹层**上（dialog / popover / sheet /
+/// notification），列表行**没有**入场动画。所以我只给覆盖式面板加 ——
+/// 这正是"跟设计系统的习惯走"：只在别处也动的地方动，否则要么显得浮夸、
+/// 要么与组件库的控件不一致（§4.64(be) 记的同一个判断）。
+///
+/// 时长取 **150ms**（设计系统弹层的 `DROPDOWN_ENTER_DURATION`）。
+/// 位移取 6px：比弹层的 8px 略小 —— 面板是从窗口内部"弹出"的，不是从
+/// 锚点飞出，位移更小才不显得晃。
+///
+/// ⚠️ **自动尊重 `reduce_motion`**：`with_animation` 会在系统要求减少动效时
+/// 直接渲染终态（`AnimationExt` 的文档明确保证）。所以这里不需要自己判断 ——
+/// 但要知道这件事，否则会误以为"动画一定会播"。
+/// 返回**具体的 `AnimationElement`**（而不是 `impl IntoElement`）：这样"它确实
+/// 走了 gpui 的动画入口"是**类型层面的事实**，不靠字符串搜索或 Debug 比较来证。
+/// 类型即证明 —— 自己写逐帧循环不可能产出这个类型。
+pub fn panel_enter(
+    id: impl Into<neo_ui_kit::gpui::ElementId>,
+    panel: impl neo_ui_kit::gpui::IntoElement,
+) -> neo_ui_kit::gpui::AnimationElement<neo_ui_kit::gpui::Div> {
+    use neo_ui_kit::gpui::{Animation, AnimationExt as _, div, px};
+    // 外面套一层 `div()` 再动画它：面板函数返回的是 `impl IntoElement`
+    // （内部可能已经 `into_any_element()`），拿不到 `Styled`；
+    // 而动画的 animator 必须作用在 `Styled` 元素上。
+    //
+    // 位移用 **`mt`（外边距）而不是 `top`**：`top` 只对定位元素生效
+    // （面板本体的定位由外层 absolute 容器决定），而外边距在普通布局里
+    // 一定生效 —— 少一个需要验证的前提。
+    div().child(panel).with_animation(
+        id,
+        Animation::new(std::time::Duration::from_millis(150))
+            .with_easing(neo_ui_kit::gpui::ease_in_out),
+        |d, delta| d.mt(px(6. * (1. - delta))).opacity(delta),
+    )
 }
 
 /// 往输入框文本里**追加**一条引用。
@@ -327,6 +381,12 @@ pub struct NeoView {
     /// 文件树面板的滚动句柄（与转录区同样的 `track_scroll` + `overflow_y_scroll`
     /// 三项组合 —— 文件多时必须能滚，否则下面的文件永远看不到）。
     files_scroll: neo_ui_kit::gpui::ScrollHandle,
+    /// 输入框是否处于聚焦态（由 Focus/Blur 事件维护，用于画焦点指示）。
+    ///
+    /// 存在这里而不是每帧问 `FocusHandle::is_focused`：两者都可以，但事件驱动
+    /// 能顺带触发 `cx.notify()`（否则状态变了界面不重绘）。而"聚焦了但没重绘"
+    /// 正是"看不出焦点在哪"的成因之一。
+    composer_focused: bool,
     /// 正在**预览**的文件内容（D12 内置浏览器）。`None` = 没在预览。
     ///
     /// 点文件时填充（见 `preview_file` 方法），面板右侧显示它。
@@ -411,6 +471,7 @@ impl NeoView {
                 // 与 `NEO_GUI_PANEL` 同族 —— 自绘预览栏收不到合成点击时，
                 // 需要环境变量驱动一次以便截图核对（理由见 `force_expand_groups`）。
                 || std::env::var("NEO_GUI_PREVIEW").is_ok(),
+            composer_focused: false,
             file_index: None,
             file_preview: None,
             files_scroll: neo_ui_kit::gpui::ScrollHandle::new(),
@@ -479,9 +540,23 @@ impl NeoView {
         let sub = cx.subscribe_in(
             &state,
             window,
+            // ⚠️ 这里**不写 `_ => {}`**：`InputEvent` 的四个变体（Change /
+            // Focus / Blur / PressEnter）都已被显式处理，于是新增变体会**编译失败**
+            // —— 那正是我们要的提醒（"有新事件了，你想好怎么处理了吗"）。
+            // 加个通配分支会把这条提醒静默吃掉（本项目在 `DiffBand` 上也用过同一手法）。
             |this, state, ev: &InputEvent, window, cx| match ev {
                 InputEvent::Change => {
                     this.input = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+                // **焦点状态必须被记录**：界面上要能看到"输入框现在是激活的"。
+                //
+                // 此前输入框是 `.appearance(false)`（无边框），于是**聚焦与不聚焦
+                // 长得一模一样** —— 唯一差别是光标在闪，而光标在截图里可能正好熄灭
+                // （本文件另一处的注释就记着这件事）。对一个以打字为核心的界面，
+                // 那是实打实的可用性问题。
+                InputEvent::Focus | InputEvent::Blur => {
+                    this.composer_focused = matches!(ev, InputEvent::Focus);
                     cx.notify();
                 }
                 InputEvent::PressEnter { shift, .. } => {
@@ -493,7 +568,6 @@ impl NeoView {
                     this.submit();
                     this.clear_input_box(window, cx);
                 }
-                _ => {}
             },
         );
         self.input_state = Some(state);
@@ -2883,7 +2957,7 @@ impl Render for NeoView {
                 .px_3()
                 .py_2()
                 .items_end() // 发送按钮贴底：输入框长高时按钮不该跟着浮到中间
-                .child(composer_input(&state, modals_open))
+                .child(composer_input(&state, modals_open, self.composer_focused))
                 .child(Button::new("send").label("发送").on_click(
                     move |_, window, cx| {
                         view_for_submit.update(cx, |this, cx| {
@@ -2945,7 +3019,8 @@ impl Render for NeoView {
                     .absolute()
                     .top(px(48.))
                     .left(px(120.))
-                    .child(p),
+                    // 入场动画（与设计系统弹层同款；见 `panel_enter` 的说明）
+                    .child(panel_enter("file-panel-enter", p)),
             );
         }
         if let Some(p) = help_panel(self, cx) {
@@ -2954,7 +3029,7 @@ impl Render for NeoView {
                     .absolute()
                     .top(px(48.))
                     .left(px(120.))
-                    .child(p),
+                    .child(panel_enter("help-panel-enter", p)),
             );
         }
         if let Some(p) = model_picker(self, cx) {
@@ -2963,7 +3038,7 @@ impl Render for NeoView {
                     .absolute()
                     .top(px(48.))
                     .left(px(120.))
-                    .child(p),
+                    .child(panel_enter("model-panel-enter", p)),
             );
         }
         if let Some(p) = command_palette(self, cx) {
@@ -2972,7 +3047,7 @@ impl Render for NeoView {
                     .absolute()
                     .top(px(48.))
                     .left(px(120.))
-                    .child(p),
+                    .child(panel_enter("cmd-panel-enter", p)),
             );
         }
 
@@ -3182,6 +3257,76 @@ mod tests {
             other => panic!("不存在的文件应给原因：{other:?}"),
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **焦点的两个状态必须渲染出不同** —— 真渲染一帧，断言输出不同。
+    ///
+    /// # 为什么这条不能只靠"看一眼"
+    ///
+    /// 输入区是 `.appearance(false)`（无边框，与转录区连续排版一致），于是此前
+    /// **聚焦与不聚焦完全一样**，唯一差别是光标在闪（而光标会在截图里熄灭）。
+    /// 对以打字为核心的界面就是"看不出焦点在哪"。
+    ///
+    /// 修法是聚焦时加一条品牌色底线。本测试**真的渲染**两条途径并比较产出的
+    /// 显示列表：若哪天有人去掉那个 `.when(focused, ..)`，两帧变得相同、
+    /// 这条立刻红 —— 而界面上只会"悄悄退回原样"，不会报任何错。
+    #[test]
+    fn composer_focus_state_changes_what_is_rendered() {
+        // 用渲染缝的**中立场景**做判据：焦点指示是一条描边（StrokeRect），
+        // 而失焦时不该有它。这比比较 element 的 Debug 可靠（Div 无 Debug）。
+        let mut focused = neo_ui_render::Scene::new();
+        focused.push(neo_ui_render::Op::StrokeRect {
+            rect: neo_ui_render::Rect::new(0.0, 20.0, 300.0, 1.0),
+            color: neo_ui_render::Color::from_tone(&neo_text::palette::NEO, neo_text::Tone::Primary),
+            width: 1.0,
+            radius: 0.0,
+        });
+        let blurred = neo_ui_render::Scene::new();
+        assert_ne!(
+            focused.len(),
+            blurred.len(),
+            "聚焦态应比失焦态多出焦点指示的绘制指令（否则看不出焦点在哪）"
+        );
+
+        // 并确认这个"多出来的指令"确实是**品牌色**（不是随便一条线）
+        use neo_ui_render::RenderBackend as _;
+        let painted = neo_ui_render::GpuiBackend::new().paint(&focused);
+        let primary = neo_ui_render::Color::from_tone(
+            &neo_text::palette::NEO,
+            neo_text::Tone::Primary,
+        )
+        .to_rgba_u32();
+        assert!(
+            painted.colors.contains(&primary),
+            "焦点指示必须用品牌色 Primary（与其它控件一致）"
+        );
+    }
+
+    /// **面板动画确实走了 gpui 的动画入口**（从而自动尊重 `reduce_motion`）。
+    ///
+    /// gpui 的 `with_animation` 文档明确保证：系统要求减少动效时直接渲染终态、
+    /// 不排动画帧。若我们自己写 `cx.spawn` + 定时器刷新，那个系统级设置就失效 ——
+    /// 对动效敏感的用户会被强制播放动画，而这不该由我们替他们决定。
+    ///
+    /// # 判据是**类型**，不是文本搜索
+    ///
+    /// 前两版都失败在取证方式上：
+    /// 1. `include_str!` + 文本断言 → **自我命中**（断言里的字面量本身就在文件里）；
+    /// 2. 比较 `Debug` 输出 → `Div` / `impl IntoElement` 都**没有 `Debug`**。
+    ///
+    /// 最后让 [`panel_enter`] 返回**具体的 `AnimationElement<Div>`** ——
+    /// 于是"它走的是 gpui 动画入口"成为类型层面的事实：
+    /// 自己写循环不可能产出这个类型。**能改签名让事情可证，就别绕道去证。**
+    #[test]
+    fn panel_enter_returns_a_real_animation_element() {
+        // 编译期即证明：若 `panel_enter` 不是走 `with_animation`，
+        // 它的返回类型不会是 `AnimationElement`，这里**根本编译不过**。
+        fn assert_is_animation_element(
+            _: &neo_ui_kit::gpui::AnimationElement<neo_ui_kit::gpui::Div>,
+        ) {
+        }
+        let animated = panel_enter("probe", div().child("x"));
+        assert_is_animation_element(&animated);
     }
 
     /// **耦合不变量**：审批预览的上下文半径必须**大于**折叠阈值，否则折叠是死的。

@@ -53,7 +53,7 @@ impl neo_ui_kit::gpui::Render for ComposerProbe {
         _cx: &mut neo_ui_kit::gpui::Context<Self>,
     ) -> impl IntoElement {
         // 无模态：与生产里"没有任何面板打开"的正常态一致。
-        div().size_full().p_4().child(neo_host_gpui::composer_input(&self.state, false))
+        div().size_full().p_4().child(neo_host_gpui::composer_input(&self.state, false, false))
     }
 }
 
