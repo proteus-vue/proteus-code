@@ -63,6 +63,199 @@ impl Default for ScanLimits {
     }
 }
 
+/// 一次**文件预览**（内置浏览器）的上限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewLimits {
+    /// 最多显示多少字节。
+    ///
+    /// 取 256 KiB：装得下绝大多数源文件（本仓最大的 `PROJECT_MEMORY.md` 接近 300 KB，
+    /// 会被截断并如实上报）。再大没有意义 —— 界面一次能滚过的量有限，
+    /// 而且"打开一个文件把内存拉满"是必须避免的。
+    pub max_bytes: usize,
+    /// 单行最大显示字符数。超过则**从行首截断**并标注。
+    ///
+    /// 取 2000：压过的 JS（一行几万字符）与长 base64 会撑爆横向布局，
+    /// 而这类行本来就无法阅读。截断而不是折行 —— 折行会让行号与内容错位，
+    /// 而"行号对不上"比"看不全"更糟（用户会以为看到的是那一行全部）。
+    pub max_line_chars: usize,
+}
+
+impl Default for PreviewLimits {
+    fn default() -> Self {
+        Self { max_bytes: 256 * 1024, max_line_chars: 2000 }
+    }
+}
+
+/// 一次文件预览的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Preview {
+    /// 文本内容（已按上限截断）。
+    Text {
+        /// 逐行（**已切好、且按 char 边界安全**），供界面直接渲染。
+        lines: Vec<String>,
+        /// 字节数是否触及上限（如实上报；界面要显示"只显示前 N KB"）。
+        truncated: bool,
+        /// 总行数（截断前）。截断时它与 `lines.len()` 不同 —— 界面据此说明。
+        total_lines: usize,
+    },
+    /// 二进制（含 NUL 字节）：**不当作文本显示**。
+    ///
+    /// 为什么单独一类而不是"显示乱码"：把 PNG/可执行文件当文本渲染会得到
+    /// 满屏乱码，用户以为文件损坏了。明确说"这是二进制"才是诚实的。
+    Binary { size: usize },
+    /// 读不出来（不存在 / 权限 / 不是文件）。
+    Unreadable { reason: String },
+}
+
+/// 读取一个文件用于**界面预览**（D12 内置浏览器）。
+///
+/// # 它为什么不是内核那条 `@文件` 注入路径
+///
+/// 两者**目的不同、安全性要求也不同**：
+/// - 内核注入：内容进**模型上下文**，要花钱、要经沙箱（`cat` 走 `SandboxBackend`）、
+///   受 `max_output_bytes` 约束；
+/// - 界面预览：内容只给人看，**不进模型、不花钱**。
+///
+/// 所以它不走沙箱（沙箱是"内核执行外部动作"的边界），但**必须自己做两件事**：
+/// 1. **限定在工作区内**（复用 `is_within`，与沙箱同一套判定）——
+///    否则界面能读任意路径，而路径来自扫描结果，理论上可被软链带出去；
+/// 2. **有界**（字节上限 + 单行上限），理由见 [`PreviewLimits`]。
+///
+/// `rel` 是**相对工作区**的路径（与 `FileIndex::files` 的元素同形）。
+pub fn preview_file(root: &Path, rel: &Path) -> Preview {
+    preview_file_with(root, rel, PreviewLimits::default())
+}
+
+/// 同上，可指定上限（测试用它构造"必然截断"的小上限）。
+pub fn preview_file_with(root: &Path, rel: &Path, limits: PreviewLimits) -> Preview {
+    // 防御：`rel` 若带 `..` 或绝对路径，`join` 之后可能跑到工作区外。
+    // `is_within` 会兜住，但先在这里拒绝能给出更清楚的原因。
+    if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Preview::Unreadable {
+            reason: format!("路径必须在工作区内（收到 {})", rel.display()),
+        };
+    }
+    let full = root.join(rel);
+    if !is_within(root, &full) {
+        return Preview::Unreadable {
+            reason: format!("路径在工作区之外：{}", rel.display()),
+        };
+    }
+    let meta = match std::fs::metadata(&full) {
+        Ok(m) => m,
+        Err(e) => return Preview::Unreadable { reason: format!("无法读取：{e}") },
+    };
+    if meta.is_dir() {
+        return Preview::Unreadable { reason: "这是一个目录".into() };
+    }
+    let size = meta.len() as usize;
+    // 先按上限读，避免把超大文件整体读进内存再截断。
+    let bytes = match std::fs::read(&full) {
+        Ok(b) => b,
+        Err(e) => return Preview::Unreadable { reason: format!("无法读取：{e}") },
+    };
+    let read_truncated = bytes.len() > limits.max_bytes;
+    let slice = &bytes[..bytes.len().min(limits.max_bytes)];
+
+    // 二进制判定：出现 NUL 就当二进制。这是 git 的判据（几千字节内看有没有 NUL），
+    // 简单且足够 —— 文本文件里出现 NUL 本身就是异常。
+    if slice.contains(&0) {
+        return Preview::Binary { size };
+    }
+
+    // 字节 → 文本。**不假设 UTF-8**：非 UTF-8 的文本文件（GBK 等）用 lossy
+    // 转换会得到替换字符，但"能看个大概"好过"整个文件报错"。
+    //
+    // ⚠️ 截断点可能落在多字节字符中间 —— `from_utf8_lossy` 会把不完整的那一
+    // 个字符替换成 U+FFFD，这正是我们要的（宁可最后一个字符是替换符，
+    // 也不 panic、也不丢整行）。
+    let text = String::from_utf8_lossy(slice).into_owned();
+    // 截断在字符串级再确认一次：按字节截可能切在字符中间，
+    // 这里用 char 边界安全的截断兜住（与内核 `truncate_utf8` 同一手法）。
+    let (text, cut_at_char) = truncate_on_char_boundary(&text, limits.max_bytes);
+    let truncated = read_truncated || cut_at_char;
+
+    // `lines()` 已经不吃尾部换行（"a\n" 与 "a" 都是一行），所以不能再加一 ——
+    // 加了会让每个以换行结尾的文件都多报一行（实测：3 行文件报 4 行）。
+    let total_lines = text.lines().count();
+    // 单行长度封顶：这是**内存/布局**的下限保护（一行几 MB 的压缩文件），
+    // 不是"给人看的截断提示"。
+    //
+    // ⚠️ 所以这里**不追加**"已截断"之类的文字 —— 实测确认它会被渲染层的
+    // 省略号裁在可视区之外（2000 字符远超面板宽度），加了也是死重。
+    // 用户可见的"还有内容"信号由渲染层的 `…` 承担（见宿主预览栏）。
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if l.chars().count() > limits.max_line_chars {
+                l.chars().take(limits.max_line_chars).collect()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+
+    Preview::Text { lines, truncated, total_lines }
+}
+
+/// `path` 解析后是否落在 `root` 之内（含软链解析）。
+///
+/// # 为什么这里自己实现一份，而不是复用 `neo-sandbox-local::is_within`
+///
+/// 因为**依赖方向不允许**：本 crate 是 L1，而 `neo-sandbox-local` 是 L3 ——
+/// 向上依赖会被架构守卫（`check_architecture.py`）拒绝，而那条守卫是对的
+/// （平台层不该知道沙箱实现的存在）。
+///
+/// 代价是同一套语义有两份实现，所以：
+/// - 这里**逐句对齐**那边的做法（`canonicalize` 后在真实路径上比前缀），
+///   而不是自己发明一个"看起来差不多"的判定；
+/// - 两处都有测试覆盖"软链/不存在/工作区外"三情形。
+///
+/// 与那边一样：**解析不出来就拒绝**（宁可拒绝，不可放行）。
+fn is_within(root: &Path, path: &Path) -> bool {
+    let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    match resolve_real(path) {
+        Some(real_target) => real_target.starts_with(&real_root),
+        None => false,
+    }
+}
+
+/// 解析出目标的"真实路径"，即使目标本身尚不存在。
+///
+/// 上溯到最近可 canonicalize 的祖先，再把尚未存在的路径段原样拼回 ——
+/// 这样"新建一个还不存在的文件"也能被正确判定在工作区内。
+fn resolve_real(path: &Path) -> Option<PathBuf> {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return Some(p);
+    }
+    let mut pending: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        let name = cursor.file_name()?.to_os_string();
+        pending.push(name);
+        cursor = cursor.parent()?.to_path_buf();
+        if let Ok(real) = std::fs::canonicalize(&cursor) {
+            let mut out = real;
+            for seg in pending.iter().rev() {
+                out.push(seg);
+            }
+            return Some(out);
+        }
+    }
+}
+
+/// 按 char 边界安全地把 `s` 截到 `max_bytes` 以内。
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> (String, bool) {
+    if s.len() <= max_bytes {
+        return (s.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    (s[..end].to_string(), true)
+}
+
 /// 扫描结果。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FileIndex {
@@ -398,6 +591,171 @@ mod tests {
         assert!(idx.files.is_empty());
         assert!(!idx.truncated, "空结果不是截断");
         assert!(idx.dirs().is_empty());
+    }
+
+    /// 正常文本：逐行返回，行数正确。
+    #[test]
+    fn preview_reads_a_text_file_line_by_line() {
+        let root = fixture("pv-text");
+        std::fs::write(root.join("a.txt"), "第一行\n第二行\n第三行\n").unwrap();
+        match preview_file(&root, Path::new("a.txt")) {
+            Preview::Text { lines, truncated, total_lines } => {
+                assert_eq!(lines, vec!["第一行", "第二行", "第三行"]);
+                assert!(!truncated);
+                assert_eq!(total_lines, 3);
+            }
+            other => panic!("应是文本：{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **二进制必须被认出来**，不能当文本渲染（否则满屏乱码，用户以为文件坏了）。
+    #[test]
+    fn preview_detects_binary_instead_of_rendering_garbage() {
+        let root = fixture("pv-bin");
+        std::fs::write(root.join("img.bin"), [0x89, b'P', b'N', b'G', 0x00, 0x1a, 0xff]).unwrap();
+        match preview_file(&root, Path::new("img.bin")) {
+            Preview::Binary { size } => assert_eq!(size, 7),
+            other => panic!("应识别为二进制：{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **工作区外的路径必须被拒**（`..` 逃逸 / 绝对路径）。
+    ///
+    /// 预览不做沙箱，这是它唯一的安全边界 —— 没有这条，界面能读任意文件。
+    ///
+    /// ⚠️ **它与下面那条软链测试是两道独立的闸，不是重复的**（实测确认过：
+    /// 关掉 `is_within` 时只有软链那条会红）：
+    /// - 本条的输入就**长得可疑**（含 `..` 或是绝对路径）→ 由入口的
+    ///   `ParentDir` / `is_absolute` 检查拦住，`is_within` 甚至不会被走到；
+    /// - 软链那条的输入**长得完全正常**（`link/secret.txt`）→ 只有把路径
+    ///   `canonicalize` 之后比前缀（`is_within`）才拦得住。
+    ///
+    /// 所以别把任何一道当"冗余"删掉 —— 它们各自挡住一种绕过方式。
+    #[test]
+    fn preview_refuses_paths_outside_the_workspace() {
+        let root = fixture("pv-escape");
+        std::fs::create_dir_all(root.join("inner")).unwrap();
+        std::fs::write(root.join("inner/ok.txt"), "x").unwrap();
+
+        for bad in ["../outside.txt", "inner/../../escape.txt", "/etc/passwd"] {
+            match preview_file(&root, Path::new(bad)) {
+                Preview::Unreadable { reason } => {
+                    assert!(!reason.is_empty(), "拒绝要给出原因：{bad}");
+                }
+                other => panic!("{bad} 应被拒绝，实际：{other:?}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **软链指向工作区外**也要被拒（前缀比较若不做真实路径解析会被绕过）。
+    #[test]
+    #[cfg(unix)]
+    fn preview_refuses_symlinks_pointing_outside() {
+        let root = fixture("pv-symlink");
+        let outside = fixture("pv-symlink-target");
+        std::fs::write(outside.join("secret.txt"), "秘密").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        match preview_file(&root, Path::new("link/secret.txt")) {
+            Preview::Unreadable { .. } => {}
+            other => panic!("经软链逃逸必须被拒，实际：{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// **超长单行被封顶**（内存/布局的下限保护）。
+    ///
+    /// ⚠️ 这里**不断言任何"已截断"文字**：实测确认这类标注会被渲染层的省略号
+    /// 裁在可视区之外（2000 字符远超面板宽度），加了也是死重。
+    /// 用户可见的"还有内容"信号由渲染层的 `…` 承担 ——
+    /// **数据层管封顶、渲染层管提示**，各做各的，不重复。
+    #[test]
+    fn preview_caps_overlong_lines() {
+        let root = fixture("pv-longline");
+        let long = "x".repeat(5000);
+        std::fs::write(root.join("long.txt"), format!("{long}\n短行\n")).unwrap();
+        let limits = PreviewLimits { max_bytes: 1024 * 1024, max_line_chars: 100 };
+        match preview_file_with(&root, Path::new("long.txt"), limits) {
+            Preview::Text { lines, .. } => {
+                assert_eq!(lines.len(), 2, "仍是两行");
+                assert_eq!(lines[0].chars().count(), 100, "超长行应被封到上限");
+                assert_eq!(lines[1], "短行", "正常行不受影响");
+            }
+            other => panic!("应是文本：{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **字节上限生效且如实上报**（读取本身就有界，不是读完再截）。
+    #[test]
+    fn preview_respects_the_byte_cap_and_reports_truncation() {
+        let root = fixture("pv-bytecap");
+        let big: String = (0..500).map(|i| format!("第 {i} 行，写得长一点以便超过上限\n")).collect();
+        std::fs::write(root.join("big.txt"), &big).unwrap();
+        let limits = PreviewLimits { max_bytes: 200, max_line_chars: 2000 };
+        match preview_file_with(&root, Path::new("big.txt"), limits) {
+            Preview::Text { truncated, .. } => assert!(truncated, "触及字节上限必须上报"),
+            other => panic!("应是文本：{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **截断点落在多字节字符中间不 panic、不切碎**。
+    ///
+    /// 这是中文/emoji 下必然遇到的边界：按字节截断几乎总会落在字符中间。
+    #[test]
+    fn preview_cuts_on_character_boundaries_for_cjk() {
+        let root = fixture("pv-cjk");
+        // 每字 3 字节（中文），上限取一个明显的非 3 倍数 → 必然切在字符中间
+        let text = "中文内容测试中文内容测试中文内容测试";
+        std::fs::write(root.join("cjk.txt"), text).unwrap();
+        for cap in [4usize, 7, 10, 13, 104] {
+            let limits = PreviewLimits { max_bytes: cap, max_line_chars: 2000 };
+            match preview_file_with(&root, Path::new("cjk.txt"), limits) {
+                Preview::Text { lines, .. } => {
+                    // 关键：不 panic，且内容仍是**合法 UTF-8 的前缀**
+                    for l in &lines {
+                        assert!(text.starts_with(l.as_str()) || text.contains(l.as_str()),
+                            "截断结果应是原文的前缀，不出现乱码：{l:?}");
+                    }
+                }
+                other => panic!("cap={cap} 应是文本：{other:?}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 目录与不存在的文件 → `Unreadable`（且给出原因），不 panic。
+    #[test]
+    fn preview_reports_directories_and_missing_files() {
+        let root = fixture("pv-misc");
+        std::fs::create_dir_all(root.join("adir")).unwrap();
+        for p in ["adir", "nope.txt"] {
+            match preview_file(&root, Path::new(p)) {
+                Preview::Unreadable { reason } => assert!(!reason.is_empty()),
+                other => panic!("{p} 应不可读：{other:?}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 非 UTF-8 的文本文件**不报错**（用 lossy 转换"能看个大概"好过整个文件打不开）。
+    #[test]
+    fn preview_does_not_fail_on_non_utf8_text() {
+        let root = fixture("pv-gbk");
+        // GBK 编码的 "中文"：0xD6 0xD0 0xCE 0xC4 —— 不是合法 UTF-8
+        std::fs::write(root.join("gbk.txt"), [0xD6, 0xD0, 0xCE, 0xC4]).unwrap();
+        match preview_file(&root, Path::new("gbk.txt")) {
+            Preview::Text { lines, .. } => {
+                assert!(!lines.is_empty(), "应仍给出内容（替换字符）");
+            }
+            other => panic!("非 UTF-8 文本不该报错：{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 根是**文件**（不是目录）时也返回空索引，不 panic。

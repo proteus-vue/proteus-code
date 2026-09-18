@@ -296,6 +296,12 @@ pub struct NeoView {
     /// 文件树面板的滚动句柄（与转录区同样的 `track_scroll` + `overflow_y_scroll`
     /// 三项组合 —— 文件多时必须能滚，否则下面的文件永远看不到）。
     files_scroll: neo_ui_kit::gpui::ScrollHandle,
+    /// 正在**预览**的文件内容（D12 内置浏览器）。`None` = 没在预览。
+    ///
+    /// 点文件时填充（见 `preview_file` 方法），面板右侧显示它。
+    /// 与 `files_selected` 分开：选中是"高亮哪一行"，预览是"看哪个文件的内容" ——
+    /// 点一下文件两件事同时发生，但状态不该混成一个（分开才能做"只高亮不预览"）。
+    file_preview: Option<(std::path::PathBuf, neo_platform::file_index::Preview)>,
     /// 文件树里被选中的文件（用于把它加进输入框）。`None` = 未选。
     ///
     /// 单选取而**不是**多选：`@引用` 一条条插进输入框更可控，
@@ -369,8 +375,13 @@ impl NeoView {
             // 脚本化验证钩子：`NEO_GUI_PANEL=files` 启动即打开文件树
             //（与 `NEO_GUI_PANEL=help/models/cmd/terminal` 同族 —— 自绘面板
             // 收不到合成点击，需要环境变量驱动一次以便截图核对）。
-            files_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("files"),
+            files_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("files")
+                // `NEO_GUI_PREVIEW=<相对路径>`：启动即预览某个文件。
+                // 与 `NEO_GUI_PANEL` 同族 —— 自绘预览栏收不到合成点击时，
+                // 需要环境变量驱动一次以便截图核对（理由见 `force_expand_groups`）。
+                || std::env::var("NEO_GUI_PREVIEW").is_ok(),
             file_index: None,
+            file_preview: None,
             files_scroll: neo_ui_kit::gpui::ScrollHandle::new(),
             files_selected: None,
             auto_prompt: std::env::var("NEO_GUI_PROMPT")
@@ -490,6 +501,22 @@ impl NeoView {
     fn rescan_files(&mut self) {
         self.file_index = Some(neo_platform::file_index::scan_workspace(&self.workspace));
         self.files_selected = None;
+    }
+
+    /// **预览**一个文件（D12 内置浏览器）：读它的内容填进 `file_preview`。
+    ///
+    /// # 为什么点文件是"预览 + 加引用"两件事一起做
+    ///
+    /// 用户点一个文件的意图通常是"看看里面是什么"。此前点击只有"加引用" —
+    /// 那意味着**想看内容只能先加引用、再把整个文件注入模型上下文**，
+    /// 既花钱又绕。加了预览之后，点击首先满足"看一眼"，
+    /// 加引用成为一个**独立的显式动作**（面板上的按钮）。
+    ///
+    /// 读取本身有界、且限定在工作区内 —— 见 `neo_platform::file_index::preview_file`。
+    fn preview_file(&mut self, rel: &std::path::Path, cx: &mut Context<Self>) {
+        let pv = neo_platform::file_index::preview_file(&self.workspace, rel);
+        self.file_preview = Some((rel.to_path_buf(), pv));
+        cx.notify();
     }
 
     /// 把一个文件**加进输入框**作为 `@引用`（D12 的核心动作）。
@@ -1837,9 +1864,11 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
     let v_rescan = cx.entity().clone();
     let v_for_click = cx.entity().clone();
 
+    // 宽度从 420 提到 820：面板现在是**两栏**（文件列表 280 + 预览），
+    // 420 会让预览栏挤到几乎看不见。高度也一并给足（预览是竖向滚动的文字）。
     let mut col = v_flex()
-        .w(px(420.))
-        .h(px(420.))
+        .w(px(820.))
+        .h(px(460.))
         .gap_1()
         .p_3()
         .bg(neo_ui::panel_bg())
@@ -1872,7 +1901,10 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
         .child(
             div()
                 .text_color(neo_ui::neo_color(Tone::Muted))
-                .child("点击文件加入引用（@路径）"),
+                // ⚠️ 文案必须跟着行为走：点击已从"加入引用"改为"查看内容"
+                //（引用成了预览栏里的独立按钮）。留着旧文案就是**文案与行为不符** ——
+                // 用户会以为点一下就把文件塞进了上下文。
+                .child("点击文件查看内容（预览栏里可加入引用）"),
         );
 
     // **面板可见 ⇒ 索引必须在**。这里补扫而不是只显示"正在扫描…"：
@@ -1940,30 +1972,182 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
                 // 这不只是"合规"：它是这类自绘列表**唯一**能被程序检查的途径 ——
                 // 面板显示了哪些文件，从这里就能读到（本轮的验证正是这么做的）。
                 .role(neo_ui_kit::gpui::accesskit::Role::Button)
-                .aria_label(format!("加入引用 {label}"))
+                // ⚠️ 标签必须**如实描述这个按钮做什么**。它现在是"查看"
+                // 而不是"加入引用" —— 点击的行为改成了预览（见 `preview_file`），
+                // 标签就得跟着改。留着旧标签就是"文案与行为不符"，
+                // 而这类不符会让读屏用户（与自动化）据此做出错误的期待。
+                .aria_label(format!("查看 {label}"))
                 .child(label)
-                .on_click(move |_, window, cx| {
+                .on_click(move |_, _window, cx| {
                     v.update(cx, |this, cx| {
                         this.files_selected = Some(rel.clone());
-                        this.add_file_ref(&rel, window, cx);
+                        this.preview_file(&rel, cx);
                     });
                 }),
         );
     }
-    // 滚动容器：文件多时必须能滚（否则下面的文件永远看不到）。
-    // `track_scroll` + `overflow_y_scroll` 两项组合（句柄由本视图持有，
-    // 与转录区一致；组件库的一体版不让调用方拿到句柄）。
+    // 文件列表 + 预览：左右并排。预览用**独立一栏**而不是弹层 ——
+    // 用户常要"对着文件内容写任务"，同屏可见才有用。
+    let files_col = div()
+        .w(px(280.))
+        // 固定宽 + 不许被内容撑大（文件名一样可能很长）
+        .min_w(px(280.))
+        .max_w(px(280.))
+        .h_full()
+        .child(
+            // 滚动容器：文件多时必须能滚（否则下面的文件永远看不到）。
+            // `track_scroll` + `overflow_y_scroll` 两项组合（句柄由本视图持有，
+            // 与转录区一致；组件库的一体版不让调用方拿到句柄）。
+            div()
+                // `track_scroll` 要求先有 `.id()`（stateful 元素才能挂滚动句柄）
+                .id("files-scroll")
+                .size_full()
+                .min_h(px(0.))
+                .track_scroll(&view.files_scroll)
+                .overflow_y_scroll()
+                .child(list),
+        );
+
     col = col.child(
-        div()
-            // `track_scroll` 要求先有 `.id()`（stateful 元素才能挂滚动句柄）
-            .id("files-scroll")
+        h_flex()
             .flex_1()
             .min_h(px(0.))
-            .track_scroll(&view.files_scroll)
-            .overflow_y_scroll()
-            .child(list),
+            .min_w(px(0.))
+            .gap_2()
+            .child(files_col)
+            // 预览栏**只在预览过文件后出现**（没点过文件时不占地方）
+            .child(file_preview_pane(view, cx)),
     );
     Some(col)
+}
+
+/// 预览栏（D12 内置浏览器的内容侧）。
+///
+/// 三种内容形态各自如实呈现（见 `Preview` 枚举）：文本逐行、二进制说明、
+/// 读不出来给原因。**从不假装** —— 二进制渲染成乱码、读不到显示空白，
+/// 都会让用户以为是文件的问题。
+fn file_preview_pane(view: &mut NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
+    let Some((path, pv)) = view.file_preview.clone() else {
+        return div()
+            .flex_1()
+            // ⚠️ `min_w(0)` 是**长行裁切能生效的前提**（连踩四次才对）。
+            // flex item 的 `min-width` 默认是 `auto`（= 不小于内容），
+            // 于是 `flex_1` 的"可收缩"形同虚设 —— 内容多宽它就要多宽，
+            // 一路把父容器撑破，`overflow_hidden` 也就无从裁起。
+            // 每一层**要收缩的容器**都得显式给 `min_w(0)`。
+            .min_w(px(0.))
+            .child(
+                div()
+                    .text_color(neo_ui::neo_color(Tone::Muted))
+                    .child("点击左侧文件查看内容"),
+            )
+            .into_any_element();
+    };
+
+    // 标题行 + **加入引用**按钮（引用是独立动作，不再与"查看"混在一起）
+    let v_ref = cx.entity().clone();
+    let rel_for_ref = path.clone();
+    let mut head = h_flex()
+        .gap_2()
+        .child(
+            div()
+                .text_color(neo_ui::neo_color(Tone::Info))
+                .child(path.to_string_lossy().into_owned()),
+        )
+        .child({
+            div()
+                .id("preview-add-ref")
+                .text_color(neo_ui::neo_color(Tone::Accent))
+                .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                .aria_label(format!("加入引用 {}", path.display()))
+                .child("加入引用")
+                .on_click(move |_, window, cx| {
+                    v_ref.update(cx, |this, cx| {
+                        this.add_file_ref(&rel_for_ref, window, cx);
+                    });
+                })
+        });
+
+    let body: neo_ui_kit::gpui::AnyElement = match pv {
+        neo_platform::file_index::Preview::Text { lines, truncated, total_lines } => {
+            if truncated {
+                head = head.child(
+                    div()
+                        .text_color(neo_ui::neo_color(Tone::Warning))
+                        .child(format!("⚠ 只显示前 {} 行（共 {total_lines} 行）", lines.len())),
+                );
+            }
+            let mut col = v_flex().gap_0().min_w(px(0.));
+            for (i, l) in lines.iter().enumerate() {
+                col = col.child(
+                    h_flex()
+                        .gap_2()
+                        .w_full()
+                        .min_w(px(0.))
+                        // ⚠️ 单行 + **省略号裁切**（真机截图连踩两次才对）。
+                        //
+                        // 第一版抄了 diff 正文的 `whitespace_nowrap`，长行**横向
+                        // 冲出面板**盖到主界面上（实测：4000 字符的一行直接越界）。
+                        // 第二版改成折行 —— 仍然越界，因为一长串无空白的字符
+                        // （`xxxx…`、压缩后的 JS）**没有折行断点**，折行对它无效。
+                        //
+                        // 正解是 **`truncate()`**（= `overflow_hidden` +
+                        // `whitespace_nowrap` + `text_ellipsis` 三者合一）。
+                        //
+                        // ⚠️ 我第三版误用了 `text_ellipsis()`：它**只设
+                        // `text_overflow` 样式**，不含 `overflow_hidden` ——
+                        // 于是既没裁也没省略号，长行照样越界（连踩三次）。
+                        // `truncate()` 才是那个"合一的"方法，名字也更直白。
+                        // **`…` 是"这里还有内容"的可见信号**：用户不会误以为
+                        // 那一行就这么点。
+                        .items_start()
+                        .child(
+                            // 行号：等宽右对齐，方便对齐定位
+                            div()
+                                .w(px(44.))
+                                .text_color(neo_ui::neo_color(Tone::Muted))
+                                .child(format!("{:>4}", i + 1)),
+                        )
+                        .child(
+                            div()
+                                // 占满剩余宽度并允许收缩 → 省略号在容器右边界处出现
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_color(neo_ui::neo_color(Tone::Text))
+                                .truncate()
+                                .child(l.clone()),
+                        ),
+                );
+            }
+            col.into_any_element()
+        }
+        neo_platform::file_index::Preview::Binary { size } => div()
+            .text_color(neo_ui::neo_color(Tone::Warning))
+            .child(format!("二进制文件（{size} 字节）—— 不按文本显示"))
+            .into_any_element(),
+        neo_platform::file_index::Preview::Unreadable { reason } => div()
+            .text_color(neo_ui::neo_color(Tone::Error))
+            .child(format!("无法预览：{reason}"))
+            .into_any_element(),
+    };
+
+    v_flex()
+        .flex_1()
+        .min_h(px(0.))
+        // 同上：不收缩就不可能裁切长行
+        .min_w(px(0.))
+        .gap_1()
+        .child(head)
+        .child(
+            div()
+                .id("preview-scroll")
+                .flex_1()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .overflow_y_scroll()
+                .child(body),
+        )
+        .into_any_element()
 }
 
 fn help_panel(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
@@ -2281,6 +2465,17 @@ impl Render for NeoView {
         // 在 render 里取一次并向下传，而不是在深层函数里各取一次 ——
         // 后者要求每个函数都拿到 `Window`，会把签名污染到整条链路。
         let line_height = f32::from(window.line_height());
+
+        // `NEO_GUI_PREVIEW=<相对路径>`：启动即预览一个文件（脚本化截图验证用）。
+        // **只做一次**（用 `take` 式判断）：否则每帧都会重新读盘，
+        // 而预览是"打开一次"的动作，不是每帧的事。
+        if let Ok(rel) = std::env::var("NEO_GUI_PREVIEW") {
+            if self.file_preview.is_none() {
+                // 先扫索引（预览栏要能显示，索引不必需，但保持一致体验）
+                self.ensure_files();
+                self.preview_file(std::path::Path::new(&rel), cx);
+            }
+        }
         // 0) 输入框（惰性；第一次渲染时 window 才可用）
         self.ensure_input(window, cx);
         self.ensure_search(window, cx);
@@ -2905,6 +3100,37 @@ mod tests {
                 "路径必须往返一致（含空格的那条尤其关键）"
             );
         }
+    }
+
+    /// **点击文件 → 预览的内容形态**（把 closure 的效果组合起来断言）。
+    ///
+    /// 真机点击需要窗口在前台，故这里测"点击会得到什么"：文本 → 逐行、
+    /// 二进制 → 如实说明、读不到 → 给原因。三种都不能"假装"。
+    #[test]
+    fn clicking_a_file_yields_an_honest_preview_for_every_kind() {
+        let root = std::env::temp_dir().join(format!("neo-host-pv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "第一行\n第二行\n").unwrap();
+        std::fs::write(root.join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
+
+        use neo_platform::file_index::{preview_file, Preview};
+        // 文本
+        match preview_file(&root, std::path::Path::new("a.txt")) {
+            Preview::Text { lines, .. } => assert_eq!(lines, vec!["第一行", "第二行"]),
+            other => panic!("文本文件应逐行返回：{other:?}"),
+        }
+        // 二进制：必须被认出来
+        assert!(
+            matches!(preview_file(&root, std::path::Path::new("bin.dat")), Preview::Binary { .. }),
+            "二进制必须被识别，不能当文本渲染"
+        );
+        // 读不到：必须给原因（不是空白）
+        match preview_file(&root, std::path::Path::new("nope")) {
+            Preview::Unreadable { reason } => assert!(!reason.is_empty()),
+            other => panic!("不存在的文件应给原因：{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **耦合不变量**：审批预览的上下文半径必须**大于**折叠阈值，否则折叠是死的。
