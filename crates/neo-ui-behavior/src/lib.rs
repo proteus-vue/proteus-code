@@ -31,6 +31,7 @@ pub mod fold;
 pub mod focus;
 pub mod keys;
 pub mod scroll;
+pub mod tree;
 
 pub use clock::{format_duration, TurnClock};
 pub use fold::{
@@ -39,6 +40,7 @@ pub use fold::{
 };
 pub use focus::FocusIntent;
 pub use scroll::{FollowTail, ScrollPos};
+pub use tree::{ancestors_of, all_dirs, indent_level, tree_rows, RowKind, TreeRow, MAX_INDENT_DEPTH};
 // `Verdict` 必须导出：它是 `KeyArbiter::verdict()` 的**返回类型**，
 // 调用方要 `match` 它就得能命名它 —— 只导出 `KeyArbiter` 与 `Layer`
 // 会让"怎么用裁决结果"变成一个无法表达的问题（文档测试抓到过：

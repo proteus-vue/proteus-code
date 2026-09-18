@@ -393,6 +393,12 @@ pub struct NeoView {
     /// 与 `files_selected` 分开：选中是"高亮哪一行"，预览是"看哪个文件的内容" ——
     /// 点一下文件两件事同时发生，但状态不该混成一个（分开才能做"只高亮不预览"）。
     file_preview: Option<(std::path::PathBuf, neo_platform::file_index::Preview)>,
+    /// 文件树里**已展开的目录**（按**路径**记，不按下标）。
+    ///
+    /// ⚠️ 键用路径而非行号：文件列表会被重扫（点"刷新"，将来接文件监听），
+    /// 行号会整批错位 —— 那时"我展开的目录"会突然变成别的目录。
+    /// 与 `expanded_diff_folds` 同一条教训，但这里更容易踩（重扫是常态）。
+    files_expanded: std::collections::BTreeSet<std::path::PathBuf>,
     /// 文件树里被选中的文件（用于把它加进输入框）。`None` = 未选。
     ///
     /// 单选取而**不是**多选：`@引用` 一条条插进输入框更可控，
@@ -475,6 +481,7 @@ impl NeoView {
             file_index: None,
             file_preview: None,
             files_scroll: neo_ui_kit::gpui::ScrollHandle::new(),
+            files_expanded: std::collections::BTreeSet::new(),
             files_selected: None,
             auto_prompt: std::env::var("NEO_GUI_PROMPT")
                 .ok()
@@ -603,9 +610,17 @@ impl NeoView {
     }
 
     /// 显式重扫（用户在面板上点"刷新"时用）。
+    ///
+    /// **展开态按路径保留**：用户展开的目录在重扫后仍是展开的（只要那个目录
+    /// 还在）。这正是"用路径做键"的兑现 —— 若用行号，重扫后展开的会变成别的目录。
     fn rescan_files(&mut self) {
         self.file_index = Some(neo_platform::file_index::scan_workspace(&self.workspace));
         self.files_selected = None;
+        // 丢掉已不存在的目录（删掉的目录不该留在集合里越积越多）
+        if let Some(idx) = &self.file_index {
+            let alive = neo_ui_behavior::all_dirs(&idx.files);
+            self.files_expanded.retain(|d| alive.contains(d));
+        }
     }
 
     /// **预览**一个文件（D12 内置浏览器）：读它的内容填进 `file_preview`。
@@ -2010,7 +2025,40 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
                                 cx.notify();
                             });
                         }),
-                ),
+                )
+                // **展开全部 / 全部折叠**：默认全折叠（树才不是一堵墙），
+                // 但"我要找的那个文件在深层"时逐个点开太慢 —— 需要一键展开。
+                // 两者是同一动作的两态，所以用一个开关而不是两个按钮。
+                .child({
+                    let v = cx.entity().clone();
+                    let all_open = view
+                        .file_index
+                        .as_ref()
+                        .map(|i| {
+                            let dirs = neo_ui_behavior::all_dirs(&i.files);
+                            !dirs.is_empty() && view.files_expanded.len() >= dirs.len()
+                        })
+                        .unwrap_or(false);
+                    let label = if all_open { "全部折叠" } else { "展开全部" };
+                    text_button(label, Tone::Muted)
+                        .id("files-expand-all")
+                        .aria_label(label.to_string())
+                        .on_click(move |_, _, cx| {
+                            v.update(cx, |this, cx| {
+                                let dirs = this
+                                    .file_index
+                                    .as_ref()
+                                    .map(|i| neo_ui_behavior::all_dirs(&i.files))
+                                    .unwrap_or_default();
+                                if this.files_expanded.len() >= dirs.len() && !dirs.is_empty() {
+                                    this.files_expanded.clear();
+                                } else {
+                                    this.files_expanded = dirs;
+                                }
+                                cx.notify();
+                            });
+                        })
+                }),
         )
         .child(
             div()
@@ -2061,58 +2109,79 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
         return Some(col);
     }
 
+    // ── 树形渲染（D12 可折叠树）──
+    //
+    // 索引给的是**扁平路径**；层级与折叠由 `neo-ui-behavior::tree` 推导
+    //（纯逻辑、可断言，两个宿主共用同一套）。此前直接渲染全路径，在真实仓库上
+    // 是一堵"路径墙"（本仓 342 个文件），且每行重复长前缀、横向空间几乎全浪费。
+    let rows = neo_ui_behavior::tree_rows(&idx.files, &view.files_expanded);
+
     let mut list = v_flex().gap_0();
-    for f in &idx.files {
-        let label = f.to_string_lossy().into_owned();
-        let selected = view.files_selected.as_ref() == Some(f);
-        let tone = if selected { Tone::Accent } else { Tone::Text };
-        let rel = f.clone();
+    for row in &rows {
+        let selected = view.files_selected.as_ref() == Some(&row.path);
+        let rel = row.path.clone();
         let v = v_for_click.clone();
-        list = list.child(
-            div()
-                .id(("file", {
-                    // 元素 id 用**路径哈希**：同一面板里路径唯一，而
-                    // `ElementId` 只吃 `(&str, usize/u32/u64)`。
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    rel.hash(&mut h);
-                    h.finish()
-                }))
-                .whitespace_nowrap()
-                // ── 让它**像一条列表项**，而不是一行裸文字 ──
-                //
-                // 此前是纯文本：贴着面板左边缘、行与行密排、鼠标移上去毫无反馈。
-                // 那是"能点"但**看不出能点**的形态，也正是"自绘 UI 粗糙"最直观
-                // 的来源。列表项该有的三件事：内边距、行高、悬停/选中反馈。
-                .px_2()
-                .py_1()
-                .rounded(px(neo_ui::RADIUS))
-                .when(selected, |d| d.bg(neo_ui::neo_color(Tone::Border)))
-                // hover 的取值跟设计系统的习惯走（`muted` 半透明），
-                // 而不是我另挑一个颜色 —— 否则悬停色会与组件库控件不一致。
-                .hover(|d| d.bg(neo_ui::neo_color(Tone::Border).opacity(0.45)))
-                .text_color(neo_ui::neo_color(tone))
-                // **无障碍**：自绘的文本行默认不进无障碍树（实测：整棵文件树
-                // 在 AX 里一条都没有），意味着读屏用户与自动化都拿不到这些文件。
-                // 给 role + label 后它们成为可读、可聚焦的按钮。
-                //
-                // 这不只是"合规"：它是这类自绘列表**唯一**能被程序检查的途径 ——
-                // 面板显示了哪些文件，从这里就能读到（本轮的验证正是这么做的）。
-                .role(neo_ui_kit::gpui::accesskit::Role::Button)
-                // ⚠️ 标签必须**如实描述这个按钮做什么**。它现在是"查看"
-                // 而不是"加入引用" —— 点击的行为改成了预览（见 `preview_file`），
-                // 标签就得跟着改。留着旧标签就是"文案与行为不符"，
-                // 而这类不符会让读屏用户（与自动化）据此做出错误的期待。
-                .aria_label(format!("查看 {label}"))
-                .child(label)
-                .on_click(move |_, _window, cx| {
-                    v.update(cx, |this, cx| {
+        let is_dir = matches!(row.kind, neo_ui_behavior::RowKind::Dir { .. });
+
+        // 目录：▾ 展开 / ▸ 折叠，并在折叠时给**直接子项数**
+        //（让"点开一下会多出几行"可预期，而不是点开才知道）
+        let label = match &row.kind {
+            neo_ui_behavior::RowKind::Dir { child_count, expanded } => {
+                let arrow = if *expanded { "▾" } else { "▸" };
+                format!("{arrow} {}/  ({child_count})", row.name)
+            }
+            neo_ui_behavior::RowKind::File => row.name.clone(),
+        };
+
+        // 缩进：层级 × 每级宽度。**缩进有上限**（见 `MAX_INDENT_DEPTH`）——
+        // 否则极深的路径会把名字挤出面板右边界，那时缩进反而挤掉了内容。
+        let indent = neo_ui_behavior::indent_level(row.depth) as f32 * 12.0;
+
+        let tone = if is_dir {
+            Tone::Info // 目录用信息色，与文件（正文色）分开，层级一眼可辨
+        } else if selected {
+            Tone::Accent
+        } else {
+            Tone::Text
+        };
+
+        let row_el = text_button(label, tone)
+            .id(("tree-row", {
+                // 元素 id 用**路径哈希**（同一面板里路径唯一；ElementId 只吃
+                // `(&str, usize/u32/u64)`）。
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                rel.hash(&mut h);
+                h.finish()
+            }))
+            .pl(px(4. + indent))
+            .when(selected, |d| d.bg(neo_ui::neo_color(Tone::Border)))
+            .role(neo_ui_kit::gpui::accesskit::Role::Button)
+            // 标签如实描述行为：目录是"展开/折叠"，文件是"查看"
+            .aria_label(if is_dir {
+                format!("展开或折叠目录 {}", rel.display())
+            } else {
+                format!("查看 {}", rel.display())
+            })
+            .on_click(move |_, window, cx| {
+                v.update(cx, |this, cx| {
+                    if is_dir {
+                        // 目录：切换展开态（**按路径**记）
+                        if !this.files_expanded.remove(&rel) {
+                            this.files_expanded.insert(rel.clone());
+                        }
+                        cx.notify();
+                    } else {
                         this.files_selected = Some(rel.clone());
                         this.preview_file(&rel, cx);
-                    });
-                }),
-        );
+                        let _ = window;
+                    }
+                });
+            });
+
+        list = list.child(row_el);
     }
+
     // 文件列表 + 预览：左右并排。预览用**独立一栏**而不是弹层 ——
     // 用户常要"对着文件内容写任务"，同屏可见才有用。
     let files_col = div()
@@ -3257,6 +3326,70 @@ mod tests {
             other => panic!("不存在的文件应给原因：{other:?}"),
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **D12 树接线**：折叠态只显示根级、展开态显示子项，且两者行数不同。
+    ///
+    /// 这条守的是"树真的折叠了" —— 若哪天有人把 `files_expanded` 透传错
+    /// （比如传了全部目录），界面会退回"一堵路径墙"，而**不会有任何报错**。
+    #[test]
+    fn the_file_tree_folds_and_expands() {
+        use std::collections::BTreeSet;
+        let files: Vec<std::path::PathBuf> = vec![
+            "src/main.rs".into(),
+            "src/deep/x.rs".into(),
+            "docs/readme.md".into(),
+            "top.txt".into(),
+        ];
+
+        let collapsed = neo_ui_behavior::tree_rows(&files, &BTreeSet::new());
+        assert_eq!(collapsed.len(), 3, "折叠态：docs/ + src/ + top.txt");
+        assert!(
+            collapsed.iter().all(|r| r.depth == 0),
+            "折叠态不该有缩进行"
+        );
+
+        let mut exp = BTreeSet::new();
+        exp.insert(std::path::PathBuf::from("src"));
+        let opened = neo_ui_behavior::tree_rows(&files, &exp);
+        assert!(opened.len() > collapsed.len(), "展开后行数应变多");
+        assert!(
+            opened.iter().any(|r| r.name == "deep" && r.depth == 1),
+            "src 的子项应在第 1 层出现：{opened:?}"
+        );
+        // 深层文件仍不该出现（只展开了一层）
+        assert!(
+            !opened.iter().any(|r| r.name == "x.rs"),
+            "只展开一层时孙项不该出现"
+        );
+    }
+
+    /// **展开态按路径保留**：重扫后（文件列表变化）已展开的目录仍是展开的。
+    ///
+    /// 这是"键用路径而非行号"的兑现。若用行号，重扫后展开的会变成别的目录 ——
+    /// 而重扫是**常态**（点刷新、将来接文件监听）。
+    #[test]
+    fn expansion_is_kept_across_rescans_by_path() {
+        use std::collections::BTreeSet;
+        let after: Vec<std::path::PathBuf> = vec!["aaa/c.rs".into(), "src/b.rs".into(), "zzz/a.rs".into()];
+
+        let mut exp = BTreeSet::new();
+        exp.insert(std::path::PathBuf::from("src"));
+
+        // 模拟 rescan：保留仍存在的目录
+        let alive = neo_ui_behavior::all_dirs(&after);
+        let exp_after: BTreeSet<std::path::PathBuf> =
+            exp.iter().filter(|d| alive.contains(*d)).cloned().collect();
+
+        let rows = neo_ui_behavior::tree_rows(&after, &exp_after);
+        let src = rows.iter().find(|r| r.name == "src").expect("src 应在");
+        assert!(
+            matches!(src.kind, neo_ui_behavior::RowKind::Dir { expanded: true, .. }),
+            "重扫后 src 仍应展开"
+        );
+        // 新出现的目录默认折叠
+        let aaa = rows.iter().find(|r| r.name == "aaa").expect("aaa 应在");
+        assert!(matches!(aaa.kind, neo_ui_behavior::RowKind::Dir { expanded: false, .. }));
     }
 
     /// **焦点的两个状态必须渲染出不同** —— 真渲染一帧，断言输出不同。
