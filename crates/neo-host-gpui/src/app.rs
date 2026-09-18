@@ -107,6 +107,37 @@ pub fn composer_input(
         )
 }
 
+/// 一个**可点的文字按钮**（状态栏开关、面板里的行内动作）。
+///
+/// # 为什么要有这个助手
+///
+/// 实测：宿主里 22 个 `on_click` 元素，`.hover()` 出现 **0 次** —— 也就是说
+/// 满屏"能点但看不出能点"的东西。那是"自绘 UI 粗糙"最直接的来源。
+///
+/// 而修法不能是"在每个调用点各写一遍 hover"：
+/// - 12 个可点元素会得到 12 份**各不相同的**悬停色与内边距（那正是拼凑感）；
+/// - 下次加按钮时，忘了写 hover 又回到原样。
+///
+/// 所以收成一个助手：**悬停/内边距/圆角只有一份定义**。
+/// 取值跟设计系统的习惯走（`muted` 半透明），不自己另挑颜色 ——
+/// 否则悬停色会与组件库的控件不一致。
+/// 返回一个**已带悬停样式**的 `Div`：调用方接着 `.id(..)`（可点元素都需要 id）
+/// 与 `.on_click(..)`。不在这里返回 `Stateful` 是因为 `.hover()` 返回的是
+/// 普通 `Div`（gpui 的样式方法不保留 stateful 标记），调用顺序必须是
+/// `id → hover → on_click`。
+fn text_button(
+    label: impl Into<neo_ui_kit::gpui::SharedString>,
+    tone: Tone,
+) -> neo_ui_kit::gpui::Div {
+    div()
+        .px_2()
+        .py(px(2.))
+        .rounded(px(neo_ui::RADIUS))
+        .text_color(neo_ui::neo_color(tone))
+        .hover(|d| d.bg(neo_ui::neo_color(Tone::Border).opacity(0.45)))
+        .child(label.into())
+}
+
 /// 往输入框文本里**追加**一条引用。
 ///
 /// 独立成纯函数是为了能直接断言"追加而不是覆盖"这条语义 —— 它跑在点击回调里，
@@ -1312,6 +1343,10 @@ impl NeoView {
                     // 标题可点击：切换**这一块**的折叠
                     let header = div()
                         .id(("reasoning-head", idx))
+                        // 可折叠标题也是可点元素 —— 与其它列表项一致的悬停反馈
+                        .rounded(px(neo_ui::RADIUS))
+                        .px_1()
+                        .hover(|d| d.bg(neo_color(Tone::Border).opacity(0.45)))
                         .text_color(neo_color(Tone::Muted))
                         .child(head)
                         .on_click(move |_, _, cx| {
@@ -1364,6 +1399,9 @@ impl NeoView {
                     col = col.child(
                         div()
                             .id(("tool-group", idx))
+                            .rounded(px(neo_ui::RADIUS))
+                            .px_1()
+                            .hover(|d| d.bg(neo_color(Tone::Border).opacity(0.45)))
                             .text_color(neo_color(tone))
                             .child(format!("{arrow} {mark} {} 次工具调用", run.tool_count()))
                             .on_click(move |_, _, cx| {
@@ -1808,6 +1846,12 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
             h_flex()
                 .gap_1()
                 .id(format!("sess-{id}"))
+                // 列表项形态 + 悬停反馈（实测：这些行此前都"能点但看不出能点"）
+                .px_2()
+                .py(px(2.))
+                .rounded(px(neo_ui::RADIUS))
+                .when(is_current, |d| d.bg(neo_color(Tone::Border)))
+                .hover(|d| d.bg(neo_color(Tone::Border).opacity(0.45)))
                 .child(if let Some(t) = dot_tone {
                     div().text_color(neo_color(t)).child(dot)
                 } else {
@@ -1888,10 +1932,8 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
                         .child(format!("{}", view.workspace.display())),
                 )
                 .child(
-                    div()
+                    text_button("刷新", Tone::Accent)
                         .id("files-rescan")
-                        .text_color(neo_ui::neo_color(Tone::Accent))
-                        .child("刷新")
                         .on_click(move |_, _, cx| {
                             v_rescan.update(cx, |this, cx| {
                                 this.rescan_files();
@@ -2069,12 +2111,10 @@ fn file_preview_pane(view: &mut NeoView, cx: &mut Context<NeoView>) -> impl Into
                 .child(path.to_string_lossy().into_owned()),
         )
         .child({
-            div()
+            text_button("加入引用", Tone::Accent)
                 .id("preview-add-ref")
-                .text_color(neo_ui::neo_color(Tone::Accent))
                 .role(neo_ui_kit::gpui::accesskit::Role::Button)
                 .aria_label(format!("加入引用 {}", path.display()))
-                .child("加入引用")
                 .on_click(move |_, window, cx| {
                     v_ref.update(cx, |this, cx| {
                         this.add_file_ref(&rel_for_ref, window, cx);
@@ -2281,6 +2321,10 @@ fn model_picker(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoEl
                 Tone::Text
             }))
             .child(if is_current { format!("● {label}") } else { format!("  {label}") }))
+            .px_2()
+            .py(px(3.))
+            .rounded(px(neo_ui::RADIUS))
+            .hover(|d| d.bg(neo_color(Tone::Border).opacity(0.45)))
             .on_click(move |_, _, cx| {
                 let name = name.clone();
                 v.update(cx, |this, cx| {
@@ -2334,6 +2378,11 @@ fn command_palette(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl Int
         col = col.child(
             div()
                 .id(format!("cmd-{}", c.name))
+                .px_2()
+                .py(px(3.))
+                .rounded(px(neo_ui::RADIUS))
+                .when(sel, |d| d.bg(neo_color(Tone::Border)))
+                .hover(|d| d.bg(neo_color(Tone::Border).opacity(0.45)))
                 .text_color(neo_color(if sel { Tone::Accent } else { Tone::Text }))
                 .child(format!("/{}  {}", c.name, c.desc))
                 .on_click(move |_, _, cx| {
@@ -2632,10 +2681,7 @@ impl Render for NeoView {
                     .child({
                         let v = cx.entity().clone();
                         let label = if self.sidebar_open { "侧栏 ◀" } else { "侧栏 ▶" };
-                        div()
-                            .id("sidebar-toggle")
-                            .text_color(neo_color(Tone::Muted))
-                            .child(label)
+                        text_button(label, Tone::Muted).id("sidebar-toggle")
                             .on_click(move |_, _, cx| {
                                 v.update(cx, |this, cx| {
                                     this.run_action(neo_driver::commands::Action::ToggleSidebar);
@@ -2648,10 +2694,7 @@ impl Render for NeoView {
                     .child({
                         let v = cx.entity().clone();
                         let label = if self.files_open { "文件 ◀" } else { "文件 ▶" };
-                        div()
-                            .id("files-toggle")
-                            .text_color(neo_color(Tone::Muted))
-                            .child(label)
+                        text_button(label, Tone::Muted).id("files-toggle")
                             .on_click(move |_, _, cx| {
                                 v.update(cx, |this, cx| {
                                     this.run_action(neo_driver::commands::Action::ToggleFiles);
