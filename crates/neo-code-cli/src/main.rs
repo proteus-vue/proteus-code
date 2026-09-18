@@ -391,6 +391,10 @@ fn cmd_desktop(args: &[String]) -> i32 {
             status,
             mode,
             model_name.clone(),
+            // 工作区传给宿主：文件树（D12）要扫它。由这里注入而不是宿主
+            // `current_dir()` —— 宿主用的目录必须与内核用的**同一个**
+            //（否则文件树指向一处、`@文件` 解析到另一处）。
+            workspace.clone(),
             wake,
         );
         let _ = kernel_thread.join();

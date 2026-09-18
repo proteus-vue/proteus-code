@@ -5359,6 +5359,7 @@ dependencies = [
  "neo-exec",
  "neo-llm-deepseek",
  "neo-mock",
+ "neo-platform",
  "neo-protocol",
  "neo-sandbox-local",
  "neo-session",
@@ -5453,6 +5454,7 @@ dependencies = [
 name = "neo-platform"
 version = "0.1.0"
 dependencies = [
+ "ignore",
  "neo-protocol",
 ]
 

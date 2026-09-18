@@ -37,6 +37,9 @@ fn main() {
         "/tmp · default".to_string(),
         neo_protocol::ExecMode::Default,
         "mock".to_string(),
+        // 工作区：冒烟只验窗口层，给一个真实存在的目录即可
+        //（文件树 D12 会用它；给不存在的路径也安全，扫描返回空索引）。
+        std::env::temp_dir(),
         wake,
     );
     if let Err(e) = r {

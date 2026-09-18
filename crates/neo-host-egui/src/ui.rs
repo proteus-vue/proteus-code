@@ -341,6 +341,22 @@ impl App {
                 let st = if self.sidebar_open { "显示" } else { "隐藏" };
                 self.notice = Some((format!("会话栏已{st}"), std::time::Instant::now()));
             }
+            // D12 文件树：**egui 侧不实现**（如实告知，不假装）。
+            //
+            // 为什么不实现：egui 已冻结（只修 bug、不加功能，见缺口表的
+            // "删除前置条件"）—— gpui 是默认宿主且已实现文件树，为即将删除的
+            // 宿主再补一个新功能是纯浪费。
+            //
+            // 为什么**必须**有这个分支而不是留空：留空会让命令表里的 `/files`
+            // 在 egui 下"列着却点了没反应"，那正是本仓明确反对的
+            // "看起来有功能"的假象（见 commands.rs 的穷尽性守卫）。
+            // 所以给一句诚实的提示，并让用户知道去哪找。
+            A::ToggleFiles => {
+                self.notice = Some((
+                    "文件树仅在 gpui 宿主可用（默认宿主；本窗口是 egui 回退）".to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
             A::NewSession => self.new_session(),
             A::Compact => {
                 self.handle.send(neo_protocol::Op::Compact);

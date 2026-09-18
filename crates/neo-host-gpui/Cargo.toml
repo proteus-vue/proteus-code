@@ -33,6 +33,9 @@ neo-driver = { path = "../neo-driver", version = "0.1.0" }
 neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
 neo-core = { path = "../neo-core", version = "0.1.0" }
 neo-session = { path = "../neo-session", version = "0.1.0" }
+# 工作区文件索引（D12 文件树）。它在 L0，与渲染/内核无关 —— 只是文件系统。
+# 放 neo-platform 的理由见那边 `file_index` 模块头部（TUI 将来也用同一份）。
+neo-platform = { path = "../neo-platform", version = "0.1.0" }
 neo-text = { path = "../neo-text", version = "0.1.0" }
 # 唤醒钩子用的通道（响应式宿主必须靠它通知重绘，不能轮询）。
 # 它本就在依赖树里（gpui 自己依赖它 2.5.0），这里显式声明是为了不依赖传递。

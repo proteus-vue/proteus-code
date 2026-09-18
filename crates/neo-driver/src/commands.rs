@@ -69,6 +69,8 @@ pub enum Action {
     ToggleTerminal,
     /// 切换 / 新建会话（D1）
     ToggleSidebar,
+    /// 文件树面板（D12）：点文件可加为 `@引用`
+    ToggleFiles,
     NewSession,
     /// 压缩上下文（`Op::Compact`）
     Compact,
@@ -110,6 +112,7 @@ pub struct Command {
 pub enum ActionStatic {
     ToggleTerminal,
     ToggleSidebar,
+    ToggleFiles,
     NewSession,
     Compact,
     Rewind,
@@ -128,6 +131,7 @@ impl ActionStatic {
         match self {
             Self::ToggleTerminal => Action::ToggleTerminal,
             Self::ToggleSidebar => Action::ToggleSidebar,
+            Self::ToggleFiles => Action::ToggleFiles,
             Self::NewSession => Action::NewSession,
             Self::Compact => Action::Compact,
             Self::Rewind => Action::Rewind,
@@ -155,6 +159,12 @@ pub const COMMANDS: &[Command] = &[
         desc: "显示 / 隐藏会话栏",
         action: ActionStatic::ToggleSidebar,
         category: Category::Session,
+    },
+    Command {
+        name: "files",
+        desc: "显示 / 隐藏文件树（点文件可加为 @引用）",
+        action: ActionStatic::ToggleFiles,
+        category: Category::View,
     },
     Command {
         name: "new",
@@ -320,7 +330,7 @@ mod tests {
             // （靠 match 的穷尽性保证：新增 ActionStatic 会编译失败）
             match a {
                 Action::ToggleTerminal
-                | Action::ToggleSidebar | Action::NewSession
+                | Action::ToggleSidebar | Action::ToggleFiles | Action::NewSession
                 | Action::Compact | Action::Rewind | Action::Interrupt
                 | Action::ShowModels | Action::CycleMode | Action::ToggleReasoning
                 | Action::ClearTranscript | Action::Help | Action::Quit => {}

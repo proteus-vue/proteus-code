@@ -59,6 +59,68 @@ pub fn parse_file_ref(raw: &str) -> (String, Option<(usize, usize)>) {
     }
 }
 
+/// 把一条文件引用**格式化成可写进输入框的文本** —— [`parse_file_ref`] 的逆。
+///
+/// # 为什么必须有它（此前只有解析、没有格式化）
+///
+/// 解析早就有了（`parse_refs`），但反向一直是空的。于是"给输入框插入一条文件引用"
+/// 这件事没有任何正确做法：调用方只能自己拼 `format!("@{path}")` —— 而**路径含
+/// 空格时这就错了**（`@my file.txt` 会被解析成 `@my` 加一个普通词 `file.txt`）。
+/// 文件树做"点一下把文件加进上下文"时正是这个场景，所以这一轮把它补上。
+///
+/// # 引号规则（与 `ref_tokens` 的解析严格对偶）
+///
+/// | 情形 | 输出 |
+/// |---|---|
+/// | 路径无空白、不以引号开头 | `@src/main.rs`（直接写，可读性最好） |
+/// | 含空白 | `@"my file.txt"` |
+/// | 含 `"` | `@'a"b.txt'`（换单引号，免得转义） |
+/// | 含 `'` 也含 `"` | `@"a\"b'c.txt"`（用双引号 + 转义 `\"`） |
+/// | 含换行 | `None` —— **无法安全表示**，不猜 |
+///
+/// 含行范围时拼成 `@"a b.rs"#12-40`（行号跟在右引号后，与解析一致）。
+///
+/// 返回 `None` 表示"这条路径无法被安全表示"，调用方应**如实告知**而不是
+/// 硬拼一个会解析错的字符串（后者会在下次解析时静默丢引用）。
+pub fn format_file_ref(path: &str, lines: Option<(usize, usize)>) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    // 换行/回车无法在单条引用里表示：解析器把空白当分隔符，引号体内虽可含换行，
+    // 但那样一条引用会跨两行 —— 在输入框里既看不出也容易误删。不猜，直接拒绝。
+    if path.contains('\n') || path.contains('\r') {
+        return None;
+    }
+    let needs_quote = path.chars().any(char::is_whitespace)
+        || path.starts_with('"')
+        || path.starts_with('\'');
+    let body = if !needs_quote {
+        path.to_string()
+    } else if !path.contains('"') {
+        // 无 `"` → 用双引号（最常见的含空格情形）
+        format!("\"{path}\"")
+    } else if !path.contains('\'') {
+        // 含 `"` 但不含 `'` → 用单引号，免转义
+        format!("'{path}'")
+    } else {
+        // 两种引号都有 → 双引号 + 把 `"` 转义（解析器认 `\"`）
+        format!("\"{}\"", path.replace('"', "\\\""))
+    };
+    let range = match lines {
+        Some((a, b)) if a >= 1 && a <= b => {
+            if a == b {
+                format!("#{a}")
+            } else {
+                format!("#{a}-{b}")
+            }
+        }
+        // 非法行范围（0 起、逆序）当作没有范围 —— 与 `valid_range` 的判定一致，
+        // 不产出解析回来会被丢弃的东西。
+        _ => String::new(),
+    };
+    Some(format!("@{body}{range}"))
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RefKind {
@@ -841,6 +903,78 @@ mod tests {
                 ContextRef { kind: RefKind::Skill, target: "skill-x".into(), lines: None },
             ]
         );
+    }
+
+    /// **往返契约**：格式化出来的文本，必须能被**真正的解析器**（`parse_refs`）
+    /// 还原成同一条引用。
+    ///
+    /// 为什么用 `parse_refs` 而不是 `parse_file_ref`：前者才是链路上的真实消费者
+    /// （输入框文本 → 引用列表）。只测 `parse_file_ref` 会漏掉分词那一步 ——
+    /// 而"路径含空格"的 bug 恰恰发生在分词（`@my file.txt` 被切成两个词）。
+    #[test]
+    fn formatted_file_refs_round_trip_through_the_real_parser() {
+        let cases: &[&str] = &[
+            "src/main.rs",
+            "my file.txt",          // 含空格
+            "a b/c d.rs",           // 多段含空格
+            "中文 路径/文件.rs",     // 含空格的中文路径
+            "a\"b.txt",             // 含双引号
+            "a'b.txt",              // 含单引号
+            "a\"b'c.txt",           // 两种引号都有
+            "src/weird\u{3000}space.rs", // 全角空格（也属 whitespace）
+            "#hash.rs",             // 以 # 开头（路径本身含 #）
+            "dir/with#hash/x.rs",
+        ];
+        for path in cases {
+            for lines in [None, Some((1usize, 1usize)), Some((12usize, 40usize))] {
+                let formatted = format_file_ref(path, lines)
+                    .unwrap_or_else(|| panic!("应能格式化 {path:?}"));
+                let refs = parse_refs(&formatted);
+                assert_eq!(
+                    refs.len(),
+                    1,
+                    "格式化结果 {formatted:?} 应解析出**恰好一条**引用（{path:?} lines={lines:?}）：{refs:?}"
+                );
+                assert_eq!(refs[0].kind, RefKind::File, "应是文件引用：{formatted:?}");
+                assert_eq!(
+                    refs[0].target, *path,
+                    "路径往返不一致：{path:?} → {formatted:?} → {:?}",
+                    refs[0].target
+                );
+                assert_eq!(
+                    refs[0].lines,
+                    lines.map(|(a, b)| (a, b)),
+                    "行范围往返不一致：{formatted:?}"
+                );
+            }
+        }
+    }
+
+    /// 不可表示的路径**返回 None**，不硬拼一个会被解析错的字符串。
+    #[test]
+    fn unrepresentable_paths_are_rejected_instead_of_mangled() {
+        assert!(format_file_ref("", None).is_none(), "空路径");
+        assert!(format_file_ref("a\nb.txt", None).is_none(), "含换行（无法单行表示）");
+        assert!(format_file_ref("a\rb.txt", None).is_none(), "含回车");
+        // 非法行范围 → 当作没有范围（而不是产出解析回来会被丢弃的东西）
+        assert_eq!(format_file_ref("a.rs", Some((0, 5))).as_deref(), Some("@a.rs"));
+        assert_eq!(format_file_ref("a.rs", Some((9, 3))).as_deref(), Some("@a.rs"));
+    }
+
+    /// 常见路径**不加引号**（可读性优先：输入框里 `@src/main.rs` 比 `@"src/main.rs"` 好读）。
+    #[test]
+    fn plain_paths_are_not_unnecessarily_quoted() {
+        assert_eq!(format_file_ref("src/main.rs", None).as_deref(), Some("@src/main.rs"));
+        assert_eq!(
+            format_file_ref("src/main.rs", Some((12, 40))).as_deref(),
+            Some("@src/main.rs#12-40")
+        );
+        assert_eq!(
+            format_file_ref("src/main.rs", Some((7, 7))).as_deref(),
+            Some("@src/main.rs#7")
+        );
+        // 只在必要时加引号
+        assert_eq!(format_file_ref("my file.txt", None).as_deref(), Some("@\"my file.txt\""));
     }
 
     #[test]

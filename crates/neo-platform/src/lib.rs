@@ -13,6 +13,8 @@
 //!
 //! conformance 测试同一份用例跑两个后端（见 tests/clipboard.rs）。
 
+pub mod file_index;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 

@@ -107,6 +107,22 @@ pub fn composer_input(
         )
 }
 
+/// 往输入框文本里**追加**一条引用。
+///
+/// 独立成纯函数是为了能直接断言"追加而不是覆盖"这条语义 —— 它跑在点击回调里，
+/// 那里只能靠真机试，而"覆盖了用户已写的任务描述"是**静默丢数据**：
+/// 屏幕上看不出异常，用户只能发现自己打的字没了。
+///
+/// 规则：空输入 → 只有引用；非空 → 保留原文本（**不 trim 掉中间的空格**）、
+/// 末尾补一个空格再接引用，保证与后面的内容有分隔。
+fn append_ref(existing: &str, token: &str) -> String {
+    if existing.trim().is_empty() {
+        format!("{token} ")
+    } else {
+        format!("{} {token} ", existing.trim_end())
+    }
+}
+
 /// 界面状态（Entity）。
 pub struct NeoView {
     handle: KernelHandle,
@@ -260,6 +276,31 @@ pub struct NeoView {
     //
     // 默认**折叠**大于 1 的组：连续 5 次工具调用各带参数与输出会把转录淹掉，
     // 而用户此刻要看的是正文。单个调用不做分组外壳（套一层反而多一次点击）。
+    /// 工作区根（文件树扫描用；见 `run` 的参数说明）。
+    workspace: std::path::PathBuf,
+    /// 文件树面板是否展开（D12）。
+    ///
+    /// 默认**关闭**：它占一栏宽度，而多数轮次用不到文件树（`@文件` 引用可以
+    /// 手打）。打开是一次显式动作（命令面板的 `/files` 或状态栏开关）。
+    files_open: bool,
+    /// 文件索引。**惰性扫描**：只在第一次打开面板时扫一次（见 `ensure_files`）。
+    ///
+    /// 为什么不在启动时扫：扫描要遍历工作区（本仓 342 个文件、约 37ms），
+    /// 而多数会话根本不会打开文件树 —— 启动时扫是**无条件付这笔钱**。
+    /// 惰性之后，只有真要用的人付出代价。
+    ///
+    /// ⚠️ **不做增量/监听**（诚实边界）：扫描结果在会话中途不会自动更新，
+    /// 新建的文件要重开面板才可见。真正的监听需要接 `notify`（本仓
+    /// `neo-platform` 已留了位置但未实现），不在本轮范围。
+    file_index: Option<neo_platform::file_index::FileIndex>,
+    /// 文件树面板的滚动句柄（与转录区同样的 `track_scroll` + `overflow_y_scroll`
+    /// 三项组合 —— 文件多时必须能滚，否则下面的文件永远看不到）。
+    files_scroll: neo_ui_kit::gpui::ScrollHandle,
+    /// 文件树里被选中的文件（用于把它加进输入框）。`None` = 未选。
+    ///
+    /// 单选取而**不是**多选：`@引用` 一条条插进输入框更可控，
+    /// 而多选要处理"插入顺序、去重、部分失败"，收益不抵复杂度。
+    files_selected: Option<std::path::PathBuf>,
     /// 启动时自动提交的任务（一次性）。来源 `NEO_GUI_PROMPT`。
     ///
     /// 与 egui 宿主的同名钩子同源（AGENTS.md 里 `PROTEUS_CODE_SMOKE` 的约定）：
@@ -278,6 +319,7 @@ impl NeoView {
         status: String,
         mode: ExecMode,
         model: String,
+        workspace: std::path::PathBuf,
     ) -> Self {
         Self {
             handle,
@@ -323,6 +365,14 @@ impl NeoView {
             sidebar_open: std::env::var("NEO_GUI_SIDEBAR").ok().as_deref() != Some("off"),
             cmd_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("cmd"),
             terminal_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("terminal"),
+            workspace,
+            // 脚本化验证钩子：`NEO_GUI_PANEL=files` 启动即打开文件树
+            //（与 `NEO_GUI_PANEL=help/models/cmd/terminal` 同族 —— 自绘面板
+            // 收不到合成点击，需要环境变量驱动一次以便截图核对）。
+            files_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("files"),
+            file_index: None,
+            files_scroll: neo_ui_kit::gpui::ScrollHandle::new(),
+            files_selected: None,
             auto_prompt: std::env::var("NEO_GUI_PROMPT")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
@@ -421,6 +471,53 @@ impl NeoView {
         if let Some(state) = self.input_state.clone() {
             state.update(cx, |s, cx| s.set_value("", window, cx));
         }
+    }
+
+    /// **惰性**扫描工作区并缓存文件索引（理由见 `file_index` 字段的说明：
+    /// 不要让不用文件树的人也为扫描付钱）。
+    ///
+    /// 重复调用是**无操作**：已有索引就直接返回。想刷新（会话中新建了文件）
+    /// 走 [`Self::rescan_files`] —— 把"只扫一次"与"显式重扫"分开，
+    /// 避免每次渲染都偷偷扫一遍（那会让界面卡在扫描上）。
+    fn ensure_files(&mut self) {
+        if self.file_index.is_some() {
+            return;
+        }
+        self.file_index = Some(neo_platform::file_index::scan_workspace(&self.workspace));
+    }
+
+    /// 显式重扫（用户在面板上点"刷新"时用）。
+    fn rescan_files(&mut self) {
+        self.file_index = Some(neo_platform::file_index::scan_workspace(&self.workspace));
+        self.files_selected = None;
+    }
+
+    /// 把一个文件**加进输入框**作为 `@引用`（D12 的核心动作）。
+    ///
+    /// # 三个必须做对的地方
+    ///
+    /// 1. **引用文本由协议层格式化**（`FileIndex::as_file_ref` → `format_file_ref`），
+    ///    不在这里拼 `format!("@{path}")`：路径含空格时那样拼出来的引用**会被
+    ///    解析成两个词**（`@my file.txt` → `@my` + 普通词），静默丢掉引用。
+    /// 2. **追加而不是覆盖**：用户可能已经写了任务描述，替换会把他的字抹掉。
+    /// 3. **镜像与真实输入框都要更新**（两个都改）：`input` 是提交时读的那份，
+    ///    `input_state` 是屏幕上那份 —— 只改一个会导致"看到的不等于提交的"。
+    fn add_file_ref(&mut self, rel: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(idx) = self.file_index.as_ref() else {
+            return;
+        };
+        let Some(token) = idx.as_file_ref(rel) else {
+            // 无法安全表示（含换行等）→ 如实告知，不硬拼一个会解析错的字符串
+            self.notice = Some(format!("无法表示为引用：{}", rel.display()));
+            return;
+        };
+        let new_text = append_ref(&self.input, &token);
+        self.input = new_text.clone();
+        if let Some(state) = self.input_state.clone() {
+            state.update(cx, |s, cx| s.set_value(&new_text, window, cx));
+        }
+        self.notice = Some(format!("已加入引用 {token}"));
+        cx.notify();
     }
 
     /// 惰性建"搜索思考"输入框并订阅（理由同 `ensure_input`）。
@@ -627,6 +724,15 @@ impl NeoView {
             // 会话栏（D1）：无独立面板，用"新建/切换"表达
             A::ToggleSidebar => {
                 self.sidebar_open = !self.sidebar_open;
+            }
+            // 文件树（D12）
+            A::ToggleFiles => {
+                self.files_open = !self.files_open;
+                if self.files_open {
+                    self.ensure_files();
+                }
+                let st = if self.files_open { "显示" } else { "隐藏" };
+                self.notice = Some(format!("文件树已{st}"));
             }
             A::NewSession => self.new_session(),
             // 清屏：只清**屏幕上的**转录，不动会话日志
@@ -1711,6 +1817,155 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
 /// 命令清单**从共享命令表读**（`neo_driver::commands::COMMANDS`），
 /// 不在这里手写。手写清单必然在加命令时忘记更新 ——
 /// 而"列了但按不出来"和"能按但没列"都是错误信息。
+/// **D12 文件树面板**：列出工作区文件，点一下加进输入框作为 `@引用`。
+///
+/// # 三个刻意的设计
+///
+/// 1. **只列文件、不画树**：目录层级由路径前缀表达（`src/main.rs`），
+///    按路径排序后同一目录自然相邻。真画一棵可折叠的树需要"哪层展开了"的
+///    状态，而它的收益（省几行缩进）不抵那份状态 —— 等文件数真的撑不住再上。
+/// 2. **截断必须显示**：`FileIndex.truncated` 为真时在顶部写明原因
+///    （"文件过多，只显示前 N 个"）。用户看到一棵树会默认"这是全部"，
+///    不报就会把"文件找不到"当成"文件不存在"。
+/// 3. **点文件=加引用，而不是打开文件**：本宿主没有文件查看器（D12 的
+///    "内置浏览器"仍未做），所以点击的唯一有意义动作是把它放进上下文。
+///    文案也直说这件事（"点击加入引用"），不暗示能预览。
+fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
+    if !view.files_open {
+        return None;
+    }
+    let v_rescan = cx.entity().clone();
+    let v_for_click = cx.entity().clone();
+
+    let mut col = v_flex()
+        .w(px(420.))
+        .h(px(420.))
+        .gap_1()
+        .p_3()
+        .bg(neo_ui::panel_bg())
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_color(neo_ui::neo_color(Tone::Info))
+                        .child("文件树"),
+                )
+                .child(
+                    div()
+                        .text_color(neo_ui::neo_color(Tone::Muted))
+                        .child(format!("{}", view.workspace.display())),
+                )
+                .child(
+                    div()
+                        .id("files-rescan")
+                        .text_color(neo_ui::neo_color(Tone::Accent))
+                        .child("刷新")
+                        .on_click(move |_, _, cx| {
+                            v_rescan.update(cx, |this, cx| {
+                                this.rescan_files();
+                                cx.notify();
+                            });
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .text_color(neo_ui::neo_color(Tone::Muted))
+                .child("点击文件加入引用（@路径）"),
+        );
+
+    // **面板可见 ⇒ 索引必须在**。这里补扫而不是只显示"正在扫描…"：
+    // 实测踩到 —— `NEO_GUI_PANEL=files`（启动即打开）走的是构造函数，
+    // **不经过 `run_action`**，于是 `ensure_files()` 从没被调用，
+    // 面板永远停在"正在扫描"。修法是让"面板可见"成为自足条件：
+    // 谁把它显示出来都无所谓，渲染时保证索引就绪。
+    //
+    // 这也比"在构造函数里再调一次 ensure_files"更稳：后者要给每个未来的
+    // 开启入口都记得调一次（典型的"改一处忘一处"）。
+    if view.file_index.is_none() {
+        view.ensure_files();
+    }
+    let Some(idx) = view.file_index.as_ref() else {
+        col = col.child(
+            div()
+                .text_color(neo_ui::neo_color(Tone::Muted))
+                .child("（工作区无法扫描：路径不存在或不是目录）"),
+        );
+        return Some(col);
+    };
+
+    // **截断如实上报**（见本函数头部第 2 条）
+    if let (true, Some(reason)) = (idx.truncated, idx.truncated_reason) {
+        let limits = neo_platform::file_index::ScanLimits::default();
+        col = col.child(
+            div()
+                .text_color(neo_ui::neo_color(Tone::Warning))
+                .child(format!("⚠ {}", reason.explain(&limits))),
+        );
+    }
+
+    if idx.files.is_empty() {
+        col = col.child(
+            div()
+                .text_color(neo_ui::neo_color(Tone::Muted))
+                .child("（工作区里没有可显示的文件）"),
+        );
+        return Some(col);
+    }
+
+    let mut list = v_flex().gap_0();
+    for f in &idx.files {
+        let label = f.to_string_lossy().into_owned();
+        let selected = view.files_selected.as_ref() == Some(f);
+        let tone = if selected { Tone::Accent } else { Tone::Text };
+        let rel = f.clone();
+        let v = v_for_click.clone();
+        list = list.child(
+            div()
+                .id(("file", {
+                    // 元素 id 用**路径哈希**：同一面板里路径唯一，而
+                    // `ElementId` 只吃 `(&str, usize/u32/u64)`。
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    rel.hash(&mut h);
+                    h.finish()
+                }))
+                .whitespace_nowrap()
+                .text_color(neo_ui::neo_color(tone))
+                // **无障碍**：自绘的文本行默认不进无障碍树（实测：整棵文件树
+                // 在 AX 里一条都没有），意味着读屏用户与自动化都拿不到这些文件。
+                // 给 role + label 后它们成为可读、可聚焦的按钮。
+                //
+                // 这不只是"合规"：它是这类自绘列表**唯一**能被程序检查的途径 ——
+                // 面板显示了哪些文件，从这里就能读到（本轮的验证正是这么做的）。
+                .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                .aria_label(format!("加入引用 {label}"))
+                .child(label)
+                .on_click(move |_, window, cx| {
+                    v.update(cx, |this, cx| {
+                        this.files_selected = Some(rel.clone());
+                        this.add_file_ref(&rel, window, cx);
+                    });
+                }),
+        );
+    }
+    // 滚动容器：文件多时必须能滚（否则下面的文件永远看不到）。
+    // `track_scroll` + `overflow_y_scroll` 两项组合（句柄由本视图持有，
+    // 与转录区一致；组件库的一体版不让调用方拿到句柄）。
+    col = col.child(
+        div()
+            // `track_scroll` 要求先有 `.id()`（stateful 元素才能挂滚动句柄）
+            .id("files-scroll")
+            .flex_1()
+            .min_h(px(0.))
+            .track_scroll(&view.files_scroll)
+            .overflow_y_scroll()
+            .child(list),
+    );
+    Some(col)
+}
+
 fn help_panel(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
     if !view.help_open {
         return None;
@@ -2179,6 +2434,22 @@ impl Render for NeoView {
                                 });
                             })
                     })
+                    // 文件树开关（D12）。与 `/files` 命令等价（同一个 Action）——
+                    // 有可点入口才不用每次都走命令面板。
+                    .child({
+                        let v = cx.entity().clone();
+                        let label = if self.files_open { "文件 ◀" } else { "文件 ▶" };
+                        div()
+                            .id("files-toggle")
+                            .text_color(neo_color(Tone::Muted))
+                            .child(label)
+                            .on_click(move |_, _, cx| {
+                                v.update(cx, |this, cx| {
+                                    this.run_action(neo_driver::commands::Action::ToggleFiles);
+                                    cx.notify();
+                                });
+                            })
+                    })
                     // 高风险档位常驻提示（ZCode 语义：风险状态不能只在切档时弹一次）
                     .child(if matches!(mode, ExecMode::AutoEdit | ExecMode::FullAccess) {
                         div()
@@ -2421,6 +2692,16 @@ impl Render for NeoView {
         });
 
         // ── 命令面板（D9）：覆盖在主区之上 ──
+        // ── 文件树（D12）：与帮助/模型面板同层（覆盖式） ──
+        if let Some(p) = file_panel(self, cx) {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(48.))
+                    .left(px(120.))
+                    .child(p),
+            );
+        }
         if let Some(p) = help_panel(self, cx) {
             root = root.child(
                 div()
@@ -2463,6 +2744,10 @@ pub fn run(
     status: String,
     mode: ExecMode,
     model: String,
+    // 工作区根 —— **文件树（D12）要用它**。由装配点传入而不是宿主自己
+    // `current_dir()`：宿主不该猜"工作区是哪个目录"，那是装配点的决定
+    //（CLI 有 `--workspace`，两者必须一致，否则文件树指向的和内核用的不是同一处）。
+    workspace: std::path::PathBuf,
     // 唤醒信号：驱动线程投递，本宿主在渲染路径里消费（gpui 上下文非 Send，
     // 驱动线程不能直接调 cx.notify）。
     wake: neo_driver::WakeSignal,
@@ -2510,7 +2795,7 @@ pub fn run(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .take();
-                NeoView::new(handle.clone(), sess, (*models_for_view).clone(), status, mode, model)
+                NeoView::new(handle.clone(), sess, (*models_for_view).clone(), status, mode, model, workspace.clone())
             });
             *view_holder.lock().unwrap_or_else(|e| e.into_inner()) = Some(view.clone());
 
@@ -2591,6 +2876,106 @@ mod tests {
             turns_remaining: 0,
             budget_used: 0,
         }
+    }
+
+    /// **D12 接线**：`add_file_ref` 产出的必须是**可解析的引用**，且
+    /// **追加**在已有文本之后（不覆盖用户已写的内容）。
+    ///
+    /// 这两条都会静默出错：引用拼错（路径含空格）会在下次解析时丢引用；
+    /// 覆盖写入会把用户的任务描述抹掉 —— 两者都不会报错。
+    #[test]
+    fn add_file_ref_appends_a_parseable_reference() {
+        // 直接测"生成 + 解析"这一对（不需要窗口：引用文本的生成是纯逻辑）
+        let idx = neo_platform::file_index::FileIndex {
+            files: vec![
+                std::path::PathBuf::from("src/main.rs"),
+                std::path::PathBuf::from("my file.txt"),
+            ],
+            truncated: false,
+            truncated_reason: None,
+        };
+        for f in &idx.files {
+            let token = idx.as_file_ref(f).expect("应能生成引用");
+            let refs = neo_protocol::parse_refs(&token);
+            assert_eq!(refs.len(), 1, "{token:?} 应解析出恰好一条引用");
+            assert_eq!(refs[0].kind, neo_protocol::RefKind::File);
+            assert_eq!(
+                refs[0].target,
+                f.to_string_lossy().replace('\\', "/"),
+                "路径必须往返一致（含空格的那条尤其关键）"
+            );
+        }
+    }
+
+    /// **点击一个文件所产生的效果**（把 closure 里那三行组合起来断言）。
+    ///
+    /// # 为什么值得单独测
+    ///
+    /// 真机上点一下需要窗口在前台 —— 而本项目的约定是**验证不抢用户焦点**
+    /// （见效率规范第零条）。所以点击的**效果**用纯函数组合来钉：
+    /// 取引用文本（`as_file_ref`）→ 追加进输入框（`append_ref`）→
+    /// 解析回来必须还是那条引用。
+    ///
+    /// 这三步各自有测试，但"组合起来还对"是另一条命题 —— 例如把 token 追加到
+    /// 一个**不以空白结尾**的文本后面，就可能粘成一个词（`配置@a.rs`）。
+    #[test]
+    fn the_click_effect_produces_a_reference_the_kernel_can_resolve() {
+        let idx = neo_platform::file_index::FileIndex {
+            files: vec![
+                std::path::PathBuf::from("README.md"),
+                std::path::PathBuf::from("my file.txt"),
+                std::path::PathBuf::from("src/main.rs"),
+            ],
+            truncated: false,
+            truncated_reason: None,
+        };
+        for (existing, f) in [
+            ("", 0usize),
+            ("改一下配置", 1),   // 含空格路径 + 已有文本（最需防"粘成一个词"）
+            ("已写完的句子。", 2),
+        ] {
+            let rel = &idx.files[f];
+            let token = idx.as_file_ref(rel).expect("应能生成引用");
+            let text = append_ref(existing, &token);
+
+            // 原文本必须还在（不覆盖）
+            assert!(text.starts_with(existing), "原文本被覆盖：{existing:?} -> {text:?}");
+
+            // 引用必须能被解析回来，且 target 正确
+            let refs = neo_protocol::parse_refs(&text);
+            assert_eq!(refs.len(), 1, "应解析出恰好一条引用：{text:?}");
+            assert_eq!(
+                refs[0].target,
+                rel.to_string_lossy().replace('\\', "/"),
+                "引用目标不对（含空格路径尤需检查）：{text:?}"
+            );
+        }
+    }
+
+    /// **追加而不是覆盖**：用户已写的任务描述必须保留。
+    ///
+    /// 这是"静默丢数据"类缺陷：覆盖写入不会报错，屏幕上也不异常 ——
+    /// 用户只能发现自己打的字没了。故用纯函数把它钉住。
+    #[test]
+    fn append_ref_never_overwrites_existing_text() {
+        // 空输入 → 只有引用（带一个尾空格，方便继续输入）
+        assert_eq!(append_ref("", "@a.rs"), "@a.rs ");
+        assert_eq!(append_ref("   ", "@a.rs"), "@a.rs ", "纯空白视为空");
+
+        // 非空 → 原文本保留，引用追加在后
+        assert_eq!(append_ref("改一下配置", "@a.rs"), "改一下配置 @a.rs ");
+        // 末尾空白被规整，但**中间的空格不能被吃掉**
+        assert_eq!(append_ref("改 一下  ", "@a.rs"), "改 一下 @a.rs ");
+        assert!(
+            append_ref("改 一下", "@a.rs").starts_with("改 一下"),
+            "原有内容必须原样保留"
+        );
+
+        // 追加出来的整串，引用部分必须仍能被解析出来（与协议层对齐）
+        let text = append_ref("改一下配置", "@\"my file.txt\"");
+        let refs = neo_protocol::parse_refs(&text);
+        assert_eq!(refs.len(), 1, "追加后引用应可解析：{text:?}");
+        assert_eq!(refs[0].target, "my file.txt", "含空格路径必须完整：{text:?}");
     }
 
     /// 切段：强调区间之外的部分仍要原样输出（不能只输出强调部分）。
