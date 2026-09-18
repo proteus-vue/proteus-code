@@ -54,8 +54,9 @@ impl HeadlessBackend {
 /// （保留了几何、颜色、文字与裁剪），而不是"喂给某个绘制 API 的参数包"。
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeadlessCmd {
-    Fill { rect: Rect, color: Color },
-    Stroke { rect: Rect, color: Color, width: f32 },
+    /// 填充（`radius` 见 `scene::Op::FillRect` 的说明）。
+    Fill { rect: Rect, color: Color, radius: f32 },
+    Stroke { rect: Rect, color: Color, width: f32, radius: f32 },
     /// 文字 —— **本后端真的画得出**（见模块头部的能力对照表）。
     Text { text: String, origin: Point, color: Color, size: f32 },
     /// 裁剪区（后续指令受它约束）。
@@ -141,24 +142,33 @@ impl HeadlessPaint {
                     ));
                     clipped = true;
                 }
-                HeadlessCmd::Fill { rect, color } => out.push_str(&format!(
-                    "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"/>\n",
-                    rect.origin.x,
-                    rect.origin.y,
-                    rect.size.w,
-                    rect.size.h,
-                    color_hex(*color)
-                )),
-                HeadlessCmd::Stroke { rect, color, width } => out.push_str(&format!(
-                    "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"none\" \
-                     stroke=\"{}\" stroke-width=\"{}\"/>\n",
-                    rect.origin.x,
-                    rect.origin.y,
-                    rect.size.w,
-                    rect.size.h,
-                    color_hex(*color),
-                    width
-                )),
+                HeadlessCmd::Fill { rect, color, radius } => {
+                    // SVG 用 `rx` 表示圆角。**不夹取**：这里输出的就是场景里
+                    // 的那个值 —— 夹取该由产生场景的一方负责（见 progress.rs
+                    // 的说明），否则两个后端会给出不同结果。
+                    let rx = if *radius > 0.0 { format!(" rx=\"{radius}\"") } else { String::new() };
+                    out.push_str(&format!(
+                        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"{rx} fill=\"{}\"/>\n",
+                        rect.origin.x,
+                        rect.origin.y,
+                        rect.size.w,
+                        rect.size.h,
+                        color_hex(*color)
+                    ))
+                }
+                HeadlessCmd::Stroke { rect, color, width, radius } => {
+                    let rx = if *radius > 0.0 { format!(" rx=\"{radius}\"") } else { String::new() };
+                    out.push_str(&format!(
+                        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"{rx} fill=\"none\" \
+                         stroke=\"{}\" stroke-width=\"{}\"/>\n",
+                        rect.origin.x,
+                        rect.origin.y,
+                        rect.size.w,
+                        rect.size.h,
+                        color_hex(*color),
+                        width
+                    ))
+                }
                 HeadlessCmd::Text { text, origin, color, size } => out.push_str(&format!(
                     "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-size=\"{}\">{}</text>\n",
                     origin.x,
@@ -231,11 +241,11 @@ impl RenderBackend for HeadlessBackend {
         let mut colors = Vec::with_capacity(scene.len());
         for op in scene.ops() {
             match op {
-                Op::FillRect { rect, color } => {
-                    cmds.push(HeadlessCmd::Fill { rect: *rect, color: *color });
+                Op::FillRect { rect, color, radius } => {
+                    cmds.push(HeadlessCmd::Fill { rect: *rect, color: *color, radius: *radius });
                     colors.push(Some(*color));
                 }
-                Op::StrokeRect { rect, color, width } => {
+                Op::StrokeRect { rect, color, width, radius } => {
                     // 与 GpuiBackend 同一语义：零线宽画不出东西 → 不产出指令，
                     // **但仍占一个颜色位**（它是一条 op，只是画不出）。
                     // 两个后端在这点上必须一致，否则"描边在 A 看得见、在 B 不见"。
@@ -244,6 +254,7 @@ impl RenderBackend for HeadlessBackend {
                             rect: *rect,
                             color: *color,
                             width: *width,
+                            radius: *radius,
                         });
                     }
                     colors.push(Some(*color));
@@ -364,8 +375,9 @@ mod tests {
                 rect: Rect::new(0.0, 0.0, 4.0, 4.0),
                 color: Color::rgb(9, 9, 9),
                 width: 0.0,
+                radius: 0.0,
             },
-            Op::FillRect { rect: Rect::new(0.0, 0.0, 1.0, 1.0), color: Color::rgb(1, 2, 3) },
+            Op::FillRect { rect: Rect::new(0.0, 0.0, 1.0, 1.0), color: Color::rgb(1, 2, 3), radius: 0.0 },
         ]);
         let paint = HeadlessBackend::new().paint(&s);
         assert_eq!(paint.cmds.len(), 1, "零线宽不该产出描边指令（只剩那条填充）");
@@ -395,7 +407,7 @@ mod tests {
     fn svg_export_closes_the_clip_group_it_opens() {
         let s = scene_with(vec![
             Op::PushClip { rect: Rect::new(0.0, 0.0, 10.0, 10.0) },
-            Op::FillRect { rect: Rect::new(0.0, 0.0, 5.0, 5.0), color: Color::rgb(1, 1, 1) },
+            Op::FillRect { rect: Rect::new(0.0, 0.0, 5.0, 5.0), color: Color::rgb(1, 1, 1), radius: 0.0 },
             Op::PopClip,
         ]);
         let svg = HeadlessBackend::new().paint(&s).to_svg(20.0, 20.0);

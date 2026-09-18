@@ -1097,6 +1097,7 @@ fn progress_chart_element(segments: Vec<neo_ui_render::ProgressSegment>) -> impl
             f32::from(bounds.size.height),
             track_color,
             fill_color,
+            neo_ui::RADIUS,
         );
         (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
     };
@@ -1135,6 +1136,7 @@ fn usage_chart_element(bars: Vec<neo_ui_render::UsageBar>) -> impl IntoElement {
             f32::from(bounds.size.height),
             input_color,
             output_color,
+            neo_ui::RADIUS,
         );
         (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
     };
@@ -1964,6 +1966,18 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
                     h.finish()
                 }))
                 .whitespace_nowrap()
+                // ── 让它**像一条列表项**，而不是一行裸文字 ──
+                //
+                // 此前是纯文本：贴着面板左边缘、行与行密排、鼠标移上去毫无反馈。
+                // 那是"能点"但**看不出能点**的形态，也正是"自绘 UI 粗糙"最直观
+                // 的来源。列表项该有的三件事：内边距、行高、悬停/选中反馈。
+                .px_2()
+                .py(px(3.))
+                .rounded(px(neo_ui::RADIUS))
+                .when(selected, |d| d.bg(neo_ui::neo_color(Tone::Border)))
+                // hover 的取值跟设计系统的习惯走（`muted` 半透明），
+                // 而不是我另挑一个颜色 —— 否则悬停色会与组件库控件不一致。
+                .hover(|d| d.bg(neo_ui::neo_color(Tone::Border).opacity(0.45)))
                 .text_color(neo_ui::neo_color(tone))
                 // **无障碍**：自绘的文本行默认不进无障碍树（实测：整棵文件树
                 // 在 AX 里一条都没有），意味着读屏用户与自动化都拿不到这些文件。

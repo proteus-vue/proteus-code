@@ -106,6 +106,8 @@ pub struct GpuiQuad {
     pub w: f32,
     pub h: f32,
     pub color: Color,
+    /// 圆角半径（0 = 直角）。见 `scene::Op::FillRect` 的说明。
+    pub radius: f32,
 }
 
 /// 一条待描边的矩形（线宽 > 0）。
@@ -117,6 +119,8 @@ pub struct GpuiStroke {
     pub h: f32,
     pub width: f32,
     pub color: Color,
+    /// 圆角半径（0 = 直角）。
+    pub radius: f32,
 }
 
 /// GPUI 后端的绘制产物：一批填充矩形 + 一批描边 + 文字指令计数。
@@ -163,9 +167,11 @@ impl GpuiPaint {
             );
             // 无边框、直角：变更条是"面"不是"卡片"（本项目一贯的视觉纪律：
             // 底色层是面、边框只是线）
+            // 圆角经 `Corners::all` 交给 gpui 的 quad —— 它自己在绘制时
+            // 处理抗锯齿与"半径超过边长时按半宽裁"的边界（不必我们夹取）。
             window.paint_quad(neo_ui_kit::gpui::quad(
                 bounds,
-                Corners::default(),
+                Corners::all(px(q.radius)),
                 to_gpui_rgba(q.color),
                 Edges::default(),
                 neo_ui_kit::gpui::transparent_black(),
@@ -181,7 +187,7 @@ impl GpuiPaint {
             // 四条实心条：后者在拐角会重叠（半透明色下看得见"角更亮"）。
             window.paint_quad(neo_ui_kit::gpui::quad(
                 bounds,
-                Corners::default(),
+                Corners::all(px(s.radius)),
                 neo_ui_kit::gpui::transparent_black(),
                 Edges::all(px(s.width)),
                 to_gpui_rgba(s.color),
@@ -231,17 +237,18 @@ impl RenderBackend for GpuiBackend {
         let mut text_ops = 0;
         for op in scene.ops() {
             match op {
-                crate::scene::Op::FillRect { rect, color } => {
+                crate::scene::Op::FillRect { rect, color, radius } => {
                     quads.push(GpuiQuad {
                         x: rect.origin.x,
                         y: rect.origin.y,
                         w: rect.size.w,
                         h: rect.size.h,
                         color: *color,
+                        radius: *radius,
                     });
                     colors.push(color.to_rgba_u32());
                 }
-                crate::scene::Op::StrokeRect { rect, color, width } => {
+                crate::scene::Op::StrokeRect { rect, color, width, radius } => {
                     // 线宽为 0 的描边画不出任何东西 —— 按"不产生绘制指令"处理，
                     // 但仍占一个颜色位（顺序契约），否则后续 op 的颜色会整体错位。
                     if *width > 0.0 {
@@ -252,6 +259,7 @@ impl RenderBackend for GpuiBackend {
                             h: rect.size.h,
                             width: *width,
                             color: *color,
+                            radius: *radius,
                         });
                     }
                     colors.push(color.to_rgba_u32());
@@ -287,6 +295,7 @@ mod tests {
         s.push(Op::FillRect {
             rect: Rect::new(0.0, 0.0, 10.0, 10.0),
             color: Color::rgb(0xa7, 0x8b, 0xfa),
+            radius: 0.0,
         });
         s
     }
@@ -310,6 +319,7 @@ mod tests {
         s.push(Op::FillRect {
             rect: Rect::new(0.0, 0.0, 1.0, 1.0),
             color: Color::rgb(0, 0, 0),
+            radius: 0.0,
         });
         s.push(Op::FillText {
             text: "中文 abc".into(),
@@ -331,6 +341,7 @@ mod tests {
         s.push(Op::FillRect {
             rect: Rect::new(0.0, 0.0, 1.0, 1.0),
             color: Color::rgb(1, 2, 3),
+            radius: 0.0,
         });
         s.push(Op::PopClip);
         let paint = GpuiBackend::new().paint(&s);
@@ -372,11 +383,12 @@ mod tests {
     fn supported_claims_match_what_paint_actually_produces() {
         let b = GpuiBackend::new();
         let ops = [
-            Op::FillRect { rect: Rect::new(0.0, 0.0, 4.0, 4.0), color: Color::rgb(1, 1, 1) },
+            Op::FillRect { rect: Rect::new(0.0, 0.0, 4.0, 4.0), color: Color::rgb(1, 1, 1), radius: 0.0 },
             Op::StrokeRect {
                 rect: Rect::new(0.0, 0.0, 4.0, 4.0),
                 color: Color::rgb(2, 2, 2),
                 width: 1.0,
+                radius: 0.0,
             },
             Op::FillText {
                 text: "x".into(),
@@ -412,8 +424,9 @@ mod tests {
             rect: Rect::new(0.0, 0.0, 4.0, 4.0),
             color: Color::rgb(9, 9, 9),
             width: 0.0,
+            radius: 0.0,
         });
-        s.push(Op::FillRect { rect: Rect::new(0.0, 0.0, 1.0, 1.0), color: Color::rgb(1, 2, 3) });
+        s.push(Op::FillRect { rect: Rect::new(0.0, 0.0, 1.0, 1.0), color: Color::rgb(1, 2, 3), radius: 0.0 });
         let paint = GpuiBackend::new().paint(&s);
 
         assert!(paint.strokes.is_empty(), "零线宽画不出东西，不该产生描边指令");
@@ -425,7 +438,7 @@ mod tests {
     #[test]
     fn unsupported_ops_reports_the_text_boundary() {
         let mut s = Scene::new();
-        s.push(Op::FillRect { rect: Rect::new(0.0, 0.0, 1.0, 1.0), color: Color::rgb(0, 0, 0) });
+        s.push(Op::FillRect { rect: Rect::new(0.0, 0.0, 1.0, 1.0), color: Color::rgb(0, 0, 0), radius: 0.0 });
         s.push(Op::FillText {
             text: "画不出的文字".into(),
             origin: crate::scene::Point::new(0.0, 0.0),

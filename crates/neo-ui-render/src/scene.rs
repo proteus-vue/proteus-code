@@ -101,10 +101,22 @@ impl Rect {
 /// 自绘表面需要什么，等它真的需要时再往这里加。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
-    /// 填充矩形。
-    FillRect { rect: Rect, color: Color },
-    /// 描边矩形。
-    StrokeRect { rect: Rect, color: Color, width: f32 },
+    /// 填充矩形（可带圆角，`radius = 0` 即直角）。
+    ///
+    /// # 圆角为什么是**这里的属性**而不是另开一条指令
+    ///
+    /// 它就是"这块矩形有多圆"，与颜色一样是矩形的**属性**（Zed 的场景模型
+    /// 也是这么放的：`Quad { bounds, corner_radii, background, … }`）。
+    /// 另开一条 `FillRoundedRect` 会让"同一件事有两种说法" —— 后端要处理
+    /// 两遍、`supported()` 要报两条，而它们永远该一起变。
+    ///
+    /// **默认 0（直角）**是刻意的：`radius` 是"要圆角的人显式要"的属性，
+    /// 而不是"所有人都会继承的默认"。这一点很重要 —— 像 diff 底色带那种
+    /// **整行通铺**的面必须保持直角（圆角会让行与行之间出现缝隙，
+    /// 一眼看去像"改动的行数不对"）。
+    FillRect { rect: Rect, color: Color, radius: f32 },
+    /// 描边矩形（可带圆角，语义同上）。
+    StrokeRect { rect: Rect, color: Color, width: f32, radius: f32 },
     /// 画一行文字（基线左上角对齐）。
     FillText { text: String, origin: Point, color: Color, size: f32 },
     /// 压入裁剪区（后续绘制只在该区内可见）。
@@ -131,6 +143,21 @@ impl Scene {
     pub fn push(&mut self, op: Op) -> &mut Self {
         self.ops.push(op);
         self
+    }
+
+    /// 方角填充 —— **最常见**的情形，所以单列一个入口。
+    ///
+    /// 有它之后调用点读起来是 `scene.fill(rect, color)` 而不是
+    /// `push(Op::FillRect { rect, color, radius: 0.0 })` ——
+    /// 后者会让"我没要圆角"淹没在一堆字段里。
+    pub fn fill(&mut self, rect: Rect, color: Color) -> &mut Self {
+        self.push(Op::FillRect { rect, color, radius: 0.0 })
+    }
+
+    /// 圆角填充。`radius` 由调用方给（**不要**在渲染层写死具体数值：
+    /// 半径属于设计系统，应当与颜色一样由上层传入）。
+    pub fn fill_rounded(&mut self, rect: Rect, color: Color, radius: f32) -> &mut Self {
+        self.push(Op::FillRect { rect, color, radius })
     }
 
     pub fn ops(&self) -> &[Op] {
@@ -209,7 +236,7 @@ mod tests {
     fn scene_builder_accumulates_and_clears() {
         let mut s = Scene::new();
         assert!(s.is_empty());
-        s.push(Op::FillRect { rect: Rect::new(0.0, 0.0, 1.0, 1.0), color: Color::rgb(1, 2, 3) });
+        s.push(Op::FillRect { rect: Rect::new(0.0, 0.0, 1.0, 1.0), color: Color::rgb(1, 2, 3), radius: 0.0 });
         s.push(Op::PopClip);
         assert_eq!(s.len(), 2);
         s.clear();

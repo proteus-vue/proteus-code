@@ -25,6 +25,22 @@ pub fn neo_color(tone: Tone) -> neo_ui_kit::gpui::Rgba {
     neo_ui_kit::gpui::rgba(Color::from_tone(&palette::NEO, tone).to_rgba_u32())
 }
 
+/// 自绘组件的圆角半径（逻辑像素）—— **与主题的 `radius` 同一来源**。
+///
+/// # 为什么要在渲染缝之外单独开一个入口
+///
+/// 渲染缝（`neo-ui-render`）是**中立层**，不能读 gpui 的主题（那会让它依赖
+/// 某个后端）。所以半径必须像颜色一样**从上层传入**：颜色走 `neo_color`，
+/// 半径走这里 —— 两者都是"设计系统的值 → 交给缝"的同一条路径。
+///
+/// 取 **6px**，即设计系统的 `Theme::radius`（medium）；`radius_lg = 8` 留给
+/// 弹窗类大面。数值与主题一致，换主题时一起变（不写死在渲染层，见
+/// `neo_ui_render::Op::FillRect` 的说明）。
+///
+/// 不是"随便挑的 6"：Zed / GitHub 这类工具的控件圆角也在这个量级
+/// （4–8px）—— 再大就显得是"卡片"而不是控件，再小则与直角无异。
+pub const RADIUS: f32 = 6.0;
+
 /// 页面底色（近黑）。
 ///
 /// # 为什么必须单开一个入口，而不是让调用方写 `neo_color(Tone::None)`

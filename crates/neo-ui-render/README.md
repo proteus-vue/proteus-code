@@ -42,10 +42,8 @@ RenderBackend（trait）
 use neo_ui_render::{Color, Op, Rect, Scene};
 
 let mut scene = Scene::new();
-scene.push(Op::FillRect {
-    rect: Rect::new(0.0, 0.0, 100.0, 20.0),
-    color: Color::rgb(0x33, 0x33, 0x33),
-});
+// 方角填充用 `fill()`（最常见的情形，不必写 radius 字段）
+scene.fill(Rect::new(0.0, 0.0, 100.0, 20.0), Color::rgb(0x33, 0x33, 0x33));
 // 每个 PushClip 都要有对应的 PopClip —— `clips_balanced()` 可以自检
 assert!(scene.clips_balanced());
 ```
@@ -56,10 +54,8 @@ assert!(scene.clips_balanced());
 use neo_ui_render::{Color, Op, Rect, RenderBackend, Scene, GpuiBackend};
 
 let mut scene = Scene::new();
-scene.push(Op::FillRect {
-    rect: Rect::new(0.0, 0.0, 10.0, 10.0),
-    color: Color::rgb(0xff, 0x00, 0x00),
-});
+// 要圆角时显式给半径（数值由调用方从设计系统取，不在渲染层写死）
+scene.fill_rounded(Rect::new(0.0, 0.0, 10.0, 10.0), Color::rgb(0xff, 0x00, 0x00), 6.0);
 
 let mut backend = GpuiBackend::new();
 let paint = backend.paint(&scene);

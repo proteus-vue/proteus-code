@@ -178,10 +178,9 @@ pub fn diff_backdrop(bands: &[DiffBand], width: f32, line_height: f32) -> Scene 
         let Some(color) = style.color_for(*band) else {
             continue; // 上下文行没有底 —— 不画任何东西（不是画一个透明矩形）
         };
-        scene.push(Op::FillRect {
-            rect: Rect::new(0.0, i as f32 * line_height, width, line_height),
-            color,
-        });
+        // ⚠️ **直角**：底带是整行通铺的面，给它圆角会让相邻行之间出现缝隙，
+        // 一眼看去像"改动的行数不对"（这是真实的风险，不是洁癖）。
+        scene.fill(Rect::new(0.0, i as f32 * line_height, width, line_height), color);
     }
 
     scene.push(Op::PopClip);

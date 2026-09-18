@@ -64,7 +64,7 @@ pub fn change_gutter(marks: &[GutterMark], width: f32, height: f32) -> Scene {
             GutterMark::Del => Some(Color::from_tone(&neo_text::palette::NEO, neo_text::Tone::Error)),
         };
         if let Some(color) = color {
-            scene.push(Op::FillRect { rect: Rect::new(0.0, y, width, h), color });
+            scene.fill(Rect::new(0.0, y, width, h), color);
         }
         // 末格贴着底边（避免浮点累计误差留下缝隙）
         y = if i + 1 == marks.len() { height } else { y + per };

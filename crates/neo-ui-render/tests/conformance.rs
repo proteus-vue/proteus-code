@@ -30,6 +30,9 @@ use neo_ui_render::{
 fn real_world_scenes() -> Vec<(&'static str, Scene)> {
     let input = Color::from_tone(&NEO, Tone::Primary);
     let output = Color::from_tone(&NEO, Tone::Accent);
+    // **真实半径**（设计系统的 `radius` medium = 6px），不是 0 ——
+    // 否则跨后端契约就完全没覆盖"圆角"这条路径（而它是本轮新增的能力）。
+    const R: f32 = 6.0;
     vec![
         (
             "用量条形图（三个组件的真实数据）",
@@ -39,6 +42,7 @@ fn real_world_scenes() -> Vec<(&'static str, Scene)> {
                 40.0,
                 input,
                 output,
+                R,
             ),
         ),
         (
@@ -53,6 +57,7 @@ fn real_world_scenes() -> Vec<(&'static str, Scene)> {
                 6.0,
                 input,
                 output,
+                R,
             ),
         ),
         (
@@ -77,9 +82,90 @@ fn real_world_scenes() -> Vec<(&'static str, Scene)> {
         ("空场景（消费者拿到空列表）", Scene::new()),
         (
             "退化输入（全零 / 零尺寸）",
-            usage_bars(&[UsageBar::new(0, 0)], 0.0, 0.0, input, output),
+            usage_bars(&[UsageBar::new(0, 0)], 0.0, 0.0, input, output, R),
         ),
     ]
+}
+
+/// 契约 0：**圆角必须跨后端一致**（两个后端都要如实带上半径）。
+///
+/// # 为什么这条值得单列
+///
+/// 圆角是本轮给缝新增的能力，而它最容易出的错是"一个后端画圆角、
+/// 另一个画直角"—— 同一份场景在两个后端长得不同，正是这条缝要防的事。
+/// 而且 gpui 与 headless **夹取半径的方式不同**（gpui 内部夹、SVG 不夹），
+/// 所以"场景里给的半径是否被如实传达"必须被断言 ——
+/// 夹取该由产生场景的一方负责（见 `progress.rs` 的说明）。
+#[test]
+fn every_backend_carries_the_corner_radius_through() {
+    let gpui = GpuiBackend::new();
+    let headless = HeadlessBackend::new();
+
+    // 用真实组件的场景（里面确实有圆角：柱顶与进度段）
+    for (name, scene) in real_world_scenes() {
+        if scene.is_empty() {
+            continue;
+        }
+        let g = gpui.paint(&scene);
+        let h = headless.paint(&scene);
+
+        // gpui 侧：把每个填充矩形的半径收集起来
+        let g_radii: Vec<f32> = g.quads.iter().map(|q| q.radius).collect();
+        // headless 侧：同样
+        let h_radii: Vec<f32> = h
+            .cmds
+            .iter()
+            .filter_map(|c| match c {
+                neo_ui_render::HeadlessCmd::Fill { radius, .. } => Some(*radius),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            g_radii, h_radii,
+            "[{name}] 两个后端带出的半径必须逐一相同"
+        );
+    }
+
+    // 且**真的出现过非零半径** —— 否则这条契约是在测"全 0"，毫无意义
+    let has_rounding = real_world_scenes().iter().any(|(_, s)| {
+        !s.is_empty()
+            && gpui
+                .paint(s)
+                .quads
+                .iter()
+                .any(|q| q.radius > 0.0)
+    });
+    assert!(
+        has_rounding,
+        "真实组件的场景里应当出现非零圆角（否则这条契约没有覆盖到圆角路径）"
+    );
+}
+
+/// 契约 0b：**圆角要落到 SVG 的属性上**（headless 的视觉出口）。
+///
+/// 只断言"命令里带了 radius"还不够 —— 导出成 SVG 时忘了写 `rx`，
+/// 画出来仍是直角，而命令层完全看不出来。
+#[test]
+fn the_headless_svg_export_writes_the_radius_attribute() {
+    let headless = HeadlessBackend::new();
+    let mut scene = Scene::new();
+    scene.fill_rounded(
+        neo_ui_render::Rect::new(0.0, 0.0, 40.0, 12.0),
+        neo_ui_render::Color::rgb(0x33, 0x33, 0x33),
+        6.0,
+    );
+    let svg = headless.paint(&scene).to_svg(40.0, 12.0);
+    assert!(
+        svg.contains("rx=\"6\""),
+        "SVG 必须写出圆角（rx）—— 否则导出的图仍是直角：{svg}"
+    );
+
+    // 而直角场景**不该**带 rx（免得给每个矩形都塞一个无意义的 0）
+    let mut square = Scene::new();
+    square.fill(neo_ui_render::Rect::new(0.0, 0.0, 4.0, 4.0), neo_ui_render::Color::rgb(1, 1, 1));
+    let svg2 = headless.paint(&square).to_svg(4.0, 4.0);
+    assert!(!svg2.contains("rx="), "直角不该写 rx：{svg2}");
 }
 
 /// 契约 1：**度量必须逐字一致**。
@@ -199,11 +285,13 @@ fn capability_claims_are_honest_and_observed() {
     scene.push(neo_ui_render::Op::FillRect {
         rect: neo_ui_render::Rect::new(0.0, 0.0, 4.0, 4.0),
         color: neo_ui_render::Color::rgb(1, 1, 1),
+        radius: 0.0,
     });
     scene.push(neo_ui_render::Op::StrokeRect {
         rect: neo_ui_render::Rect::new(0.0, 0.0, 4.0, 4.0),
         color: neo_ui_render::Color::rgb(2, 2, 2),
         width: 1.0,
+        radius: 0.0,
     });
     scene.push(neo_ui_render::Op::FillText {
         text: "文字".into(),
@@ -309,6 +397,7 @@ fn a_backend_that_lies_about_fill_rect_is_caught() {
     scene.push(neo_ui_render::Op::FillRect {
         rect: neo_ui_render::Rect::new(0.0, 0.0, 4.0, 4.0),
         color: neo_ui_render::Color::rgb(1, 1, 1),
+        radius: 0.0,
     });
 
     let liar = LyingBackend;

@@ -323,6 +323,7 @@ impl Storybook {
                         24.0,
                         neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Info),
                         neo_ui_render::Color::from_tone(&neo_text::palette::NEO, Tone::Accent),
+                        neo_ui::RADIUS,
                     );
                     let svg = HeadlessBackend::new().paint(&scene).to_svg(96.0, 24.0);
                     v_flex()
@@ -387,6 +388,7 @@ fn usage_demo_element(bars: Vec<neo_ui_render::UsageBar>) -> neo_ui_kit::gpui::A
             f32::from(bounds.size.height),
             input_color,
             output_color,
+            neo_ui::RADIUS,
         );
         (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
     };
@@ -412,6 +414,7 @@ fn progress_demo_element(segs: Vec<neo_ui_render::ProgressSegment>) -> neo_ui_ki
             f32::from(bounds.size.height),
             track,
             fill,
+            neo_ui::RADIUS,
         );
         (bounds, neo_ui_render::GpuiBackend::new().paint(&scene))
     };

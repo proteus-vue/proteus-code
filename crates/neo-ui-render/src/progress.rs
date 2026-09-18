@@ -72,6 +72,8 @@ pub fn segmented_progress(
     height: f32,
     track_color: Color,
     fill_color: Color,
+    // 段的圆角半径（同样由调用方从设计系统取）。
+    radius: f32,
 ) -> Scene {
     let mut scene = Scene::new();
     if segments.is_empty() || width <= 0.0 || height <= 0.0 {
@@ -94,10 +96,12 @@ pub fn segmented_progress(
         let x = i as f32 * (seg_w + gap);
 
         // 1) 先画整段的底色（表示"这一段存在，但还没走完"）
-        scene.push(Op::FillRect {
-            rect: Rect::new(x, 0.0, seg_w, height),
-            color: track_color,
-        });
+        //
+        // 圆角夹到"半宽/半高"之内：超过之后 gpui 会自己夹取，但 headless
+        // 的 SVG 不夹 —— 两个后端会给不同结果。**在这里夹一次**，
+        // 让"中立场景"本身就只有一种解释（跨后端一致性由此保证）。
+        let r = radius.min(seg_w / 2.0).min(height / 2.0);
+        scene.fill_rounded(Rect::new(x, 0.0, seg_w, height), track_color, r);
 
         // 2) 再按比例覆盖已完成部分
         if seg.total == 0 {
@@ -106,17 +110,17 @@ pub fn segmented_progress(
         }
         if seg.is_complete() {
             // 完成时画满整段，不留空隙（第 2 条）
-            scene.push(Op::FillRect {
-                rect: Rect::new(x, 0.0, seg_w, height),
-                color: fill_color,
-            });
+            scene.fill_rounded(Rect::new(x, 0.0, seg_w, height), fill_color, r);
         } else {
             let w = seg_w * seg.fraction();
             if w >= 1.0 {
-                scene.push(Op::FillRect {
-                    rect: Rect::new(x, 0.0, w, height),
-                    color: fill_color,
-                });
+                // 已走部分：右端也要圆角（否则"走了一半"的截断处是硬边，
+                // 看起来像被切掉而不是"进行中"）。半径按**实际宽度**再夹一次。
+                scene.fill_rounded(
+                    Rect::new(x, 0.0, w, height),
+                    fill_color,
+                    r.min(w / 2.0),
+                );
             }
             // 比例不足 1px 就不画那一小条：它会退化成"几乎看不见"，
             // 而底色已经表达了"未完成"。
@@ -139,7 +143,7 @@ mod tests {
         s.ops()
             .iter()
             .filter_map(|o| match o {
-                Op::FillRect { rect, color } => Some((*rect, *color)),
+                Op::FillRect { rect, color, .. } => Some((*rect, *color)),
                 _ => None,
             })
             .collect()
@@ -147,7 +151,7 @@ mod tests {
 
     #[test]
     fn empty_input_yields_empty_scene() {
-        let s = segmented_progress(&[], 100.0, 8.0, c(1), c(2));
+        let s = segmented_progress(&[], 100.0, 8.0, c(1), c(2), 0.0);
         assert!(s.ops().is_empty());
         assert!(s.clips_balanced());
     }
@@ -155,7 +159,7 @@ mod tests {
     #[test]
     fn zero_size_yields_empty_scene() {
         for (w, h) in [(0.0, 8.0), (100.0, 0.0), (-5.0, 8.0)] {
-            let s = segmented_progress(&[ProgressSegment::new(1, 2)], w, h, c(1), c(2));
+            let s = segmented_progress(&[ProgressSegment::new(1, 2)], w, h, c(1), c(2), 0.0);
             assert!(s.ops().is_empty(), "尺寸 {w}x{h} 应返回空场景");
         }
     }
@@ -164,7 +168,7 @@ mod tests {
     /// 画一段 1px 会让人以为已经动过了。
     #[test]
     fn a_segment_with_no_progress_draws_only_the_track() {
-        let s = segmented_progress(&[ProgressSegment::new(0, 3)], 100.0, 8.0, c(1), c(2));
+        let s = segmented_progress(&[ProgressSegment::new(0, 3)], 100.0, 8.0, c(1), c(2), 0.0);
         let r = rects(&s);
         assert_eq!(r.len(), 1, "只应有底色");
         assert_eq!(r[0].1, c(1), "是底色而不是填充色");
@@ -174,7 +178,7 @@ mod tests {
     /// 那一点点空隙会让人怀疑"是不是还差一步"。
     #[test]
     fn a_complete_segment_fills_its_whole_width() {
-        let s = segmented_progress(&[ProgressSegment::new(3, 3)], 100.0, 8.0, c(1), c(2));
+        let s = segmented_progress(&[ProgressSegment::new(3, 3)], 100.0, 8.0, c(1), c(2), 0.0);
         let r = rects(&s);
         let fill = r.iter().find(|(_, col)| *col == c(2)).expect("应有填充");
         assert!((fill.0.size.w - 100.0).abs() < 0.01, "完成段应画满，实际 {:?}", fill.0);
@@ -183,7 +187,7 @@ mod tests {
     /// 部分完成：填充宽度 = 段宽 × 比例。
     #[test]
     fn partial_progress_is_proportional() {
-        let s = segmented_progress(&[ProgressSegment::new(1, 4)], 100.0, 8.0, c(1), c(2));
+        let s = segmented_progress(&[ProgressSegment::new(1, 4)], 100.0, 8.0, c(1), c(2), 0.0);
         let r = rects(&s);
         let fill = r.iter().find(|(_, col)| *col == c(2)).expect("应有填充");
         assert!((fill.0.size.w - 25.0).abs() < 0.01, "1/4 应占 25%，实际 {:?}", fill.0);
@@ -192,7 +196,7 @@ mod tests {
     /// 每段先画底色再覆盖填充 —— 顺序反了填充会被底色盖住。
     #[test]
     fn track_is_drawn_before_fill() {
-        let s = segmented_progress(&[ProgressSegment::new(1, 2)], 100.0, 8.0, c(1), c(2));
+        let s = segmented_progress(&[ProgressSegment::new(1, 2)], 100.0, 8.0, c(1), c(2), 0.0);
         let r = rects(&s);
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].1, c(1), "底色先画");
@@ -206,7 +210,7 @@ mod tests {
         let seg = ProgressSegment::new(0, 0);
         assert!(!seg.is_complete());
         assert_eq!(seg.fraction(), 0.0);
-        let s = segmented_progress(&[seg], 100.0, 8.0, c(1), c(2));
+        let s = segmented_progress(&[seg], 100.0, 8.0, c(1), c(2), 0.0);
         let r = rects(&s);
         assert_eq!(r.len(), 1, "只画底色");
         assert_eq!(r[0].1, c(1));
@@ -218,7 +222,7 @@ mod tests {
         let seg = ProgressSegment::new(99, 3);
         assert!(seg.is_complete());
         assert_eq!(seg.fraction(), 1.0);
-        let s = segmented_progress(&[seg], 100.0, 8.0, c(1), c(2));
+        let s = segmented_progress(&[seg], 100.0, 8.0, c(1), c(2), 0.0);
         let fill = rects(&s).into_iter().find(|(_, col)| *col == c(2)).unwrap();
         assert!(fill.0.size.w <= 100.01);
     }
@@ -231,7 +235,7 @@ mod tests {
             ProgressSegment::new(0, 2),
             ProgressSegment::new(1, 2),
         ];
-        let s = segmented_progress(&segs, 100.0, 8.0, c(1), c(2));
+        let s = segmented_progress(&segs, 100.0, 8.0, c(1), c(2), 0.0);
         let r = rects(&s);
         // 每段一条底色，共 3 条；填充：第 1、3 段各 1 条
         let tracks: Vec<f32> = r.iter().filter(|(_, col)| *col == c(1)).map(|(x, _)| x.origin.x).collect();
@@ -244,7 +248,7 @@ mod tests {
     #[test]
     fn narrow_width_gives_every_segment_at_least_one_pixel() {
         let segs: Vec<ProgressSegment> = (0..10).map(|_| ProgressSegment::new(1, 2)).collect();
-        let s = segmented_progress(&segs, 12.0, 8.0, c(1), c(2));
+        let s = segmented_progress(&segs, 12.0, 8.0, c(1), c(2), 0.0);
         let tracks: Vec<Rect> = rects(&s)
             .into_iter()
             .filter(|(_, col)| *col == c(1))
@@ -260,7 +264,7 @@ mod tests {
     #[test]
     fn never_draws_outside_the_given_width() {
         let segs: Vec<ProgressSegment> = (0..50).map(|_| ProgressSegment::new(1, 1)).collect();
-        let s = segmented_progress(&segs, 20.0, 8.0, c(1), c(2));
+        let s = segmented_progress(&segs, 20.0, 8.0, c(1), c(2), 0.0);
         for (rect, _) in rects(&s) {
             assert!(
                 rect.origin.x + rect.size.w <= 20.01,
@@ -273,13 +277,13 @@ mod tests {
     #[test]
     fn clips_are_always_balanced() {
         let segs = vec![ProgressSegment::new(1, 3), ProgressSegment::new(0, 0)];
-        let s = segmented_progress(&segs, 50.0, 6.0, c(1), c(2));
+        let s = segmented_progress(&segs, 50.0, 6.0, c(1), c(2), 0.0);
         assert!(s.clips_balanced());
     }
 
     #[test]
     fn degenerate_inputs_do_not_panic() {
-        let _ = segmented_progress(&[ProgressSegment::new(u32::MAX, u32::MAX)], 1.0, 1.0, c(1), c(2));
-        let _ = segmented_progress(&[ProgressSegment::default()], 1.0, 1.0, c(1), c(2));
+        let _ = segmented_progress(&[ProgressSegment::new(u32::MAX, u32::MAX)], 1.0, 1.0, c(1), c(2), 0.0);
+        let _ = segmented_progress(&[ProgressSegment::default()], 1.0, 1.0, c(1), c(2), 0.0);
     }
 }

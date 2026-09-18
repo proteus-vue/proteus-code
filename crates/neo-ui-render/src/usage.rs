@@ -77,6 +77,9 @@ pub fn usage_bars(
     height: f32,
     input_color: Color,
     output_color: Color,
+    // 柱顶圆角半径。由调用方从设计系统取（与颜色同一来源）——
+    // 不在渲染层写死：换主题时圆角应与颜色一起变。
+    radius: f32,
 ) -> Scene {
     let mut scene = Scene::new();
     if bars.is_empty() || width <= 0.0 || height <= 0.0 {
@@ -125,16 +128,22 @@ pub fn usage_bars(
         // 这里选 **input 在下、output 在上**，因为读图时"底部是输入"更符合
         // "输入决定输出"的直觉；且两根柱子对比时底部对齐的是同类量。
         if in_h > 0.0 {
-            scene.push(Op::FillRect {
-                rect: Rect::new(x, height - in_h, bar_w, in_h),
-                color: input_color,
-            });
+            // 柱**顶**圆角：让两根堆叠的柱子看起来是一根有圆头的条，
+            // 而不是两块硬边色块（这是"图表"与"色块"在观感上的分界）。
+            // 半径取 `min(bar_w/2, radius)` —— 超过半宽 gpui 会夹取，
+            // 但我们自己先夹能保证各后端结果一致（headless 的 SVG 不夹）。
+            scene.fill_rounded(
+                Rect::new(x, height - in_h, bar_w, in_h),
+                input_color,
+                radius.min(bar_w / 2.0),
+            );
         }
         if out_h > 0.0 {
-            scene.push(Op::FillRect {
-                rect: Rect::new(x, height - in_h - out_h, bar_w, out_h),
-                color: output_color,
-            });
+            scene.fill_rounded(
+                Rect::new(x, height - in_h - out_h, bar_w, out_h),
+                output_color,
+                radius.min(bar_w / 2.0),
+            );
         }
     }
 
@@ -154,7 +163,7 @@ mod tests {
         s.ops()
             .iter()
             .filter_map(|o| match o {
-                Op::FillRect { rect, color } => Some((*rect, *color)),
+                Op::FillRect { rect, color, .. } => Some((*rect, *color)),
                 _ => None,
             })
             .collect()
@@ -162,7 +171,7 @@ mod tests {
 
     #[test]
     fn empty_input_yields_empty_scene() {
-        let s = usage_bars(&[], 100.0, 40.0, c(1), c(2));
+        let s = usage_bars(&[], 100.0, 40.0, c(1), c(2), 0.0);
         assert!(s.ops().is_empty());
         assert!(s.clips_balanced());
     }
@@ -171,7 +180,7 @@ mod tests {
     fn all_zero_yields_nothing_not_flat_bars() {
         // 全零时画"齐平的空柱子"会让人以为有数据 —— 宁可不画
         let bars = vec![UsageBar::new(0, 0), UsageBar::new(0, 0)];
-        let s = usage_bars(&bars, 100.0, 40.0, c(1), c(2));
+        let s = usage_bars(&bars, 100.0, 40.0, c(1), c(2), 0.0);
         assert!(rects(&s).is_empty());
     }
 
@@ -183,7 +192,7 @@ mod tests {
     #[test]
     fn bar_heights_are_proportional() {
         let bars = vec![UsageBar::new(50, 50), UsageBar::new(25, 25)];
-        let s = usage_bars(&bars, 100.0, 100.0, c(1), c(1));
+        let s = usage_bars(&bars, 100.0, 100.0, c(1), c(1), 0.0);
         let r = rects(&s);
         // 按横坐标归组（同一根柱子的各段 x 相同）
         let mut by_x: std::collections::BTreeMap<u32, f32> = std::collections::BTreeMap::new();
@@ -201,7 +210,7 @@ mod tests {
     #[test]
     fn a_single_bar_does_not_span_the_whole_width() {
         let bars = vec![UsageBar::new(10, 10)];
-        let s = usage_bars(&bars, 200.0, 40.0, c(1), c(2));
+        let s = usage_bars(&bars, 200.0, 40.0, c(1), c(2), 0.0);
         for (rect, _) in rects(&s) {
             assert!(
                 rect.size.w <= MAX_BAR_W + 0.01,
@@ -216,7 +225,7 @@ mod tests {
     #[test]
     fn tiny_values_still_get_a_visible_bar() {
         let bars = vec![UsageBar::new(1_000_000, 0), UsageBar::new(1, 0)];
-        let s = usage_bars(&bars, 100.0, 100.0, c(1), c(2));
+        let s = usage_bars(&bars, 100.0, 100.0, c(1), c(2), 0.0);
         let r = rects(&s);
         assert_eq!(r.len(), 2, "两根柱子都要画出来");
         let tiny = r.iter().map(|(x, _)| x.size.h).fold(f32::MAX, f32::min);
@@ -228,7 +237,7 @@ mod tests {
     #[test]
     fn bars_grow_from_the_bottom() {
         let bars = vec![UsageBar::new(10, 0)];
-        let s = usage_bars(&bars, 100.0, 40.0, c(1), c(2));
+        let s = usage_bars(&bars, 100.0, 40.0, c(1), c(2), 0.0);
         let r = rects(&s);
         assert_eq!(r.len(), 1);
         let (rect, _) = r[0];
@@ -242,7 +251,7 @@ mod tests {
     #[test]
     fn input_and_output_are_drawn_as_two_segments() {
         let bars = vec![UsageBar::new(30, 70)];
-        let s = usage_bars(&bars, 100.0, 100.0, c(1), c(2));
+        let s = usage_bars(&bars, 100.0, 100.0, c(1), c(2), 0.0);
         let r = rects(&s);
         assert_eq!(r.len(), 2, "两段：输入 + 输出");
         let input_seg = r.iter().find(|(_, col)| *col == c(1)).expect("应有输入段");
@@ -257,7 +266,7 @@ mod tests {
     #[test]
     fn a_zero_component_draws_no_segment() {
         let bars = vec![UsageBar::new(0, 50)];
-        let s = usage_bars(&bars, 100.0, 100.0, c(1), c(2));
+        let s = usage_bars(&bars, 100.0, 100.0, c(1), c(2), 0.0);
         let r = rects(&s);
         assert_eq!(r.len(), 1, "只有输出段");
         assert_eq!(r[0].1, c(2));
@@ -269,7 +278,7 @@ mod tests {
     fn narrow_width_keeps_the_most_recent_bars() {
         let bars: Vec<UsageBar> = (1..=20).map(|i| UsageBar::new(i * 10, 0)).collect();
         // 宽度只够约 4 根（每根 1px + 1px 间隙）
-        let s = usage_bars(&bars, 8.0, 40.0, c(1), c(2));
+        let s = usage_bars(&bars, 8.0, 40.0, c(1), c(2), 0.0);
         let r = rects(&s);
         let count = r.iter().filter(|(_, col)| *col == c(1)).count();
         assert!(count <= 4, "窄区域不该画出 20 根，实际 {count}");
@@ -283,7 +292,7 @@ mod tests {
     #[test]
     fn every_bar_has_at_least_one_pixel_of_width() {
         let bars: Vec<UsageBar> = (1..=10).map(|_| UsageBar::new(10, 0)).collect();
-        let s = usage_bars(&bars, 10.0, 40.0, c(1), c(2));
+        let s = usage_bars(&bars, 10.0, 40.0, c(1), c(2), 0.0);
         for (rect, _) in rects(&s) {
             assert!(rect.size.w >= 1.0, "柱子宽度不该小于 1px：{:?}", rect);
         }
@@ -296,7 +305,7 @@ mod tests {
         // 前面有个巨大的值，后面都是小值；可见的是小值那部分
         let mut bars = vec![UsageBar::new(1_000_000, 0)];
         bars.extend((1..=20).map(|_| UsageBar::new(1000, 0)));
-        let s = usage_bars(&bars, 8.0, 100.0, c(1), c(2));
+        let s = usage_bars(&bars, 8.0, 100.0, c(1), c(2), 0.0);
         // 可见柱子的高度应远小于满高（因为基准是那个百万级的值）
         for (rect, _) in rects(&s) {
             assert!(
@@ -310,7 +319,7 @@ mod tests {
     #[test]
     fn zero_or_negative_extent_is_handled() {
         for (w, h) in [(0.0, 10.0), (10.0, 0.0), (-1.0, 10.0)] {
-            let s = usage_bars(&[UsageBar::new(1, 1)], w, h, c(1), c(2));
+            let s = usage_bars(&[UsageBar::new(1, 1)], w, h, c(1), c(2), 0.0);
             assert!(s.ops().is_empty(), "尺寸非法时应返回空场景");
         }
     }
@@ -319,15 +328,15 @@ mod tests {
     #[test]
     fn clips_are_always_balanced() {
         let bars = vec![UsageBar::new(10, 20), UsageBar::new(0, 0), UsageBar::new(5, 5)];
-        let s = usage_bars(&bars, 50.0, 30.0, c(1), c(2));
+        let s = usage_bars(&bars, 50.0, 30.0, c(1), c(2), 0.0);
         assert!(s.clips_balanced());
     }
 
     /// 单根、极窄等边界组合不该 panic。
     #[test]
     fn degenerate_inputs_do_not_panic() {
-        let _ = usage_bars(&[UsageBar::new(1, 0)], 1.0, 1.0, c(1), c(2));
-        let _ = usage_bars(&[UsageBar::new(u64::MAX, u64::MAX)], 10.0, 10.0, c(1), c(2));
-        let _ = usage_bars(&[UsageBar::default()], 10.0, 10.0, c(1), c(2));
+        let _ = usage_bars(&[UsageBar::new(1, 0)], 1.0, 1.0, c(1), c(2), 0.0);
+        let _ = usage_bars(&[UsageBar::new(u64::MAX, u64::MAX)], 10.0, 10.0, c(1), c(2), 0.0);
+        let _ = usage_bars(&[UsageBar::default()], 10.0, 10.0, c(1), c(2), 0.0);
     }
 }
