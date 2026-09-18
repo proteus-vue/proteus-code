@@ -5456,6 +5456,7 @@ version = "0.1.0"
 dependencies = [
  "ignore",
  "neo-protocol",
+ "notify",
 ]
 
 [[package]]

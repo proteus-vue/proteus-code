@@ -393,6 +393,29 @@ pub struct NeoView {
     /// 与 `files_selected` 分开：选中是"高亮哪一行"，预览是"看哪个文件的内容" ——
     /// 点一下文件两件事同时发生，但状态不该混成一个（分开才能做"只高亮不预览"）。
     file_preview: Option<(std::path::PathBuf, neo_platform::file_index::Preview)>,
+    /// 唤醒信号（文件监听在后台发现变化时用它主动唤醒本视图）。
+    wake: neo_driver::WakeSignal,
+    /// 工作区文件监听器（D12：让树在磁盘变化时自己更新）。
+    ///
+    /// `None` = 尚未启动或启动失败（**失败不致命**：手动"刷新"仍然可用，
+    /// 只是少了自动更新）。启动在**后台线程**里做 —— 见 `ensure_watch`。
+    workspace_watcher: Option<neo_platform::file_watch::WorkspaceWatcher>,
+    /// 后台线程建好监听器后，经它送回视图（**非阻塞安装**）。
+    ///
+    /// # 为什么需要这条通道
+    ///
+    /// `workspace_watcher` 必须在**视图**里（渲染时读 `take_pending`），
+    /// 而它的构建（6 秒）必须在**后台线程**里。两者只能通过一条通道交接：
+    /// 线程建好就送回来，视图每帧 `try_recv` 一次，就绪即安装。
+    ///
+    /// 这样"构建耗时长"与"句柄归视图"两个要求同时满足，且**全程不阻塞**。
+    watch_rx: Option<std::sync::mpsc::Receiver<neo_platform::file_watch::WorkspaceWatcher>>,
+    /// 启动监听是否**已经试过**（成功或失败都算）。
+    ///
+    /// 单独记一个布尔而不是看 `workspace_watcher.is_none()`：失败时那个字段
+    /// 会一直是 `None`，于是每帧都会**重新发起一次 6 秒的启动**（实测
+    /// FSEvents 启动就是这个量级）—— 那会是灾难性的。
+    watch_attempted: bool,
     /// 文件树里**已展开的目录**（按**路径**记，不按下标）。
     ///
     /// ⚠️ 键用路径而非行号：文件列表会被重扫（点"刷新"，将来接文件监听），
@@ -423,6 +446,9 @@ impl NeoView {
         mode: ExecMode,
         model: String,
         workspace: std::path::PathBuf,
+        // 唤醒信号：文件监听在后台线程里收到变化时用它主动唤醒本视图
+        //（响应式宿主不出帧就不重绘，所以"有新变化"必须主动告知 —— 见 `ensure_watch`）。
+        wake: neo_driver::WakeSignal,
     ) -> Self {
         Self {
             handle,
@@ -481,6 +507,10 @@ impl NeoView {
             file_index: None,
             file_preview: None,
             files_scroll: neo_ui_kit::gpui::ScrollHandle::new(),
+            wake,
+            workspace_watcher: None,
+            watch_rx: None,
+            watch_attempted: false,
             files_expanded: std::collections::BTreeSet::new(),
             files_selected: None,
             auto_prompt: std::env::var("NEO_GUI_PROMPT")
@@ -607,6 +637,82 @@ impl NeoView {
             return;
         }
         self.file_index = Some(neo_platform::file_index::scan_workspace(&self.workspace));
+        self.ensure_watch();
+    }
+
+    /// 启动工作区监听（**在后台线程里**），变化时唤醒本视图。
+    ///
+    /// # 为什么必须放后台
+    ///
+    /// 实测 `notify` 的 FSEvents 后端 `watch()` 要 **6.2 秒**（它要起一个
+    /// CFRunLoop 线程并注册事件流，见 `neo_platform::file_watch` 的说明）。
+    /// 在渲染路径上直接调它 = **窗口卡死 6 秒** —— 比"文件树不自动更新"糟得多。
+    ///
+    /// # 为什么用回调 + `WakeSignal` 而不是轮询
+    ///
+    /// 响应式 GUI 不出帧就不重绘，所以"有新变化"必须主动告知它。
+    /// `watch_with` 的回调**只在合并后调一次**（风暴里后续事件被丢弃），
+    /// 直接转成 `WakeSignal::notify()`（它自己也做一次合并）——
+    /// 全程无轮询、无 sleep，与效率规范一致。
+    ///
+    /// # 失败不致命
+    ///
+    /// 启动失败（如 Linux 的 inotify watch 数超限）只是**少了自动更新**，
+    /// 手动"刷新"仍在 —— 所以这里不报错、不弹窗，只在诊断环境变量下打印。
+    fn ensure_watch(&mut self) {
+        if self.watch_attempted {
+            return;
+        }
+        self.watch_attempted = true;
+        let root = self.workspace.clone();
+        let wake = self.wake.clone();
+        let report = std::env::var("NEO_GUI_WATCH").is_ok();
+        // 建好就送回来的通道（容量 1：只会送一次）
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.watch_rx = Some(rx);
+        std::thread::Builder::new()
+            .name("neo-file-watch".into())
+            .spawn(move || {
+                let ready = neo_platform::file_watch::WorkspaceWatcher::watch_with(
+                    &root,
+                    Some(Box::new({
+                        let wake = wake.clone();
+                        move || wake.notify()
+                    })),
+                );
+                match ready {
+                    Ok(w) => {
+                        if report {
+                            eprintln!("[neo] 文件监听已启动：{}", root.display());
+                        }
+                        // 交给视图持有（线程到此结束 —— 句柄不再需要这里）
+                        let _ = tx.send(w);
+                        // 唤醒一次，让视图**有机会安装**它（否则若界面静止，
+                        // 没人渲染那一帧，句柄就一直没被取走）。
+                        wake.notify();
+                    }
+                    Err(e) => {
+                        // 失败不致命（手动刷新仍可用），故只在显式要诊断时打印。
+                        if report {
+                            eprintln!("[neo] 文件监听启动失败（手动刷新仍可用）：{e}");
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
+
+    /// 安装**已就绪**的监听器（非阻塞；未就绪就什么都不做）。
+    ///
+    /// 每帧调一次：后台线程建好后（约 6 秒）这里就会取到它。
+    fn install_ready_watch(&mut self) {
+        let Some(rx) = &self.watch_rx else {
+            return;
+        };
+        if let Ok(w) = rx.try_recv() {
+            self.workspace_watcher = Some(w);
+            self.watch_rx = None; // 只可能有一次
+        }
     }
 
     /// 显式重扫（用户在面板上点"刷新"时用）。
@@ -2720,6 +2826,48 @@ impl Render for NeoView {
         }
 
 
+        // 1) 文件监听：磁盘有变化 → 重扫索引
+        //
+        // ⚠️ **"有事件"不等于"索引变了"**：`target/` 里的构建产物、编辑器
+        // 的临时文件都会触发事件，但它们不进索引（扫描时已被 .gitignore 排除）。
+        // 所以这里**重扫 + 比较**，只在索引真的变了时才更新与重绘 ——
+        // 噪声过滤的责任在比较这一步（而不是给事件再实现一遍忽略规则，
+        // 那会造成"两套规则"）。见 `neo_platform::file_watch` 的模块说明。
+        if self.files_open {
+            // 先安装（后台线程可能刚刚建好监听器）
+            self.install_ready_watch();
+            if let Some(w) = &self.workspace_watcher {
+                if w.take_pending() {
+                    let fresh = neo_platform::file_index::scan_workspace(&self.workspace);
+                    if let Some(old_idx) = &self.file_index {
+                        if neo_platform::file_watch::index_meaningfully_changed(old_idx, &fresh) {
+                            self.file_index = Some(fresh);
+                            // 已展开但已不存在的目录要清掉（否则集合越积越多）
+                            if let Some(idx) = &self.file_index {
+                                let alive = neo_ui_behavior::all_dirs(&idx.files);
+                                self.files_expanded.retain(|d| alive.contains(d));
+                            }
+                            // 选中的文件若被删了，清掉选中（避免预览一个不存在的文件）
+                            if let Some(sel) = &self.files_selected {
+                                let exists = self
+                                    .file_index
+                                    .as_ref()
+                                    .map(|i| i.files.contains(sel))
+                                    .unwrap_or(false);
+                                if !exists {
+                                    self.files_selected = None;
+                                }
+                            }
+                            cx.notify();
+                        }
+                    } else {
+                        self.file_index = Some(fresh);
+                        cx.notify();
+                    }
+                }
+            }
+        }
+
         // 1) 收事件（非阻塞）
         // 冒烟钩子：首帧把 NEO_GUI_PROMPT 当作一次提交（只做一次）
         if let Some(text) = self.auto_prompt.take() {
@@ -3160,6 +3308,8 @@ pub fn run(
             // 这是响应式宿主的**唯一**重绘触发点（gpui 不出帧就不画）。
             // 用 `cx.spawn` 挂一个后台等待：信号驱动，不轮询、不空转 ——
             // `WakeSignal` 的通道是 async 的，`recv().await` 会真正挂起。
+            // 给视图留一份（文件监听要用它主动唤醒）；闭包本身也要一份。
+            let wake_for_view = wake.clone();
             {
                 let wake = wake.clone();
                 let holder = view_holder.clone();
@@ -3173,6 +3323,24 @@ pub fn run(
                         if let Some(view) = view {
                             async_cx.update(|cx| cx.notify(view.entity_id()));
                         }
+                        // ⚠️ **必须再 refresh 一次**（实测抓到的真缺陷）。
+                        //
+                        // `cx.notify(entity_id)` 只是把实体**标脏**，它
+                        // **唤不醒已经停下的平台渲染循环** —— gpui 自己在
+                        // `AsyncApp::refresh` 的注释里写明：
+                        //   "A direct call would leave the refresh effect queued,
+                        //    which cannot wake a platform render loop that has
+                        //    already parked."
+                        //
+                        // 这个缺陷**在轮次运行时不显现**：那时 `pump` 发现变化会
+                        // 自己 `notify`，渲染循环一直醒着，于是"notify 有效"是个
+                        // 假象。直到我做文件监听才发现 —— 监听的回调发生在**空闲**
+                        // 时刻（用户在等文件变化），那正是渲染循环已经停下的场景，
+                        // 于是标脏之后**永远等不到那一帧**。
+                        //
+                        // 修法：先标脏（让视图重画），再 `refresh`（唤醒循环）。
+                        // 两步都需要，缺一个都不行。
+                        async_cx.refresh();
                     }
                 })
                 .detach();
@@ -3185,7 +3353,7 @@ pub fn run(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .take();
-                NeoView::new(handle.clone(), sess, (*models_for_view).clone(), status, mode, model, workspace.clone())
+                NeoView::new(handle.clone(), sess, (*models_for_view).clone(), status, mode, model, workspace.clone(), wake_for_view.clone())
             });
             *view_holder.lock().unwrap_or_else(|e| e.into_inner()) = Some(view.clone());
 
