@@ -42,44 +42,24 @@ hr; echo "#  NEO 门禁"; echo "#  仓库: $ROOT"; hr
 # 两种都不预检的话，第 2 段「零 warning」会因为输出里没有 warning 而报
 # 「✅ 无 warning」—— 那是假通过（只有编译真的跑起来，warning 计数才有意义）。
 #
-# 版本从 rust-toolchain.toml **读**，不在这里抄一遍：抄了就会漂移。
-PINNED=""
-if [ -f "$ROOT/rust-toolchain.toml" ]; then
-  PINNED="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-    "$ROOT/rust-toolchain.toml" | head -1)"
-fi
-
-# rustup 的 shim 会按 rust-toolchain.toml 自动选版本，所以只要它在，优先用它。
-if [ -x "$HOME/.cargo/bin/cargo" ] && [ "$(command -v cargo 2>/dev/null)" != "$HOME/.cargo/bin/cargo" ]; then
-  echo "  ℹ️  当前 PATH 先命中的是 $(command -v cargo)，已优先改用 rustup shim：\$HOME/.cargo/bin/cargo"
-  PATH="$HOME/.cargo/bin:$PATH"; export PATH
-fi
-
+# 判定逻辑**不在本文件**：它被别的脚本共用（make-app.sh / 将来的打包脚本），
+# 抄一份必然漂移，故抽到 lib 里。库文件用的是"失败即返回非零 + stderr 说明"，
+# 门禁这边需要一个布尔量，故包一层。
+. "$ROOT/scripts/lib-rust-toolchain.sh"
 CARGO_OK=0
-if command -v cargo >/dev/null 2>&1; then
-  if ( cd "$ROOT" && cargo --version ) >/tmp/neo-cargo-ver.log 2>&1; then
-    CARGO_OK=1
-    # 只认 `cargo X.Y.Z` 那一行：首次使用某 toolchain 时 rustup 会先打印
-    # 若干行 "info: syncing channel updates..."，直接取首行会拿到 "syncing"。
-    have="$(grep -m1 '^cargo ' /tmp/neo-cargo-ver.log | awk '{print $2}')"
-    case "$PINNED" in
-      [0-9]*)
-        case "$have" in
-          "$PINNED"*) echo "  ✅ 工具链：cargo ${have}（与 rust-toolchain.toml 一致）" ;;
-          *)
-            echo "  ❌ cargo 版本不匹配：当前 ${have}，本仓钉的是 ${PINNED}（见 rust-toolchain.toml）"
-            echo "     —— Rust 门禁整体判失败（是工具链选错，非代码问题）。"
-            echo "     修法：让 PATH 先命中 rustup 的 \$HOME/.cargo/bin；未装 rustup 则先装它。"
-            echo "     用旧 cargo 的典型症状是下游报「feature edition2024 is required」，看着像编译错误。"
-            CARGO_OK=0
-            ;;
-        esac ;;
-      *) echo "  ℹ️  钉版通道不是具体版本号（${PINNED:-未读到}），跳过版本核对" ;;
-    esac
-  else
-    echo "  ⚠️  cargo 无法执行 —— Rust 门禁整体判失败（是工具链/环境问题，非代码问题）："
-    head -6 /tmp/neo-cargo-ver.log | sed 's/^/     /'
-  fi
+if command -v cargo >/dev/null 2>&1 && [ "$(command -v cargo)" != "$HOME/.cargo/bin/cargo" ]; then
+  # 只在"确实换过"时提示（库函数内部已把 PATH 优先级调整好）
+  echo "  ℹ️  当前 PATH 先命中的是 $(command -v cargo)，已优先改用 rustup shim：\$HOME/.cargo/bin/cargo"
+fi
+if ensure_pinned_cargo; then
+  CARGO_OK=1
+  # 库函数只报错不报成功（非门禁场景不需要那行输出），这里补一句让人安心。
+  VER="$(cargo --version 2>/dev/null | grep -m1 '^cargo ' | awk '{print $2}')"
+  echo "  ✅ 工具链：cargo ${VER:-未知}（与 rust-toolchain.toml 一致）"
+else
+  # 库函数已把原因与修法打到 stderr，这里补一句门禁口径。
+  echo "  ⚠️  cargo 未通过预检 —— Rust 门禁整体判失败（是工具链/环境问题，非代码问题）"
+  CARGO_OK=0
 fi
 
 # ── 1. Rust 测试（内核 conformance 是主门禁）────────────────────────────

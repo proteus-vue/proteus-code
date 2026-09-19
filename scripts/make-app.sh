@@ -29,6 +29,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# 选对工具链：PATH 上若是 Homebrew 的旧 cargo，会报 "feature edition2024 is
+# required" —— 看着像编译错误，实为工具链选错（详见该库文件说明）。
+. "$ROOT/scripts/lib-rust-toolchain.sh"
+ensure_pinned_cargo || exit 1
+
 PROFILE="debug"
 FEATURES=""
 APP_DIR="${NEO_APP_DIR:-dist}"
