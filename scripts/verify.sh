@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # NEO 全套门禁入口。
 #
-# 九部分：
+# 十一部分：
 #   0. 预检：cargo 可执行 **且是钉版的那把**（解析失败 / 版本选错都会让后续门禁失去意义）
 #   1. Rust 工程门禁：cargo test（含内核 conformance、内存有界性、SPI conformance）
 #   2. 架构与协议守卫：docs/neo-plan/05-验证/ 的 Python 检查（依赖方向、协议确定性、
 #      会话格式、配置层叠、模式矩阵、SPI 合规、UI 分层、可提取性、许可证）
 #   3. 工具链卫生：零 warning（warning 是未来错误的温床）
 #   4. 执行效率规范：固定盲等 / 重复拉取 / 无退出轮询（ai-efficiency-rules）
+#   4.3 文档站：cargo doc 零 warning（Phase 3）
 #   4.4 无障碍守卫：自绘可点元素的 role / aria_label / Tab 顺序
 #   4.5 性能预算：release 二进制体积（快照式检查；全部三项见 scripts/measure-perf.sh）
 #   5. shell 卫生：变量后紧跟非 ASCII（bash 3.2 会把中文标点吃进变量名）
@@ -176,6 +177,57 @@ if [ -f "$AUDIT" ]; then
   fi
 else
   echo "  [SKIP] 未找到 ${AUDIT}（skill 未安装？见 docs/ai-efficiency-rules/）"
+fi
+
+# ── 4.3 文档站：`cargo doc` 零 warning（Phase 3 要求"文档站"）─────────────
+#
+# 为什么"doc 零 warning"值得进门禁：
+#
+#   1. 它是**文档站的前置** —— 有 broken link / 未闭合标签时，生成的站点里
+#      那块就是坏的，而"文档站能建起来"不等于"站点里没有坏链接"；
+#   2. 它**极易长回来**：新增一行 `[`foo`]` 指向私有条目就会产生一条，
+#      而普通 `cargo test` 完全不会报（`cargo doc` 是独立一遍）；
+#   3. 本仓"零 warning"是硬约束，而此前只覆盖了 `cargo check` ——
+#      **doc 那一遍是盲区**（实测有 16 条，含 4 处 broken link）。
+#
+# 它**不跑** `cargo doc --open`（那要人看），也不上传站点 —— 那些是发布动作。
+hr; echo "#  文档站：cargo doc 零 warning（Phase 3）"; hr
+if [ "$CARGO_OK" -eq 1 ]; then
+  ( cd "$ROOT" && cargo doc --workspace --no-deps ) >/tmp/neo-doc.log 2>&1
+  doc_rc=$?
+  if [ "$doc_rc" -ne 0 ]; then
+    echo "  ❌ cargo doc 失败（exit ${doc_rc}）："
+    grep -E '^error' -A 6 /tmp/neo-doc.log | head -20 | sed 's/^/     /'
+    fail=$((fail+1))
+  else
+    doc_warn="$(grep -cE '^warning' /tmp/neo-doc.log || true)"
+    if [ "${doc_warn:-0}" -eq 0 ]; then
+      echo "  ✅ cargo doc 零 warning（文档站可建，且无坏链接）"
+      # 顺带核一下索引页的链接（40 个相对链接必须都指得到东西）。
+      # 只**核对产物**（若已生成），不在门禁里重建整个站点 —— 那要跑一遍
+      # build-docs.sh（几秒到几十秒），而"链接是否有效"在产物齐备时
+      # 用 0.1 秒就能查完。
+      if [ -f "$ROOT/dist/docs/index.html" ]; then
+        py=python3; command -v "$py" >/dev/null 2>&1 || py=python
+        if "$py" "$ROOT/scripts/check_doc_links.py" "$ROOT/dist/docs" >/tmp/neo-doclinks.log 2>&1; then
+          sed 's/^/  /' /tmp/neo-doclinks.log
+        else
+          sed 's/^/     /' /tmp/neo-doclinks.log
+          echo "     （产物过期？重跑：bash scripts/build-docs.sh）"
+          fail=$((fail+1))
+        fi
+      else
+        echo "  ℹ️  未生成文档站产物（要生成：bash scripts/build-docs.sh）"
+      fi
+    else
+      echo "  ❌ doc 有 $doc_warn 条 warning —— 坏链接/未闭合标签会让生成的站点出问题"
+      grep -E '^warning' -A 4 /tmp/neo-doc.log | head -30 | sed 's/^/     /'
+      fail=$((fail+1))
+    fi
+  fi
+else
+  echo "  [SKIP] cargo 未通过预检 —— 文档检查未执行"
+  fail=$((fail+1))
 fi
 
 # ── 4.4 无障碍守卫（DoD 九宫格第 1/3 项）─────────────────────────────────

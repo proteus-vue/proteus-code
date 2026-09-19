@@ -72,6 +72,29 @@ neo tui --provider demo        # Markdown 高亮 + 任务清单
 `AGENTS.md` 超 32 KiB 时**诚实截断**（标注"已截断"），尚未实现规划中的
 "让模型生成握手摘要"。
 
+### 文档
+
+```bash
+bash scripts/build-docs.sh     # → dist/docs/index.html
+```
+
+产物是 **`cargo doc` 的 API 参考 + 一份手写文档索引**（指向方案、parity、
+发布流程等）。
+
+**为什么是 `cargo doc` 而不是 mdbook**：方案 Phase 3 原文是"`cargo doc` **或**
+mdbook"，选前者的理由是 Rust 项目的文档主体本来就是 doc comment —— 本仓五个
+可开源 crate 的模块头注释写得很重（每条设计取舍都在那里），`cargo doc` 直接
+把它们组织成可跳转的站点，**不必维护第二份文档**；而且它对 broken intra-doc
+link 敏感（见下）。
+
+**文档站也进门禁**：`verify.sh` 要求 `cargo doc` **零 warning**，并逐个核对
+索引页的相对链接。这两条都是实测出来的必要性 —— 此前 `cargo doc` 有 **16 条
+warning**（含 4 处坏链接），而 `cargo check` 完全不会报（那是独立的一遍）；
+索引页第一版则有 40 个链接里 **10 个指不到东西**（指向仓库上级，
+单独托管即失效）。**"能生成"不等于"站点是好的"。**
+
+贡献前请读 **[CONTRIBUTING.md](CONTRIBUTING.md)**。
+
 ### 安装
 
 四种方式，按「省事 → 可控」排列：
@@ -198,8 +221,10 @@ cargo run -p neo-code-cli -- tui --provider mock   # 不装 PATH，直接用 car
 cargo test --workspace     # 806 个测试
 cargo check --workspace    # 25 个 crate，零 unsafe、零 warning
 
-bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 性能预算 / 执行效率 / 测试
-bash scripts/measure-perf.sh  # 性能预算完整实测（体积 / 空闲出帧 / 冷启动）
+bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 文档 / 性能预算 / 无障碍 / 执行效率 / 测试
+bash scripts/measure-perf.sh           # 性能预算完整实测（体积 / 空闲出帧 / 冷启动）
+bash scripts/check-keyboard-reach.sh   # 键盘可达（真机走一遍 Tab 顺序）
+bash scripts/build-docs.sh             # 构建文档站 → dist/docs/（cargo doc + 手写文档索引）
 ```
 
 发布（维护者）：打 tag 即触发 `.github/workflows/release.yml`，出多平台二进制并
