@@ -107,6 +107,22 @@ for fn in sorted(os.listdir(docs_dir)):
         shutil.copy2(os.path.join(docs_dir, fn), os.path.join(dest, "docs", fn))
 PYEOF
 
+# 把站内的 markdown **渲染成 HTML**（`.md` 同时保留，便于"看源码"）。
+#
+# ⚠️ 这一步是本轮补上的：第一版只把 `.md` 复制进站点，于是索引页点进去是
+# **原始 markdown** —— 表格、标题全不渲染，一片等宽文字。那等于没做文档站。
+#
+# 之所以先"没做"，是因为我当时把它记成了"诚实边界"（"不引 markdown 渲染器，
+# 所以是源码形态"）—— 但**看到实际效果才明白那不是边界，是缺陷**。
+# 这条教训值得记：把"没做"写成"边界"会让它看起来像有意为之，从而不再被修。
+echo "== 渲染 markdown → HTML =="
+converted=0
+while IFS= read -r -d '' md; do
+  python3 "$ROOT/scripts/md_to_html.py" "$md" "${md%.md}.html" || exit 1
+  converted=$((converted + 1))
+done < <(find "$OUT/repo" -name '*.md' -print0)
+echo "   已渲染 ${converted} 个 markdown 页面"
+
 # 生成索引页。
 #
 # 它不追求好看 —— 追求**能进得去、且不撒谎**：列出的每一项都必须真的存在
@@ -168,19 +184,19 @@ HTML
 <p class="note">这五个目录可整体复制出去独立编译（由 <code>check_extractable.py</code> 每次门禁验证）。</p>
 <h2>设计文档（仓库内 markdown）</h2>
 <ul>
-  <li><a href="repo/docs/neo-plan/README.md">方案总纲</a> — 六层架构、模块规格、里程碑、验证套件</li>
-  <li><a href="repo/docs/neo-plan/02-架构设计/">架构设计</a> — 方法论、事件协议、状态机、正交双轴</li>
-  <li><a href="repo/docs/neo-plan/04-落地计划/里程碑与验收标准.md">里程碑与验收标准</a></li>
-  <li><a href="repo/docs/neo-plan/05-验证/">验证套件</a></li>
-  <li><a href="repo/docs/spi-first-methodology/README.md">SPI-First 方法论</a> — 跨 16 次生产实践泛化</li>
-  <li><a href="repo/docs/desktop-parity.md">桌面 parity</a> — 逐项对照表</li>
-  <li><a href="repo/docs/RELEASE.md">发布流程</a></li>
+  <li><a href="repo/docs/neo-plan/README.html">方案总纲</a> — 六层架构、模块规格、里程碑、验证套件</li>
+  <li><a href="repo/docs/neo-plan/02-架构设计/Proteus方法论-语义核心与后端SPI.html">架构设计</a> — 方法论、事件协议、状态机、正交双轴</li>
+  <li><a href="repo/docs/neo-plan/04-落地计划/里程碑与验收标准.html">里程碑与验收标准</a></li>
+  <li><a href="repo/docs/neo-plan/05-验证/验证矩阵.html">验证套件</a></li>
+  <li><a href="repo/docs/spi-first-methodology/README.html">SPI-First 方法论</a> — 跨 16 次生产实践泛化</li>
+  <li><a href="repo/docs/desktop-parity.html">桌面 parity</a> — 逐项对照表</li>
+  <li><a href="repo/docs/RELEASE.html">发布流程</a></li>
 </ul>
 <h2>项目文档</h2>
 <ul>
-  <li><a href="repo/README.md">README</a></li>
-  <li><a href="repo/CONTRIBUTING.md">贡献指南</a></li>
-  <li><a href="repo/PROJECT_MEMORY.md">项目记忆</a>（为什么这样做、踩过什么坑）</li>
+  <li><a href="repo/README.html">README</a></li>
+  <li><a href="repo/CONTRIBUTING.html">贡献指南</a></li>
+  <li><a href="repo/PROJECT_MEMORY.html">项目记忆</a>（为什么这样做、踩过什么坑）</li>
 </ul>
 </body>
 </html>

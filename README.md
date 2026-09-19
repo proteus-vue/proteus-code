@@ -78,8 +78,9 @@ neo tui --provider demo        # Markdown 高亮 + 任务清单
 bash scripts/build-docs.sh     # → dist/docs/index.html
 ```
 
-产物是 **`cargo doc` 的 API 参考 + 一份手写文档索引**（指向方案、parity、
-发布流程等）。
+产物是 **`cargo doc` 的 API 参考 + 手写文档（已渲染成 HTML）**：
+索引页列出 31 个 crate 与方案 / parity / 发布流程等文档，点进去都是可读页面
+（不是 markdown 源码）。
 
 **为什么是 `cargo doc` 而不是 mdbook**：方案 Phase 3 原文是"`cargo doc` **或**
 mdbook"，选前者的理由是 Rust 项目的文档主体本来就是 doc comment —— 本仓五个
