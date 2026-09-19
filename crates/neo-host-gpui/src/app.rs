@@ -185,11 +185,33 @@ pub fn panel_enter(
     // （面板本体的定位由外层 absolute 容器决定），而外边距在普通布局里
     // 一定生效 —— 少一个需要验证的前提。
     //
+    // # ⚠️ 只做位移，**不做淡入**（实测改出来的，不是审美取舍）
+    //
+    // 原实现是 `mt(…) .opacity(delta)`（下滑 + 淡入）。它在真机上有致命情形：
+    // **面板在应用空闲时被打开，动画停在第 0 帧** —— 那时 `opacity(0)`，
+    // 面板**完全看不见**，而它有 1100×560 那么大（实测：Diff 查看器日志写着
+    // "已打开"、状态确实置位、无 panic，而屏幕上一片空白）。
+    //
+    // 机制与 §4.64(bi) 记的**同一个**：gpui 的动画靠 `with_animation` 在
+    // `request_layout` 里 `request_animation_frame()` 推进，而**平台渲染循环
+    // 一旦 park 就不再出帧**。空闲（等审批、等输入）正是 park 的时候。实测确认
+    // `cx.notify()` 与 `wake.notify()`（标脏 + `refresh`，平时有效的路径）
+    // **都没能**再排出一帧。
+    //
+    // 所以把**可见性从动画里摘出来**：面板恒 `opacity(1)`，动画只负责那 6px
+    // 位移。有帧时观感几乎不变；没帧时面板**就在那儿**。
+    //
+    // 代价是少了淡入 —— 有意的：**装饰不得决定可见性**。淡入是装饰，看不见是
+    // 缺陷，两者不该由同一行代码决定。`reduce_motion` 仍自动生效（同一入口）。
+    //
+    // 影响面是**所有面板**（`/wiki` `/files` `/help` `/diff`…），因为都走它。
+    // 此前没暴露是因为验证面板多在启动时用 `NEO_GUI_PANEL` 打开（那时有初始帧），
+    // 而"空闲时打开面板"恰恰是用户真正会做的事。
     div().child(panel).with_animation(
         id,
         Animation::new(std::time::Duration::from_millis(150))
             .with_easing(neo_ui_kit::gpui::ease_in_out),
-        |d, delta| d.mt(px(6. * (1. - delta))).opacity(delta),
+        |d, delta| d.mt(px(6. * (1. - delta))),
     )
 }
 
