@@ -140,10 +140,29 @@ pub fn composer_input(
 /// 与 `.on_click(..)`。不在这里返回 `Stateful` 是因为 `.hover()` 返回的是
 /// 普通 `Div`（gpui 的样式方法不保留 stateful 标记），调用顺序必须是
 /// `id → hover → on_click`。
+/// 自绘的文本按钮 —— **本项目里所有"看起来能点的一行字"都经它构造**。
+///
+/// # 它为什么必须带 role（这是无障碍守卫的第一道口）
+///
+/// 自绘控件的默认状态是"**既不可访问也不可测试**"：一个 `div().on_click()`
+/// 在鼠标下工作良好，而读屏用户读不到它、键盘用户 Tab 不到它、程序也没法
+/// 用 `AXPress` 语义点击它（见 PROJECT_MEMORY §4.64(ba)）。
+///
+/// 所以 role 写在这里**一次**，而不是指望 9 个调用点各记得写一遍 ——
+/// "每个调用点都要记得"正是会漏的东西（本轮审计：28 个可点元素只有 4 个
+/// 带 role，缺口全在裸 `div` 上）。
+///
+/// **调用方仍需给 `aria_label` 与 `tab_index`**：role 是"这是什么"，
+/// 而 label 要说清"做什么、对谁做"（如"展开目录 src"），tab 序号决定键盘
+/// 顺序 —— 这两件都只有调用点知道。守卫 `check_a11y.py` 逐处检查。
 fn text_button(
     label: impl Into<neo_ui_kit::gpui::SharedString>,
     tone: Tone,
 ) -> neo_ui_kit::gpui::Div {
+    // ⚠️ 这里**不能**给 role：`role` 来自 `StatefulInteractiveElement`，
+    // 而那要求元素先有 `.id()`（有状态元素才能挂 a11y 节点）。调用方拿到
+    // 本函数的返回值后才 `.id(...)`，所以 role 必须由**调用点**补 ——
+    // 这是实测编译不过才确认的（见 §4.64(bp)）。
     div()
         .px_2()
         .py_0p5()
@@ -474,6 +493,40 @@ pub struct NeoView {
     process_start: std::time::Instant,
     /// 是否报告启动耗时（`NEO_GUI_STARTUP`）。
     startup_report: bool,
+    /// `NEO_GUI_TAB` 只跑一次（见 render 里的说明）。
+    tab_probe_done: bool,
+    /// `NEO_GUI_TAB` 之前的帧计数（要等至少一帧画完，见那里的说明）。
+    tab_probe_frames: u32,
+    /// **Tab 顺序用的焦点句柄池**（按 `tab_index` 取用）。
+    ///
+    /// # 为什么需要它（这是真机实测抓出来的）
+    ///
+    /// 我原先给 15 个自绘可点元素加了 `tab_index`，以为键盘顺序就通了。
+    /// 真机用 `NEO_GUI_TAB` 走一遍才发现：**`focus_next` 连调 5 次，焦点
+    /// 一动不动**。
+    ///
+    /// 根因（读上游源码）：`tab_index` 只登记"序号 + 是 tab stop"，
+    /// 而**真正进顺序表的条件是元素有 `tracked_focus_handle`** ——
+    /// `gpui-pre/src/elements/div.rs:2555`：
+    ///
+    /// ```ignore
+    /// if let Some(focus_handle) = &self.tracked_focus_handle {
+    ///     window.next_frame.tab_stops.insert(focus_handle);
+    /// }
+    /// ```
+    ///
+    /// 而 `tracked_focus_handle` 由 `track_focus(&handle)` 设置。生产代码里
+    /// `track_focus` **一处都没有**（0 处），所以那 15 个 `tab_index` 全部
+    /// 登记不进去 —— **属性在，键盘走不到**。
+    ///
+    /// 修法：预先建一组句柄（这里按序号取），每处可点元素
+    /// `.track_focus(&handle).tab_index(n)`。
+    ///
+    /// **为什么不给每个元素各建一个**：元素数量随内容变（文件树几百行、
+    /// Wiki 几十篇），各建一个要动态分配且要跟着重扫更新。而句柄的作用只是
+    /// "让框架知道这里有个可聚焦点"，**具体是哪个句柄不影响键盘顺序**
+    ///（顺序由 `tab_index` 决定）。所以固定一池子即可 —— 简单且不会随内容漂移。
+    tab_focus: Vec<neo_ui_kit::gpui::FocusHandle>,
     /// 首帧时刻是否已报过（只报一次）。
     startup_reported: bool,
     // **D4** 工具组的折叠状态**不在这里** —— 它按块下标记账，必须与
@@ -635,6 +688,9 @@ impl NeoView {
             process_start: std::time::Instant::now(),
             startup_report: std::env::var("NEO_GUI_STARTUP").is_ok(),
             startup_reported: false,
+            tab_probe_done: false,
+            tab_probe_frames: 0,
+            tab_focus: Vec::new(),
             transcript: Transcript::new(),
             input: String::new(),
             reasoning_query: String::new(),
@@ -867,6 +923,19 @@ impl NeoView {
             self.wiki_current = Some(0);
         }
         self.wiki = Some(wiki);
+    }
+
+    /// 取第 `i` 个 Tab 焦点句柄（池子按需扩容，见 `tab_focus` 的说明）。
+    ///
+    /// - `tab_index` 决定键盘顺序（越小的越先到）；
+    /// - 同一序号重复取到同一个句柄 —— **这是刻意的**：多个元素共用一个
+    ///   句柄时，框架只登记一次，于是那个位置只停一次（不会因为"文件树有
+    ///   300 行"就让 Tab 要按 300 次才能走出去）。
+    fn tab_handle(&mut self, cx: &mut Context<Self>, i: usize) -> neo_ui_kit::gpui::FocusHandle {
+        while self.tab_focus.len() <= i {
+            self.tab_focus.push(cx.focus_handle());
+        }
+        self.tab_focus[i].clone()
     }
 
     /// `NEO_GUI_PANEL=diff` 的启动钩子：**等到真的有了 diff 再打开**。
@@ -1819,6 +1888,7 @@ fn wiki_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
     if view.wiki.is_none() {
         view.ensure_wiki();
     }
+    let nav_tab = view.tab_handle(cx, 30);
     let Some(wiki) = view.wiki.as_ref() else {
         return Some(
             v_flex()
@@ -1894,8 +1964,13 @@ fn wiki_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
         nav = nav.child(
             text_button(p.title.clone(), if is_current { Tone::Accent } else { Tone::Text })
                 .id(("wiki-nav", idx))
+                // 标签带上路径：同名标题的两篇文档靠它区分（树里也一样）
+                .aria_label(format!("阅读 {}（{}）", p.title, p.path.display()))
+                .track_focus(&nav_tab)
+                .tab_index(100 + idx as isize)
                 .when(is_current, |d| d.bg(neo_ui::neo_color(Tone::Border)))
                 .role(neo_ui_kit::gpui::accesskit::Role::Button)
+            .tab_index(700 + (i as isize))
                 // 标签带上路径：同名标题的两篇文档靠它区分
                 .aria_label(format!("阅读 {}（{}）", p.title, p.path.display()))
                 .on_click(move |_, _, cx| {
@@ -2024,6 +2099,10 @@ fn wiki_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
 /// 固定行数的窗口，所以按"可用高度 ÷ 行高"折出来记进 `diff_viewport`，
 /// 供下次按键使用。**只在渲染里算**，因为只有那里知道真实高度。
 fn diff_viewer_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
+    if view.diff_viewer.is_none() {
+        return None;
+    }
+    let file_tab = view.tab_handle(cx, 31);
     if diag() {
         eprintln!("[neo] diff_viewer_panel 被调用，viewer={}", view.diff_viewer.is_some());
     }
@@ -2097,6 +2176,9 @@ fn diff_viewer_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<im
                 if *is_cur { Tone::Accent } else { Tone::Text },
             )
             .id(("diff-file", idx))
+            .aria_label(format!("跳到文件 {path}"))
+            .track_focus(&file_tab)
+            .tab_index(200 + idx as isize)
             .when(*is_cur, |d| d.bg(neo_ui::neo_color(Tone::Border)))
             .role(neo_ui_kit::gpui::accesskit::Role::Button)
             .aria_label(format!("跳到文件 {path}"))
@@ -2324,7 +2406,15 @@ impl NeoView {
     /// `line_height`：当前文本样式的真实行高，由 `render` 传入（那里有 `Window`）。
     /// diff 背景带的 y 与文字容器的 `.line_height()` 都必须用它 —— 两边同源才
     /// 对得齐（见 `diff_backdrop_element` 的对齐说明）。
-    fn transcript_view(&self, cx: &mut Context<Self>, line_height: f32) -> impl IntoElement {
+    /// `&mut self` 而不是 `&self`：**要给可折叠标题取 Tab 顺序句柄**
+    ///（`tab_handle` 需要可变借用 —— 句柄池按需扩容）。
+    /// 早先写成 `&self`，于是那几处 `tab_index` 一直没接上 `track_focus`，
+    /// 键盘用户到不了它们（真机 `NEO_GUI_TAB` 走出来的）。
+    fn transcript_view(&mut self, cx: &mut Context<Self>, line_height: f32) -> impl IntoElement {
+        // Tab 顺序句柄（见 `tab_focus` 的说明）：转录区里三处可折叠元素共用
+        // 一个句柄 —— **同一个句柄的多个元素在顺序表里只登记一次**，
+        // 于是"一屏几十个折叠把手"不会变成"要按几十次 Tab"。
+        let reasoning_tab = self.tab_handle(cx, 20);
         let blocks = &self.transcript.blocks;
         // **D4 工具分组**：连续的工具调用合成一组。
         //
@@ -2382,6 +2472,10 @@ impl NeoView {
                     // 标题可点击：切换**这一块**的折叠
                     let header = div()
                         .id(("reasoning-head", idx))
+                        .aria_label(format!("{head}（点击展开或收起）"))
+                        .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                        .track_focus(&reasoning_tab)
+                        .tab_index(300 + idx as isize)
                         // 可折叠标题也是可点元素 —— 与其它列表项一致的悬停反馈
                         .rounded(px(neo_ui::RADIUS))
                         .px_1()
@@ -2438,6 +2532,10 @@ impl NeoView {
                     col = col.child(
                         div()
                             .id(("tool-group", idx))
+                            .aria_label(format!("{arrow} {mark} {} 次工具调用（点击展开或收起）", run.tool_count()))
+                            .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                            .track_focus(&reasoning_tab)
+                            .tab_index(400 + idx as isize)
                             .rounded(px(neo_ui::RADIUS))
                             .px_1()
                             .hover(|d| d.bg(neo_color(Tone::Border).opacity(0.45)))
@@ -2572,6 +2670,10 @@ impl NeoView {
                                         // 不用 `a*n+b` 那种乘加：它会在某些取值上撞号，
                                         // 而 id 撞号的表现是"点一处展开、另一处也动"。
                                         .id(("diff-fold", ((idx as u64) << 32) | (start as u64)))
+                                        .aria_label(format!("展开被折叠的 {n} 行未改内容"))
+                                        .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                                        .track_focus(&reasoning_tab)
+                                        .tab_index(500 + start as isize)
                                         .whitespace_nowrap()
                                         .text_color(neo_color(Tone::Info))
                                         .child(format!("⋯ 未改 {n} 行（点击展开）"))
@@ -2673,7 +2775,7 @@ impl NeoView {
 ///
 /// 两个面板合并成一栏是刻意的：窗口宽度有限，而二者都是"当前上下文"的展示。
 /// ZCode 把它们分在左右两侧（各占 240px），那在宽屏上才成立。
-fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
+fn side_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
     let mut col = v_flex()
         // 260 而不是 220：220 会把"标题 ·条数 +3 -1"里最右侧的 `-1` 裁掉
         //（真机截图看出来的 —— 那一行**恰好**在改动行数出现时超宽，
@@ -2881,10 +2983,21 @@ fn side_panel(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
         };
         let click_id = id.clone();
         let v = cx.entity().clone();
+        // 会话列表项也有 Tab 句柄（所有会话项共用一个 —— 列表多长都只占
+        // 一个 Tab 位置，见 `tab_focus` 的说明）。
+        let sess_tab = view.tab_handle(cx, 32);
         col = col.child(
             h_flex()
                 .gap_1()
                 .id(format!("sess-{id}"))
+                .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                .track_focus(&sess_tab)
+                .aria_label(if is_current {
+                    format!("当前会话：{shown}")
+                } else {
+                    format!("切换到会话：{shown}")
+                })
+                .tab_index(900)
                 // 列表项形态 + 悬停反馈（实测：这些行此前都"能点但看不出能点"）
                 .px_2()
                 .py_0p5()
@@ -2948,6 +3061,8 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
     }
     let v_rescan = cx.entity().clone();
     let v_for_click = cx.entity().clone();
+    let rescan_tab = view.tab_handle(cx, 10);
+    let expand_tab = view.tab_handle(cx, 11);
 
     // 宽度从 420 提到 820：面板现在是**两栏**（文件列表 280 + 预览），
     // 420 会让预览栏挤到几乎看不见。高度也一并给足（预览是竖向滚动的文字）。
@@ -2969,6 +3084,12 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
                 .child(
                     text_button("刷新", Tone::Accent)
                         .id("files-rescan")
+                        // role 只能在调用点给（`stateful` 要求先有 id）——
+                        // 见 `text_button` 的说明
+                        .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                        .aria_label("重新扫描工作区文件")
+                        .track_focus(&rescan_tab)
+                        .tab_index(600)
                         .on_click(move |_, _, cx| {
                             v_rescan.update(cx, |this, cx| {
                                 this.rescan_files();
@@ -2992,6 +3113,10 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
                     let label = if all_open { "全部折叠" } else { "展开全部" };
                     text_button(label, Tone::Muted)
                         .id("files-expand-all")
+                        .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                        .aria_label(label.to_string())
+                        .track_focus(&expand_tab)
+                        .tab_index(601)
                         .aria_label(label.to_string())
                         .on_click(move |_, _, cx| {
                             v.update(cx, |this, cx| {
@@ -3066,8 +3191,15 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
     // 是一堵"路径墙"（本仓 342 个文件），且每行重复长前缀、横向空间几乎全浪费。
     let rows = neo_ui_behavior::tree_rows(&idx.files, &view.files_expanded);
 
+    // 这些行的 Tab 句柄（见 `tab_focus` 的说明：一个句柄可被多个元素共用，
+    // 顺序由 `tab_index` 决定）。**必须取具体句柄** —— 只给 `tab_index` 而
+    // 不 `track_focus` 的话，元素根本不会进 Tab 顺序表。
+    let row_tab = view.tab_handle(cx, 3);
+
     let mut list = v_flex().gap_0();
-    for row in &rows {
+    // 带下标遍历：`tab_index` 需要一个序号（键盘顺序）。用行下标而不是
+    // 行号哈希 —— 顺序应当跟着**视觉顺序**（自上而下），而不是路径的哈希值。
+    for (row_ix, row) in rows.iter().enumerate() {
         let selected = view.files_selected.as_ref() == Some(&row.path);
         let rel = row.path.clone();
         let v = v_for_click.clone();
@@ -3113,6 +3245,8 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
             } else {
                 format!("查看 {}", rel.display())
             })
+            .track_focus(&row_tab)
+            .tab_index(700 + row_ix as isize)
             .on_click(move |_, window, cx| {
                 v.update(cx, |this, cx| {
                     if is_dir {
@@ -3204,6 +3338,7 @@ fn file_preview_pane(view: &mut NeoView, cx: &mut Context<NeoView>) -> impl Into
     // 标题行 + **加入引用**按钮（引用是独立动作，不再与"查看"混在一起）
     let v_ref = cx.entity().clone();
     let rel_for_ref = path.clone();
+    let ref_tab = view.tab_handle(cx, 33);
     let mut head = h_flex()
         .gap_2()
         .child(
@@ -3214,6 +3349,9 @@ fn file_preview_pane(view: &mut NeoView, cx: &mut Context<NeoView>) -> impl Into
         .child({
             text_button("加入引用", Tone::Accent)
                 .id("preview-add-ref")
+                .aria_label(format!("把 {} 加入任务输入框", path.display()))
+                .track_focus(&ref_tab)
+                .tab_index(800)
                 .role(neo_ui_kit::gpui::accesskit::Role::Button)
                 .aria_label(format!("加入引用 {}", path.display()))
                 .on_click(move |_, window, cx| {
@@ -3380,10 +3518,11 @@ fn help_panel(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElem
 ///
 /// 与命令面板同构（覆盖式、可点选）。**不显示模型名列表就让人左右切换**
 /// 是 gpui 侧此前的做法 —— 用户看不到有哪些可选，更看不出某个是桩。
-fn model_picker(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
+fn model_picker(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
     if !view.model_picker_open {
         return None;
     }
+    let pick_tab = view.tab_handle(cx, 34);
     let mut col = v_flex()
         .w(px(420.))
         .gap_1()
@@ -3413,6 +3552,14 @@ fn model_picker(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoEl
         let mut row = h_flex()
             .gap_2()
             .id(format!("model-{}", m.name))
+            .aria_label(if is_current {
+                format!("当前模型：{label}")
+            } else {
+                format!("切换到模型：{label}")
+            })
+            .role(neo_ui_kit::gpui::accesskit::Role::Button)
+            .track_focus(&pick_tab)
+            .tab_index(1000)
             .child(div().text_color(neo_color(if is_current {
                 Tone::Accent
             } else {
@@ -3442,7 +3589,8 @@ fn model_picker(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoEl
     Some(col)
 }
 
-fn command_palette(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
+fn command_palette(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
+    let cmd_tab = view.tab_handle(cx, 35);
     if !view.cmd_open {
         return None;
     }
@@ -3476,6 +3624,10 @@ fn command_palette(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl Int
         col = col.child(
             div()
                 .id(format!("cmd-{}", c.name))
+                .aria_label(format!("执行命令 /{}：{}", c.name, c.desc))
+                .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                .track_focus(&cmd_tab)
+                .tab_index(1100)
                 .px_2()
                 .py_1()
                 .rounded(px(neo_ui::RADIUS))
@@ -3584,7 +3736,7 @@ fn terminal_panel(view: &NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
 }
 
 /// 审批对话框（模态）：三档 Allow / Always / Reject。
-fn approval_dialog(view: &NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
+fn approval_dialog(view: &mut NeoView, cx: &mut Context<NeoView>) -> impl IntoElement {
     let p = view.transcript.pending.clone().expect("调用方保证有 pending");
     let v1 = cx.entity().clone();
     let v2 = cx.entity().clone();
@@ -3761,8 +3913,57 @@ impl Render for NeoView {
             cx.notify();
         }
 
+        // 状态栏那几个开关的 Tab 句柄（**在 render 里取**：它们就渲染在这里）。
+        //
+        // 注：审批对话框那三个按钮（允许/总是允许/拒绝）**不需要**这里处理 ——
+        // 它们是组件库的 `Button`，自带 `track_focus` + `tab_index`
+        //（见 `check_a11y.py` 的 LIBRARY_WIDGETS：组件库控件由上游保证）。
+        let model_tab = self.tab_handle(cx, 40);
+        let sidebar_tab = self.tab_handle(cx, 41);
+        let files_tab = self.tab_handle(cx, 42);
+
         // 1) 收事件（非阻塞）
         let changed = self.pump();
+        // 1.4) `NEO_GUI_TAB=<n>`：**键盘可达性验证钩子**。
+        //
+        // # 它为什么需要（而不能靠合成按键）
+        //
+        // 合成 Tab 键要求窗口在**最前台**（本项目约定不抢焦点，见效率规范第零条），
+        // 所以那条路走不通。而"Tab 顺序表能不能用"是**键盘用户的核心问题** ——
+        // 它由 `focus_next` 驱动，与按键同一条机制（`Root` 把 Tab 接到它）。
+        // 所以直接调 `focus_next` n 次，并把结果打出来：**同一件事、不需前台**。
+        //
+        // 用法：`NEO_GUI_TAB=3` 启动 → 日志里看到焦点走过的顺序。
+        if let Ok(n) = std::env::var("NEO_GUI_TAB") {
+            // ⚠️ 必须**等至少一帧画完**再探：tab stop 是在 `paint` 阶段写进
+            // `next_frame` 的，而 `focus_next` 读的是 `rendered_frame` ——
+            // 两者在这一帧末才交换。上一版在同一个 render 里立刻探，于是
+            // 读到的永远是**上一帧**（空）的表，表现为"Tab 不动"。
+            //
+            // 用帧计数判定（不引入额外状态）：`frames.count` 由 `NEO_GUI_FRAMES`
+            // 维护，但那个开关独立 —— 所以这里按"本函数被调用过几次"记。
+            self.tab_probe_frames += 1;
+            let ready = self.tab_probe_frames >= 3;
+            if ready && !self.tab_probe_done {
+                self.tab_probe_done = true;
+                let n: usize = n.parse().unwrap_or(1);
+                let start = window.focused(cx).map(|h| format!("{h:?}"));
+                let mut visited = Vec::new();
+                for _ in 0..n {
+                    window.focus_next(cx);
+                    let now = window.focused(cx).map(|h| format!("{h:?}"));
+                    visited.push(now);
+                }
+                eprintln!(
+                    "[neo] tab-probe: 起点={start:?} 走 {n} 次 → {:?}",
+                    visited
+                        .iter()
+                        .map(|v| v.as_deref().unwrap_or("(无)"))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+
         // 1.5) diff 查看器的启动钩子。**必须在 pump 之后**：它要等转录里真的
         //      出现 `Block::Diff` 才打开，而那个块正是 pump 刚推进去的 ——
         //      放在 pump 之前会永远看到上一帧的转录（实测踩到：钩子每帧都跑、
@@ -3851,6 +4052,10 @@ impl Render for NeoView {
                         div()
                             .text_color(neo_color(Tone::Muted))
                             .id("model-open")
+                            .aria_label(format!("选择模型（当前 {model}）"))
+                            .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                            .track_focus(&model_tab)
+                            .tab_index(10)
                             .child(format!("模型：{model} ▾"))
                             .on_click(move |_, _, cx| {
                                 view_for_model.update(cx, |this, cx| {
@@ -3865,7 +4070,15 @@ impl Render for NeoView {
                     .child({
                         let v = cx.entity().clone();
                         let label = if self.sidebar_open { "侧栏 ◀" } else { "侧栏 ▶" };
-                        text_button(label, Tone::Muted).id("sidebar-toggle")
+                        text_button(label, Tone::Muted)
+                            .id("sidebar-toggle")
+                            .aria_label(if self.sidebar_open {
+                                "收起侧栏"
+                            } else {
+                                "展开侧栏"
+                            })
+                            .track_focus(&sidebar_tab)
+                            .tab_index(11)
                             .on_click(move |_, _, cx| {
                                 v.update(cx, |this, cx| {
                                     this.run_action(neo_driver::commands::Action::ToggleSidebar);
@@ -3878,7 +4091,16 @@ impl Render for NeoView {
                     .child({
                         let v = cx.entity().clone();
                         let label = if self.files_open { "文件 ◀" } else { "文件 ▶" };
-                        text_button(label, Tone::Muted).id("files-toggle")
+                        text_button(label, Tone::Muted)
+                            .id("files-toggle")
+                            .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                            .aria_label(if self.files_open {
+                                "收起文件树"
+                            } else {
+                                "展开文件树"
+                            })
+                            .track_focus(&files_tab)
+                            .tab_index(12)
                             .on_click(move |_, _, cx| {
                                 v.update(cx, |this, cx| {
                                     this.run_action(neo_driver::commands::Action::ToggleFiles);
