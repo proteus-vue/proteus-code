@@ -125,6 +125,26 @@ jobs:
       # 这里显式不装 webkit —— 正是为验证精简路径。
       - name: 构建
         run: cargo build --release -p neo-code-cli ${{ matrix.features }} --target ${{ matrix.target }}
+      - name: 体积预算检查（方案 §7：< 30MB）
+        shell: bash
+        run: |
+          set -euo pipefail
+          # **在这里检查而不是在 verify.sh 里**：verify 跑在 PR 上，那时没有
+          # release 产物（fresh checkout 不编 release）；而这里编出来的正是
+          # **用户实际下载的那个二进制** —— 在它身上量才算数。
+          #
+          # 这条预算**真的漏过**：此前全仓没有 `[profile.release]`，而方案
+          # 口径是"剥离符号后 <30MB"—— 实测 38MB，从写下那天起就没满足过，
+          # 且没有任何东西会因此报警（预算表是文档，不是门禁）。见 §4.64(bo)。
+          BIN="target/${{ matrix.target }}/release/neo"
+          bytes=$(stat -c%s "$BIN" 2>/dev/null || stat -f%z "$BIN")
+          mb=$(awk -v b="$bytes" 'BEGIN{printf "%.2f", b/1048576}')
+          echo "neo 体积：${mb}MB（预算 30MB）"
+          if awk -v m="$mb" 'BEGIN{exit !(m >= 30)}'; then
+            echo "::error::release 二进制 ${mb}MB 超出方案 §7 的 30MB 预算"
+            echo "先检查 Cargo.toml 的 [profile.release] 是否仍带 strip = \"symbols\""
+            exit 1
+          fi
       - name: 打包
         shell: bash
         run: |

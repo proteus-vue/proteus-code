@@ -51,6 +51,29 @@ authors = ["Proteus Contributors"]
 # 与 rust-toolchain.toml 的钉版一致；crates.io 上会作为最低 Rust 版本展示。
 rust-version = "1.95"
 
+# ── 发布档：体积与调试信息的取舍 ────────────────────────────────────────
+#
+# 方案 §7 的性能预算里有一条明确的：**release 二进制 < 30MB（剥离符号后）**。
+# 而此前全仓**没有 `[profile.release]`** —— 于是那条预算从未被满足过：
+# 实测 38MB（release 默认带调试符号，而 gpui/wgpu 那棵树很大）。
+#
+# 为什么 `strip = "symbols"` 而不是 `"debuginfo"`：
+#   - `symbols` 去掉符号表**与**调试信息（体积收益最大）；
+#   - 代价是崩溃栈会变成地址而无法符号化 —— 而崩溃上报链路**尚未做**
+#     （缺口表挂着）。等接上 Sentry 之类时，正确做法是**同时产出并上传
+#     .dSYM / .pdb**（`split-debuginfo`），而不是把符号留在发布产物里。
+#     这条注释就是那个"将来做崩溃上报时要回来改"的锚点。
+#
+# `panic = "abort"`：不引入 —— 内核依赖"工具边界可安全中断"的语义（M1 验收），
+# 而 abort 会让某些 panic 处理路径失效。体积不是拿正确性换的。
+#
+# `lto`：开 thin。实测代价可接受（构建时间），收益是体积与运行速度。不用 fat：
+# 那会让全量构建明显变慢，而这个项目的迭代频率高（一天十几个提交）。
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+
 [workspace.dependencies]
 # ── UI 栈：全仓唯一的 GPUI pin ──────────────────────────────────────────
 #
