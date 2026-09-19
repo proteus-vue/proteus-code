@@ -2592,6 +2592,17 @@ fn file_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
             .min_h(px(0.))
             .min_w(px(0.))
             .gap_2()
+            // ⚠️ **必须显式 `items_stretch`**：`h_flex()` 默认是 `items_center`
+            //（`gpui-base/src/styled.rs` 里 `h_flex()` = `flex_row().items_center()`），
+            // 而 flex 行的 `align_items` 管的正是**纵轴**。默认值下两栏高度都按
+            // 内容算并上下居中 —— 预览**短文件**时看不出来，一旦预览长文件
+            //（实测预览本仓 `PROJECT_MEMORY.md`，5596 行），预览栏就会既向上
+            // 盖住面板标题、又向下溢出到主界面上。
+            //
+            // 这个缺陷此前一直存在但从未暴露：之前的验证都只预览短文件。
+            // 是 Repo Wiki 面板（同样两栏、但内容是长文档）把它带出来的 ——
+            // 修 Wiki 时读到 gpui 源码才确认根因，回头一看文件树同病。
+            .items_stretch()
             .child(files_col)
             // 预览栏**只在预览过文件后出现**（没点过文件时不占地方）
             .child(file_preview_pane(view, cx)),
