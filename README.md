@@ -198,7 +198,8 @@ cargo run -p neo-code-cli -- tui --provider mock   # 不装 PATH，直接用 car
 cargo test --workspace     # 806 个测试
 cargo check --workspace    # 25 个 crate，零 unsafe、零 warning
 
-bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 执行效率 / 测试
+bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 性能预算 / 执行效率 / 测试
+bash scripts/measure-perf.sh  # 性能预算完整实测（体积 / 空闲出帧 / 冷启动）
 ```
 
 发布（维护者）：打 tag 即触发 `.github/workflows/release.yml`，出多平台二进制并
