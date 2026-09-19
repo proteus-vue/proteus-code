@@ -184,6 +184,7 @@ pub fn panel_enter(
     // 位移用 **`mt`（外边距）而不是 `top`**：`top` 只对定位元素生效
     // （面板本体的定位由外层 absolute 容器决定），而外边距在普通布局里
     // 一定生效 —— 少一个需要验证的前提。
+    //
     div().child(panel).with_animation(
         id,
         Animation::new(std::time::Duration::from_millis(150))
@@ -206,6 +207,21 @@ fn append_ref(existing: &str, token: &str) -> String {
     } else {
         format!("{} {token} ", existing.trim_end())
     }
+}
+
+/// 诊断开关：`NEO_GUI_DIAG=1` 时把内核事件与面板生命周期打到 stderr。
+///
+/// # 它为什么值得留下（而不是排查完就删）
+///
+/// 本轮定位两个缺陷全靠它 —— 而它们**都不能从截图上直接看出来**：
+/// ① 启动钩子读的是上一帧的转录（日志显示 `has_diff=false` 但 `blocks` 在增长）；
+/// ② 面板"打开了"却没有帧（日志与屏幕结论相反）。
+///
+/// 与既有的 `NEO_GUI_SCROLL` / `NEO_GUI_FOCUS` / `NEO_GUI_WATCH` 同族：
+/// **响应式宿主不出帧，行为与状态可能背离**，所以需要一条能读的时序通道。
+/// 默认关闭（它每帧打印，开着会有噪音）。
+fn diag() -> bool {
+    std::env::var("NEO_GUI_DIAG").is_ok()
 }
 
 /// 界面状态（Entity）。
@@ -449,6 +465,27 @@ pub struct NeoView {
     /// `ScrollHandle` 三项组合缺一不可（少一个就会出现"滚不动"，
     /// 而文档动辄上千行）。
     wiki_scroll: neo_ui_kit::gpui::ScrollHandle,
+    /// **全屏 diff 查看器**（D5 的剩余两项：并排视图、跳转上/下一处改动）。
+    ///
+    /// `None` = 未打开。打开时它覆盖主区（与命令面板/文件树同一层）——
+    /// 全屏语义与 TUI 的 `d` 一致：**读 diff 时不想被正文挤着**。
+    ///
+    /// 取哪个 diff：打开时从转录里找**最近一个 `Block::Diff`**（见 `open_diff_viewer`）。
+    /// 审批中的那个就是最近的，所以"按 `d` 看完整改动"得到的正是待批内容。
+    diff_viewer: Option<neo_capability::diff_view::Viewer>,
+    /// 查看器可见的**行数**（渲染时更新）。
+    ///
+    /// `Viewer` 的 `set_cursor` / `hunk_step` / `file_step` 都要一个 `viewport`
+    /// 参数来保证"跳到的行在视野内"。终端里那是窗口高度（行），GUI 里没有
+    /// 等价物 —— 但**判定仍需一个有界的视口**，否则 `ensure_visible` 拿不到
+    /// 依据。所以渲染时按行高把可用高度折成行数记在这里。
+    diff_viewport: usize,
+    /// diff 查看器正文区的滚动句柄。
+    ///
+    /// 与其它滚动区同一条纪律三项组合。**但查看器的滚动还有第二个驱动源**：
+    /// `]`/`[` 跳改动会让"当前行"跑出视野，那时要用 `scroll_to_item`
+    /// 把它拉回来 —— 见 `diff_viewer_panel` 的说明。
+    diff_scroll: neo_ui_kit::gpui::ScrollHandle,
     /// 启动时自动提交的任务（一次性）。来源 `NEO_GUI_PROMPT`。
     ///
     /// 与 egui 宿主的同名钩子同源（AGENTS.md 里 `PROTEUS_CODE_SMOKE` 的约定）：
@@ -542,6 +579,12 @@ impl NeoView {
             wiki: None,
             wiki_current: None,
             wiki_scroll: neo_ui_kit::gpui::ScrollHandle::new(),
+            // `NEO_GUI_PANEL=diff` 的启动钩子不在这里把查看器建起来：那时转录
+            // 还是空的（没有任何 diff 可取）。真正的处理在 render 里 —— 等
+            // 转录里出现第一个 diff 块再打开，见 `ensure_diff_viewer_from_env`。
+            diff_viewer: None,
+            diff_viewport: 20,
+            diff_scroll: neo_ui_kit::gpui::ScrollHandle::new(),
             auto_prompt: std::env::var("NEO_GUI_PROMPT")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
@@ -551,6 +594,23 @@ impl NeoView {
     /// 取回已到达的事件并更新模型。返回是否有变化（决定要不要重绘）。
     fn pump(&mut self) -> bool {
         let events = self.handle.drain();
+        if diag() {
+            eprintln!("[neo] pump: {} 个事件", events.len());
+            for e in &events {
+                let name = match e {
+                    EventMsg::TurnStarted { .. } => "TurnStarted",
+                    EventMsg::TurnComplete { .. } => "TurnComplete",
+                    EventMsg::PatchProposed { .. } => "PatchProposed",
+                    EventMsg::ApprovalRequest { .. } => "ApprovalRequest",
+                    EventMsg::ToolCallBegin { .. } => "ToolCallBegin",
+                    EventMsg::ToolCallEnd { .. } => "ToolCallEnd",
+                    EventMsg::ModelSwitched { .. } => "ModelSwitched",
+                    EventMsg::GoalUpdated { .. } => "GoalUpdated",
+                    _ => "其它",
+                };
+                eprintln!("[neo]   事件: {name}");
+            }
+        }
         if events.is_empty() {
             return false;
         }
@@ -694,6 +754,168 @@ impl NeoView {
             self.wiki_current = Some(0);
         }
         self.wiki = Some(wiki);
+    }
+
+    /// `NEO_GUI_PANEL=diff` 的启动钩子：**等到真的有了 diff 再打开**。
+    ///
+    /// # 为什么不能像别的面板那样在构造函数里开
+    ///
+    /// 其它面板（files/wiki/help…）打开时不依赖会话内容。查看器相反 ——
+    /// 它要一份 diff，而启动那一刻转录必然是空的（模型还没跑）。
+    /// 构造函数里打开只会得到"当前会话还没有 diff"。
+    ///
+    /// 所以做成**幂等的惰性打开**：每帧问一次"钩子要求开吗、现在有 diff 吗"，
+    /// 都满足才开（开了之后 `diff_viewer.is_some()`，自然不再重复）。
+    /// 返回 `true` 表示**这一帧刚打开**（调用方据此触发重绘 —— 打开动作
+    /// 本身只改状态，重绘是调用方的事，与其它面板的 open 一致）。
+    fn ensure_diff_viewer_from_env(&mut self) -> bool {
+        if self.diff_viewer.is_some() {
+            return false;
+        }
+        if std::env::var("NEO_GUI_PANEL").ok().as_deref() != Some("diff") {
+            return false;
+        }
+        let has_diff = self
+            .transcript
+            .blocks
+            .iter()
+            .any(|b| matches!(b, neo_driver::transcript::Block::Diff { .. }));
+        if diag() {
+            eprintln!("[neo] diff-hook: has_diff={has_diff} blocks={}", self.transcript.blocks.len());
+        }
+        if has_diff {
+            self.open_diff_viewer();
+            // `NEO_GUI_DIFF_SPLIT=1`：打开即切双列（脚本化截图核对用，
+            // 与其它 `NEO_GUI_*` 钩子同族 —— 自绘面板收不到合成按键）。
+            if std::env::var("NEO_GUI_DIFF_SPLIT").is_ok() {
+                if let Some(v) = self.diff_viewer.as_mut() {
+                    v.mode = neo_capability::diff_view::ViewMode::Split;
+                }
+            }
+            if diag() {
+                eprintln!("[neo] diff-hook: 已打开查看器");
+            }
+            return true;
+        }
+        false
+    }
+
+    /// 打开**全屏 diff 查看器**（D5 剩余两项的承载处）。
+    ///
+    /// # 取哪一份 diff
+    ///
+    /// 转录里**最近一个** `Block::Diff`。理由：审批中的那份就是最近的，所以
+    /// 「看完整改动」拿到的正是待批内容；而已经批过的旧 diff 也还能回看
+    ///（转录里留着的那些块就是历史）。
+    ///
+    /// 没有任何 diff 时**明确告知**，不打开一个空面板 —— 空面板会让人以为
+    /// "程序坏了"，而事实是"这一轮还没产生改动"。
+    fn open_diff_viewer(&mut self) {
+        let Some(diff) = self.transcript.blocks.iter().rev().find_map(|b| match b {
+            neo_driver::transcript::Block::Diff { diff, .. } => Some(diff.clone()),
+            _ => None,
+        }) else {
+            self.notice = Some("当前会话还没有 diff（先让模型改点什么）".into());
+            return;
+        };
+        let parsed = neo_capability::diff_view::parse(&diff);
+        self.diff_viewer = Some(neo_capability::diff_view::Viewer::new(parsed));
+    }
+
+    /// 查看器里的一个按键。返回 `true` 表示已消费（渲染层据此决定要不要
+    /// 让它继续冒泡）。
+    ///
+    /// # 为什么键位照抄 TUI
+    ///
+    /// `]` `[` 跳改动、`n` `p` 跳文件、`v` 切统一/双列、`d`/Esc 关闭 ——
+    /// 与 `neo-host-tui` 的全屏查看器**逐键一致**。两个宿主对同一份 diff
+    /// 提供同一套操作，用户不必学两遍；这也是"宿主语义等价"在交互层的延伸。
+    ///
+    /// **视口高度**由渲染时记下（`diff_viewport`），因为"跳转后要把目标
+    /// 滚进视野"必须知道窗口有多少行可见 —— 而按键处理发生在渲染之外。
+    fn diff_viewer_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let viewport = self.diff_viewport.max(1);
+        let Some(v) = self.diff_viewer.as_mut() else {
+            return false;
+        };
+        match key {
+            "escape" | "d" => {
+                self.diff_viewer = None;
+                cx.notify();
+            }
+            "]" => {
+                v.hunk_step(true, viewport);
+                self.diff_scroll_to_cursor();
+                cx.notify();
+            }
+            "[" => {
+                v.hunk_step(false, viewport);
+                self.diff_scroll_to_cursor();
+                cx.notify();
+            }
+            "n" => {
+                v.file_step(true, viewport);
+                self.diff_scroll_to_cursor();
+                cx.notify();
+            }
+            "p" => {
+                v.file_step(false, viewport);
+                self.diff_scroll_to_cursor();
+                cx.notify();
+            }
+            "v" => {
+                v.toggle_mode();
+                let m = match v.mode {
+                    neo_capability::diff_view::ViewMode::Unified => "统一",
+                    neo_capability::diff_view::ViewMode::Split => "双列",
+                };
+                self.notice = Some(format!("diff 视图：{m}"));
+                cx.notify();
+            }
+            "b" => {
+                v.toggle_tree();
+                cx.notify();
+            }
+            "j" | "down" => {
+                let (c, vp) = (v.cursor.saturating_add(1), viewport);
+                v.set_cursor(c, vp);
+                cx.notify();
+            }
+            "k" | "up" => {
+                let (c, vp) = (v.cursor.saturating_sub(1), viewport);
+                v.set_cursor(c, vp);
+                cx.notify();
+            }
+            "g" => {
+                let vp = viewport;
+                v.set_cursor(0, vp);
+                cx.notify();
+            }
+            "G" => {
+                let last = v.line_count().saturating_sub(1);
+                v.set_cursor(last, viewport);
+                cx.notify();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// 跳转之后把光标行滚进视野。
+    ///
+    /// # 为什么不能只依赖 `Viewer` 自己的 offset
+    ///
+    /// `Viewer` 的 `offset` 是**行**概念（终端模型：它自己算屏幕行）。GUI 的
+    /// 滚动是像素的，由 gpui 管 —— 两边各算一份必然对不上（这正是"同一件事
+    /// 两个来源"）。
+    ///
+    /// 所以：`Viewer` 只负责"跳到哪一行"（纯逻辑、可单测），**滚动交给
+    /// `scroll_to_item`**（gpui 的机制，它知道每项的真实高度）。显示行与
+    /// diff 行一一对应（见 `diff_display_rows`），所以下标可以直接用。
+    fn diff_scroll_to_cursor(&self) {
+        if let Some(v) = &self.diff_viewer {
+            self.diff_scroll.scroll_to_item(v.cursor.saturating_sub(1));
+        }
     }
 
     /// 启动工作区监听（**在后台线程里**），变化时唤醒本视图。
@@ -1043,6 +1265,8 @@ impl NeoView {
                 let st = if self.files_open { "显示" } else { "隐藏" };
                 self.notice = Some(format!("文件树已{st}"));
             }
+            // 全屏 diff 查看器（D5）
+            A::OpenDiff => self.open_diff_viewer(),
             // 仓库文档（Repo Wiki，D12）
             A::ToggleWiki => {
                 self.wiki_open = !self.wiki_open;
@@ -1664,7 +1888,238 @@ fn wiki_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl Into
     Some(col.into_any_element())
 }
 
-/// 思考块带搜索高亮：把匹配区间标成项目主色。
+/// **全屏 diff 查看器**（D5：并排视图 + 跳转上/下一处改动）。
+///
+/// # 为什么要有它（与转录里那些 diff 块的关系）
+///
+/// 转录里的 diff 是**行内预览**：够看清"改了什么"，但大改动读不完、跳不到
+/// 想看的地方。查看器补的正是这两件事 —— 与 TUI 的 `d` 全屏查看器同构，
+/// 键位也逐键一致（`]` `[` 跳改动、`n` `p` 跳文件、`v` 切双列、`d`/Esc 关闭）。
+///
+/// # 统一 / 双列两种视图
+///
+/// - **统一**：删除紧邻新增（就是 diff 原文的形状），信息密度高；
+/// - **双列**：左右对照。配对规则在共享层（`Viewer::split_rows`）——
+///   两宿主必须配出同样的对，否则同一份改动在两处长得不一样。
+///
+/// 双列的每一行用**表格行**画：左右各占一半宽度，中间一条分界线。空的一侧
+/// 画空（`SplitRow` 里 None 的那侧）—— 这是配对补齐的可见形态。
+///
+/// # 视口高度要在渲染时记下来
+///
+/// `Viewer` 的跳转要一个 `viewport`（行数）来保证目标行滚进视野。GUI 没有
+/// 固定行数的窗口，所以按"可用高度 ÷ 行高"折出来记进 `diff_viewport`，
+/// 供下次按键使用。**只在渲染里算**，因为只有那里知道真实高度。
+fn diff_viewer_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
+    if diag() {
+        eprintln!("[neo] diff_viewer_panel 被调用，viewer={}", view.diff_viewer.is_some());
+    }
+    let v = view.diff_viewer.as_ref()?;
+
+    // 可用高度 → 行数（见上面说明）。减去表头/状态行占的几行。
+    let avail_h = 520.0f32;
+    let lh = 20.0f32;
+    view.diff_viewport = ((avail_h / lh) as usize).max(1);
+
+    let summary = v.summary();
+    let mode = v.mode;
+    let cursor = v.cursor;
+    let tree_lines: Vec<(usize, String, bool, usize, usize)> = v
+        .diff
+        .files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            (
+                i,
+                f.path.clone(),
+                i == v.file_cursor,
+                f.adds,
+                f.dels,
+            )
+        })
+        .collect();
+
+    let mut head = h_flex()
+        .gap_3()
+        .items_center()
+        .child(neo_ui::text_role::section_title("Diff 查看器"))
+        .child(div().text_color(neo_ui::neo_color(Tone::Muted)).text_sm().child(summary))
+        // 模式指示**常驻**：切过一次之后，用户不该靠记忆判断当前是哪一列
+        .child(
+            div()
+                .text_color(neo_ui::neo_color(Tone::Info))
+                .text_sm()
+                .child(match mode {
+                    neo_capability::diff_view::ViewMode::Unified => "统一",
+                    neo_capability::diff_view::ViewMode::Split => "双列",
+                }),
+        );
+
+    // 操作提示：**只列真的实现了的**。列一条按不出来的比不列更糟
+    //（与帮助面板同一条纪律）。
+    head = head.child(
+        div()
+            .text_color(neo_ui::neo_color(Tone::Muted))
+            .text_sm()
+            .child("] / [ 跳改动 · n / p 跳文件 · v 切双列 · j / k 移动 · d 关闭"),
+    );
+
+    let mut col = v_flex()
+        .w(px(1100.))
+        .h(px(560.))
+        .gap_1()
+        .p_3()
+        .bg(neo_ui::panel_bg())
+        .child(head);
+
+    // ── 文件树（左栏，可关）──
+    let mut nav = v_flex().gap_0().min_w(px(0.));
+    for (i, path, is_cur, adds, dels) in &tree_lines {
+        let idx = *i;
+        let inner = cx.entity().clone();
+        nav = nav.child(
+            text_button(
+                format!("{path}  +{adds} -{dels}"),
+                if *is_cur { Tone::Accent } else { Tone::Text },
+            )
+            .id(("diff-file", idx))
+            .when(*is_cur, |d| d.bg(neo_ui::neo_color(Tone::Border)))
+            .role(neo_ui_kit::gpui::accesskit::Role::Button)
+            .aria_label(format!("跳到文件 {path}"))
+            .on_click(move |_, _, cx| {
+                inner.update(cx, |this, cx| {
+                    if let Some(v) = this.diff_viewer.as_mut() {
+                        v.file_cursor = idx;
+                        v.goto_selected_file(this.diff_viewport.max(1));
+                    }
+                    this.diff_scroll_to_cursor();
+                    cx.notify();
+                });
+            }),
+        );
+    }
+
+    // ── 正文 ──
+    let mut body = v_flex().gap_0().min_w(px(0.));
+
+    /// 一行 diff 的文字与色调（统一/双列共用，避免两处各写一遍分类）。
+    fn line_face(
+        v: &neo_capability::diff_view::Viewer,
+        idx: Option<usize>,
+    ) -> (String, Tone) {
+        use neo_capability::diff_view::Kind;
+        let Some(i) = idx else {
+            return (String::new(), Tone::Text);
+        };
+        let l = &v.diff.lines[i];
+        let tone = match l.kind {
+            Kind::Add => Tone::Success,
+            Kind::Del => Tone::Error,
+            Kind::HunkHeader => Tone::Info,
+            Kind::Header => Tone::Muted,
+            Kind::Context => Tone::Text,
+        };
+        // 行号前缀：单侧用旧/新行号，两侧都有时给「旧│新」—— 与终端一致
+        let no = match (l.old_no, l.new_no) {
+            (Some(o), Some(n)) => format!("{o:>4} {n:>4} "),
+            (Some(o), None) => format!("{o:>4}      "),
+            (None, Some(n)) => format!("     {n:>4} "),
+            (None, None) => "          ".to_string(),
+        };
+        (format!("{no}{}", l.text), tone)
+    }
+
+    let is_split = mode == neo_capability::diff_view::ViewMode::Split;
+    // 当前光标行：统一视图高亮那一行；双列视图高亮**含它的一对**
+    let rows = v.split_rows();
+    let mut row_ix = 0usize;
+    for r in &rows {
+        let contains_cursor = r.contains(cursor);
+        let bg = if contains_cursor { Some(neo_ui::neo_color(Tone::Border)) } else { None };
+
+        if is_split {
+            let (lt, lto) = line_face(v, r.left);
+            let (rt, rto) = line_face(v, r.right);
+            // `.id()` 放在**链首**：它把 `Div` 变成 `Stateful<Div>`，后续
+            // builder 都返回同一种类型 —— 放末尾再赋值给 `Div` 会类型不符。
+            //
+            // 而且每行确实需要一个稳定 id：`scroll_to_item` 按子项下标找元素，
+            // 没有 id 的子项不参与那套索引，跳转就落不到正确的行上。
+            let mut row = h_flex().id(("diff-split-row", row_ix)).gap_2().w_full().min_w(px(0.));
+            row = row.child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_color(neo_ui::neo_color(lto))
+                    .when_some(bg, |d, c| d.bg(c))
+                    .child(lt),
+            );
+            // 分界线：让"左/右"一眼可辨（不是靠对齐猜）
+            row = row.child(div().text_color(neo_ui::neo_color(Tone::Border)).child("│"));
+            row = row.child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_color(neo_ui::neo_color(rto))
+                    .when_some(bg, |d, c| d.bg(c))
+                    .child(rt),
+            );
+            body = body.child(row);
+        } else {
+            let (text, tone) = line_face(v, r.left.or(r.right));
+            let mut d = div()
+                .w_full()
+                .min_w(px(0.))
+                .truncate()
+                .text_color(neo_ui::neo_color(tone))
+                .child(text);
+            if let Some(c) = bg {
+                d = d.bg(c);
+            }
+            body = body.child(d.id(("diff-row", row_ix)));
+        }
+        row_ix += 1;
+    }
+
+    // 左栏：文件树（`b` 可关，与 TUI 一致）
+    let mut cols = h_flex()
+        .flex_1()
+        .gap_3()
+        .items_stretch()
+        .min_w(px(0.))
+        .min_h(px(0.));
+    if v.tree && !tree_lines.is_empty() {
+        cols = cols.child(
+            div().w(px(240.)).min_w(px(240.)).max_w(px(240.)).h_full().child(
+                div()
+                    .id("diff-tree-scroll")
+                    .size_full()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .child(nav),
+            ),
+        );
+    }
+    cols = cols.child(
+        div()
+            .id("diff-body-scroll")
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .min_h(px(0.))
+            .track_scroll(&view.diff_scroll)
+            .overflow_y_scroll()
+            .child(body),
+    );
+    col = col.child(cols);
+
+    Some(col.into_any_element())
+}
+
+
 ///
 /// 用 `StyledText::with_highlights` 而不是拼多个 `div` —— 与 `styled_line`
 /// 同一个理由：它要作为**一行文字**参与排版（中文里搜索时，逐片段拼盒子会
@@ -3166,6 +3621,21 @@ impl Render for NeoView {
 
         // 1) 收事件（非阻塞）
         let changed = self.pump();
+        // 1.5) diff 查看器的启动钩子。**必须在 pump 之后**：它要等转录里真的
+        //      出现 `Block::Diff` 才打开，而那个块正是 pump 刚推进去的 ——
+        //      放在 pump 之前会永远看到上一帧的转录（实测踩到：钩子每帧都跑、
+        //      却始终 has_diff=false，因为 `PatchProposed` 是在它之后才被消费）
+        if self.ensure_diff_viewer_from_env() {
+            // 刚打开 → 必须**再排一帧**，否则入场动画停在 opacity 0（开场帧），
+            // 面板看不见。
+            //
+            // ⚠️ 这里**不能用 `cx.notify()`**：在渲染中调用它唤不醒已 park 的
+            // 显示循环（§4.64(bi) 记过同一个机制 —— "空闲时通知无效"），
+            // 于是那一帧把动画画在 0 处，之后不再有帧，动画永远走不完。
+            // `wake` 是**渲染之外**的通道：后台任务收到后从异步上下文调
+            // `cx.notify()`，那一刻窗口才会真正被唤醒。
+            self.wake.notify();
+        }
         // 2) 有变化 → 标记需要重绘（响应式宿主的核心一步）。
         //
         // 注意这里**不消费** wake 信号：信号的作用是"让视图被唤醒一次"，
@@ -3486,6 +3956,14 @@ impl Render for NeoView {
             // 模态优先：命令面板打开时，它先接管键盘（见 KeyArbiter 的规则）
             let cmd_open = v.read(cx).cmd_open;
 
+            // diff 查看器**模态优先**：它覆盖主区，键位（j/k/n/p/[/]/v/b/g/G）
+            // 与正常输入冲突，所以开着时先由它接管。`d`/Esc 关闭。
+            if v.read(cx).diff_viewer.is_some() {
+                if v.update(cx, |this, cx| this.diff_viewer_key(&key, cx)) {
+                    return;
+                }
+            }
+
             if secondary && key == "k" {
                 v.update(cx, |this, cx| this.toggle_cmd(cx));
             } else if key == "escape" && v.read(cx).help_open {
@@ -3525,6 +4003,15 @@ impl Render for NeoView {
                     .left(px(120.))
                     // 入场动画（与设计系统弹层同款；见 `panel_enter` 的说明）
                     .child(panel_enter("file-panel-enter", p)),
+            );
+        }
+        if let Some(p) = diff_viewer_panel(self, cx) {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(48.))
+                    .left(px(120.))
+                    .child(panel_enter("diff-viewer-enter", p)),
             );
         }
         if let Some(p) = wiki_panel(self, cx) {
@@ -3612,6 +4099,9 @@ pub fn run(
                 let async_cx = cx.to_async();
                 cx.spawn(async move |_| {
                     while wake.recv().await.is_some() {
+                        if diag() {
+                            eprintln!("[neo] wake 收到信号 → 通知重绘");
+                        }
                         let view = holder
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -4263,6 +4753,93 @@ mod tests {
     /// 这条守的是折叠的正确性：`Header` / `Meta` 若被归成 `Context`（曾经的
     /// `_ => Context` 就是这么写的），折叠会把它们一起藏掉 —— 而"这段 diff 属于
     /// 哪个文件""这个 diff 被截断过"是**结构信息**，藏了会误导。
+    // ── D5 全屏查看器 ────────────────────────────────────────────────────
+
+    /// 查看器的**取源**：打开时取转录里**最近一个** diff 块。
+    ///
+    /// 这条守的是"审批中按 d 看到的正是待批内容" —— 审批那份是最近的，
+    /// 所以"取最近"这条规则本身就保证了它。若哪天改成取第一个，用户会
+    /// 看到一份**早就批过的旧 diff** 并照着它做判断（而它已经落在磁盘上）。
+    #[test]
+    fn diff_viewer_takes_the_most_recent_diff_block() {
+        use neo_driver::transcript::{Block, Transcript};
+        let mut t = Transcript::new();
+        t.blocks.push(Block::Diff { path: "old.txt".into(), diff: "-a\n+b\n".into() });
+        t.blocks.push(Block::User("中间的东西".into()));
+        t.blocks.push(Block::Diff { path: "new.txt".into(), diff: "-c\n+d\n".into() });
+
+        let picked = t.blocks.iter().rev().find_map(|b| match b {
+            Block::Diff { diff, .. } => Some(diff.clone()),
+            _ => None,
+        });
+        assert!(
+            picked.as_deref().is_some_and(|d| d.contains("+d")),
+            "必须取最近那份（含 +d），取到的是：{picked:?}"
+        );
+    }
+
+    /// **跳转真的改变了光标，且不越界** —— 用共享层的 Viewer 直接断言
+    /// （键位处理只是把它接上，判定在那边，那也正是它值得被单测的原因）。
+    #[test]
+    fn diff_viewer_navigation_moves_and_stays_in_bounds() {
+        use neo_capability::diff_view::{Kind, Viewer, parse};
+        let text = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n@@ -10,2 +10,2 @@\n x\n-y\n+z";
+        let mut v = Viewer::new(parse(text));
+        let viewport = 10;
+
+        // 跳下一处改动：落在每个 hunk 头
+        v.hunk_step(true, viewport);
+        let first_hunk = v.cursor;
+        assert_eq!(
+            v.diff.lines[first_hunk].kind,
+            Kind::HunkHeader,
+            "第一次跳转应落在第一个 hunk 头"
+        );
+        v.hunk_step(true, viewport);
+        let second_hunk = v.cursor;
+        assert_eq!(v.diff.lines[second_hunk].kind, Kind::HunkHeader);
+        assert!(second_hunk > first_hunk);
+
+        // 到底不循环（不回绕到开头）
+        v.hunk_step(true, viewport);
+        assert_eq!(v.cursor, second_hunk, "末尾再跳应原地不动（循环会让人失去方向感）");
+
+        // 反向：回到第一个 hunk；再反向则**停在它上面**（不是回到 0）——
+        // "上一处改动"到底了就该停住，回退到文件开头会让用户以为还有内容。
+        v.hunk_step(false, viewport);
+        assert_eq!(v.cursor, first_hunk);
+        v.hunk_step(false, viewport);
+        assert_eq!(v.cursor, first_hunk, "第一处改动再往回跳应停在原处");
+
+        // 文件跳转：单文件 diff 应原地不动（不越界、不 panic）
+        v.file_step(true, viewport);
+        assert_eq!(v.cursor, first_hunk, "只有一个文件时不该跳走");
+    }
+
+    /// 双列视图的**配对由共享层给**，宿主只渲染 —— 这里钉住"宿主拿到的
+    /// 配对是完整的"（不丢行），因为漏行在界面上表现为"少了一段内容"，
+    /// 而那种缺陷不会报错。
+    #[test]
+    fn diff_viewer_split_rows_cover_every_line() {
+        use neo_capability::diff_view::{Viewer, parse};
+        let text = "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n keep\n-old1\n-old2\n+new1\n tail";
+        let v = Viewer::new(parse(text));
+        let rows = v.split_rows();
+        let mut covered = vec![false; v.diff.lines.len()];
+        for r in &rows {
+            for side in [r.left, r.right] {
+                if let Some(i) = side {
+                    covered[i] = true;
+                }
+            }
+        }
+        assert!(
+            covered.iter().all(|c| *c),
+            "并排视图漏了行：{:?}",
+            covered.iter().enumerate().filter(|(_, c)| !**c).map(|(i, _)| i).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn diff_classification_keeps_header_and_meta_distinct() {
         let lines = vec![

@@ -40,16 +40,19 @@ neo-text = { path = "../neo-text", version = "0.1.0" }
 # 唤醒钩子用的通道（响应式宿主必须靠它通知重绘，不能轮询）。
 # 它本就在依赖树里（gpui 自己依赖它 2.5.0），这里显式声明是为了不依赖传递。
 async-channel = "2"
+# diff 查看器的**纯逻辑**（解析 / hunk 与文件导航 / 并排配对）。
+# 为什么在 capability 而不是这里：解析器必须与**生产者**（`unified_diff`）
+# 同处一地，且 TUI 的查看器也用它 —— 两宿主共用同一套判定，否则同一份
+# diff 会被配出不同的对（那是最难解释的一类不一致）。
+neo-capability = { path = "../neo-capability", version = "0.1.0" }
 
 [[example]]
 name = "window_smoke"
-
 [dev-dependencies]
 neo-mock = { path = "../neo-mock", version = "0.1.0" }
 neo-config = { path = "../neo-config", version = "0.1.0" }
 neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
 neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }
-neo-capability = { path = "../neo-capability", version = "0.1.0" }
 neo-exec = { path = "../neo-exec", version = "0.1.0" }
 serde_json = { workspace = true }
 # UI 测试基建（无头窗口）—— 只为 composer 的**多行语义**回归用例打开。

@@ -357,6 +357,16 @@ impl App {
                     std::time::Instant::now(),
                 ));
             }
+            // D5 全屏 diff 查看器：egui 侧不实现（同上，给诚实提示）。
+            // 注：egui 有自己的审批 diff 预览 + 全屏查看器在 TUI/gpui 两侧，
+            // 它是冻结的回退通道，不为它补新功能。
+            A::OpenDiff => {
+                self.notice = Some((
+                    "全屏 diff 查看器在 gpui 宿主与 TUI 里可用（本窗口是 egui 回退）"
+                        .to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
             // D12 仓库文档（Repo Wiki）：与文件树同理 —— egui 侧不实现，
             // 但必须给一句诚实的提示（留空 = "列着却点了没反应"）。
             A::ToggleWiki => {

@@ -73,6 +73,8 @@ pub enum Action {
     ToggleFiles,
     /// 仓库文档面板（Repo Wiki，D12）：把 README / docs 聚合成一处看
     ToggleWiki,
+    /// 全屏 diff 查看器（D5）：并排视图 + 跳转上/下一处改动
+    OpenDiff,
     NewSession,
     /// 压缩上下文（`Op::Compact`）
     Compact,
@@ -116,6 +118,7 @@ pub enum ActionStatic {
     ToggleSidebar,
     ToggleFiles,
     ToggleWiki,
+    OpenDiff,
     NewSession,
     Compact,
     Rewind,
@@ -136,6 +139,7 @@ impl ActionStatic {
             Self::ToggleSidebar => Action::ToggleSidebar,
             Self::ToggleFiles => Action::ToggleFiles,
             Self::ToggleWiki => Action::ToggleWiki,
+            Self::OpenDiff => Action::OpenDiff,
             Self::NewSession => Action::NewSession,
             Self::Compact => Action::Compact,
             Self::Rewind => Action::Rewind,
@@ -174,6 +178,12 @@ pub const COMMANDS: &[Command] = &[
         name: "wiki",
         desc: "仓库文档（README / docs 聚合成一处；含密钥的文档会被排除）",
         action: ActionStatic::ToggleWiki,
+        category: Category::View,
+    },
+    Command {
+        name: "diff",
+        desc: "全屏 diff 查看器（并排视图、跳上/下一处改动）",
+        action: ActionStatic::OpenDiff,
         category: Category::View,
     },
     Command {
@@ -341,6 +351,7 @@ mod tests {
             match a {
                 Action::ToggleTerminal
                 | Action::ToggleSidebar | Action::ToggleFiles | Action::ToggleWiki
+                | Action::OpenDiff
                 | Action::NewSession
                 | Action::Compact | Action::Rewind | Action::Interrupt
                 | Action::ShowModels | Action::CycleMode | Action::ToggleReasoning
