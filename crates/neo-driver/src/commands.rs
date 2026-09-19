@@ -71,6 +71,8 @@ pub enum Action {
     ToggleSidebar,
     /// 文件树面板（D12）：点文件可加为 `@引用`
     ToggleFiles,
+    /// 仓库文档面板（Repo Wiki，D12）：把 README / docs 聚合成一处看
+    ToggleWiki,
     NewSession,
     /// 压缩上下文（`Op::Compact`）
     Compact,
@@ -113,6 +115,7 @@ pub enum ActionStatic {
     ToggleTerminal,
     ToggleSidebar,
     ToggleFiles,
+    ToggleWiki,
     NewSession,
     Compact,
     Rewind,
@@ -132,6 +135,7 @@ impl ActionStatic {
             Self::ToggleTerminal => Action::ToggleTerminal,
             Self::ToggleSidebar => Action::ToggleSidebar,
             Self::ToggleFiles => Action::ToggleFiles,
+            Self::ToggleWiki => Action::ToggleWiki,
             Self::NewSession => Action::NewSession,
             Self::Compact => Action::Compact,
             Self::Rewind => Action::Rewind,
@@ -164,6 +168,12 @@ pub const COMMANDS: &[Command] = &[
         name: "files",
         desc: "显示 / 隐藏文件树（点文件可加为 @引用）",
         action: ActionStatic::ToggleFiles,
+        category: Category::View,
+    },
+    Command {
+        name: "wiki",
+        desc: "仓库文档（README / docs 聚合成一处；含密钥的文档会被排除）",
+        action: ActionStatic::ToggleWiki,
         category: Category::View,
     },
     Command {
@@ -330,7 +340,8 @@ mod tests {
             // （靠 match 的穷尽性保证：新增 ActionStatic 会编译失败）
             match a {
                 Action::ToggleTerminal
-                | Action::ToggleSidebar | Action::ToggleFiles | Action::NewSession
+                | Action::ToggleSidebar | Action::ToggleFiles | Action::ToggleWiki
+                | Action::NewSession
                 | Action::Compact | Action::Rewind | Action::Interrupt
                 | Action::ShowModels | Action::CycleMode | Action::ToggleReasoning
                 | Action::ClearTranscript | Action::Help | Action::Quit => {}

@@ -357,6 +357,14 @@ impl App {
                     std::time::Instant::now(),
                 ));
             }
+            // D12 仓库文档（Repo Wiki）：与文件树同理 —— egui 侧不实现，
+            // 但必须给一句诚实的提示（留空 = "列着却点了没反应"）。
+            A::ToggleWiki => {
+                self.notice = Some((
+                    "仓库文档仅在 gpui 宿主可用（默认宿主；本窗口是 egui 回退）".to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
             A::NewSession => self.new_session(),
             A::Compact => {
                 self.handle.send(neo_protocol::Op::Compact);

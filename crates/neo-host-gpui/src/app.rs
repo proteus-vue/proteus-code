@@ -427,6 +427,28 @@ pub struct NeoView {
     /// 单选取而**不是**多选：`@引用` 一条条插进输入框更可控，
     /// 而多选要处理"插入顺序、去重、部分失败"，收益不抵复杂度。
     files_selected: Option<std::path::PathBuf>,
+    /// 仓库文档面板（Repo Wiki，D12）是否展开。
+    ///
+    /// 与文件树分开的面板：文件树回答"仓库里有什么文件"，Wiki 回答"这个仓库
+    /// 是什么、怎么用" —— 后者的入口是**少数几篇写成文的文档**，不是几百个路径。
+    wiki_open: bool,
+    /// 聚合出的仓库文档。惰性构建（第一次打开面板时读盘，见 `ensure_wiki`）。
+    ///
+    /// ⚠️ 它**已经过敏感信息闸**：含疑似密钥的文档不会出现在 `pages` 里，
+    /// 而是落在 `skipped`（见 `neo_platform::wiki`）。宿主只负责呈现，不判断。
+    wiki: Option<neo_platform::wiki::Wiki>,
+    /// Wiki 里当前正在读的那一篇（相对路径）。`None` = 还没选。
+    ///
+    /// 与文件树的 `file_preview` 同构（`(路径, 内容)` 两处状态），但这里存的是
+    /// **已聚合的内容**（`WikiPage` 自带正文），不必再读一次盘 —— 聚合时已经
+    /// 把正文装进内存了，再读一遍就是同一份数据两个来源。
+    wiki_current: Option<usize>,
+    /// Wiki 正文区的滚动句柄。
+    ///
+    /// 与文件树/转录同一条纪律：`track_scroll` + `overflow_y_scroll` +
+    /// `ScrollHandle` 三项组合缺一不可（少一个就会出现"滚不动"，
+    /// 而文档动辄上千行）。
+    wiki_scroll: neo_ui_kit::gpui::ScrollHandle,
     /// 启动时自动提交的任务（一次性）。来源 `NEO_GUI_PROMPT`。
     ///
     /// 与 egui 宿主的同名钩子同源（AGENTS.md 里 `PROTEUS_CODE_SMOKE` 的约定）：
@@ -513,6 +535,13 @@ impl NeoView {
             watch_attempted: false,
             files_expanded: std::collections::BTreeSet::new(),
             files_selected: None,
+            // 脚本化验证钩子：`NEO_GUI_PANEL=wiki` 启动即打开仓库文档面板
+            //（与 `files` 同族 —— 自绘面板收不到合成点击，需要环境变量
+            // 驱动一次以便截图核对）。
+            wiki_open: std::env::var("NEO_GUI_PANEL").ok().as_deref() == Some("wiki"),
+            wiki: None,
+            wiki_current: None,
+            wiki_scroll: neo_ui_kit::gpui::ScrollHandle::new(),
             auto_prompt: std::env::var("NEO_GUI_PROMPT")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
@@ -638,6 +667,33 @@ impl NeoView {
         }
         self.file_index = Some(neo_platform::file_index::scan_workspace(&self.workspace));
         self.ensure_watch();
+    }
+
+    /// **惰性**聚合仓库文档（Repo Wiki）。
+    ///
+    /// # 为什么复用文件索引而不是自己遍历一遍
+    ///
+    /// 两份遍历必然在某个边界上不一致（`.gitignore` 语义、隐藏文件、软链）。
+    /// 索引已经有了这份"仓库里有哪些文件"，Wiki 只要从里面挑出文档即可 ——
+    /// 这也是 `wiki::build_wiki` 收 `files` 而不收 `root` 的原因。
+    ///
+    /// 顺带：调用它会**顺带确保索引就绪**（文件树可能是关着的，索引没扫过）。
+    ///
+    /// # 默认选中第一篇
+    ///
+    /// 打开就有内容，而不是"选一篇看看"的空面板 —— Wiki 的用法是"进来就读"，
+    /// 而第一篇按排序就是 `README`（见 `wiki::sort_docs`）。
+    fn ensure_wiki(&mut self) {
+        if self.wiki.is_some() {
+            return;
+        }
+        self.ensure_files();
+        let files = self.file_index.as_ref().map(|i| i.files.clone()).unwrap_or_default();
+        let wiki = neo_platform::wiki::build_wiki(&self.workspace, &files);
+        if !wiki.pages.is_empty() {
+            self.wiki_current = Some(0);
+        }
+        self.wiki = Some(wiki);
     }
 
     /// 启动工作区监听（**在后台线程里**），变化时唤醒本视图。
@@ -986,6 +1042,15 @@ impl NeoView {
                 }
                 let st = if self.files_open { "显示" } else { "隐藏" };
                 self.notice = Some(format!("文件树已{st}"));
+            }
+            // 仓库文档（Repo Wiki，D12）
+            A::ToggleWiki => {
+                self.wiki_open = !self.wiki_open;
+                if self.wiki_open {
+                    self.ensure_wiki();
+                }
+                let st = if self.wiki_open { "显示" } else { "隐藏" };
+                self.notice = Some(format!("仓库文档已{st}"));
             }
             A::NewSession => self.new_session(),
             // 清屏：只清**屏幕上的**转录，不动会话日志
@@ -1382,10 +1447,221 @@ fn usage_chart_element(bars: Vec<neo_ui_render::UsageBar>) -> impl IntoElement {
 /// 前者把它当**一行文字**参与排版（换行、基线正确），后者是并排的盒子，
 /// 中英混排时会各占各的宽度、断行位置全错。
 fn styled_line(spans: &[(String, Tone)]) -> impl IntoElement {
+
     // 归并、色调翻译、区间语义这三件事都在 `neo_ui::rich_text` 里做 ——
     // 宿主只负责"给内容"。原先这里是手写的偏移累加，与
     // `reasoning_highlighted` 各写了一遍同样的区间逻辑。
     neo_ui::rich_text(&neo_ui::RichText::from_spans(spans)).into_any_element()
+}
+
+/// **Repo Wiki**（D12）：把仓库文档聚合成一处读。
+///
+/// # 两栏：目录 + 正文
+///
+/// 左栏是文档列表（标题 + 路径），右栏是正文（Markdown 走**共享解析器**
+/// `neo_text::markdown::blocks`，与转录区同一套 —— 两个宿主别的界面都用它，
+/// Wiki 没理由长出第二套 Markdown 渲染）。
+///
+/// # 界面上必须能看到"有文档被排除"
+///
+/// 这是本面板**最重要的一处呈现**：聚合前有一道敏感信息闸（见
+/// `neo_platform::wiki`），含疑似密钥的文档会被整篇排除。如果界面只显示
+/// 收录进来的那些，用户会以为"仓库的文档就这些" —— 而真实情况是"有一篇
+/// 被拦下了，因为它里面有密钥"。
+///
+/// 两件事都要说清：**拦了几篇**、**为什么拦**（哪一行、什么类型，但不回显密钥）。
+/// 前者让"少了一篇"可见，后者让人知道去改哪儿。
+fn wiki_panel(view: &mut NeoView, cx: &mut Context<NeoView>) -> Option<impl IntoElement> {
+    if !view.wiki_open {
+        return None;
+    }
+
+    // **面板可见 ⇒ 内容必须在**。与文件树同一条纪律：谁把面板显示出来都
+    // 无所谓（`/wiki`、环境变量、状态栏），渲染时保证数据就绪。
+    // 放在这里而不是构造函数，理由见 `file_panel` 里那段说明。
+    if view.wiki.is_none() {
+        view.ensure_wiki();
+    }
+    let Some(wiki) = view.wiki.as_ref() else {
+        return Some(
+            v_flex()
+                .w(px(900.))
+                .h(px(500.))
+                .p_3()
+                .bg(neo_ui::panel_bg())
+                .child(div().text_color(neo_ui::neo_color(Tone::Muted)).child("（无法聚合仓库文档）"))
+                .into_any_element(),
+        );
+    };
+
+    let mut col = v_flex().w(px(900.)).h(px(500.)).gap_1().p_3().bg(neo_ui::panel_bg()).child(
+        h_flex()
+            .gap_2()
+            .child(neo_ui::text_role::section_title("仓库文档"))
+            .child(
+                div()
+                    .text_color(neo_ui::neo_color(Tone::Muted))
+                    .child(format!(
+                        "{} 篇（来自 README 与 docs/）",
+                        wiki.pages.len()
+                    )),
+            ),
+    );
+
+    // ── 被排除的文档：**必须显示**（见本函数头部说明）──
+    if !wiki.skipped.is_empty() {
+        let mut warn = v_flex()
+            .gap_0()
+            .p_2()
+            .rounded(px(neo_ui::RADIUS))
+            .bg(neo_ui::neo_color(Tone::Error).opacity(0.12))
+            .child(
+                div()
+                    .text_color(neo_ui::neo_color(Tone::Error))
+                    .child(format!("⚠ {} 篇未收录", wiki.skipped.len())),
+            );
+        for s in &wiki.skipped {
+            warn = warn.child(
+                div()
+                    .text_color(neo_ui::neo_color(Tone::Muted))
+                    .text_sm()
+                    // 文案来自 `skip_explain`（单一事实源）——
+                    // 宿主不自己拼原因，否则两个宿主会给出不同说法。
+                    .child(format!("· {} —— {}", s.path.display(), neo_platform::wiki::skip_explain(&s.reason))),
+            );
+        }
+        col = col.child(warn);
+    }
+
+    if let (true, Some(reason)) = (wiki.truncated, wiki.truncated_reason.as_ref()) {
+        col = col.child(
+            div().text_color(neo_ui::neo_color(Tone::Warning)).text_sm().child(format!("⚠ {reason}")),
+        );
+    }
+
+    if wiki.pages.is_empty() {
+        col = col.child(
+            div()
+                .text_color(neo_ui::neo_color(Tone::Muted))
+                .child("（这个工作区里没有可收录的文档：只读根目录的 README/AGENTS 与 docs/ 下的 Markdown）"),
+        );
+        return Some(col.into_any_element());
+    }
+
+    // ── 左栏：目录 ──
+    let mut nav = v_flex().gap_0();
+    for (i, p) in wiki.pages.iter().enumerate() {
+        let is_current = view.wiki_current == Some(i);
+        let idx = i;
+        let v = cx.entity().clone();
+        nav = nav.child(
+            text_button(p.title.clone(), if is_current { Tone::Accent } else { Tone::Text })
+                .id(("wiki-nav", idx))
+                .when(is_current, |d| d.bg(neo_ui::neo_color(Tone::Border)))
+                .role(neo_ui_kit::gpui::accesskit::Role::Button)
+                // 标签带上路径：同名标题的两篇文档靠它区分
+                .aria_label(format!("阅读 {}（{}）", p.title, p.path.display()))
+                .on_click(move |_, _, cx| {
+                    v.update(cx, |this, cx| {
+                        this.wiki_current = Some(idx);
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+
+    // 左栏固定宽；不限制的话长标题会把正文挤没。
+    //
+    // 三件套 `w`/`min_w`/`max_w` 与文件树同款：只给 `w` 时 flex 项默认的
+    // `min-width: auto` 会让内容把这一栏撑开。
+    let nav_col = div()
+        .w(px(260.))
+        .min_w(px(260.))
+        .max_w(px(260.))
+        .h_full()
+        .child(
+            // 滚动容器：文档多时必须能滚。
+            // `track_scroll` + `overflow_y_scroll` 两项组合 + `size_full()`
+            // —— 与文件树滚动容器逐项一致（漏了 `size_full` 就会让内容
+            // 撑破外框，实测表现为两个栏压到表头上面）。
+            div()
+                .id("wiki-nav-scroll")
+                .size_full()
+                .min_h(px(0.))
+                .overflow_y_scroll()
+                .child(nav),
+        );
+
+    // ── 右栏：正文 ──
+    //
+    // # 三处必须显式写对（读 gpui 源码才确认，实测各踩一次）
+    //
+    // 1. **`h_flex()` 默认带 `items_center`**（`gpui-base/src/styled.rs` 里
+    //    `h_flex()` = `flex_row().items_center()`）。在 flex 行里 `align_items`
+    //    管的是**纵轴**，Center 意味着子项高度=内容高度、且上下居中 ——
+    //    正文有几百行时就会**同时向上和向下溢出**面板（实测：正文压在表头
+    //    上面、越过面板底边）。所以这一行必须显式 `.items_stretch()`。
+    // 2. **每一层要收缩的容器都要 `min_*(0.)`**：gpui 的 `min_size` 默认是
+    //    `auto`，taffy 会按内容的 min-content 兜底，于是"能收缩"形同虚设。
+    // 3. **滚动容器要有确定高度**：`overflow_y_scroll` 只设样式，真正能滚
+    //    要求它的高度被父级界定（否则 `scroll_max` 恒为 0）。
+    let current = view.wiki_current.and_then(|i| wiki.pages.get(i));
+    let mut body = v_flex().gap_1().min_w(px(0.)).child(
+        div()
+            .text_color(neo_ui::neo_color(Tone::Muted))
+            .text_sm()
+            .child(match current {
+                Some(p) => format!("{}（{} 行）", p.path.display(), p.total_lines),
+                None => "选一篇开始读".into(),
+            }),
+    );
+
+    if let Some(p) = current {
+        if p.truncated {
+            // 截断如实标注 —— 否则读者会把"看到的部分"当成全文
+            body = body.child(
+                div().text_color(neo_ui::neo_color(Tone::Warning)).text_sm().child(format!(
+                    "⚠ 文件较大，只显示前 {} 行（共 {} 行）",
+                    p.body.lines().count(),
+                    p.total_lines
+                )),
+            );
+        }
+        // Markdown 走共享解析器（与转录区同一套语义与色调）
+        for line in neo_text::markdown::blocks(&p.body) {
+            body = body.child(styled_line(&line));
+        }
+    }
+
+    col = col.child(
+        h_flex()
+            .flex_1()
+            .gap_3()
+            // ⚠️ `items_stretch` 必须显式给（`h_flex()` 默认是 `items_center`，
+            // 见本段开头第 1 条）—— 少了它，两栏都会按内容高度居中并溢出。
+            .items_stretch()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .child(nav_col)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .min_h(px(0.))
+                    .child(
+                        div()
+                            .id("wiki-body-scroll")
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .overflow_y_scroll()
+                            .track_scroll(&view.wiki_scroll)
+                            .child(body),
+                    ),
+            ),
+    );
+
+    Some(col.into_any_element())
 }
 
 /// 思考块带搜索高亮：把匹配区间标成项目主色。
@@ -3240,6 +3516,15 @@ impl Render for NeoView {
                     .child(panel_enter("file-panel-enter", p)),
             );
         }
+        if let Some(p) = wiki_panel(self, cx) {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(48.))
+                    .left(px(120.))
+                    .child(panel_enter("wiki-panel-enter", p)),
+            );
+        }
         if let Some(p) = help_panel(self, cx) {
             root = root.child(
                 div()
@@ -3603,6 +3888,41 @@ mod tests {
         );
     }
 
+    /// **两栏面板必须显式 `items_stretch`** —— 守一个只在长内容下暴露的缺陷。
+    ///
+    /// # 为什么值得单测一条
+    ///
+    /// `h_flex()` 的默认是 `items_center`（见 gpui-base 的 `styled.rs`：它就是
+    /// `flex_row().items_center()`），而 flex 行的 `align_items` 管的是**纵轴**。
+    /// 默认值下子栏高度按内容算并上下居中 —— 内容短时**完全看不出来**，
+    /// 内容一长（预览几千行的文件、或 Wiki 里的一篇长文档）两栏就同时向上
+    /// 盖住面板标题、向下溢出到主界面。本仓实测踩到过，且它在文件树面板里
+    /// **潜伏了很久**：此前所有验证都只预览短文件。
+    ///
+    /// 这条测试用两栏结构的**源码契约**做断言会太脆，所以断言的是可观察
+    /// 事实：面板函数产出的元素树上带 `items_stretch` 的 flex 行存在。
+    /// 它抓不住"所有布局问题"，但能抓住**这次这个**：把 `items_stretch`
+    /// 删掉时它会红。
+    #[test]
+    fn two_column_panels_stretch_their_children_vertically() {
+        // gpui 的 `Style` 是公开可读的：直接构造同样的 flex 行，确认
+        // `items_stretch()` 与 `h_flex()` 默认值**确实不同** —— 这条是
+        // "为什么必须显式写"的根据，而不是我们的猜测。
+        use neo_ui_kit::component::{h_flex, v_flex};
+        use neo_ui_kit::gpui::Styled as _;
+        let mut default_row = h_flex();
+        let mut stretched = h_flex().items_stretch();
+        assert_ne!(
+            format!("{:?}", default_row.style().align_items),
+            format!("{:?}", stretched.style().align_items),
+            "h_flex() 的默认 align_items 必须与 items_stretch() 不同 —— \
+             若哪天上游把默认改成 stretch，本仓那几处显式调用就可以删了"
+        );
+        // 顺带钉住纵向容器的默认（v_flex 走 cross 轴 stretch，是我们要的）
+        let mut col = v_flex();
+        let _ = col.style();
+    }
+
     /// **面板动画确实走了 gpui 的动画入口**（从而自动尊重 `reduce_motion`）。
     ///
     /// gpui 的 `with_animation` 文档明确保证：系统要求减少动效时直接渲染终态、
@@ -3835,6 +4155,96 @@ mod tests {
             parts.iter().any(|(t, e)| *e && *t == "旧"),
             "应强调「旧」这个完整的汉字：{parts:?}"
         );
+    }
+
+    /// **Repo Wiki 的底线守卫**：面板拿到的数据里**不可能**有密钥。
+    ///
+    /// 这条测试的价值在于它守的是**已聚合的结果**（`Wiki`），也就是宿主
+    /// 实际渲染的东西 —— 而不是"检测器能认出密钥"（那已在 `neo-platform`
+    /// 测过）。两者是不同的断言：检测器对了，但宿主若绕过 `build_wiki`
+    /// 自己读文件（比如"顺手"加一个目录里没排除的路径），泄漏仍会发生。
+    ///
+    /// 因此这里走宿主真实的数据入口：`build_wiki` + 文件索引给出的列表。
+    ///
+    /// 末句：**它是"宿主拿到的数据"，不是"检测器的能力"** —— 检测器单独测
+    /// 过了（`neo-platform::secrets` 的用例），但那不能覆盖"宿主自己绕过去"
+    /// 这条路。
+    #[test]
+    fn the_wiki_panel_data_never_contains_a_secret() {
+        let dir = std::env::temp_dir().join(format!("neo-gpui-wiki-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        let secret = "sk-9fK2mQ7dLp3Xr8Tn5Vw1Za6Bc4Ye0Hg";
+        std::fs::write(dir.join("README.md"), "# 项目\n\n正常内容。\n").unwrap();
+        std::fs::write(
+            dir.join("docs/setup.md"),
+            format!("# 安装\n\nDEEPSEEK_API_KEY={secret}\n"),
+        )
+        .unwrap();
+        // 上面那篇的正文里还有一份私钥块，覆盖第二类命中
+        std::fs::write(
+            dir.join("docs/keys.md"),
+            "# 密钥\n\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n",
+        )
+        .unwrap();
+
+        let files = vec![
+            std::path::PathBuf::from("README.md"),
+            std::path::PathBuf::from("docs/setup.md"),
+            std::path::PathBuf::from("docs/keys.md"),
+        ];
+        let wiki = neo_platform::wiki::build_wiki(&dir, &files);
+
+        // 只有 README 该被收录
+        assert_eq!(wiki.pages.len(), 1, "含密钥的文档被收录了：{:?}", wiki.pages);
+        assert_eq!(wiki.pages[0].path, std::path::PathBuf::from("README.md"));
+        assert_eq!(wiki.skipped.len(), 2, "两篇含敏感信息的都要被拦下");
+
+        // 正文里不得出现密钥的任何片段
+        for p in &wiki.pages {
+            for win in secret.as_bytes().windows(6) {
+                let frag = std::str::from_utf8(win).unwrap();
+                assert!(!p.body.contains(frag), "正文泄露了密钥片段 {frag}");
+            }
+            assert!(!p.body.contains("PRIVATE KEY"), "私钥块漏进了正文");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 全仓文档过一遍聚合闸：**本仓自己的文档不该被自己的守卫拦下**。
+    ///
+    /// 这条防的是"过度报警"——一个把自家文档全排除掉的 Wiki 等于没做，
+    /// 而它不会以任何错误的形式表现出来（面板打开是空的）。
+    /// 同时它也是一份真实的回归夹具：若哪天真有人在 `docs/` 里贴了密钥，
+    /// 这里会红，而那正是我们想要的信号。
+    #[test]
+    fn the_repos_own_docs_pass_our_own_secret_gate() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("crates/neo-host-gpui 的上两级是仓库根");
+        if !root.join("docs").is_dir() {
+            return; // 提取集演练等场景下没有 docs/，跳过
+        }
+        let idx = neo_platform::file_index::scan_workspace(root);
+        let wiki = neo_platform::wiki::build_wiki(root, &idx.files);
+        assert!(
+            wiki.pages.len() >= 10,
+            "本仓文档应当大量收录（收进来 {} 篇，排除 {} 篇）—— 若寥寥无几，\
+             多半是检测规则过度报警了",
+            wiki.pages.len(),
+            wiki.skipped.len()
+        );
+        for s in &wiki.skipped {
+            // 只允许"读不出来"这类，敏感命中说明仓库里真有东西要处理
+            assert!(
+                !matches!(s.reason, neo_platform::wiki::WikiSkip::Sensitive { .. }),
+                "仓库文档里检出了疑似密钥，请先处理：{} —— {}",
+                s.path.display(),
+                neo_platform::wiki::skip_explain(&s.reason)
+            );
+        }
     }
 
     /// **接线契约 1**：分类必须**完整** —— 文件头与截断说明不能被当成上下文。

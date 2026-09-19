@@ -15,6 +15,8 @@
 
 pub mod file_index;
 pub mod file_watch;
+pub mod secrets;
+pub mod wiki;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
