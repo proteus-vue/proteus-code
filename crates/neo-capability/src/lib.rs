@@ -13,6 +13,7 @@
 //! 因此"工具绕过沙箱"在类型层面就不可能 —— 这是内核第 2 条铁律的落地点。
 
 pub mod diff;
+pub mod diff_view;
 
 use neo_core::{CallKind, SandboxOutcome, Tool, ToolCtx, ToolRegistry};
 use neo_protocol::{EventMsg, TodoEntry, TodoStatus, ToolOutput};
