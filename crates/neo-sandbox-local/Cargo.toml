@@ -15,5 +15,5 @@ description = "L3 PROVIDER：SandboxBackend 的本机实现（macOS Seatbelt 等
 # 实现必须能依赖契据，故落在 L3。L1 的 neo-sandbox 只负责"把 argv 包裹成
 # 受限形式"，是被本 crate 复用的**更低层工具**，不是同一个 seam。
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }

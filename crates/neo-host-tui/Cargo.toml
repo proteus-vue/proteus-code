@@ -22,12 +22,12 @@ description = "L5 宿主：终端（终端控制零依赖，自写 ANSI 渲染�
 [dependencies]
 # 宿主中立的文本语义（语义色调 / 宽度 / Markdown / 高亮）。
 # 与桌面 GUI 宿主共享同一份 —— 所以它必须在宿主之下，不能留在这里。
-neo-text = { path = "../neo-text", version = "0.1.0" }
-neo-session = { path = "../neo-session", version = "0.1.0" }
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
-neo-config = { path = "../neo-config", version = "0.1.0" }
-neo-platform = { path = "../neo-platform", version = "0.1.0" }
-neo-capability = { path = "../neo-capability", version = "0.1.0" }
+neo-text = { path = "../neo-text", version = "0.2.0" }
+neo-session = { path = "../neo-session", version = "0.2.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
+neo-config = { path = "../neo-config", version = "0.2.0" }
+neo-platform = { path = "../neo-platform", version = "0.2.0" }
+neo-capability = { path = "../neo-capability", version = "0.2.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }

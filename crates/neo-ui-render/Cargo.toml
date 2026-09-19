@@ -26,7 +26,7 @@ description = "L2 UI 渲染缝：后端中立颜色/几何 + RenderBackend trait
 #   - 只有**自绘表面**（diff 视图、图表、自绘画布）才走它。
 [dependencies]
 # 门面层（唯一 pin gpui 的入口）—— 本 crate 不直接声明任何 gpui 依赖
-neo-ui-kit = { path = "../neo-ui-kit", version = "0.1.0" }
+neo-ui-kit = { path = "../neo-ui-kit", version = "0.2.0" }
 # 宿主中立的语义色调（Tone）与调色板（Palette）：中立颜色从它派生，
 # 这样"同一个 Tone 在 TUI / egui / gpui 里是同一个颜色"有单一来源
-neo-text = { path = "../neo-text", version = "0.1.0" }
+neo-text = { path = "../neo-text", version = "0.2.0" }

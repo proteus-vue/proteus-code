@@ -11,7 +11,7 @@ description = "L3 PROVIDER：MCP 客户端（外部工具服务器 → Tool）"
 
 # L3 PROVIDER —— MCP 客户端（把外部工具服务器的能力变成 ToolRegistry 里的 Tool）
 [dependencies]
-neo-core = { path = "../neo-core", version = "0.1.0" }
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

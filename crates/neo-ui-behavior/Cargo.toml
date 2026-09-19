@@ -28,4 +28,4 @@ description = "L3 UI 行为层：无样式、不可见但难做对的东西（�
 [dependencies]
 # 只依赖渲染缝的中立几何类型（`FocusIntent` 复用它做命中判断）。
 # **不依赖 neo-ui-kit** —— 这是本层"后端无关"的机器保证。
-neo-ui-render = { path = "../neo-ui-render", version = "0.1.0" }
+neo-ui-render = { path = "../neo-ui-render", version = "0.2.0" }

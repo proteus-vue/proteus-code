@@ -24,19 +24,19 @@ description = "L5 宿主：桌面原生 GUI（GPUI / gpui-kit，NEO 的品牌界
 # 这条不是形式主义：两份 gpui 会让 Cargo 编译两份引擎，报出类型身份分裂的怪错误。
 [dependencies]
 # UI 栈（四层）：门面 / 渲染缝 / 行为层 / 设计系统
-neo-ui = { path = "../neo-ui", version = "0.1.0" }
-neo-ui-behavior = { path = "../neo-ui-behavior", version = "0.1.0" }
-neo-ui-kit = { path = "../neo-ui-kit", version = "0.1.0" }
-neo-ui-render = { path = "../neo-ui-render", version = "0.1.0" }
+neo-ui = { path = "../neo-ui", version = "0.2.0" }
+neo-ui-behavior = { path = "../neo-ui-behavior", version = "0.2.0" }
+neo-ui-kit = { path = "../neo-ui-kit", version = "0.2.0" }
+neo-ui-render = { path = "../neo-ui-render", version = "0.2.0" }
 # 共享内核驱动 + 转录模型（与 egui 宿主共用同一份实现）
-neo-driver = { path = "../neo-driver", version = "0.1.0" }
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
-neo-session = { path = "../neo-session", version = "0.1.0" }
+neo-driver = { path = "../neo-driver", version = "0.2.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
+neo-session = { path = "../neo-session", version = "0.2.0" }
 # 工作区文件索引（D12 文件树）。它在 L0，与渲染/内核无关 —— 只是文件系统。
 # 放 neo-platform 的理由见那边 `file_index` 模块头部（TUI 将来也用同一份）。
-neo-platform = { path = "../neo-platform", version = "0.1.0" }
-neo-text = { path = "../neo-text", version = "0.1.0" }
+neo-platform = { path = "../neo-platform", version = "0.2.0" }
+neo-text = { path = "../neo-text", version = "0.2.0" }
 # 唤醒钩子用的通道（响应式宿主必须靠它通知重绘，不能轮询）。
 # 它本就在依赖树里（gpui 自己依赖它 2.5.0），这里显式声明是为了不依赖传递。
 async-channel = "2"
@@ -44,19 +44,19 @@ async-channel = "2"
 # 为什么在 capability 而不是这里：解析器必须与**生产者**（`unified_diff`）
 # 同处一地，且 TUI 的查看器也用它 —— 两宿主共用同一套判定，否则同一份
 # diff 会被配出不同的对（那是最难解释的一类不一致）。
-neo-capability = { path = "../neo-capability", version = "0.1.0" }
+neo-capability = { path = "../neo-capability", version = "0.2.0" }
 
 [[example]]
 name = "window_smoke"
 [dev-dependencies]
-neo-mock = { path = "../neo-mock", version = "0.1.0" }
-neo-config = { path = "../neo-config", version = "0.1.0" }
-neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
-neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }
-neo-exec = { path = "../neo-exec", version = "0.1.0" }
+neo-mock = { path = "../neo-mock", version = "0.2.0" }
+neo-config = { path = "../neo-config", version = "0.2.0" }
+neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.2.0" }
+neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.2.0" }
+neo-exec = { path = "../neo-exec", version = "0.2.0" }
 serde_json = { workspace = true }
 # UI 测试基建（无头窗口）—— 只为 composer 的**多行语义**回归用例打开。
 # 它是本宿主的运行时依赖（非 dev），这里重复声明只是为了在**测试构建**里
 # 打开 `test-support`：那会编进 release 二进制，所以绝不能加在 [dependencies]
 # 里（见根 Cargo.toml 的说明）。与 `neo-ui/tests/ime_regression.rs` 同一做法。
-neo-ui-kit = { path = "../neo-ui-kit", version = "0.1.0", features = ["test-support"] }
+neo-ui-kit = { path = "../neo-ui-kit", version = "0.2.0", features = ["test-support"] }

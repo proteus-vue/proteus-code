@@ -11,6 +11,6 @@ description = "L3 PROVIDER：多会话库（列举 / 新建 / 删除 / 标题）
 
 # L3 PROVIDER —— 多会话的目录管理与元信息（会话库）
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-session = { path = "../neo-session", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-session = { path = "../neo-session", version = "0.2.0" }
 serde_json = { workspace = true }

@@ -10,8 +10,8 @@ rust-version.workspace = true
 description = "L4 目标编排：Goal 引擎（Plan→Code→Review→Learn）"
 
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
-neo-capability = { path = "../neo-capability", version = "0.1.0" }
-neo-session = { path = "../neo-session", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
+neo-capability = { path = "../neo-capability", version = "0.2.0" }
+neo-session = { path = "../neo-session", version = "0.2.0" }
 serde = { workspace = true }

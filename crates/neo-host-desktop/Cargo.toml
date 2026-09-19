@@ -12,8 +12,8 @@ description = "L5 宿主：系统 webview 窗口（替代 Electron）"
 # L5 HOST: 不含业务逻辑，只做渲染 + 输入解析 + 消费事件流。
 # 用系统 webview（wry）替代 Electron：不捆绑 Chromium、不捆绑 Node。
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
-neo-orchestration = { path = "../neo-orchestration", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
+neo-orchestration = { path = "../neo-orchestration", version = "0.2.0" }
 wry = "0.46.1"
 tao = "0.31.1"

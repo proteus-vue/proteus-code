@@ -15,6 +15,6 @@ description = "L3 PROVIDER：ModelProvider 实现（OpenAI 兼容 chat-completio
 # 理由：调试链保持浅（依赖越少，出错时能查的地方越少）；
 # 也避免了沙箱环境拉不到 crate 的问题。
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
 serde_json = { workspace = true }
