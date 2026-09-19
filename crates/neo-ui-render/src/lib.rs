@@ -45,6 +45,7 @@ pub mod backend;
 pub mod diff;
 pub mod gutter;
 pub mod headless;
+pub mod raster;
 pub mod progress;
 pub mod scene;
 pub mod usage;
