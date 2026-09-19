@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # NEO 全套门禁入口。
 #
-# 七部分：
+# 八部分：
 #   0. 预检：cargo 可执行 **且是钉版的那把**（解析失败 / 版本选错都会让后续门禁失去意义）
 #   1. Rust 工程门禁：cargo test（含内核 conformance、内存有界性、SPI conformance）
 #   2. 架构与协议守卫：docs/neo-plan/05-验证/ 的 Python 检查（依赖方向、协议确定性、
 #      会话格式、配置层叠、模式矩阵、SPI 合规、UI 分层、可提取性、许可证）
 #   3. 工具链卫生：零 warning（warning 是未来错误的温床）
 #   4. 执行效率规范：固定盲等 / 重复拉取 / 无退出轮询（ai-efficiency-rules）
+#   4.5 性能预算：release 二进制体积（快照式检查；全部三项见 scripts/measure-perf.sh）
 #   5. shell 卫生：变量后紧跟非 ASCII（bash 3.2 会把中文标点吃进变量名）
 #   6. CI 失败摘要：注解通道是否仍能读到真因
 #
@@ -60,6 +61,32 @@ else
   # 库函数已把原因与修法打到 stderr，这里补一句门禁口径。
   echo "  ⚠️  cargo 未通过预检 —— Rust 门禁整体判失败（是工具链/环境问题，非代码问题）"
   CARGO_OK=0
+fi
+
+# ── 0.5 预检：macOS 上能不能找到 SDK（链接期的隐性前提）─────────────────
+#
+# 为什么需要它：**Xcode 许可未同意**时，`xcrun --show-sdk-path` 直接失败，
+# 于是所有需要**链接**的步骤（集成测试、doctest）报的是：
+#
+#     error: linking with `cc` failed
+#     note: You have not agreed to the Xcode license agreements
+#
+# 而 `cargo check` **不链接**，所以它是绿的 —— 于是现象是
+# "check 过了、test 全红、报的是一堆链接错误"，看着像代码坏了或依赖出问题。
+# 实测踩到一次（一次门禁因此报出 2 组失败，全是这一个根因）。
+#
+# 判据只看"SDK 路径取不取得到"，不看 Xcode 版本/路径细节。
+# **不自动改 `DEVELOPER_DIR`**：选 Xcode 的 SDK 还是 CommandLineTools 的，
+# 是开发者自己的决定（两者版本可能不同），门禁不该替他选。
+if [ "$(uname -s)" = "Darwin" ]; then
+  if ! xcrun --show-sdk-path >/dev/null 2>&1; then
+    echo "  ⚠️  取不到 macOS SDK —— 链接期测试会失败（是环境问题，非代码问题）："
+    xcrun --show-sdk-path 2>&1 | head -2 | sed 's/^/     /'
+    echo "     两种修法（都只需一次）："
+    echo "       a) 同意 Xcode 许可：sudo xcodebuild -license accept"
+    echo "       b) 改用命令行工具链的 SDK：export DEVELOPER_DIR=/Library/Developer/CommandLineTools"
+    echo "     （不改环境也能跑：把 (b) 的那个 export 加到本次 bash 会话即可）"
+  fi
 fi
 
 # ── 1. Rust 测试（内核 conformance 是主门禁）────────────────────────────
@@ -148,6 +175,33 @@ if [ -f "$AUDIT" ]; then
   fi
 else
   echo "  [SKIP] 未找到 ${AUDIT}（skill 未安装？见 docs/ai-efficiency-rules/）"
+fi
+
+# ── 4.5 性能预算：二进制体积（方案 §7）───────────────────────────────────
+#
+# 为什么只把**体积**放进每次门禁：它是纯 `stat`（瞬时、不需要 GUI、
+# 不需要显示服务器），而另两项（空闲出帧、冷启动到首帧）要在真窗口上测、
+# 加起来约 30 秒 —— 每次门禁都跑会明显拖慢本地迭代，而那两项的变化频率
+# 远低于"某次改动顺手加大了二进制"。
+#
+# 所以要测全部三项时跑：`bash scripts/measure-perf.sh`
+#
+# 体积这条是**实打实抓过问题的**：此前全仓没有 `[profile.release]`，
+# 于是方案要求的"剥离符号后 <30MB"从未被满足 —— 实测 38MB。
+hr; echo "#  性能预算：release 二进制体积（方案 §7：< 30MB）"; hr
+REL_BIN="$ROOT/target/release/neo"
+if [ ! -f "$REL_BIN" ]; then
+  echo "  [SKIP] 没找到 $REL_BIN —— 跑一次 cargo build --release -p neo-code-cli 后这条才有意义"
+else
+  bytes=$(stat -f%z "$REL_BIN" 2>/dev/null || stat -c%s "$REL_BIN")
+  mb=$(awk -v b="$bytes" 'BEGIN{printf "%.2f", b/1048576}')
+  if awk -v m="$mb" 'BEGIN{exit !(m < 30)}'; then
+    echo "  ✅ release 二进制 ${mb}MB（预算 < 30MB）"
+  else
+    echo "  ❌ release 二进制 ${mb}MB —— 超出方案 §7 的 30MB 预算"
+    echo "     先看 Cargo.toml 的 [profile.release] 是否仍带 strip = \"symbols\""
+    fail=$((fail+1))
+  fi
 fi
 
 # ── 5. shell 多字节变量名（bash 3.2 会把中文标点吃进变量名）─────────────

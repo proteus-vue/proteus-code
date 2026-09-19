@@ -246,6 +246,65 @@ fn diag() -> bool {
     std::env::var("NEO_GUI_DIAG").is_ok()
 }
 
+
+/// 帧统计：计数 + 帧间隔的**分位数**。
+///
+/// # 为什么记间隔而不是"帧时间"
+///
+/// 方案写的是"主线程帧时间 p95 < 16.6ms"。但在 gpui 里 `render` 返回后框架
+/// 还有布局/绘制阶段，我们**测不到**那一整段；能测准的是**相邻两帧的间隔**
+/// （`render` 被调用的时间差）。
+///
+/// 两者的关系要说清（否则这个数字会被误读）：
+/// - 稳态下（每帧都被排出来）间隔 ≈ 帧时间 + 等待，能反映"卡不卡"；
+/// - **但空闲时它无意义** —— 那时根本没有帧，间隔会很大，而那是**要的**结果。
+///
+/// 所以本结构同时报**帧数**（判断"空闲到底出不出帧"）与**间隔分位数**
+///（判断"忙的时候卡不卡"）。**两个数必须一起读**，只看一个会得出相反结论。
+#[derive(Default)]
+struct FrameStats {
+    count: u64,
+    last: Option<std::time::Instant>,
+    /// 间隔样本（毫秒）。有上限 —— 长跑会话不该无限增长。
+    gaps_ms: Vec<f32>,
+    /// 统计窗口的起点（用于打印"最近 N 秒出了多少帧"）。
+    window_start: Option<std::time::Instant>,
+}
+
+impl FrameStats {
+    /// 样本上限。取 4096：够算稳定的 p95，而内存占用可忽略（16 KB）。
+    const MAX_SAMPLES: usize = 4096;
+
+    fn tick(&mut self, now: std::time::Instant) {
+        self.count += 1;
+        if let Some(prev) = self.last {
+            if self.gaps_ms.len() < Self::MAX_SAMPLES {
+                self.gaps_ms.push((now - prev).as_secs_f32() * 1000.0);
+            }
+        }
+        self.last = Some(now);
+        self.window_start.get_or_insert(now);
+    }
+
+    /// `(p50, p95, 样本数)` 毫秒。没有样本时返回 `None`。
+    fn percentiles(&self) -> Option<(f32, f32, usize)> {
+        if self.gaps_ms.is_empty() {
+            return None;
+        }
+        let mut v = self.gaps_ms.clone();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let pick = |q: f32| {
+            let i = ((v.len() as f32 - 1.0) * q).round() as usize;
+            v[i]
+        };
+        Some((pick(0.5), pick(0.95), v.len()))
+    }
+
+    fn since_window_start(&self, now: std::time::Instant) -> f32 {
+        self.window_start.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0)
+    }
+}
+
 /// 界面状态（Entity）。
 pub struct NeoView {
     handle: KernelHandle,
@@ -393,6 +452,30 @@ pub struct NeoView {
     /// `NEO-SMOKE-READY`**，标题可以从系统里读到，于是等待变成有条件的。
     /// 值 = 是否已经观察到"跑起来过"（否则首帧的状态就满足"不在运行"）。
     shot_armed: Option<bool>,
+    /// **帧统计**（性能预算实测用，见 `NEO_GUI_FRAMES`）。
+    ///
+    /// # 为什么要它（这是方案 §7 里"空闲 CPU ≈ 0"与"帧时间 p95"的抓手）
+    ///
+    /// 响应式宿主的性能问题**看不见**：它不出帧时 CPU 是 0（好事），
+    /// 出帧太多时也只是"感觉有点费电"。而这两件事正好是方案里点名要测的
+    /// 两项，此前整块未测（缺口表挂着）。
+    ///
+    /// 它同时是"空闲不出帧"这条纪律的**可观测证据**：上两轮在渲染循环
+    /// park 上连踩两次（动画停在第 0 帧、`cx.notify` 唤不醒已停的循环），
+    /// 而那时**没有任何手段能直接读到"到底出了多少帧"** —— 只能靠日志猜。
+    frames: FrameStats,
+    /// 是否打印帧统计（`NEO_GUI_FRAMES`）。默认关闭。
+    frame_report: bool,
+    /// **进程起点**（性能预算：冷启动到首帧）。
+    ///
+    /// 为什么由宿主自己记：脚本侧只能掐 wall clock + 轮询，于是轮询间隔本身
+    /// 成了误差源，而且轮询会多占一个核、污染相邻的帧间隔测量。
+    /// 宿主知道"main 开始的时刻"与"第一帧画完的时刻" —— 由它报最准。
+    process_start: std::time::Instant,
+    /// 是否报告启动耗时（`NEO_GUI_STARTUP`）。
+    startup_report: bool,
+    /// 首帧时刻是否已报过（只报一次）。
+    startup_reported: bool,
     // **D4** 工具组的折叠状态**不在这里** —— 它按块下标记账，必须与
     // `clear_view` 一起被清理，所以和 `collapsed_reasoning` 同放共享层
     // （见 `neo_driver::transcript::Transcript::expanded_tool_runs`）。
@@ -544,6 +627,14 @@ impl NeoView {
             turn_usages: Vec::new(),
             force_expand_groups: std::env::var("NEO_GUI_EXPAND").is_ok(),
             shot_armed: std::env::var("NEO_GUI_SHOT").ok().map(|_| false),
+            frames: FrameStats::default(),
+            frame_report: std::env::var("NEO_GUI_FRAMES").is_ok(),
+            // ⚠️ 这个 `Instant::now()` 在**构造函数**里取，不是 `run()` 开头 ——
+            // 后者晚于大量装配工作（配置加载、会话库扫描、provider 构建）。
+            // 用户感受到的"双击到看见东西"包含那一段，所以起点要尽量早。
+            process_start: std::time::Instant::now(),
+            startup_report: std::env::var("NEO_GUI_STARTUP").is_ok(),
+            startup_reported: false,
             transcript: Transcript::new(),
             input: String::new(),
             reasoning_query: String::new(),
@@ -3535,6 +3626,35 @@ impl Render for NeoView {
         // 在 render 里取一次并向下传，而不是在深层函数里各取一次 ——
         // 后者要求每个函数都拿到 `Window`，会把签名污染到整条链路。
         let line_height = f32::from(window.line_height());
+
+        // 帧统计（`NEO_GUI_FRAMES=1`）：**只在这里打点**，见 `FrameStats` 的说明。
+        // 每帧打印而不是定时汇总 —— 不开定时器就不会自己制造帧
+        // （那会让"空闲不出帧"这个被测对象被观测行为本身改变）。
+        // 冷启动到首帧：**只报一次**（第一帧那一刻）
+        if self.startup_report && !self.startup_reported {
+            self.startup_reported = true;
+            eprintln!(
+                "[neo] startup since={}ms",
+                self.process_start.elapsed().as_millis()
+            );
+        }
+
+        if self.frame_report {
+            let now = std::time::Instant::now();
+            self.frames.tick(now);
+            let secs = self.frames.since_window_start(now);
+            let pct = self.frames
+                .percentiles()
+                .map(|(p50, p95, n)| format!("p50={p50:.1}ms p95={p95:.1}ms n={n}"))
+                .unwrap_or_else(|| "（样本不足）".into());
+            eprintln!(
+                "[neo] frame #{:<6} 窗口 {:.1}s  频率 {:.1}/s  {}",
+                self.frames.count,
+                secs,
+                self.frames.count as f32 / secs.max(0.001),
+                pct
+            );
+        }
 
         // `NEO_GUI_PREVIEW=<相对路径>`：启动即预览一个文件（脚本化截图验证用）。
         // **只做一次**（用 `take` 式判断）：否则每帧都会重新读盘，
