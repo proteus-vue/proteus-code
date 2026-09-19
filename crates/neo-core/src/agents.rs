@@ -166,7 +166,7 @@ impl AgentFactory {
 pub struct AgentTool {
     factory: Arc<AgentFactory>,
     spec: AgentSpec,
-    /// 工具名(agent_<name>,非法字符收敛为下划线,与 MCP 同一规则)
+    /// 工具名（`agent_<name>`，非法字符收敛为下划线，与 MCP 同一规则）
     tool_name: String,
 }
 

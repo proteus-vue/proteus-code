@@ -98,7 +98,7 @@ use neo_ui_kit::kit_test::TestWindowExt as _;
 
 ## 许可
 
-Apache-2.0，见 [LICENSE](LICENSE)。
+Apache-2.0，见 [LICENSE](https://github.com/proteus-vue/proteus-code/blob/main/crates/neo-ui-kit/LICENSE)。
 
 选它而不是 MIT 的原因：Apache-2.0 含**明确的专利授权**条款（第 3 节）——
 使用者不必另行担心贡献者持有的专利主张。对一个打算被商业项目采用的库来说，

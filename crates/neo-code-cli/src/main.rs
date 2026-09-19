@@ -1,6 +1,6 @@
 //! `neo` —— multitool 入口
 //!
-//! ```
+//! ```text
 //! neo exec "<task>" [--mode <plan|confirm|default|auto-edit|full>] [--json] [--workspace <dir>]
 //! neo serve          # Web 宿主（浏览器界面 + SSE 事件流）
 //! neo                # TUI 宿主（真终端交互）

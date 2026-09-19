@@ -22,7 +22,7 @@
 //! 3. **占位符必须放过**。文档里大量出现 `sk-YOUR_KEY_HERE`、`${API_KEY}`、
 //!    `AKIAIOSFODNN7EXAMPLE`（AWS 官方示例）这类**教学用占位**。把它们一律
 //!    拦下的话，Wiki 会被自己的守卫掏空，而"天天误报的守卫"下一步就是被关掉。
-//!    所以每条规则都要过一道 [`looks_like_placeholder`]。
+//!    所以每条规则都要过一道 `looks_like_placeholder`（占位符判定）。
 //!
 //! # 不用正则
 //!

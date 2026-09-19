@@ -508,7 +508,7 @@ fn is_no_newline_marker(line: &str) -> bool {
 /// 配不上的（纯增 / 纯删 / 数量不等）不产生强调 —— 那种情况整行着色已经够了。
 ///
 /// 中间只允许夹 `\ No newline at end of file` 这类**无内容标记**（见
-/// [`is_no_newline_marker`]）；夹了上下文行则视为不相邻，不配对。
+/// `is_no_newline_marker`）；夹了上下文行则视为不相邻，不配对。
 ///
 /// # ⚠️ 两个必须做对的地方（都是静默出错的那类）
 ///
