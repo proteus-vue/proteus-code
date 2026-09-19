@@ -312,6 +312,17 @@ impl SandboxBackend for LocalSandbox {
 mod tests {
     use super::*;
 
+    /// 每个测试用**唯一**的临时目录名（理由见 `tests/seatbelt_enforced.rs`
+    /// 里同名函数的说明：固定名会在并行测试间互相删除）。
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("neo-{tag}-{pid}-{nanos}"))
+    }
+
     #[test]
     fn read_capped_returns_immediately_at_limit() {
         // 关键修复：达到上限立即返回，不 drain（否则 yes 会让读线程永不返回）
@@ -338,7 +349,7 @@ mod tests {
 
     #[test]
     fn is_within_handles_symlinked_tmp_and_new_files() {
-        let root = std::env::temp_dir().join("neo-within-root");
+        let root = unique_dir("within-root");
         let _ = std::fs::create_dir_all(&root);
 
         // 根内已存在文件
@@ -370,7 +381,7 @@ mod tests {
 
     #[test]
     fn write_file_respects_modes() {
-        let root = std::env::temp_dir().join("neo-wf-root");
+        let root = unique_dir("wf-root");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let sb = LocalSandbox::new(&root);

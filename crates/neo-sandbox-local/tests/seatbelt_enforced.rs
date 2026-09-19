@@ -17,13 +17,35 @@ fn run(sb: &LocalSandbox, mode: SandboxMode, cmd: &str) -> String {
     }
 }
 
+/// 每个测试用**唯一**的临时目录名。
+///
+/// # 为什么（这是实测抓到的 flaky）
+///
+/// 原先是固定名（`neo-sbx-test-ro` 等）。而 `cargo test --workspace` 会
+/// **并行跑多个测试二进制**，`neo-sandbox-local` 的这些用例之间也会并行 ——
+/// 于是固定名会让两个测试操作同一个目录：一个的 `remove_dir_all` 会把
+/// 另一个正在用的目录删掉，表现为**随机失败**（单独跑必过、全量跑偶尔红）。
+///
+/// 它甚至跨 crate 撞：`neo-platform` 的测试也用 `temp_dir`。
+/// 进程 id + 纳秒时间戳足以区分（同进程内的并行用例仍共享 pid，
+/// 所以下面每个用例还带了各自的名字）。
+fn unique_dir(tag: &str) -> std::path::PathBuf {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("neo-sbx-{tag}-{pid}-{nanos}"))
+}
+
 #[test]
 fn read_only_actually_blocks_writing_outside_workspace() {
-    let ws = std::env::temp_dir().join("neo-sbx-test-ro");
+    let ws = unique_dir("ro");
     let _ = std::fs::create_dir_all(&ws);
     let sb = LocalSandbox::new(&ws).with_timeout(std::time::Duration::from_secs(20));
 
-    let target = "/tmp/neo-sbx-should-not-exist";
+    let target = unique_dir("target-should-not-exist");
+    let target = target.to_str().unwrap();
     let _ = std::fs::remove_file(target);
 
     // 在 read-only 下尝试写一个工作区外的文件
@@ -38,7 +60,7 @@ fn read_only_actually_blocks_writing_outside_workspace() {
 
 #[test]
 fn workspace_write_allows_writing_inside_workspace() {
-    let ws = std::env::temp_dir().join("neo-sbx-test-ws");
+    let ws = unique_dir("ws");
     let _ = std::fs::remove_dir_all(&ws);
     std::fs::create_dir_all(&ws).unwrap();
     let sb = LocalSandbox::new(&ws).with_timeout(std::time::Duration::from_secs(20));
@@ -50,7 +72,7 @@ fn workspace_write_allows_writing_inside_workspace() {
 
 #[test]
 fn workspace_write_blocks_writing_outside_workspace() {
-    let ws = std::env::temp_dir().join("neo-sbx-test-ws2");
+    let ws = unique_dir("ws2");
     let _ = std::fs::remove_dir_all(&ws);
     std::fs::create_dir_all(&ws).unwrap();
     let sb = LocalSandbox::new(&ws).with_timeout(std::time::Duration::from_secs(20));
@@ -66,7 +88,7 @@ fn workspace_write_blocks_writing_outside_workspace() {
 
 #[test]
 fn read_only_allows_reading() {
-    let ws = std::env::temp_dir().join("neo-sbx-test-r");
+    let ws = unique_dir("r");
     let _ = std::fs::create_dir_all(&ws);
     let sb = LocalSandbox::new(&ws).with_timeout(std::time::Duration::from_secs(20));
     let out = run(&sb, SandboxMode::ReadOnly, "echo readable");
@@ -75,7 +97,7 @@ fn read_only_allows_reading() {
 
 #[test]
 fn output_cap_is_enforced_during_read_not_after() {
-    let ws = std::env::temp_dir().join("neo-sbx-test-cap");
+    let ws = unique_dir("cap");
     let _ = std::fs::create_dir_all(&ws);
     let sb = LocalSandbox::new(&ws).with_timeout(std::time::Duration::from_secs(20));
     // 产出 1 MB，上限 1000 字节
@@ -92,7 +114,7 @@ fn output_cap_is_enforced_during_read_not_after() {
 
 #[test]
 fn a_hanging_command_is_killed_by_timeout() {
-    let ws = std::env::temp_dir().join("neo-sbx-test-to");
+    let ws = unique_dir("to");
     let _ = std::fs::create_dir_all(&ws);
     let sb = LocalSandbox::new(&ws).with_timeout(std::time::Duration::from_millis(400));
     let started = std::time::Instant::now();
