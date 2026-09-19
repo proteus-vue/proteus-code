@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # NEO 全套门禁入口。
 #
-# 五部分：
-#   0. 预检：cargo 是否可执行（工具链钉版文件解析失败会让后续门禁失去意义）
+# 七部分：
+#   0. 预检：cargo 可执行 **且是钉版的那把**（解析失败 / 版本选错都会让后续门禁失去意义）
 #   1. Rust 工程门禁：cargo test（含内核 conformance、内存有界性、SPI conformance）
 #   2. 架构与协议守卫：docs/neo-plan/05-验证/ 的 Python 检查（依赖方向、协议确定性、
-#      会话格式、配置层叠、模式矩阵、SPI 合规）
+#      会话格式、配置层叠、模式矩阵、SPI 合规、UI 分层、可提取性、许可证）
 #   3. 工具链卫生：零 warning（warning 是未来错误的温床）
 #   4. 执行效率规范：固定盲等 / 重复拉取 / 无退出轮询（ai-efficiency-rules）
 #   5. shell 卫生：变量后紧跟非 ASCII（bash 3.2 会把中文标点吃进变量名）
+#   6. CI 失败摘要：注解通道是否仍能读到真因
 #
 # 用法：bash scripts/verify.sh
 set -uo pipefail
@@ -26,16 +27,55 @@ hr() { printf '%s\n' "##########################################################
 
 hr; echo "#  NEO 门禁"; echo "#  仓库: $ROOT"; hr
 
-# ── 0. 预检：cargo 能不能跑 ─────────────────────────────────────────────
+# ── 0. 预检：cargo 能不能跑 + 是不是钉版的那把 ──────────────────────────
 #
-# 区分「环境坏了」与「代码没过」。典型环境故障是 rust-toolchain.toml 不是
-# 合法 TOML：rustup 会让本仓库内每一条 cargo 命令都直接失败。此时若不预检，
-# 第 2 段「零 warning」会因为输出里没有 warning 而报「✅ 无 warning」——
-# 那是假通过（只有编译真的跑起来，warning 计数才有意义）。
+# 区分「环境坏了」与「代码没过」。两类环境故障都实际发生过：
+#   ① rust-toolchain.toml 不是合法 TOML —— rustup 会让本仓库内每一条 cargo
+#      命令直接失败；
+#   ② PATH 上先命中的是**另一把 cargo**（本机实测：Homebrew 的
+#      /opt/homebrew/bin 排在 ~/.cargo/bin 前面）—— 此时 `cargo --version`
+#      正常退出，旧 cargo 却解析不了依赖树（树里有包要求 edition2024，即
+#      cargo ≥ 1.85），报出来的是 "failed to parse manifest ... feature
+#      edition2024 is required"。它**看起来像编译错误，实为工具链选错**，
+#      且会同时污染 4 个门禁（测试 / warning / 可提取性 / 第三方清单）——
+#      上游日志里出现的正是这一串连带失败。
+# 两种都不预检的话，第 2 段「零 warning」会因为输出里没有 warning 而报
+# 「✅ 无 warning」—— 那是假通过（只有编译真的跑起来，warning 计数才有意义）。
+#
+# 版本从 rust-toolchain.toml **读**，不在这里抄一遍：抄了就会漂移。
+PINNED=""
+if [ -f "$ROOT/rust-toolchain.toml" ]; then
+  PINNED="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$ROOT/rust-toolchain.toml" | head -1)"
+fi
+
+# rustup 的 shim 会按 rust-toolchain.toml 自动选版本，所以只要它在，优先用它。
+if [ -x "$HOME/.cargo/bin/cargo" ] && [ "$(command -v cargo 2>/dev/null)" != "$HOME/.cargo/bin/cargo" ]; then
+  echo "  ℹ️  当前 PATH 先命中的是 $(command -v cargo)，已优先改用 rustup shim：\$HOME/.cargo/bin/cargo"
+  PATH="$HOME/.cargo/bin:$PATH"; export PATH
+fi
+
 CARGO_OK=0
 if command -v cargo >/dev/null 2>&1; then
   if ( cd "$ROOT" && cargo --version ) >/tmp/neo-cargo-ver.log 2>&1; then
     CARGO_OK=1
+    # 只认 `cargo X.Y.Z` 那一行：首次使用某 toolchain 时 rustup 会先打印
+    # 若干行 "info: syncing channel updates..."，直接取首行会拿到 "syncing"。
+    have="$(grep -m1 '^cargo ' /tmp/neo-cargo-ver.log | awk '{print $2}')"
+    case "$PINNED" in
+      [0-9]*)
+        case "$have" in
+          "$PINNED"*) echo "  ✅ 工具链：cargo ${have}（与 rust-toolchain.toml 一致）" ;;
+          *)
+            echo "  ❌ cargo 版本不匹配：当前 ${have}，本仓钉的是 ${PINNED}（见 rust-toolchain.toml）"
+            echo "     —— Rust 门禁整体判失败（是工具链选错，非代码问题）。"
+            echo "     修法：让 PATH 先命中 rustup 的 \$HOME/.cargo/bin；未装 rustup 则先装它。"
+            echo "     用旧 cargo 的典型症状是下游报「feature edition2024 is required」，看着像编译错误。"
+            CARGO_OK=0
+            ;;
+        esac ;;
+      *) echo "  ℹ️  钉版通道不是具体版本号（${PINNED:-未读到}），跳过版本核对" ;;
+    esac
   else
     echo "  ⚠️  cargo 无法执行 —— Rust 门禁整体判失败（是工具链/环境问题，非代码问题）："
     head -6 /tmp/neo-cargo-ver.log | sed 's/^/     /'
@@ -47,7 +87,7 @@ hr; echo "#  Rust: cargo test --workspace（内核 / 内存 / SPI conformance）
 if [ "$CARGO_OK" -eq 1 ]; then
   ( cd "$ROOT" && cargo test --workspace ) || fail=$((fail+1))
 else
-  echo "  [SKIP] cargo 不可用 —— Rust 门禁未执行（见上方预检信息）。"
+  echo "  [SKIP] cargo 未通过预检 —— Rust 门禁未执行（见上方预检信息）。"
   fail=$((fail+1))
 fi
 
@@ -74,7 +114,7 @@ if [ "$CARGO_OK" -eq 1 ]; then
     fi
   fi
 else
-  echo "  [SKIP] cargo 不可用 —— 零 warning 检查未执行（见上方预检信息）。"
+  echo "  [SKIP] cargo 未通过预检 —— 零 warning 检查未执行（见上方预检信息）。"
   fail=$((fail+1))
 fi
 

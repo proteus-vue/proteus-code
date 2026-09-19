@@ -230,10 +230,10 @@ proteus-code/                  ← 项目本体是 Rust 内核
 ├── crates/                    ★ 内核与宿主
 │   ├── neo-protocol/          L0 线协议（Op / EventMsg / 双轴枚举），零业务依赖
 │   ├── neo-text/              L1 基础：宿主中立的文本语义（色调 / 宽度 / Markdown / 高亮）
-│   ├── neo-ui-kit/            L1 UI 门面（唯一 pin GPUI 的地方）
-│   ├── neo-ui-render/         L2 UI 渲染缝（中立颜色/几何 + RenderBackend）
-│   ├── neo-ui-behavior/       L3 UI 行为层（焦点仲裁 / 按键路由，与后端解耦）
-│   ├── neo-ui/                L4 UI 设计系统（品牌主题 + 组件）
+│   ├── neo-ui-kit/            L1 UI 门面（唯一 pin GPUI 的地方；通用控件来自上游组件库）
+│   ├── neo-ui-render/         L2 UI 渲染缝（中立颜色/几何 + RenderBackend；只服务自绘表面）
+│   ├── neo-ui-behavior/       L3 UI 行为层（树/折叠/滚动跟随/按键仲裁，刻意不依赖 GPUI）
+│   ├── neo-ui/                L4 UI 设计系统（品牌主题；**是主题不是组件库**，自研组件 5 个）
 │   ├── neo-driver/            L3 GUI 共享内核驱动（driving 边界守卫所在）
 │   ├── neo-sandbox/           L1 平台（命令包裹：Seatbelt / Landlock+bwrap / ACL）
 │   ├── neo-platform/          L1 平台（进程加固 / fs notify / git）
@@ -242,7 +242,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 │   ├── neo-orchestration/     L4 目标编排（Goal 引擎）
 │   ├── neo-host-tui/          L5 宿主：终端
 │   ├── neo-host-desktop/      L5 宿主：系统 webview（替代 Electron）
-│   ├── neo-host-egui/         L5 宿主：桌面原生 GUI（egui；neo desktop 默认走它）
+│   ├── neo-host-egui/         L5 宿主：桌面原生 GUI（egui；已冻结，回退通道，`--egui` 才走）
 │   ├── neo-host-gpui/         L5 宿主：桌面 GPUI（**默认桌面 UI**）
 │   ├── neo-host-web/          L5 宿主：浏览器（零依赖 HTTP + SSE，含内置页面）
 │   ├── neo-exec/              L5 宿主：无头 / CI
