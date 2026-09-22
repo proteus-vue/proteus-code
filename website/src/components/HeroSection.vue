@@ -65,12 +65,12 @@ const logoLines = computed(() => LOGO_LARGE)
 </span></pre>
 
       <p class="tagline">—— 编程 Agent 内核</p>
-      <p class="sub">Rust 内核 · TUI / Desktop / Web / Exec 共享同一内核</p>
+      <p class="sub">Rust 内核 · TUI / Desktop / Web / Exec / app-server 共享同一内核</p>
 
       <p class="meta">
         <span class="v">v0.1.0</span>
         <span class="sep">·</span>
-        <span>617 测试</span>
+        <span>1102 测试</span>
         <span class="sep">·</span>
         <span>零 unsafe</span>
         <span class="sep">·</span>

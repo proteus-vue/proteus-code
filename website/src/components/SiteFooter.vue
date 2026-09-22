@@ -6,7 +6,7 @@ const REPO = 'https://github.com/proteus-vue/proteus-code'
 const year = new Date().getFullYear()
 
 const nav = [
-  { href: '#hosts', text: '四宿主' },
+  { href: '#hosts', text: '五宿主' },
   { href: '#features', text: '特性' },
   { href: '#arch', text: '架构' },
   { href: '#why', text: '对比' },
@@ -37,7 +37,7 @@ const ext = [
           <span>neo</span>
         </div>
         <p class="tag">
-          用 Rust 重写的编程 Agent 内核。<br />一套内核，四个宿主。
+          用 Rust 重写的编程 Agent 内核。<br />一套内核，五个宿主。
         </p>
       </div>
 

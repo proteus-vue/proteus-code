@@ -259,8 +259,8 @@ neo exec "用一句话回答 1+1" --mode plan
 # 需要 Rust —— 版本由 rust-toolchain.toml 钉定（1.95.0），rustup 会自动选用
 cargo run -p neo-code-cli -- tui --provider mock   # 不装 PATH，直接用 cargo 跑 TUI
 
-cargo test --workspace     # 806 个测试
-cargo check --workspace    # 25 个 crate，零 unsafe、零 warning
+cargo test --workspace     # 1102 个测试
+cargo check --workspace    # 32 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 文档 / 性能预算 / 无障碍 / 执行效率 / 测试
 bash scripts/measure-perf.sh           # 性能预算完整实测（体积 / 空闲出帧 / 冷启动）
@@ -293,7 +293,7 @@ cd website && npm install && npm run dev    # 或 npm run build → dist/web
 
 ```
 proteus-code/                  ← 项目本体是 Rust 内核
-├── Cargo.toml                 workspace（31 crates）
+├── Cargo.toml                 workspace（32 crates）
 ├── crates/                    ★ 内核与宿主
 │   ├── neo-protocol/          L0 线协议（Op / EventMsg / 双轴枚举），零业务依赖
 │   ├── neo-text/              L1 基础：宿主中立的文本语义（色调 / 宽度 / Markdown / 高亮）
@@ -312,6 +312,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 │   ├── neo-host-egui/         L5 宿主：桌面原生 GUI（egui；已冻结，回退通道，`--egui` 才走）
 │   ├── neo-host-gpui/         L5 宿主：桌面 GPUI（**默认桌面 UI**）
 │   ├── neo-host-web/          L5 宿主：浏览器（零依赖 HTTP + SSE，含内置页面）
+│   ├── neo-host-appserver/    L5 宿主：stdio JSON-RPC（编辑器 / IDE / 脚本接入）
 │   ├── neo-exec/              L5 宿主：无头 / CI
 │   ├── neo-code-cli/          `neo` 入口（multitool）
 │   ├── neo-session/           会话真相源（append-only）

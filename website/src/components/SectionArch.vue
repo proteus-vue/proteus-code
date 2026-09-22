@@ -5,7 +5,7 @@
 <script setup lang="ts">
 // 自上而下：宿主 → 协议（依赖方向也是自上而下）
 const layers = [
-  { id: 'L5', name: '宿主', detail: 'TUI / Desktop / Web / Exec', crates: 'neo-host-* · neo-exec · neo-code-cli', depth: 5 },
+  { id: 'L5', name: '宿主', detail: 'TUI / Desktop / Web / Exec / app-server', crates: 'neo-host-* · neo-exec · neo-code-cli', depth: 5 },
   { id: 'L4', name: '编排', detail: 'Goal 引擎（Plan → Code → Review → Learn）', crates: 'neo-orchestration', depth: 4 },
   { id: 'L3', name: '能力', detail: 'Shell-First 工具集 + 各 SPI 实现', crates: 'neo-capability · *-local · neo-mcp', depth: 3 },
   { id: 'L2', name: '内核', detail: 'turn/step 主循环 · 三维闸门 · SPI 契据', crates: 'neo-core', depth: 2 },

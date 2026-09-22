@@ -3,9 +3,9 @@
      ★ 数字全部可从仓库门禁复现（cargo test / verify.sh），不是宣传口径。 -->
 <script setup lang="ts">
 const stats = [
-  { value: '4', label: '宿主共享一核', note: 'TUI / Desktop / Web / Exec' },
-  { value: '23', label: 'crate 分层', note: 'L0–L5，依赖只能向下' },
-  { value: '617', label: '测试全绿', note: '内核 / 内存 / SPI / 宿主' },
+  { value: '5', label: '宿主共享一核', note: 'TUI / Desktop / Web / Exec / app-server' },
+  { value: '32', label: 'crate 分层', note: 'L0–L5，依赖只能向下' },
+  { value: '1102', label: '测试全绿', note: '内核 / 内存 / SPI / 宿主' },
   { value: '0', label: 'unsafe / warning', note: '生产代码，门禁强制' },
 ]
 </script>

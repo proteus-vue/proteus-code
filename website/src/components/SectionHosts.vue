@@ -1,5 +1,5 @@
-<!-- src/components/SectionHosts.vue —— 四宿主
-     ★ 这一段的关键不是"列出四个名字"，而是说清**为什么四个宿主不是四份实现**：
+<!-- src/components/SectionHosts.vue —— 五宿主
+     ★ 这一段的关键不是"列出五个名字"，而是说清**为什么五个宿主不是五份实现**：
      它们共享同一内核与同一事件流（T6 等价铁律，机器断言）。 -->
 <script setup lang="ts">
 import TuiKeyHints from './TuiKeyHints.vue'
@@ -25,6 +25,11 @@ const hosts = [
     cmd: 'neo exec',
     desc: '无头 / CI 场景，支持 --json 便于脚本消费与断言',
   },
+  {
+    name: 'app-server',
+    cmd: 'neo app-server',
+    desc: 'stdio 上的 JSON-RPC 2.0：编辑器 / IDE / 脚本接入，17 个方法覆盖全部 Op',
+  },
 ]
 </script>
 
@@ -33,9 +38,9 @@ const hosts = [
     <div class="wrap">
       <div class="section-head reveal">
         <span class="eyebrow">多宿主</span>
-        <h2>四宿主，一个内核</h2>
+        <h2>五宿主，一个内核</h2>
         <p>
-          宿主只是内核的消费者，不持有业务状态、不自行解析事件。同一条事件流喂给四个宿主，
+          宿主只是内核的消费者，不持有业务状态、不自行解析事件。同一条事件流喂给五个宿主，
           事实完全等价 —— 这条称为 <strong>T6 铁律</strong>，由机器断言，不靠约定。
         </p>
       </div>
@@ -58,8 +63,9 @@ const hosts = [
           { key: 'neo desktop', text: '系统 webview' },
           { key: 'neo serve', text: '浏览器' },
           { key: 'neo exec', text: '无头 / CI' },
+          { key: 'neo app-server', text: 'stdio JSON-RPC' },
         ]"
-        tail="同一事件流 → 四宿主事实等价"
+        tail="同一事件流 → 五宿主事实等价"
       />
     </div>
   </section>

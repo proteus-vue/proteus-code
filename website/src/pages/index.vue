@@ -5,7 +5,7 @@
 
      内容原则（沿用本项目一贯风格）：
        · 只讲**已落地可验证**的能力，"未实现/边界"如实列出（SectionBoundaries）
-       · 数字给出来源：23 crate / 617 测试 / 零 unsafe / 零 warning 都能在门禁里复现 -->
+       · 数字给出来源：32 crate / 1102 测试 / 零 unsafe / 零 warning 都能在门禁里复现 -->
 <route>
 {
   "meta": {
