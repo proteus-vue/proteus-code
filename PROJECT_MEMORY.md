@@ -6192,8 +6192,33 @@ CoC 是形式主义。缺口表里如实挂着（**等有外部贡献者再补**
 `PATH="$HOME/.cargo/bin:$PATH"`；拉 crates.io 需要代理（`https_proxy=http://127.0.0.1:7897`）。
 
 **下次可接着做**：① 修 Web 宿主那个 `kind` 覆盖（小、边界清楚）；② `--listen unix://`
-（本地多客户端共用一次内核装配）；③ 协议类型导出（`SCHEMA_VERSION` 已用上，但还没有
-可给外部客户端生成类型的产物）；④ 工作区里那个**零使用**的 `tokio` 声明（删掉或注明用途）。
+（本地多客户端共用一次内核装配）；③ ~~协议类型导出~~ **已完成（见下）**；④ 工作区里那个**零使用**的 `tokio` 声明（删掉或注明用途）。
+
+---
+
+## 会话接续点（最近：2026-09-22 · 协议类型导出 / app-server 桌面后端）
+
+目标口径（用户拍板）：**对标 Codex `app-server` 的桌面后端能力**，
+不含账号体系与产品内部功能。缺口盘点后的落地顺序：
+类型导出 → thread 生命周期 → 历史投影 API → Git/导出/工具目录。
+
+本轮（09-22）做 **T1 类型导出**：
+
+| # | 事 | 证据 |
+|---|---|---|
+| 1 | `neo-protocol` 可选 `schema` 特性（schemars + ts-rs），默认关闭、不进宿主构建 | `crates/neo-protocol/Cargo.toml` |
+| 2 | 全部 16 个线类型加 `JsonSchema`/`TS` derive（cfg 门控） | `crates/neo-protocol/src/lib.rs` |
+| 3 | `neo-host-appserver::schema`：信封 + 方法参数 wire 类型 + 组合 JSON Schema + TS | `crates/neo-host-appserver/src/schema.rs` |
+| 4 | 产物三件套入库：schema.json / .ts / methods.json | `crates/neo-host-appserver/schema/` |
+| 5 | 门禁 `check_protocol_schema.py`（重生成临时目录 → 逐字节比对）挂进 `verify.sh` §2.1 | `scripts/verify.sh` |
+| 6 | 人手更新入口 `gen_protocol_schema.sh` | `scripts/` |
+
+**产物必须描述线格式，不是 Rust 内存布局**：ts-rs 把 `u64` 映射成 `bigint`，
+而 JSON 线上是 `number` —— 生成后统一改写，否则客户端会去接 BigInt。
+同理类型要 `export`，否则单文件契约没法 `import`。
+
+**下一步（T2）**：`thread/list` · `thread/get` · `thread/resume`（读 JSONL 重建）。
+注意 `Kernel` 不是 `Sync`：先做「一进程一 thread 的路由层」，不要求内核多会话并发。
 
 ---
 

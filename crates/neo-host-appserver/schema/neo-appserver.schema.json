@@ -1,0 +1,2033 @@
+{
+  "$defs": {
+    "ApprovalParams": {
+      "$defs": {
+        "Decision": {
+          "enum": [
+            "allow",
+            "allow_always",
+            "deny"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "审批应答参数（`approval/respond` / `approval/respondStep`）。",
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/Decision"
+        },
+        "id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "decision"
+      ],
+      "title": "ApprovalParams",
+      "type": "object"
+    },
+    "ApprovalPolicy": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "轴一：审批（流程边界，何时必须暂停问人）",
+      "enum": [
+        "untrusted",
+        "on_request",
+        "on_failure",
+        "never"
+      ],
+      "title": "ApprovalPolicy",
+      "type": "string"
+    },
+    "ClientInfoWire": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "客户端自述（仅诊断）。",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ClientInfoWire",
+      "type": "object"
+    },
+    "CommandParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`command/exec` 参数。",
+      "properties": {
+        "command": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "title": "CommandParams",
+      "type": "object"
+    },
+    "ContextRef": {
+      "$defs": {
+        "RefKind": {
+          "enum": [
+            "file",
+            "session",
+            "command",
+            "skill"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/RefKind"
+        },
+        "lines": {
+          "description": "行范围（1 基，闭区间）。`None` = 整个文件。\n\n单独建模而不是塞进 `target` 字符串：`src/a.rs#12-40` 里的\n\"#12-40\" 是**结构化信息**（起止行），下游（提示词拼装、UI 高亮）\n需要数值而不是再解析一遍字符串。",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          ],
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "target"
+      ],
+      "title": "ContextRef",
+      "type": "object"
+    },
+    "Decision": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "allow",
+        "allow_always",
+        "deny"
+      ],
+      "title": "Decision",
+      "type": "string"
+    },
+    "EventMsg": {
+      "$defs": {
+        "FileChange": {
+          "description": "一个文件的改动统计（供侧栏\"已修改文件\"面板）。",
+          "properties": {
+            "additions": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "deletions": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "additions",
+            "deletions"
+          ],
+          "type": "object"
+        },
+        "GoalPhase": {
+          "description": "目标子任务所处的阶段（Plan→Code→Review→Learn 的四阶段闭环 + 完成）。",
+          "enum": [
+            "plan",
+            "code",
+            "review",
+            "learn",
+            "done"
+          ],
+          "type": "string"
+        },
+        "GoalSnapshot": {
+          "description": "目标编排状态的**完整快照**。\n\n每次状态变化都发整份快照而不是增量：回放重建 = 取最后一条即可，\n宿主展示 = 直接读，不需要自己累计差量 —— 状态单一事实源在编排器，\n快照即它当时的全部。",
+          "properties": {
+            "budget_used": {
+              "description": "目标已消耗的 token 预算",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "consecutive_failures": {
+              "description": "连续失败计数（审查判停的依据 —— 回放重建后判停行为必须一致，\n所以它必须在快照里，而不能只活在内存里）",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "goal": {
+              "description": "用户设定的目标原文",
+              "type": "string"
+            },
+            "goal_id": {
+              "description": "确定性编号（`goal-N`，按编排器内计数器派生，不用随机/时钟）",
+              "type": "string"
+            },
+            "iterations": {
+              "description": "已消耗的编排步数",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "paused": {
+              "description": "暂停中（不推进，但目标保留）",
+              "type": "boolean"
+            },
+            "stopped": {
+              "description": "引擎触发停止条件后的原因（非空时不再推进）",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subtasks": {
+              "items": {
+                "$ref": "#/$defs/GoalSubtask"
+              },
+              "type": "array"
+            },
+            "turns_remaining": {
+              "description": "还需要多少个子任务轮（**下限估计**：审查失败的重试会让实际更多）。\n宿主据此决定要不要继续 `GoalAdvance`。",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "goal_id",
+            "goal",
+            "paused",
+            "subtasks",
+            "iterations",
+            "consecutive_failures",
+            "turns_remaining",
+            "budget_used"
+          ],
+          "type": "object"
+        },
+        "GoalSubtask": {
+          "description": "一个子任务在快照里的形态。",
+          "properties": {
+            "id": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "phase": {
+              "$ref": "#/$defs/GoalPhase"
+            },
+            "retries": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "phase",
+            "retries"
+          ],
+          "type": "object"
+        },
+        "TodoEntry": {
+          "description": "任务清单的一项（模型通过 `todowrite` 工具维护）。",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/TodoStatus"
+            }
+          },
+          "required": [
+            "content",
+            "status"
+          ],
+          "type": "object"
+        },
+        "TodoStatus": {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "enum": [
+            "shutdown_complete"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "用户提交的消息（内核回显）。\n\n为什么内核要发它：用户**自己的话**是转录里必须可见的事实 —— 否则\n回看会话只看到模型说了什么，不知道当时问的是什么。由内核统一发，\n四个宿主才会一致（T6）；让宿主各自记住用户输入则会分叉。",
+          "properties": {
+            "user_submitted": {
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "user_submitted"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "用户输入里的 `@` / `$` 引用已解析成具体内容并注入本轮请求。\n\n# 为什么必须发事件、且 `block` 必须落日志\n\n`block` 是**模型可见**的内容（拼在用户消息之后进入请求）。若不落盘，\n回放时只能拿到引用符号（`@src/main.rs`），重建出的历史与真实请求不符 ——\n直接违反 AGENTS.md「模型可见即已落日志」。\n\n反过来，回放时**不能重新解析**：文件内容可能已经变了，\n重解析会得到与当时不同的字节。所以内容必须\"当时定格、随日志走\"。",
+          "properties": {
+            "refs_resolved": {
+              "properties": {
+                "block": {
+                  "default": "",
+                  "description": "注入模型请求的完整上下文块。",
+                  "type": "string"
+                },
+                "summary": {
+                  "description": "人类可读的一行摘要（用户可见事实）：解析成功了几条、哪条失败。",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "summary"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "refs_resolved"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "session_configured": {
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "session_configured"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "项目指令（`AGENTS.md` 级联）已并入系统提示词。\n\n# 为什么系统提示词的组成也要落日志\n\n系统提示词**每一轮都进模型请求**，属于最典型的\"模型可见\"内容。\n只落会话消息而不落它，审计时无法回答\"模型当时到底被要求遵守什么约定\" ——\n而这恰恰是解释模型行为的关键（它按 AGENTS.md 做了某件事，日志里却看不到那份文件）。\n\n`block` 是注入提示词的实际文本；`sources` 是它来自哪些文件。\n`truncated` 如实标注是否被 32 KiB 上限截断。",
+          "properties": {
+            "instructions_loaded": {
+              "properties": {
+                "block": {
+                  "type": "string"
+                },
+                "sources": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "truncated": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "sources",
+                "block"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "instructions_loaded"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "模型已切换（运行时换模型）。\n\n单独发事件而不是只发 SessionConfigured：模型切换是用户**会关心**的\n状态变化（直接影响后续回答的风格与成本），而 SessionConfigured 是\n一次笼统的\"配置更新\"。",
+          "properties": {
+            "model_switched": {
+              "properties": {
+                "context_limit": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "model": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "model",
+                "context_limit"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "model_switched"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "turn_started": {
+              "properties": {
+                "turn_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "turn_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "turn_started"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "agent_message_delta": {
+              "properties": {
+                "delta": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "delta"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "agent_message_delta"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "agent_message_done": {
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "agent_message_done"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reasoning_delta": {
+              "properties": {
+                "delta": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "delta"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "reasoning_delta"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "tool_call_begin": {
+              "properties": {
+                "arguments": {
+                  "default": null,
+                  "description": "调用参数。**必须落日志** —— 模型下次请求要带完整的 assistant\ntool_call（含 arguments），否则会话无法从日志重建、\n跨进程续聊时请求非法。这也正是 AGENTS.md「模型可见即已落日志」\n那条约束的要求。"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "tool_call_begin"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "tool_call_end": {
+              "properties": {
+                "exit_code": {
+                  "format": "int32",
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "stderr": {
+                  "default": "",
+                  "type": "string"
+                },
+                "stdout": {
+                  "default": "",
+                  "description": "工具输出。**必须进事件流** —— 否则用户只看到 `✓ bash exit 0`\n而看不到命令打印了什么，等于无法判断这步到底做了什么。\n内核已按上限截断，`truncated` 如实标注。",
+                  "type": "string"
+                },
+                "truncated": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "exit_code"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "tool_call_end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "需要用户审批。\n\n`kind` 是内核判定的**调用类别**（read / write / network / interactive），\n不是工具名 —— \"总是允许\"将放行的范围由它定义。它必须由内核单一事实源\n给出：宿主若按工具名自行推断，bash 这类\"按命令内容分类\"的工具就会\n显示成与内核实际放行范围不一致的类别（显示\"只读\"、实际放行\"写入\"）。",
+          "properties": {
+            "approval_request": {
+              "properties": {
+                "detail": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "default": "",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "detail"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "approval_request"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "patch_proposed": {
+              "properties": {
+                "diff": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "diff"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "patch_proposed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "checkpoint_saved": {
+              "properties": {
+                "checkpoint_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "checkpoint_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "checkpoint_saved"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "单个文件发生改动（**由工具上报**，内核据此累计）。",
+          "properties": {
+            "file_changed": {
+              "properties": {
+                "additions": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "deletions": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "additions",
+                "deletions"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "file_changed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "已修改文件的**完整聚合列表**（内核广播，侧栏据此渲染）。\n\n为什么发聚合而不是只发增量：侧栏需要的是\"当前全部改动\"，\n让每个宿主自己维护增量状态，一旦某条增量丢了就会显示错乱。\n内核已经持有累计状态，广播整表最省事也最不容易错。",
+          "properties": {
+            "files_changed": {
+              "properties": {
+                "files": {
+                  "items": {
+                    "$ref": "#/$defs/FileChange"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "files"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "files_changed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "上下文已压缩：前缀 `removed_messages` 条被替换为一条 `summary`。\n\n摘要本身必须进事件流 —— 它是**模型可见**的内容（后续请求会带上），\n不落日志会让回放出的历史与真实请求不符。",
+          "properties": {
+            "context_compacted": {
+              "properties": {
+                "removed_messages": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "summary": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "removed_messages",
+                "summary"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "context_compacted"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "对话已回退。\n\n**明确区分\"对话\"与\"文件\"**：回退只动对话历史，磁盘上的改动**不会**\n被撤销（我们没有 git 快照）。宿主必须把这一点告诉用户 ——\n让人以为\"undo 了文件也回去了\"是最危险的那种错觉。",
+          "properties": {
+            "rewound": {
+              "properties": {
+                "files_kept": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "removed_messages": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "turns": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "turns",
+                "removed_messages",
+                "files_kept"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "rewound"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "任务清单被更新（整表替换，不是增量）。\n\n整表替换而非增量：模型每次给出完整清单，宿主不必维护差量状态，\n也就不会出现\"某一步的增量丢了导致清单错乱\"。",
+          "properties": {
+            "todo_updated": {
+              "properties": {
+                "items": {
+                  "items": {
+                    "$ref": "#/$defs/TodoEntry"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "items"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "todo_updated"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "goal_progress": {
+              "properties": {
+                "done": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "goal_id": {
+                  "type": "string"
+                },
+                "total": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "goal_id",
+                "done",
+                "total"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "goal_progress"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "目标编排状态变化（设定 / 阶段推进 / 暂停 / 恢复 / 停止）。\n\n快照是**完整**状态：回放重建取最后一条即可（kill 进程后续跑的核心）。\n目标文本会经子任务轮进入模型上下文 —— 模型可见，故必须落日志。",
+          "properties": {
+            "goal_updated": {
+              "properties": {
+                "snapshot": {
+                  "$ref": "#/$defs/GoalSnapshot"
+                }
+              },
+              "required": [
+                "snapshot"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "goal_updated"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "目标已被清除（清除不是快照 —— 没有目标就没有快照可发；\n宿主与回放以此显式撤销Goal 显示与状态）。",
+          "properties": {
+            "goal_cleared": {
+              "properties": {
+                "goal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "goal_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "goal_cleared"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "error"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "turn_complete": {
+              "properties": {
+                "input_tokens": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "output_tokens": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_tokens",
+                "output_tokens"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "turn_complete"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "EventMsg"
+    },
+    "EventNotification": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "事件通知的线形状：`{\"seq\", \"kind\", \"payload\"}`。\n\n载荷嵌在 `payload` 下（与 JSONL 会话日志同构），**不摊平** ——\n`ApprovalRequest` 自带的 `kind` 与通知的事件名不会撞键。",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "payload": true,
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "kind",
+        "payload"
+      ],
+      "title": "EventNotification",
+      "type": "object"
+    },
+    "ExecMode": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "ZCode 五档执行模式（UI 档位，映射到沙箱 × 审批双轴）",
+      "enum": [
+        "plan",
+        "confirm_before",
+        "default",
+        "auto_edit",
+        "full_access"
+      ],
+      "title": "ExecMode",
+      "type": "string"
+    },
+    "FileChange": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "一个文件的改动统计（供侧栏\"已修改文件\"面板）。",
+      "properties": {
+        "additions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deletions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "additions",
+        "deletions"
+      ],
+      "title": "FileChange",
+      "type": "object"
+    },
+    "GoalIdParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`goal/pause` / `goal/resume` 参数。",
+      "properties": {
+        "goal_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "goal_id"
+      ],
+      "title": "GoalIdParams",
+      "type": "object"
+    },
+    "GoalParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`goal/set` 参数。",
+      "properties": {
+        "goal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "goal"
+      ],
+      "title": "GoalParams",
+      "type": "object"
+    },
+    "GoalPhase": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "目标子任务所处的阶段（Plan→Code→Review→Learn 的四阶段闭环 + 完成）。",
+      "enum": [
+        "plan",
+        "code",
+        "review",
+        "learn",
+        "done"
+      ],
+      "title": "GoalPhase",
+      "type": "string"
+    },
+    "GoalSnapshot": {
+      "$defs": {
+        "GoalPhase": {
+          "description": "目标子任务所处的阶段（Plan→Code→Review→Learn 的四阶段闭环 + 完成）。",
+          "enum": [
+            "plan",
+            "code",
+            "review",
+            "learn",
+            "done"
+          ],
+          "type": "string"
+        },
+        "GoalSubtask": {
+          "description": "一个子任务在快照里的形态。",
+          "properties": {
+            "id": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "phase": {
+              "$ref": "#/$defs/GoalPhase"
+            },
+            "retries": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "phase",
+            "retries"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "目标编排状态的**完整快照**。\n\n每次状态变化都发整份快照而不是增量：回放重建 = 取最后一条即可，\n宿主展示 = 直接读，不需要自己累计差量 —— 状态单一事实源在编排器，\n快照即它当时的全部。",
+      "properties": {
+        "budget_used": {
+          "description": "目标已消耗的 token 预算",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "consecutive_failures": {
+          "description": "连续失败计数（审查判停的依据 —— 回放重建后判停行为必须一致，\n所以它必须在快照里，而不能只活在内存里）",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "goal": {
+          "description": "用户设定的目标原文",
+          "type": "string"
+        },
+        "goal_id": {
+          "description": "确定性编号（`goal-N`，按编排器内计数器派生，不用随机/时钟）",
+          "type": "string"
+        },
+        "iterations": {
+          "description": "已消耗的编排步数",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "paused": {
+          "description": "暂停中（不推进，但目标保留）",
+          "type": "boolean"
+        },
+        "stopped": {
+          "description": "引擎触发停止条件后的原因（非空时不再推进）",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subtasks": {
+          "items": {
+            "$ref": "#/$defs/GoalSubtask"
+          },
+          "type": "array"
+        },
+        "turns_remaining": {
+          "description": "还需要多少个子任务轮（**下限估计**：审查失败的重试会让实际更多）。\n宿主据此决定要不要继续 `GoalAdvance`。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "goal_id",
+        "goal",
+        "paused",
+        "subtasks",
+        "iterations",
+        "consecutive_failures",
+        "turns_remaining",
+        "budget_used"
+      ],
+      "title": "GoalSnapshot",
+      "type": "object"
+    },
+    "GoalSubtask": {
+      "$defs": {
+        "GoalPhase": {
+          "description": "目标子任务所处的阶段（Plan→Code→Review→Learn 的四阶段闭环 + 完成）。",
+          "enum": [
+            "plan",
+            "code",
+            "review",
+            "learn",
+            "done"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "一个子任务在快照里的形态。",
+      "properties": {
+        "id": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "phase": {
+          "$ref": "#/$defs/GoalPhase"
+        },
+        "retries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "phase",
+        "retries"
+      ],
+      "title": "GoalSubtask",
+      "type": "object"
+    },
+    "InitializeParamsWire": {
+      "$defs": {
+        "ClientInfoWire": {
+          "description": "客户端自述（仅诊断）。",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`initialize` 参数。",
+      "properties": {
+        "client": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClientInfoWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "InitializeParamsWire",
+      "type": "object"
+    },
+    "MethodDoc": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "一份方法表条目（握手响应里的 `methods` 的元素形状说明用）。",
+      "properties": {
+        "handshake_only": {
+          "description": "是否在握手前可用。",
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params": {
+          "description": "无参方法为空数组。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "params",
+        "handshake_only"
+      ],
+      "title": "MethodDoc",
+      "type": "object"
+    },
+    "Op": {
+      "$defs": {
+        "ApprovalPolicy": {
+          "description": "轴一：审批（流程边界，何时必须暂停问人）",
+          "enum": [
+            "untrusted",
+            "on_request",
+            "on_failure",
+            "never"
+          ],
+          "type": "string"
+        },
+        "ContextRef": {
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/RefKind"
+            },
+            "lines": {
+              "description": "行范围（1 基，闭区间）。`None` = 整个文件。\n\n单独建模而不是塞进 `target` 字符串：`src/a.rs#12-40` 里的\n\"#12-40\" 是**结构化信息**（起止行），下游（提示词拼装、UI 高亮）\n需要数值而不是再解析一遍字符串。",
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              ],
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "target"
+          ],
+          "type": "object"
+        },
+        "Decision": {
+          "enum": [
+            "allow",
+            "allow_always",
+            "deny"
+          ],
+          "type": "string"
+        },
+        "ExecMode": {
+          "description": "ZCode 五档执行模式（UI 档位，映射到沙箱 × 审批双轴）",
+          "enum": [
+            "plan",
+            "confirm_before",
+            "default",
+            "auto_edit",
+            "full_access"
+          ],
+          "type": "string"
+        },
+        "RefKind": {
+          "enum": [
+            "file",
+            "session",
+            "command",
+            "skill"
+          ],
+          "type": "string"
+        },
+        "SandboxMode": {
+          "description": "轴二：沙箱（技术边界，OS 强制，agent 无法绕过）",
+          "enum": [
+            "read_only",
+            "workspace_write",
+            "danger_full_access"
+          ],
+          "type": "string"
+        },
+        "SessionPatch": {
+          "properties": {
+            "approval_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "exec_mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExecMode"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sandbox_mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SandboxMode"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "enum": [
+            "interrupt",
+            "compact",
+            "fork",
+            "shutdown"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "user_turn": {
+              "properties": {
+                "refs": {
+                  "items": {
+                    "$ref": "#/$defs/ContextRef"
+                  },
+                  "type": "array"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text",
+                "refs"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "user_turn"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "开始一轮但**不驱动**：只做回显/引用解析/推入历史。配合 [`Op::Pump`]\n逐帧推进用。\n\n# 为什么需要它（而不是只用 UserTurn）\n\n`UserTurn` 在一次 `submit` 里跑完整轮（可能多次模型往返 + 工具执行），\n宿主只能等它全部结束才拿到事件 —— 期间界面**完全冻结**（真实反馈：\n\"回车后像卡死，退出后才显示一堆内容\"）。逐帧推进让宿主在每步之后\n重绘一次，至少能看到\"正在请求模型 / 正在执行工具\"。",
+          "properties": {
+            "begin_turn": {
+              "properties": {
+                "refs": {
+                  "items": {
+                    "$ref": "#/$defs/ContextRef"
+                  },
+                  "type": "array"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text",
+                "refs"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "begin_turn"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "pump",
+          "description": "推进一轮里的**一步**（一次模型请求 + 它要求的工具执行）。\n收到 `TurnComplete` 或 `ApprovalRequest` 即到边界。",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "用户直接执行一条 shell 命令（TUI 的 `!cmd`，opencode 同款）。\n\n与 UserTurn 的区别：**不经过模型**。命令仍走沙箱（结构性约束），\n结果作为 ToolResult 进入历史，供下一轮模型参考。\n由用户显式输入的命令不再问审批 —— 等价于用户自己在 shell 里敲它。",
+          "properties": {
+            "shell": {
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "shell"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "落实一次审批。\n\n`reason` 仅在 `decision = Deny` 时有意义：用户拒绝时**为什么拒**。\n它会进入模型可见的工具结果（\"用户拒绝了该调用：<理由>\"）——\n模型因此知道该换个做法，而不是原样重试（真机实测过这个差别）。\n没有理由输入的宿主（exec / Web）传 `None`，行为与之前完全一致。",
+          "properties": {
+            "approve": {
+              "properties": {
+                "decision": {
+                  "$ref": "#/$defs/Decision"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "reason": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "decision"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "approve"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "与 `Approve` 相同，但**只执行本步剩余的调用**，不驱动后续步骤。\n\n供逐帧宿主（TUI）用：`Approve` 会在一次调用里把整轮剩下的\n模型往返全部跑完 —— 那里可能又有多次网络请求，界面再次冻结\n（用户曾因此在冻结期间敲键，解冻后那些键被逐个处理，误触退出）。\n逐帧宿主用这个变体，然后自己 `Pump` 逐步推进。",
+          "properties": {
+            "approve_step": {
+              "properties": {
+                "decision": {
+                  "$ref": "#/$defs/Decision"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "reason": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "decision"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "approve_step"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "configure_session": {
+              "properties": {
+                "patch": {
+                  "$ref": "#/$defs/SessionPatch"
+                }
+              },
+              "required": [
+                "patch"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "configure_session"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "回退对话到之前某轮：删掉最近 `turns` 个用户轮次的全部消息。\n\n**只回退对话，不还原文件** —— 见 `EventMsg::Rewound` 的说明。\n用途：某个方向做错了想重新问一次，而不必开新会话丢掉前面有用的上下文。",
+          "properties": {
+            "rewind": {
+              "properties": {
+                "turns": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "turns"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "rewind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "goal_set": {
+              "properties": {
+                "goal": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "goal"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "goal_set"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "goal_pause": {
+              "properties": {
+                "goal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "goal_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "goal_pause"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "goal_resume": {
+              "properties": {
+                "goal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "goal_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "goal_resume"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "goal_advance",
+          "description": "推进目标：执行**一个**子任务轮（一次完整 turn），跑完自动推进引擎。\n与 `Pump` 同理是有界的 —— 一次只跑一轮，宿主控制节奏；\n是否还有下一轮看最新 `GoalUpdated` 快照的 `turns_remaining`。",
+          "type": "string"
+        },
+        {
+          "const": "goal_clear",
+          "description": "清除目标（目标与其进度一并丢弃，会话保留）。",
+          "type": "string"
+        }
+      ],
+      "title": "Op"
+    },
+    "RefKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "file",
+        "session",
+        "command",
+        "skill"
+      ],
+      "title": "RefKind",
+      "type": "string"
+    },
+    "RewindParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`session/rewind` 参数。",
+      "properties": {
+        "turns": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turns"
+      ],
+      "title": "RewindParams",
+      "type": "object"
+    },
+    "RpcErrorObject": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON-RPC 2.0 错误对象（响应或错误响应里的 `error`）。",
+      "properties": {
+        "code": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "data": true,
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "RpcErrorObject",
+      "type": "object"
+    },
+    "RpcErrorResponse": {
+      "$defs": {
+        "RpcErrorObject": {
+          "description": "JSON-RPC 2.0 错误对象（响应或错误响应里的 `error`）。",
+          "properties": {
+            "code": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "data": true,
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON-RPC 2.0 错误响应。",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/RpcErrorObject"
+        },
+        "id": true,
+        "jsonrpc": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "error"
+      ],
+      "title": "RpcErrorResponse",
+      "type": "object"
+    },
+    "RpcNotification": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON-RPC 2.0 通知（无 id）。",
+      "properties": {
+        "jsonrpc": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": true
+      },
+      "required": [
+        "jsonrpc",
+        "method"
+      ],
+      "title": "RpcNotification",
+      "type": "object"
+    },
+    "RpcRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON-RPC 2.0 请求。",
+      "properties": {
+        "id": {
+          "description": "请求 id（字符串或整数）。"
+        },
+        "jsonrpc": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": true
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method"
+      ],
+      "title": "RpcRequest",
+      "type": "object"
+    },
+    "RpcResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON-RPC 2.0 成功响应。",
+      "properties": {
+        "id": true,
+        "jsonrpc": {
+          "type": "string"
+        },
+        "result": true
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "result"
+      ],
+      "title": "RpcResponse",
+      "type": "object"
+    },
+    "SandboxMode": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "轴二：沙箱（技术边界，OS 强制，agent 无法绕过）",
+      "enum": [
+        "read_only",
+        "workspace_write",
+        "danger_full_access"
+      ],
+      "title": "SandboxMode",
+      "type": "string"
+    },
+    "SessionPatch": {
+      "$defs": {
+        "ApprovalPolicy": {
+          "description": "轴一：审批（流程边界，何时必须暂停问人）",
+          "enum": [
+            "untrusted",
+            "on_request",
+            "on_failure",
+            "never"
+          ],
+          "type": "string"
+        },
+        "ExecMode": {
+          "description": "ZCode 五档执行模式（UI 档位，映射到沙箱 × 审批双轴）",
+          "enum": [
+            "plan",
+            "confirm_before",
+            "default",
+            "auto_edit",
+            "full_access"
+          ],
+          "type": "string"
+        },
+        "SandboxMode": {
+          "description": "轴二：沙箱（技术边界，OS 强制，agent 无法绕过）",
+          "enum": [
+            "read_only",
+            "workspace_write",
+            "danger_full_access"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "approval_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exec_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sandbox_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SandboxMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "title": "SessionPatch",
+      "type": "object"
+    },
+    "TextParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "文本类参数（`turn/start` / `turn/begin`）。",
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "TextParams",
+      "type": "object"
+    },
+    "TodoEntry": {
+      "$defs": {
+        "TodoStatus": {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "任务清单的一项（模型通过 `todowrite` 工具维护）。",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TodoStatus"
+        }
+      },
+      "required": [
+        "content",
+        "status"
+      ],
+      "title": "TodoEntry",
+      "type": "object"
+    },
+    "TodoStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "pending",
+        "in_progress",
+        "completed"
+      ],
+      "title": "TodoStatus",
+      "type": "string"
+    },
+    "ToolOutput": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "exit_code": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "exit_code",
+        "stdout",
+        "stderr",
+        "truncated"
+      ],
+      "title": "ToolOutput",
+      "type": "object"
+    }
+  },
+  "$id": "https://proteus.local/schema/neo-appserver.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "NEO app-server 线协议契约（SCHEMA_VERSION=1）。字段形状来自 neo-protocol 与 jsonrpc，由 schemars 从 Rust 类型生成。",
+  "title": "NEO app-server wire protocol",
+  "x-error-codes": {
+    "ALREADY_INITIALIZED": -32002,
+    "INVALID_PARAMS": -32602,
+    "INVALID_REQUEST": -32600,
+    "KERNEL_ERROR": -32000,
+    "METHOD_NOT_FOUND": -32601,
+    "NOT_INITIALIZED": -32001,
+    "PARSE_ERROR": -32700,
+    "VERSION_MISMATCH": -32003
+  },
+  "x-methods": [
+    "initialize",
+    "turn/start",
+    "turn/begin",
+    "turn/pump",
+    "turn/interrupt",
+    "command/exec",
+    "approval/respond",
+    "approval/respondStep",
+    "session/configure",
+    "session/compact",
+    "session/fork",
+    "session/rewind",
+    "goal/set",
+    "goal/pause",
+    "goal/resume",
+    "goal/advance",
+    "goal/clear",
+    "shutdown"
+  ],
+  "x-notification": {
+    "event": {
+      "method": "event",
+      "shape": "EventNotification"
+    }
+  },
+  "x-protocol-version": 1,
+  "x-roots": [
+    "Op",
+    "EventMsg",
+    "ToolOutput",
+    "ContextRef",
+    "RefKind",
+    "Decision",
+    "SessionPatch",
+    "ExecMode",
+    "SandboxMode",
+    "ApprovalPolicy",
+    "FileChange",
+    "TodoEntry",
+    "TodoStatus",
+    "GoalPhase",
+    "GoalSubtask",
+    "GoalSnapshot",
+    "RpcRequest",
+    "RpcNotification",
+    "RpcResponse",
+    "RpcErrorObject",
+    "RpcErrorResponse",
+    "InitializeParamsWire",
+    "ClientInfoWire",
+    "TextParams",
+    "CommandParams",
+    "ApprovalParams",
+    "RewindParams",
+    "GoalParams",
+    "GoalIdParams",
+    "EventNotification",
+    "MethodDoc"
+  ]
+}

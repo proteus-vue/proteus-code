@@ -156,6 +156,25 @@ else
   echo "  [SKIP] 未找到 $PLAN_CHECKS"
 fi
 
+# ── 2.1 协议契约产物（JSON Schema + TS）────────────────────────────────
+#
+# 为什么单独一道：`schema/` 下的产物是**跨进程客户端**的事实来源。改 Rust
+# 类型而忘了重生成时，Rust 测试全绿、客户端却拿着过期契约 —— 属于
+# 「静态检查全绿、对外契约是坏的」那一类。判据：重生成后逐字节一致。
+hr; echo "#  协议契约产物：schema/ 与 Rust 类型同源（check_protocol_schema）"; hr
+if [ "$CARGO_OK" -eq 1 ]; then
+  py=python3; command -v "$py" >/dev/null 2>&1 || py=python
+  if "$py" "$ROOT/scripts/check_protocol_schema.py" >/tmp/neo-schema.log 2>&1; then
+    sed 's/^/  /' /tmp/neo-schema.log
+  else
+    sed 's/^/     /' /tmp/neo-schema.log
+    fail=$((fail+1))
+  fi
+else
+  echo "  [SKIP] cargo 未通过预检 —— 协议契约检查未执行"
+  fail=$((fail+1))
+fi
+
 # ── 4. 执行效率规范（ai-efficiency-rules）───────────────────────────────
 #
 # 与其它守卫同级：把「不要固定 sleep、不要重复拉取远程、不要无上限重试」

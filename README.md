@@ -74,6 +74,16 @@ printf '%s\n' \
   | neo app-server --provider mock
 ```
 
+**协议契约产物**（给 GUI / IDE 生成绑定，不必猜字段）：
+
+```bash
+bash scripts/gen_protocol_schema.sh   # → crates/neo-host-appserver/schema/
+#   neo-appserver.schema.json · neo-appserver.ts · methods.json
+```
+
+由 `schemars` / `ts-rs` 从 Rust 类型生成，门禁 `check_protocol_schema.py`
+逐字节比对 —— 类型改了产物没跟上会变红。
+
 必须先 `initialize`（响应里带协议版本、方法表与宿主能力）；`turn/start` 立即返回
 `{"accepted":true}`，**进度以 `event` 通知陆续到达**（带严格递增 `seq`）；
 需要审批时收到 `approval_request` 通知，用 `approval/respond` 回**同一个 id**；

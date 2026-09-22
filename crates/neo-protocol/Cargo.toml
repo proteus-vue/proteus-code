@@ -10,6 +10,17 @@ rust-version.workspace = true
 description = "L0 线协议：Op / EventMsg / 双轴枚举（零业务依赖）"
 
 # L1 PROTOCOL: 只允许 serde。禁止依赖任何业务 crate。
+#
+# `schema` 特性引入 schemars / ts-rs **仅用于生成对外契约产物**（JSON Schema +
+# TypeScript），默认关闭、不进任何宿主的正常构建 —— L0 的"零业务依赖"不受影响
+# （这两个是元编程工具，不是业务 crate；A4 只拦业务层）。
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+schemars = { version = "1", optional = true, features = ["derive"] }
+ts-rs = { version = "10", optional = true, features = ["serde-compat"] }
+
+[features]
+default = []
+# 对外线协议的类型导出（JSON Schema + TS）。给 GUI / IDE 客户端生成绑定用。
+schema = ["dep:schemars", "dep:ts-rs"]

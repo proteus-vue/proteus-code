@@ -1,0 +1,122 @@
+[
+  {
+    "name": "initialize",
+    "params": [
+      "protocol_version",
+      "client"
+    ],
+    "handshake_only": true
+  },
+  {
+    "name": "turn/start",
+    "params": [
+      "text"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "turn/begin",
+    "params": [
+      "text"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "turn/pump",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "turn/interrupt",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "command/exec",
+    "params": [
+      "command"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "approval/respond",
+    "params": [
+      "id",
+      "decision",
+      "reason"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "approval/respondStep",
+    "params": [
+      "id",
+      "decision",
+      "reason"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "session/configure",
+    "params": [
+      "exec_mode",
+      "sandbox_mode",
+      "approval_policy",
+      "model"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "session/compact",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "session/fork",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "session/rewind",
+    "params": [
+      "turns"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "goal/set",
+    "params": [
+      "goal"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "goal/pause",
+    "params": [
+      "goal_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "goal/resume",
+    "params": [
+      "goal_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "goal/advance",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "goal/clear",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "shutdown",
+    "params": [],
+    "handshake_only": false
+  }
+]

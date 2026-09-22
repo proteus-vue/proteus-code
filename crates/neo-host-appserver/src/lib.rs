@@ -47,6 +47,10 @@
 pub mod jsonrpc;
 pub mod serve;
 
+/// 对外契约导出（JSON Schema + TS）。仅 `schema` 特性。
+#[cfg(feature = "schema")]
+pub mod schema;
+
 pub use jsonrpc::{Action, ClientInfo, InitializeParams, RpcError, PROTOCOL_VERSION};
 pub use serve::{serve, serve_stdio};
 

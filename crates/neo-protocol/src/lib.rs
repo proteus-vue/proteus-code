@@ -10,6 +10,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 // ---------- 上下文引用（吸收 ZCode 的 @ / # / / / $ 体系） ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub struct ContextRef {
     pub kind: RefKind,
     pub target: String,
@@ -123,6 +124,7 @@ pub fn format_file_ref(path: &str, lines: Option<(usize, usize)>) -> Option<Stri
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub enum RefKind {
     File,    // @path
     Session, // #session
@@ -134,6 +136,7 @@ pub enum RefKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub enum Op {
     UserTurn { text: String, refs: Vec<ContextRef> },
     /// 开始一轮但**不驱动**：只做回显/引用解析/推入历史。配合 [`Op::Pump`]
@@ -192,6 +195,7 @@ pub enum Op {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub enum Decision {
     Allow,
     AllowAlways,
@@ -199,6 +203,7 @@ pub enum Decision {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub struct SessionPatch {
     pub exec_mode: Option<ExecMode>,
     pub sandbox_mode: Option<SandboxMode>,
@@ -209,6 +214,7 @@ pub struct SessionPatch {
 /// ZCode 五档执行模式（UI 档位，映射到沙箱 × 审批双轴）
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub enum ExecMode {
     Plan,               // 计划模式：先出计划再动手
     ConfirmBefore,      // 变更前确认
@@ -220,6 +226,7 @@ pub enum ExecMode {
 /// 轴二：沙箱（技术边界，OS 强制，agent 无法绕过）
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub enum SandboxMode {
     ReadOnly,
     WorkspaceWrite,
@@ -229,6 +236,7 @@ pub enum SandboxMode {
 /// 轴一：审批（流程边界，何时必须暂停问人）
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub enum ApprovalPolicy {
     Untrusted,
     OnRequest,
@@ -238,6 +246,7 @@ pub enum ApprovalPolicy {
 
 /// 一个文件的改动统计（供侧栏"已修改文件"面板）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub struct FileChange {
     pub path: String,
     pub additions: usize,
@@ -246,6 +255,7 @@ pub struct FileChange {
 
 /// 任务清单的一项（模型通过 `todowrite` 工具维护）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub struct TodoEntry {
     pub content: String,
     pub status: TodoStatus,
@@ -253,6 +263,7 @@ pub struct TodoEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub enum TodoStatus {
     Pending,
     InProgress,
@@ -264,6 +275,7 @@ pub enum TodoStatus {
 /// 目标子任务所处的阶段（Plan→Code→Review→Learn 的四阶段闭环 + 完成）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub enum GoalPhase {
     Plan,
     Code,
@@ -274,6 +286,7 @@ pub enum GoalPhase {
 
 /// 一个子任务在快照里的形态。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub struct GoalSubtask {
     pub id: usize,
     pub title: String,
@@ -287,6 +300,7 @@ pub struct GoalSubtask {
 /// 宿主展示 = 直接读，不需要自己累计差量 —— 状态单一事实源在编排器，
 /// 快照即它当时的全部。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub struct GoalSnapshot {
     /// 确定性编号（`goal-N`，按编排器内计数器派生，不用随机/时钟）
     pub goal_id: GoalId,
@@ -357,6 +371,7 @@ pub type Seq = u64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub enum EventMsg {
     /// 用户提交的消息（内核回显）。
     ///
@@ -416,6 +431,7 @@ pub enum EventMsg {
         /// 跨进程续聊时请求非法。这也正是 AGENTS.md「模型可见即已落日志」
         /// 那条约束的要求。
         #[serde(default)]
+        #[cfg_attr(feature = "schema", ts(type = "unknown"))]
         arguments: serde_json::Value,
     },
     ToolCallEnd {
@@ -479,6 +495,7 @@ pub enum EventMsg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub struct ToolOutput {
     pub exit_code: i32,
     pub stdout: String,

@@ -132,6 +132,19 @@ pub fn method_table() -> Vec<&'static str> {
     v
 }
 
+/// 方法 → 合法参数键（与 [`allowed_keys`] 同源，供 schema 导出）。
+///
+/// 单独开这个函数而不是直接暴露 `allowed_keys`：后者对未知方法返回 `None`
+///（表示"不限制"），而契约导出需要**完整表**（含无参方法的空列表）。
+pub fn method_param_docs() -> Vec<(&'static str, &'static [&'static str])> {
+    let mut v = vec![("initialize", &["protocol_version", "client"][..])];
+    for m in OP_METHODS {
+        let keys = allowed_keys(m).unwrap_or(&[]);
+        v.push((m, keys));
+    }
+    v
+}
+
 /// 每个方法的合法参数字段名。用于**严格校验**：出现表外的键即 `-32602`。
 ///
 /// 为什么不用 `#[serde(deny_unknown_fields)]` 一把梭：`session/configure` 的

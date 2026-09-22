@@ -19,3 +19,10 @@ neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
 neo-core = { path = "../neo-core", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# 仅 `schema` 特性：生成 JSON Schema / TypeScript 契约产物
+schemars = { version = "1", optional = true, features = ["derive"] }
+ts-rs = { version = "10", optional = true, features = ["serde-compat"] }
+
+[features]
+default = []
+schema = ["neo-protocol/schema", "dep:schemars", "dep:ts-rs"]
