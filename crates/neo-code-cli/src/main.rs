@@ -330,11 +330,14 @@ fn cmd_appserver(args: &[String]) -> i32 {
     };
     let model_name = models.current_provider().name().to_string();
     let sandbox = Arc::new(neo_sandbox_local::LocalSandbox::new(&workspace));
-    let persistence = Box::new(neo_session_local::JsonlPersistence::new(
-        workspace.join(".neo/sessions/neo-appserver.jsonl"),
-    ));
+    // 会话库：与 TUI/桌面同一目录（`.neo/sessions/`），app-server 不另开孤岛。
+    // 起动会话用稳定 id `appserver`（可被 thread/resume 切走再切回）。
+    let store = neo_session_store::SessionStore::open(workspace.join(".neo/sessions"));
+    let start_id = "appserver".to_string();
+    let persistence =
+        Box::new(neo_session_local::JsonlPersistence::new(store.path_for(&start_id)));
     let opts = ExecOptions { mode, max_steps: 32, ..Default::default() };
-    let mut kernel = build_kernel("neo-appserver", &workspace, &opts, models, sandbox, persistence);
+    let mut kernel = build_kernel(&start_id, &workspace, &opts, models, sandbox, persistence);
 
     // 横幅走 stderr（stdout 是协议通道）。人在终端里直接跑时它说明"没卡住"；
     // 程序化客户端读 stdout，不受影响。
@@ -345,16 +348,102 @@ fn cmd_appserver(args: &[String]) -> i32 {
         describe_mode(mode)
     );
 
-    // 与 serve 同款：内核独占线程，传输层只做「Op 进 / 事件出」。
-    match neo_host_appserver::serve_stdio(move |op| {
-        kernel
-            .submit(op)
-            .unwrap_or_else(|e| vec![EventMsg::Error { message: e.to_string() }])
+    // 内核独占线程：Op 推进状态机；thread/* 操作会话库（切换要动同一个 Kernel）。
+    match neo_host_appserver::serve_stdio(move |job| match job {
+        neo_host_appserver::Job::Op(op) => {
+            let events = kernel
+                .submit(op)
+                .unwrap_or_else(|e| vec![EventMsg::Error { message: e.to_string() }]);
+            neo_host_appserver::JobOut::Events(events)
+        }
+        neo_host_appserver::Job::Thread { cmd, .. } => {
+            neo_host_appserver::JobOut::Thread(thread_cmd(&mut kernel, &store, cmd))
+        }
     }) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("[neo] app-server 传输失败：{e}");
             1
+        }
+    }
+}
+
+/// `thread/*` 的装配层实现：会话库 + 内核切换。
+///
+/// 与 TUI/桌面的 `Sessions` 同一套语义，但那边要经 `KernelHandle` 跨线程
+/// 查询，这边内核就在本闭包里 —— 直接调 `switch_session`，不经句柄。
+/// 判据保持一致：不存在的 id 报错、不能删当前会话、切换后把历史事件交出去。
+fn thread_cmd(
+    kernel: &mut neo_core::Kernel,
+    store: &neo_session_store::SessionStore,
+    cmd: neo_host_appserver::ThreadCmd,
+) -> neo_host_appserver::ThreadResult {
+    use neo_host_appserver::{ThreadCmd, ThreadResult};
+
+    fn summary(m: neo_session_store::SessionMeta) -> serde_json::Value {
+        let (additions, deletions) = m.changes.unwrap_or((0, 0));
+        serde_json::json!({
+            "id": m.id,
+            "title": m.title,
+            "has_title": m.has_title(),
+            "records": m.records,
+            "bytes": m.bytes,
+            "additions": additions,
+            "deletions": deletions,
+            "has_changes": m.changes.is_some(),
+            "state": match m.state {
+                neo_session::SessionState::Idle => "idle",
+                neo_session::SessionState::Failed => "failed",
+                neo_session::SessionState::Interrupted => "interrupted",
+                neo_session::SessionState::Empty => "empty",
+            },
+        })
+    }
+
+    fn history_of(k: &mut neo_core::Kernel) -> Vec<EventMsg> {
+        k.log_for_test()
+            .into_iter()
+            .filter(|rec| rec.kind == "event")
+            .filter_map(|rec| serde_json::from_value::<EventMsg>(rec.payload).ok())
+            .collect()
+    }
+
+    match cmd {
+        ThreadCmd::List => {
+            let threads: Vec<serde_json::Value> =
+                store.list().into_iter().map(summary).collect();
+            ThreadResult::Value(serde_json::json!({ "threads": threads }))
+        }
+        ThreadCmd::Get { id } => match store.list().into_iter().find(|m| m.id == id) {
+            Some(m) => ThreadResult::Value(serde_json::json!({ "thread": summary(m) })),
+            None => ThreadResult::Error(format!("会话 {id} 不存在")),
+        },
+        ThreadCmd::Resume { id } => {
+            if !store.exists(&id) {
+                return ThreadResult::Error(format!("会话 {id} 不存在"));
+            }
+            let p = Box::new(neo_session_local::JsonlPersistence::new(store.path_for(&id)));
+            kernel.switch_session(&id, p);
+            let history = history_of(kernel);
+            ThreadResult::Resumed {
+                result: serde_json::json!({ "id": id, "events_replayed": history.len() }),
+                history,
+            }
+        }
+        ThreadCmd::Create => {
+            let id = store.new_id();
+            let p = Box::new(neo_session_local::JsonlPersistence::new(store.path_for(&id)));
+            kernel.switch_session(&id, p);
+            ThreadResult::Value(serde_json::json!({ "id": id }))
+        }
+        ThreadCmd::Delete { id } => {
+            if id == kernel.session_id() {
+                return ThreadResult::Error("不能删除当前正在使用的会话（先 thread/resume 到别的会话）".into());
+            }
+            match store.delete(&id) {
+                Ok(removed) => ThreadResult::Value(serde_json::json!({ "removed": removed })),
+                Err(e) => ThreadResult::Error(e.to_string()),
+            }
         }
     }
 }

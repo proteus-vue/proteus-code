@@ -1891,6 +1891,70 @@
       "title": "TextParams",
       "type": "object"
     },
+    "ThreadSummary": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "会话库条目（`thread/list` / `thread/get` 的 result 元素）。\n\n字段对齐 `neo_session::SessionInfo`，但状态是**线格式字符串** ——\n客户端不该依赖 Rust 枚举的 Debug 形状。",
+      "properties": {
+        "bytes": {
+          "description": "文件字节数",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "changes": {
+          "description": "累计改动（增, 删）；从未改动为 null。取自**最后一个** files_changed。",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          ],
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "has_title": {
+          "description": "标题是否来自真实内容（false = id 兜底，UI 应弱化显示）",
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "records": {
+          "description": "日志条数（粗略规模）",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "description": "idle / failed / interrupted / empty",
+          "type": "string"
+        },
+        "title": {
+          "description": "标题（取自第一条用户消息；取不到则等于 id）",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "has_title",
+        "records",
+        "bytes",
+        "state"
+      ],
+      "title": "ThreadSummary",
+      "type": "object"
+    },
     "TodoEntry": {
       "$defs": {
         "TodoStatus": {
@@ -1988,7 +2052,12 @@
     "goal/resume",
     "goal/advance",
     "goal/clear",
-    "shutdown"
+    "shutdown",
+    "thread/list",
+    "thread/get",
+    "thread/resume",
+    "thread/create",
+    "thread/delete"
   ],
   "x-notification": {
     "event": {
@@ -2028,6 +2097,7 @@
     "GoalParams",
     "GoalIdParams",
     "EventNotification",
-    "MethodDoc"
+    "MethodDoc",
+    "ThreadSummary"
   ]
 }

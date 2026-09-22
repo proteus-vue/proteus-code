@@ -51,8 +51,8 @@ pub mod serve;
 #[cfg(feature = "schema")]
 pub mod schema;
 
-pub use jsonrpc::{Action, ClientInfo, InitializeParams, RpcError, PROTOCOL_VERSION};
-pub use serve::{serve, serve_stdio};
+pub use jsonrpc::{Action, ClientInfo, InitializeParams, RpcError, ThreadCmd, PROTOCOL_VERSION};
+pub use serve::{serve, serve_ops, serve_stdio, serve_stdio_ops, Job, JobOut, ThreadResult};
 
 use neo_core::{DiffSupport, HostBackend, HostCapabilities, ImageSupport};
 use neo_protocol::{EventMsg, Fact};

@@ -28,6 +28,11 @@ export const METHODS = [
   "goal/advance",
   "goal/clear",
   "shutdown",
+  "thread/list",
+  "thread/get",
+  "thread/resume",
+  "thread/create",
+  "thread/delete",
 ] as const;
 export type MethodName = (typeof METHODS)[number];
 
@@ -63,6 +68,11 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "goal/advance": [],
   "goal/clear": [],
   "shutdown": [],
+  "thread/list": [],
+  "thread/get": ["id"],
+  "thread/resume": ["id"],
+  "thread/create": [],
+  "thread/delete": ["id"],
 };
 
 export type ApprovalParams = { id: string, decision: Decision, reason: string | null, };
@@ -168,6 +178,31 @@ export type RpcResponse = { jsonrpc: string, id: unknown, result: unknown, };
 export type SandboxMode = "read_only" | "workspace_write" | "danger_full_access";
 export type SessionPatch = { exec_mode: ExecMode | null, sandbox_mode: SandboxMode | null, approval_policy: ApprovalPolicy | null, model: string | null, };
 export type TextParams = { text: string, };
+export type ThreadSummary = { id: string, 
+/**
+ * 标题（取自第一条用户消息；取不到则等于 id）
+ */
+title: string, 
+/**
+ * 标题是否来自真实内容（false = id 兜底，UI 应弱化显示）
+ */
+has_title: boolean, 
+/**
+ * 日志条数（粗略规模）
+ */
+records: number, 
+/**
+ * 文件字节数
+ */
+bytes: number, 
+/**
+ * 累计改动（增, 删）；从未改动为 null。取自**最后一个** files_changed。
+ */
+changes: [number, number] | null, 
+/**
+ * idle / failed / interrupted / empty
+ */
+state: string, };
 export type TodoEntry = { content: string, status: TodoStatus, };
 export type TodoStatus = "pending" | "in_progress" | "completed";
 export type ToolOutput = { exit_code: number, stdout: string, stderr: string, truncated: boolean, };

@@ -97,8 +97,29 @@ pub enum Action {
     Initialize(InitializeParams),
     /// 下发一个 Op
     Submit(Op),
+    /// 会话库控制（列举 / 读摘要 / 切换重建 / 新建 / 删除）。
+    ///
+    /// **不是 `Op`**：这些动作不驱动模型轮次，而是操作「会话库」这层
+    /// （Codex 的 `thread/*` 同级）。放在线方法里而不再造一套 Op，
+    /// 是因为 `Op` 的语义是"推进一次内核状态机"，而 list/get 是查询。
+    Thread(ThreadCmd),
     /// 关停：下发 `Op::Shutdown`，并在响应之后结束读取循环
     Shutdown,
+}
+
+/// 会话库控制命令（`thread/*` 五个方法）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadCmd {
+    /// `thread/list`：全部会话摘要，最近修改在前
+    List,
+    /// `thread/get`：单个会话摘要
+    Get { id: String },
+    /// `thread/resume`：切换到历史会话并重建事件流
+    Resume { id: String },
+    /// `thread/create`：新建空会话并切换过去
+    Create,
+    /// `thread/delete`：删除（不允许删当前会话）
+    Delete { id: String },
 }
 
 /// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，17 个）。
@@ -125,10 +146,22 @@ pub const OP_METHODS: &[&str] = &[
     "shutdown",
 ];
 
-/// 全部方法名（握手用）：`initialize` + 17 个。
+/// 会话库控制方法（`ThreadCmd`）。**不是 Op 映射**，故不进 [`OP_METHODS`]。
+///
+/// 形态对齐 Codex app-server 的 `thread/*`：桌面左侧会话库靠它列举/切换。
+pub const THREAD_METHODS: &[&str] = &[
+    "thread/list",
+    "thread/get",
+    "thread/resume",
+    "thread/create",
+    "thread/delete",
+];
+
+/// 全部方法名（握手用）：`initialize` + 17 个 Op + 5 个 thread。
 pub fn method_table() -> Vec<&'static str> {
     let mut v = vec!["initialize"];
     v.extend_from_slice(OP_METHODS);
+    v.extend_from_slice(THREAD_METHODS);
     v
 }
 
@@ -139,6 +172,10 @@ pub fn method_table() -> Vec<&'static str> {
 pub fn method_param_docs() -> Vec<(&'static str, &'static [&'static str])> {
     let mut v = vec![("initialize", &["protocol_version", "client"][..])];
     for m in OP_METHODS {
+        let keys = allowed_keys(m).unwrap_or(&[]);
+        v.push((m, keys));
+    }
+    for m in THREAD_METHODS {
         let keys = allowed_keys(m).unwrap_or(&[]);
         v.push((m, keys));
     }
@@ -163,6 +200,8 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "session/rewind" => &["turns"],
         "goal/set" => &["goal"],
         "goal/pause" | "goal/resume" => &["goal_id"],
+        "thread/get" | "thread/resume" | "thread/delete" => &["id"],
+        "thread/list" | "thread/create" => &[],
         _ => return None,
     })
 }
@@ -201,7 +240,10 @@ fn from_params<T: for<'de> Deserialize<'de>>(method: &str, params: &Value) -> Re
 
 /// 把一条请求转成动作。纯函数：同样的输入永远同样的输出（可单测）。
 pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
-    if !OP_METHODS.contains(&method) && method != "initialize" {
+    if !OP_METHODS.contains(&method)
+        && !THREAD_METHODS.contains(&method)
+        && method != "initialize"
+    {
         return Err(RpcError::new(
             METHOD_NOT_FOUND,
             format!("不认识的方法：{method}"),
@@ -267,6 +309,20 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
         }
         "goal/advance" => Action::Submit(Op::GoalAdvance),
         "goal/clear" => Action::Submit(Op::GoalClear),
+        "thread/list" => Action::Thread(ThreadCmd::List),
+        "thread/get" => {
+            let p: IdParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::Get { id: p.id })
+        }
+        "thread/resume" => {
+            let p: IdParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::Resume { id: p.id })
+        }
+        "thread/create" => Action::Thread(ThreadCmd::Create),
+        "thread/delete" => {
+            let p: IdParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::Delete { id: p.id })
+        }
         "shutdown" => Action::Shutdown,
         // 不可达：method 已在上面按 OP_METHODS 拦过。
         other => return Err(RpcError::new(METHOD_NOT_FOUND, format!("不认识的方法：{other}"))),
@@ -316,6 +372,11 @@ struct GoalParams {
 #[derive(Debug, Deserialize)]
 struct GoalIdParams {
     goal_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IdParams {
+    id: String,
 }
 
 /// 审批应答的三个字段（两个方法共用）。`decision` 直接反序列化成协议层的
@@ -422,7 +483,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
-        assert_eq!(ok["methods"].as_array().unwrap().len(), 18, "initialize + 17 个方法");
+        assert_eq!(
+            ok["methods"].as_array().map(Vec::len),
+            Some(23),
+            "initialize + 17 Op + 5 thread"
+        );
 
         // 版本不匹配必须拒绝，且把双方版本放进 data（机器可读）
         let err = initialize_result(&InitializeParams {

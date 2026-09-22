@@ -89,6 +89,11 @@ bash scripts/gen_protocol_schema.sh   # → crates/neo-host-appserver/schema/
 需要审批时收到 `approval_request` 通知，用 `approval/respond` 回**同一个 id**；
 `shutdown` 或关掉 stdin 结束。
 
+**会话库（`thread/*`，对齐 Codex app-server）**：桌面左侧会话列表靠它。
+`thread/list` 列摘要 · `thread/get` 取单条 · `thread/resume` 切换并重建历史
+（历史以 `event` 通知推送）· `thread/create` 新建 · `thread/delete` 删除
+（不允许删当前会话）。与 TUI/桌面同一 `.neo/sessions/` 目录，不是孤岛。
+
 **离线验不到的**（必须真实模型）：真实推理质量、多轮工具编排、
 模型是否真的会调 `todowrite` 维护清单。压缩策略（`/compact`）、引用解析
 （`@file` / `$skill`）与项目指令级联（`AGENTS.md`）都已在离线桩上端到端验证：

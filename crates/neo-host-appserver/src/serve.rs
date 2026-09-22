@@ -42,8 +42,8 @@ use neo_protocol::{EventMsg, Op};
 use serde_json::{json, Value};
 
 use crate::jsonrpc::{
-    self, Action, RpcError, ALREADY_INITIALIZED, INVALID_REQUEST, JSONRPC_VERSION, KERNEL_ERROR,
-    NOT_INITIALIZED, PARSE_ERROR,
+    self, Action, RpcError, ThreadCmd, ALREADY_INITIALIZED, INVALID_REQUEST, JSONRPC_VERSION,
+    KERNEL_ERROR, NOT_INITIALIZED, PARSE_ERROR,
 };
 
 /// 单条请求行的字节上限（含换行符）。
@@ -53,15 +53,59 @@ use crate::jsonrpc::{
 /// 同时把失控或恶意客户端挡在有界内存内。
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 
+/// `thread/*` 的处理结果（由装配层给出，宿主只负责变成响应行）。
+#[derive(Debug)]
+pub enum ThreadResult {
+    /// 普通 RPC result
+    Value(Value),
+    /// 切换成功：result + 要以事件通知推送的历史（宿主重画转录用）
+    Resumed { result: Value, history: Vec<EventMsg> },
+    /// 失败（不存在 / 正在使用 / 内核线程已退出…）
+    Error(String),
+}
+
+/// 内核线程上的工作项。
+///
+/// 为什么 `Op` 与 `thread/*` 走**同一个**处理器：切换会话要调
+/// `Kernel::switch_session`，而 `Kernel` 只能被一个闭包持有
+/// （它不是 `Sync`）。两个 `FnMut` 各拿一半是编不过的。
+#[derive(Debug)]
+pub enum Job {
+    /// 推进内核状态机
+    Op(Op),
+    /// 会话库控制（响应是同步的，见 [`ThreadResult`]）。
+    /// `id` 是 JSON-RPC 请求 id，处理完用它写响应行。
+    Thread { id: Value, cmd: ThreadCmd },
+}
+
+/// [`Job`] 的处理结果。
+#[derive(Debug)]
+pub enum JobOut {
+    /// Op 产生的事件（以通知推送）
+    Events(Vec<EventMsg>),
+    /// thread/* 的 RPC 结果
+    Thread(ThreadResult),
+}
+
 /// 启动 stdio 传输（`neo app-server` 的入口）。
 ///
 /// 返回即"客户端已关闭连接或请求了关停"——内核线程与写线程都已收尾。
-pub fn serve_stdio<F>(handle_op: F) -> std::io::Result<()>
+/// `handle` 同时处理 `Op` 与 `thread/*`（同一闭包持有内核）。
+pub fn serve_stdio<F>(handle: F) -> std::io::Result<()>
+where
+    F: FnMut(Job) -> JobOut + Send + 'static,
+{
+    let stdin = std::io::stdin();
+    serve(stdin.lock(), std::io::stdout(), handle)
+}
+
+/// [`serve_ops`] 的 stdio 版。
+pub fn serve_stdio_ops<F>(handle_op: F) -> std::io::Result<()>
 where
     F: FnMut(Op) -> Vec<EventMsg> + Send + 'static,
 {
     let stdin = std::io::stdin();
-    serve(stdin.lock(), std::io::stdout(), handle_op)
+    serve_ops(stdin.lock(), std::io::stdout(), handle_op)
 }
 
 /// 在任意读写端上跑协议（测试用 `Cursor` + 内存缓冲即可覆盖全流程）。
@@ -69,23 +113,68 @@ where
 /// `handle_op` 由调用方注入（通常是"把 Op 交给内核线程"），因此本 crate
 /// **不依赖内核的具体类型**，只依赖 `Op`/`EventMsg` 契据 —— 与 Web 宿主同款，
 /// 也让测试能注入一个脚本化的假内核。
-pub fn serve<R, W, F>(input: R, output: W, handle_op: F) -> std::io::Result<()>
+/// 只处理 `Op` 的便捷入口（测试假内核 / 未装配会话库的装配）。
+/// `thread/*` 一律回"未接会话库"，**不静默空列表**。
+pub fn serve_ops<R, W, F>(input: R, output: W, mut handle_op: F) -> std::io::Result<()>
 where
     R: BufRead,
     W: Write + Send + 'static,
     F: FnMut(Op) -> Vec<EventMsg> + Send + 'static,
 {
+    serve(input, output, move |job| match job {
+        Job::Op(op) => JobOut::Events(handle_op(op)),
+        Job::Thread { .. } => JobOut::Thread(ThreadResult::Error(
+            "本装配未接会话库，无法使用 thread/*".into(),
+        )),
+    })
+}
+
+pub fn serve<R, W, F>(input: R, output: W, mut handle: F) -> std::io::Result<()>
+where
+    R: BufRead,
+    W: Write + Send + 'static,
+    F: FnMut(Job) -> JobOut + Send + 'static,
+{
     let (out_tx, out_rx) = channel::<String>();
-    let (ops_tx, ops_rx) = channel::<Op>();
+    // (请求 id, 工作项)：thread/* 要用 id 回响应行；Op 的 id 由读线程自己回 accepted
+    let (job_tx, job_rx) = channel::<Job>();
 
     let writer = std::thread::spawn(move || write_lines(output, out_rx));
 
     let events_tx = out_tx.clone();
     let kernel = std::thread::spawn(move || {
-        let mut handle_op = handle_op;
         let mut seq: u64 = 0;
-        while let Ok(op) = ops_rx.recv() {
-            for event in handle_op(op) {
+        while let Ok(job) = job_rx.recv() {
+            let (events, reply) = match job {
+                Job::Op(op) => match handle(Job::Op(op)) {
+                    JobOut::Events(ev) => (ev, None),
+                    // Op 处理器不该回 ThreadResult；回了就如实报在 null id 上
+                    JobOut::Thread(ThreadResult::Error(msg)) => {
+                        (Vec::new(), Some(error_line(Value::Null, &RpcError::new(KERNEL_ERROR, msg))))
+                    }
+                    JobOut::Thread(ThreadResult::Value(v)) => {
+                        (Vec::new(), Some(result_line(Value::Null, v)))
+                    }
+                    JobOut::Thread(ThreadResult::Resumed { history, .. }) => (history, None),
+                },
+                Job::Thread { id, cmd } => match handle(Job::Thread { id: id.clone(), cmd }) {
+                    JobOut::Thread(ThreadResult::Value(v)) => (Vec::new(), Some(result_line(id, v))),
+                    JobOut::Thread(ThreadResult::Resumed { result, history }) => {
+                        (history, Some(result_line(id, result)))
+                    }
+                    JobOut::Thread(ThreadResult::Error(msg)) => (
+                        Vec::new(),
+                        Some(error_line(id, &RpcError::new(KERNEL_ERROR, msg))),
+                    ),
+                    JobOut::Events(ev) => (ev, None),
+                },
+            };
+            if let Some(line) = reply {
+                if events_tx.send(line).is_err() {
+                    return;
+                }
+            }
+            for event in events {
                 seq += 1;
                 let line = notification(seq, &event).to_string();
                 if events_tx.send(line).is_err() {
@@ -95,10 +184,10 @@ where
         }
     });
 
-    let result = read_loop(input, &out_tx, &ops_tx);
+let result = read_loop(input, &out_tx, &job_tx);
 
     // 收尾顺序：先关 Op 通道（内核跑完手头这一批），再关行通道（写线程写完）
-    drop(ops_tx);
+    drop(job_tx);
     let _ = kernel.join();
     drop(out_tx);
     let _ = writer.join();
@@ -201,7 +290,7 @@ fn envelope(value: &Value) -> Result<Envelope, RpcError> {
 fn read_loop<R: BufRead>(
     mut input: R,
     out_tx: &Sender<String>,
-    ops_tx: &Sender<Op>,
+    job_tx: &Sender<Job>,
 ) -> std::io::Result<()> {
     let mut initialized = false;
     let mut buf: Vec<u8> = Vec::new();
@@ -287,7 +376,7 @@ fn read_loop<R: BufRead>(
                     let _ = out_tx.send(error_line(id, &not_initialized(&envelope.method)));
                     continue;
                 }
-                if ops_tx.send(op).is_err() {
+                if job_tx.send(Job::Op(op)).is_err() {
                     let _ = out_tx.send(error_line(
                         id,
                         &RpcError::new(KERNEL_ERROR, "内核通道已断（宿主正在退出）"),
@@ -297,12 +386,26 @@ fn read_loop<R: BufRead>(
                 // 受理 ≠ 完成：整轮进度以事件通知到达
                 let _ = out_tx.send(result_line(id, json!({ "accepted": true })));
             }
+            Ok(Action::Thread(cmd)) => {
+                if !initialized {
+                    let _ = out_tx.send(error_line(id, &not_initialized(&envelope.method)));
+                    continue;
+                }
+                // thread/* 是**同步**的：响应由内核线程在处理完后写回，
+                // 这里不提前发 accepted（list/get 没有后续事件可推）。
+                if job_tx.send(Job::Thread { id: id.clone(), cmd }).is_err() {
+                    let _ = out_tx.send(error_line(
+                        id,
+                        &RpcError::new(KERNEL_ERROR, "内核通道已断（宿主正在退出）"),
+                    ));
+                }
+            }
             Ok(Action::Shutdown) => {
                 if !initialized {
                     let _ = out_tx.send(error_line(id, &not_initialized(&envelope.method)));
                     continue;
                 }
-                let _ = ops_tx.send(Op::Shutdown);
+                let _ = job_tx.send(Job::Op(Op::Shutdown));
                 let _ = out_tx.send(result_line(id, json!({ "accepted": true })));
                 // 停止读取：内核会把 ShutdownComplete 发出来，写线程写完即收尾
                 return Ok(());

@@ -11,7 +11,8 @@
 use std::io::{Cursor, Write};
 use std::sync::{Arc, Mutex};
 
-use neo_host_appserver::{jsonrpc, serve, PROTOCOL_VERSION};
+use neo_host_appserver::{jsonrpc, serve_ops, PROTOCOL_VERSION};
+use neo_host_appserver::serve as serve_jobs;
 use neo_protocol::{Decision, EventMsg, ExecMode, Op, SessionPatch};
 use serde_json::{json, Value};
 
@@ -45,7 +46,7 @@ impl Session {
         let ops = Arc::new(Mutex::new(Vec::new()));
         let sink = SharedBuf::default();
         let kernel_side = ops.clone();
-        serve(Cursor::new(text.into_bytes()), sink.clone(), move |op: Op| {
+        serve_ops(Cursor::new(text.into_bytes()), sink.clone(), move |op: Op| {
             let events = reply_for(&op);
             kernel_side.lock().expect("锁中毒").push(op);
             events
@@ -111,7 +112,7 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 18, "initialize + 17 个 Op 方法");
+    assert_eq!(methods.len(), 23, "initialize + 17 Op + 5 thread");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
     // 宿主能力（SPI 的既有数据，不是这条协议新造的）
@@ -280,7 +281,7 @@ fn malformed_json_yields_a_parse_error_with_a_null_id() {
     // 直接插一行非 JSON：它没有可信的 id，按规范用 null
     let text = format!("{}\n这不是 JSON\n{}\n", init_line(1), op_line(2, "turn/pump", json!({})));
     let sink = SharedBuf::default();
-    serve(Cursor::new(text.into_bytes()), sink.clone(), |op: Op| stream_for(&op)).expect("serve 不该失败");
+    serve_ops(Cursor::new(text.into_bytes()), sink.clone(), |op: Op| stream_for(&op)).expect("serve 不该失败");
     let raw = String::from_utf8(sink.0.lock().expect("锁中毒").clone()).expect("UTF-8");
     let lines: Vec<Value> = raw.lines().map(|l| serde_json::from_str(l).expect("每行合法 JSON")).collect();
     let parse_err = lines
@@ -331,7 +332,7 @@ fn oversized_request_lines_are_dropped_with_an_honest_byte_count() {
     let ops = Arc::new(Mutex::new(Vec::new()));
     let sink = SharedBuf::default();
     let kernel_side = ops.clone();
-    serve(Cursor::new(text.into_bytes()), sink.clone(), move |op: Op| {
+    serve_ops(Cursor::new(text.into_bytes()), sink.clone(), move |op: Op| {
         kernel_side.lock().expect("锁中毒").push(op);
         Vec::new()
     })
@@ -390,4 +391,118 @@ fn eof_closes_the_session_without_a_shutdown_method() {
     let s = Session::run(&[init_line(1), op_line(2, "turn/pump", json!({}))], stream_for);
     assert_eq!(s.ops, vec![Op::Pump]);
     assert_eq!(s.events().len(), 2, "已下发 Op 的事件仍要写完");
+}
+
+
+/// `thread/*`：会话库控制走同步响应，历史以事件通知推送。
+#[test]
+fn thread_list_get_resume_create_delete_round_trip() {
+    use neo_host_appserver::{Job, JobOut, ThreadResult};
+    use neo_host_appserver::ThreadCmd;
+
+    let input = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"thread/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"thread/get","params":{"id":"t-1"}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"thread/resume","params":{"id":"t-1"}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"thread/create","params":{}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"thread/delete","params":{"id":"t-1"}}),
+        json!({"jsonrpc":"2.0","id":7,"method":"thread/get","params":{"id":"nope"}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"shutdown","params":{}}),
+    ];
+    let text = input.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+    let sink = SharedBuf::default();
+    serve_jobs(
+        Cursor::new(text.into_bytes()),
+        sink.clone(),
+        |job| match job {
+            Job::Op(_) => JobOut::Events(vec![EventMsg::ShutdownComplete]),
+            Job::Thread { cmd, .. } => JobOut::Thread(match cmd {
+                ThreadCmd::List => ThreadResult::Value(json!({
+                    "threads": [{"id":"t-1","title":"修 bug","has_title":true,"state":"idle"}]
+                })),
+                ThreadCmd::Get { id } if id == "t-1" => ThreadResult::Value(json!({
+                    "thread": {"id":"t-1","title":"修 bug","has_title":true,"state":"idle"}
+                })),
+                ThreadCmd::Get { id } => ThreadResult::Error(format!("会话 {id} 不存在")),
+                ThreadCmd::Resume { id } => ThreadResult::Resumed {
+                    result: json!({"id": id, "events_replayed": 1}),
+                    history: vec![EventMsg::UserSubmitted { text: "hi".into() }],
+                },
+                ThreadCmd::Create => ThreadResult::Value(json!({"id": "t-new"})),
+                ThreadCmd::Delete { id } => ThreadResult::Value(json!({"removed": id == "t-1"})),
+            }),
+        },
+    )
+    .expect("serve 不该失败");
+
+    let raw = String::from_utf8(sink.0.lock().expect("锁中毒").clone()).expect("UTF-8");
+    let lines: Vec<Value> = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("行应是 JSON"))
+        .collect();
+
+    let by_id = |id: u64| {
+        lines
+            .iter()
+            .find(|v| v["id"] == json!(id) && v.get("result").is_some())
+            .unwrap_or_else(|| panic!("id={id} 应有 result"))
+            .clone()
+    };
+    assert_eq!(by_id(2)["result"]["threads"][0]["id"], "t-1");
+    assert_eq!(by_id(3)["result"]["thread"]["title"], "修 bug");
+    assert_eq!(by_id(4)["result"]["id"], "t-1");
+    assert_eq!(by_id(4)["result"]["events_replayed"], 1);
+    assert_eq!(by_id(5)["result"]["id"], "t-new");
+    assert_eq!(by_id(6)["result"]["removed"], true);
+    // 不存在的会话：error 而不是空 result
+    let err = lines
+        .iter()
+        .find(|v| v["id"] == json!(7) && v.get("error").is_some())
+        .expect("id=7 应有 error");
+    assert!(err["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("不存在"));
+
+    // resume 的历史必须以事件通知到达（带 seq），且载荷在 payload 下
+    let ev = lines
+        .iter()
+        .find(|v| v.get("method") == Some(&json!("event")))
+        .expect("应有事件通知");
+    assert!(ev["params"]["seq"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(ev["params"]["kind"], "user_submitted");
+    assert_eq!(ev["params"]["payload"]["text"], "hi");
+}
+
+/// 未装配会话库时，thread/* 必须如实报错，不能静默空列表。
+#[test]
+fn thread_methods_without_session_store_fail_honestly() {
+    let input = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"thread/list","params":{}}),
+    ];
+    let text = input.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+    let sink = SharedBuf::default();
+    serve_ops(
+        Cursor::new(text.into_bytes()),
+        sink.clone(),
+        |_: Op| Vec::new(),
+    )
+    .expect("serve 不该失败");
+    let raw = String::from_utf8(sink.0.lock().expect("锁中毒").clone()).expect("UTF-8");
+    let lines: Vec<Value> = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("行应是 JSON"))
+        .collect();
+    let err = lines
+        .iter()
+        .find(|v| v["id"] == json!(2) && v.get("error").is_some())
+        .expect("thread/list 在无会话库时必须报错");
+    assert!(err["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("会话库"));
 }

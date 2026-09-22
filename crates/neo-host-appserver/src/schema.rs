@@ -150,6 +150,28 @@ pub struct EventNotification {
     pub payload: Value,
 }
 
+/// 会话库条目（`thread/list` / `thread/get` 的 result 元素）。
+///
+/// 字段对齐 `neo_session::SessionInfo`，但状态是**线格式字符串** ——
+/// 客户端不该依赖 Rust 枚举的 Debug 形状。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct ThreadSummary {
+    pub id: String,
+    /// 标题（取自第一条用户消息；取不到则等于 id）
+    pub title: String,
+    /// 标题是否来自真实内容（false = id 兜底，UI 应弱化显示）
+    pub has_title: bool,
+    /// 日志条数（粗略规模）
+    pub records: usize,
+    /// 文件字节数
+    #[cfg_attr(feature = "schema", ts(type = "number"))]
+    pub bytes: u64,
+    /// 累计改动（增, 删）；从未改动为 null。取自**最后一个** files_changed。
+    pub changes: Option<(usize, usize)>,
+    /// idle / failed / interrupted / empty
+    pub state: String,
+}
+
 /// 一份方法表条目（握手响应里的 `methods` 的元素形状说明用）。
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
 pub struct MethodDoc {
@@ -193,6 +215,7 @@ pub const ROOT_TYPES: &[&str] = &[
     "GoalIdParams",
     "EventNotification",
     "MethodDoc",
+    "ThreadSummary",
 ];
 
 /// 组合 JSON Schema 文档（draft 2020-12，schemars 1.x 默认）。
@@ -237,6 +260,7 @@ pub fn json_schema_document() -> Value {
     add!(GoalIdParams);
     add!(EventNotification);
     add!(MethodDoc);
+    add!(ThreadSummary);
 
     // 元数据 + 根引用表：客户端可以按名取到每个根类型的 schema。
     json!({
@@ -395,6 +419,7 @@ pub fn typescript_source() -> String {
     emit!(GoalIdParams);
     emit!(EventNotification);
     emit!(MethodDoc);
+    emit!(ThreadSummary);
 
     // 稳定顺序：按名字排，避免 HashMap 遍历导致产物抖动
     // （decls 本身已按 ROOT 优先、依赖补充的顺序压入；再按内容排序会让
@@ -448,10 +473,11 @@ mod tests {
     #[test]
     fn method_docs_cover_all_ops() {
         let docs = method_docs();
-        // initialize + 17 个 Op 方法
-        assert_eq!(docs.len(), 18, "方法表应为 initialize + 17 个 Op 方法");
+        // initialize + 17 个 Op + 5 个 thread
+        assert_eq!(docs.len(), 23, "方法表应为 initialize + 17 Op + 5 thread");
         assert!(docs[0].handshake_only);
         assert_eq!(docs[0].name, "initialize");
+        assert!(docs.iter().any(|d| d.name == "thread/resume"));
     }
 
     /// 写盘：`cargo test -p neo-host-appserver --features schema export_schema -- --ignored`

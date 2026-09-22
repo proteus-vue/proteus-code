@@ -118,5 +118,36 @@
     "name": "shutdown",
     "params": [],
     "handshake_only": false
+  },
+  {
+    "name": "thread/list",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/get",
+    "params": [
+      "id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/resume",
+    "params": [
+      "id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/create",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/delete",
+    "params": [
+      "id"
+    ],
+    "handshake_only": false
   }
 ]

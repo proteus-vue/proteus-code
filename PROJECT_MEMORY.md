@@ -6217,8 +6217,31 @@ CoC 是形式主义。缺口表里如实挂着（**等有外部贡献者再补**
 而 JSON 线上是 `number` —— 生成后统一改写，否则客户端会去接 BigInt。
 同理类型要 `export`，否则单文件契约没法 `import`。
 
-**下一步（T2）**：`thread/list` · `thread/get` · `thread/resume`（读 JSONL 重建）。
-注意 `Kernel` 不是 `Sync`：先做「一进程一 thread 的路由层」，不要求内核多会话并发。
+**下一步（T2）**：~~thread/list · thread/get · thread/resume~~ **已完成（见下）**。
+
+---
+
+## 会话接续点（最近：2026-09-22 · T2 thread 生命周期）
+
+本轮补 **app-server 的会话库 API**（Codex `thread/*` 同级）：
+
+| 方法 | 语义 | 实现 |
+|---|---|---|
+| `thread/list` | 会话摘要列表（最近修改在前） | `SessionStore::list` |
+| `thread/get` | 单条摘要 | 同上按 id |
+| `thread/resume` | 切换 + 重建历史事件流 | `Kernel::switch_session` + 日志 event 回放 |
+| `thread/create` | 新建并切过去 | `store.new_id` + switch |
+| `thread/delete` | 删除（禁止删当前） | `store.delete` |
+
+**一处架构事实**：`Kernel` 不是 `Sync`，而 `thread/resume` 要调
+`switch_session` —— 所以 `Op` 与 `thread/*` **必须同一个闭包**（`Job` 枚举），
+两个 `FnMut` 各拿一半是编不过的。`serve_ops` 留给只处理 Op 的测试假内核。
+
+**刻意与 TUI `Sessions` 平行而非抽公共库**：那边要经 `KernelHandle` 跨线程
+`query_blocking`，这边内核就在闭包里直接调。语义判据（不存在报错 / 禁删当前 /
+切换交出历史）两边一致，有集成测试钉住 wire 行为。
+
+**下一步（T3）**：历史投影 API（wire 上结构化 items，与 T6 facts 同源）。
 
 ---
 
