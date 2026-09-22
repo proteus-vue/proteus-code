@@ -1,0 +1,21 @@
+[package]
+name = "neo-host-appserver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "L5 宿主：stdio 上的 JSON-RPC 2.0（形态对齐 Codex app-server）"
+
+# L5 HOST: 不含业务逻辑，只做协议转换（JSON-RPC ⇄ Op/EventMsg）+ 传输。
+#
+# 依赖刻意压到与 Web 宿主同一量级：只要协议层与宿主 SPI 契据。
+# stdio 是标准库能力，不需要 HTTP/异步运行时 —— 这一层多加一个依赖，
+# 就多一个"客户端必须能装它"的前提。
+[dependencies]
+neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }

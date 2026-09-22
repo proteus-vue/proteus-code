@@ -1,6 +1,6 @@
 # L5 · 宿主层规格
 
-**crates**：`neo-host-tui`、`neo-host-desktop`、`neo-host-web`、`neo-exec`、`neo-code-cli`
+**crates**：`neo-host-tui`、`neo-host-desktop`、`neo-host-web`、`neo-host-appserver`、`neo-exec`、`neo-code-cli`
 **铁律**：**宿主不含任何业务逻辑，只做 渲染 + 输入解析 + 事件消费**
 
 ---
@@ -14,9 +14,14 @@
 | 宿主后端 | 技术 | 场景 | 二进制量级 |
 |---|---|---|---|
 | `neo-host-tui` | ratatui + crossterm | 终端 / SSH / CI 旁路 | ~2–5 MB |
-| **`neo-host-desktop`** | **wry（系统 webview）** | **桌面主入口** | **~5–10 MB** |
-| `neo-host-web` | axum + WebSocket | 远程 / 多端浏览器 | ~5–10 MB |
+| **`neo-host-desktop`** | **wry（系统 webview）** | 桌面 webview 入口（第二后端） | **~5–10 MB** |
+| `neo-host-web` | **手写 HTTP/1.1 + SSE（零框架依赖）** | 远程 / 多端浏览器 | ~5–10 MB |
+| `neo-host-appserver` | **stdio 上的 JSON-RPC 2.0（标准库）** | 编辑器 / IDE / 脚本接入 | ~0（纯标准库） |
 | `neo-exec` | 无头，零交互 | CI / 脚本 / 管道 | ~2–5 MB |
+
+> 表中两处与早期规格不同，均为**实现后的纠偏**：Web 宿主最终没有引 axum/WebSocket，
+> 而是手写 HTTP + SSE（理由见 `docs/desktop-plan.md:391`）；新增的 `neo-host-appserver`
+> 是"已有自己进程的客户端"的入口（早期规格只列了三个宿主，见 `00-执行摘要.md` 的 M6）。
 
 对比 Electron 的 **~78 MB+**：系统 webview 既不捆绑 Chromium，也不捆绑 Node。
 
@@ -51,21 +56,14 @@
 ```rust
 /// 宿主后端：消费内核事件流，提交内核 Op。
 /// 实现在 L5；契据在 L0/L2。宿主之间不得互相依赖。
-pub trait HostBackend {
-    /// 启动宿主，直到用户退出或内核终止。
-    ///
-    /// - `events`: 内核事件流（唯一事实来源），宿主只读消费
-    /// - `submit`: 提交 Op 的句柄（唯一写入口）
-    ///
-    /// 实现**不得**持有 Session 状态副本；渲染所需状态一律由事件流推导。
-    fn run(
-        &mut self,
-        events: EventStream,
-        submit: OpSubmitter,
-    ) -> Result<HostExit, HostError>;
-
+pub trait HostBackend: Send {
+    fn id(&self) -> &'static str;
     /// 宿主能力自描述，供内核按需降级（例如 TUI 无法显示图片）。
     fn capabilities(&self) -> HostCapabilities;
+    /// 消费一条事件。返回 Err 表示本宿主无法处理该事件 —— T6 断言 (a) 的判据。
+    fn consume(&mut self, event: &EventMsg) -> Result<(), String>;
+    /// 本宿主已向用户传达的事实集合。**T6 断言 (b) 的比较对象。**
+    fn facts(&self) -> Vec<Fact>;
 }
 
 /// 宿主能力声明：让工具知道「呈现形式」的可选项，
@@ -77,6 +75,14 @@ pub struct HostCapabilities {
     pub diffs: DiffSupport,        // 无 / 文本 / hunk 级
 }
 ```
+
+> ⚠️ **纠正（2026-09-21 核查）**：本节曾写成一个"启动式"签名
+> `fn run(&mut self, events: EventStream, submit: OpSubmitter) -> Result<HostExit, HostError>`。
+> 代码里**从来没有**这个签名（`EventStream`/`OpSubmitter`/`HostExit`/`HostError` 四个类型都不存在），
+> 实际落地的是上面这个"消费式"契据（`crates/neo-core/src/lib.rs` 的 `HostBackend`）。
+> 差异不是笔误而是设计被证伪：`run` 把控制权交给宿主，于是**无法在同一进程里逐条喂事件**，
+> 而 T6 的"同一事件流喂多个后端再比对事实"恰恰要求这件事。真正的驱动循环在各宿主的
+> `start()` 里（Web/app-server 是"内核独占线程 + 渠道"），不在契据里。
 
 **`HostCapabilities` 为什么必要**：没有它，工具就得写 `if is_tui { … } else { … }`——那正是 Proteus 反对的「业务代码里出现平台分支」。有了它，**降级是数据驱动的**：工具输出规范值 + 能力声明，宿主自行选最合适的呈现。
 
@@ -222,8 +228,9 @@ Proteus 明说：**单个角色不构成 seam**。宿主只有一种实现时，
 
 ## 十、验收
 
-- [ ] 四宿主消费同一 `EventMsg` 流，业务逻辑零重复（T6 机器校验）
-- [ ] 宿主 crate 间无相互依赖（`check_architecture`）
+- [x] 五宿主（TUI / desktop / web / app-server / exec）消费同一 `EventMsg` 流，
+      业务逻辑零重复（T6 机器校验：`neo-mock/tests/conformance.rs`）
+- [x] 宿主 crate 间无相互依赖（`check_architecture` 的 A3）
 - [ ] **桌面宿主不含 Electron、不捆绑 Chromium/Node**（体积门禁 < 15 MB）
 - [ ] 单二进制：无 Node、无 pnpm、无 profile 安装步骤
 - [ ] TUI 能完整跑通一次真实任务（证明内核与 Web 能力解耦）

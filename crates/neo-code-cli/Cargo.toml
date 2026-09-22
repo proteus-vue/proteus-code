@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "`neo` multitool 入口：TUI / Web / Desktop / exec 四宿主共用一个内核"
+description = "`neo` multitool 入口：TUI / Web / Desktop / exec / app-server 五宿主共用一个内核"
 # 产品名是 neo：CLI 入口就该叫 neo（用法/帮助里一直是 neo）。
 # 包名是 neo-code-cli（crates.io 上 neo-cli 已被占用），bin 名不受影响。
 autobins = false
@@ -25,6 +25,9 @@ neo-capability = { path = "../neo-capability", version = "0.1.0" }
 neo-exec = { path = "../neo-exec", version = "0.1.0" }
 neo-host-tui = { path = "../neo-host-tui", version = "0.1.0" }
 neo-host-web = { path = "../neo-host-web", version = "0.1.0" }
+# stdio JSON-RPC 宿主（`neo app-server`）：给编辑器/IDE 这类已有自己进程的
+# 客户端一条通用线协议。纯标准库，不进任何 feature 门 —— 精简构建也该有它。
+neo-host-appserver = { path = "../neo-host-appserver", version = "0.1.0" }
 neo-host-desktop = { path = "../neo-host-desktop", version = "0.1.0", optional = true }
 # 桌面原生 GUI（egui）。与 webview 版并存：ADR-0006 决定不押注单一方案。
 neo-host-egui = { path = "../neo-host-egui", version = "0.1.0", optional = true }

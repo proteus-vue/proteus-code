@@ -3,6 +3,7 @@
 //! ```text
 //! neo exec "<task>" [--mode <plan|confirm|default|auto-edit|full>] [--json] [--workspace <dir>]
 //! neo serve          # Web 宿主（浏览器界面 + SSE 事件流）
+//! neo app-server     # stdio JSON-RPC 宿主（编辑器/IDE/脚本接入）
 //! neo                # TUI 宿主（真终端交互）
 //! ```
 //!
@@ -24,6 +25,7 @@ const USAGE: &str = r#"neo —— 用 Rust 重构的编程 Agent 内核
 用法：
   neo exec "<任务>" [选项]     无头跑一轮（真实模型 + 真实沙箱）
   neo serve [选项]             启动 Web 宿主（用提示打印的完整 URL 打开）
+  neo app-server [选项]        启动 stdio JSON-RPC 宿主（编辑器/IDE 接入）
   neo [选项]                   启动 TUI 宿主（需真终端）
   neo --help | --version       查看用法 / 版本
 
@@ -59,6 +61,15 @@ serve 选项：
   --mode <...>                 执行模式（默认 default；Web 有交互审批，不需要放水）
   --workspace <dir>            工作区（默认当前目录）
   --provider <...>             模型后端（同 exec）
+
+app-server 选项：
+  --workspace <dir>            工作区（默认当前目录）
+  --mode <...>                 执行模式（同 serve）
+  --provider <...>             模型后端（同 exec）
+  stdin/stdout 是协议通道（JSON-RPC 2.0，一行一条），诊断一律走 stderr。
+  流程：先 initialize 握手 → turn/start 提交 → 事件以 event 通知到达 →
+  需要审批时收到 approval_request 通知，用 approval/respond 应答同一 id →
+  shutdown 或关闭 stdin 结束。方法清单见 initialize 响应里的 methods。
 
 环境变量：
   DEEPSEEK_API_KEY             必需（provider=deepseek 时）
@@ -103,6 +114,7 @@ fn main() {
         Some("exec") => cmd_exec(&args[1..]),
         Some("tui") => cmd_tui(&args[1..]),
         Some("serve") => cmd_serve(&args[1..]),
+        Some("app-server") => cmd_appserver(&args[1..]),
         #[cfg(feature = "desktop")]
         Some("desktop") => cmd_desktop(&args[1..]),
         #[cfg(not(feature = "desktop"))]
@@ -251,6 +263,100 @@ fn cmd_serve(args: &[String]) -> i32 {
     // 内核线程在 op 通道关闭前不会退出，join 即"服务于请求直到进程结束"。
     let _ = kernel_thread.join();
     0
+}
+
+/// 启动 stdio JSON-RPC 宿主（`neo app-server`）—— 编辑器/IDE/脚本的通用入口。
+///
+/// 与 `serve` 的分工：`serve` 面向浏览器（回环 HTTP + SSE + 访问令牌），
+/// `app-server` 面向**已有自己进程**的客户端（stdin/stdout 就是协议通道）。
+/// 两者共用同一套内核装配与"内核独占线程"的模型，差别只在传输 ——
+/// 所以这里不重复任何业务逻辑。
+///
+/// **stdout 只能出协议行**：本函数与内核都不得往 stdout 打印诊断，
+/// 否则客户端解析失败（诊断一律 stderr）。
+fn cmd_appserver(args: &[String]) -> i32 {
+    let mut workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut provider = String::new();
+    let mut mode = ExecMode::Default;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--workspace" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => workspace = PathBuf::from(p),
+                    None => {
+                        eprintln!("[neo] --workspace 需要一个目录");
+                        return 2;
+                    }
+                }
+            }
+            "--provider" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => provider = p.clone(),
+                    None => {
+                        eprintln!("[neo] --provider 需要一个值");
+                        return 2;
+                    }
+                }
+            }
+            "--mode" => {
+                i += 1;
+                match args.get(i).map(|s| parse_mode(s)) {
+                    Some(Ok(m)) => mode = m,
+                    Some(Err(e)) => {
+                        eprintln!("[neo] {e}");
+                        return 2;
+                    }
+                    None => {
+                        eprintln!("[neo] --mode 需要一个值");
+                        return 2;
+                    }
+                }
+            }
+            other => {
+                eprintln!("[neo] app-server 不认识的参数：{other}");
+                eprintln!("      它不从网络接收客户端（那是 `neo serve`），走 stdin/stdout");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+
+    let Some(models) = build_models(&provider) else {
+        return 2;
+    };
+    let model_name = models.current_provider().name().to_string();
+    let sandbox = Arc::new(neo_sandbox_local::LocalSandbox::new(&workspace));
+    let persistence = Box::new(neo_session_local::JsonlPersistence::new(
+        workspace.join(".neo/sessions/neo-appserver.jsonl"),
+    ));
+    let opts = ExecOptions { mode, max_steps: 32, ..Default::default() };
+    let mut kernel = build_kernel("neo-appserver", &workspace, &opts, models, sandbox, persistence);
+
+    // 横幅走 stderr（stdout 是协议通道）。人在终端里直接跑时它说明"没卡住"；
+    // 程序化客户端读 stdout，不受影响。
+    eprintln!("[neo] app-server 就绪：stdin/stdout 上跑 JSON-RPC 2.0（一行一条），诊断走 stderr");
+    eprintln!(
+        "[neo] 工作区 {} · 模式 {} · 模型 {model_name}",
+        workspace.display(),
+        describe_mode(mode)
+    );
+
+    // 与 serve 同款：内核独占线程，传输层只做「Op 进 / 事件出」。
+    match neo_host_appserver::serve_stdio(move |op| {
+        kernel
+            .submit(op)
+            .unwrap_or_else(|e| vec![EventMsg::Error { message: e.to_string() }])
+    }) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("[neo] app-server 传输失败：{e}");
+            1
+        }
+    }
 }
 
 /// 启动桌面窗口（三种实现：GPUI 默认 / --egui / --webview）。

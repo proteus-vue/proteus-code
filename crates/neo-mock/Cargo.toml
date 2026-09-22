@@ -26,3 +26,5 @@ neo-host-egui = { path = "../neo-host-egui", version = "0.1.0" }
 neo-host-gpui = { path = "../neo-host-gpui", version = "0.1.0" }
 neo-host-tui = { path = "../neo-host-tui", version = "0.1.0" }
 neo-host-web = { path = "../neo-host-web", version = "0.1.0" }
+# stdio JSON-RPC 宿主：T6 宿主等价也要覆盖它（线协议同样只从事件流抽事实）
+neo-host-appserver = { path = "../neo-host-appserver", version = "0.1.0" }

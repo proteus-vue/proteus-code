@@ -2,7 +2,7 @@
 
 > **一句话**：以 DeepSeek Harness（DSH）为起点，吸收 **ZCode（Z.ai）** 的交互范式与
 > **OpenAI Codex CLI** 的运行时架构，用 **Rust** 重写内核，交付
-> **TUI / Desktop（系统 webview）/ Web / Exec 四宿主共享同一内核** 的编程 Agent。
+> **TUI / Desktop（系统 webview）/ Web / Exec / app-server 五宿主共享同一内核** 的编程 Agent。
 >
 > **为什么是 Rust**：为了机制层面的两个硬要求 —— **高性能**（无 GC 停顿、零拷贝主循环）
 > 与**内存安全**（零 `unsafe`、类型层面无数据竞争）。附带收益是去掉过重的壳
@@ -24,7 +24,8 @@
 | `neo exec` 无头宿主（端到端闭环） | ✅ **已实现**，离线 + 真实 provider 双路径跑通 |
 | `neo tui` 终端宿主（NEO 紫主题 + 多行输入 + @// 弹窗 + 鼠标 + 滚动搜索 + 审批 diff + 右侧面板 + Markdown 高亮 + 信任门） | ✅ **已实现**，pty 逐项验证（含宽/窄终端、resize 重绘） |
 | `neo serve` Web 宿主（浏览器界面 + SSE 事件流 + 审批 + 目标编排） | ✅ **已实现**，端到端验证（订阅→提交→审批→真落盘）；目标栏浏览器实测（设定→自动逐阶段推进→暂停/恢复/清除） |
-| **T6 宿主语义等价**（同一事件流多宿主比对） | ✅ **铁律生效**：headless / TUI / desktop / **web** 四宿主事实完全等价 |
+| `neo app-server` stdio JSON-RPC 宿主（编辑器 / IDE / 脚本接入） | ✅ **已实现**：一行一条 JSON-RPC 2.0；`initialize` 握手（报协议版本 + 方法表 + 宿主能力）→ **17 个方法覆盖全部 `Op`**（含此前线上不可达的 `turn/interrupt`）→ 事件以 `event` 通知推送（带严格递增 `seq`，载荷嵌在 `payload` 下）→ 审批用 `approval/respond` 应答内核给出的同一个 id。**13 项协议集成测试**（真传输 + 脚本化假内核：握手 / 版本协商 / 全量方法映射 / 错误码 / 关停 / EOF / 输入超限）+ **1 条真实二进制端到端**（桩 provider 跑完整轮并查会话日志落盘）。**stdout 只出协议行**，诊断一律 stderr |
+| **T6 宿主语义等价**（同一事件流多宿主比对） | ✅ **铁律生效**：headless / TUI / desktop / **web** / **app-server** 五宿主事实完全等价 |
 | Shell 工具真实执行（经沙箱） | ✅ **已实现**（`bash` 真跑，输出受限） |
 | **真实模型完整推理** | ✅ **已验证**（真实模型 → 真实工具调用 → 真实沙箱 → 真实落盘，端到端跑通） |
 | `apply_patch` 落盘 | ✅ **已实现**（经 `ctx.write_file` 走沙箱，唯一匹配校验，真机验证落盘） |
@@ -41,8 +42,8 @@
 | **MCP 外部工具 + 资源**（stdio + Streamable HTTP，JSON-RPC） | ✅ **已实现**：`~/.neo/mcp.json` 声明服务器（`command` 本地进程 / `url` 远程端点，恰填其一；用户级，项目级显式拒绝），外部工具入 `ToolRegistry` 复用审批/上限/落盘整条链路；**资源**以每服务器一个 `mcp__<server>__read_resource` 工具暴露（描述内嵌资源目录，模型可控调用）。提示模板（prompts）未接入 |
 | Linux / Windows 沙箱 | ❌ **未实现**（**fail-closed**：受限档位拒绝执行，不降级放行） |
 
-**一句话现状**：内核 + 真实沙箱 + **真实模型** + 落盘 + **四宿主（exec / TUI / Web / Desktop）**
-已全部闭环并跑通；T6 宿主等价铁律在四宿主上生效（桌面复用 Web 栈）。
+**一句话现状**：内核 + 真实沙箱 + **真实模型** + 落盘 + **五宿主（exec / TUI / Web / Desktop / app-server）**
+已全部闭环并跑通；T6 宿主等价铁律在五宿主上生效（桌面复用 Web 栈）。
 
 ### 离线自验（不需要 API key）
 
@@ -59,6 +60,24 @@ neo tui --provider mock        # 界面与交互全览
 neo tui --provider selftest    # 审批 / diff 预览 / 落盘（批准后会写 ./selftest.txt）
 neo tui --provider demo        # Markdown 高亮 + 任务清单
 ```
+
+### 程序化接入（`neo app-server`）
+
+编辑器 / IDE / 脚本这类**已有自己进程**的客户端走 stdio 上的 JSON-RPC 2.0
+（一行一条；stdout 只出协议行，诊断走 stderr）：
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"turn/start","params":{"text":"用一句话说明这个仓库"}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"shutdown","params":{}}' \
+  | neo app-server --provider mock
+```
+
+必须先 `initialize`（响应里带协议版本、方法表与宿主能力）；`turn/start` 立即返回
+`{"accepted":true}`，**进度以 `event` 通知陆续到达**（带严格递增 `seq`）；
+需要审批时收到 `approval_request` 通知，用 `approval/respond` 回**同一个 id**；
+`shutdown` 或关掉 stdin 结束。
 
 **离线验不到的**（必须真实模型）：真实推理质量、多轮工具编排、
 模型是否真的会调 `todowrite` 维护清单。压缩策略（`/compact`）、引用解析
@@ -79,7 +98,7 @@ bash scripts/build-docs.sh     # → dist/docs/index.html
 ```
 
 产物是 **`cargo doc` 的 API 参考 + 手写文档（已渲染成 HTML）**：
-索引页列出 31 个 crate 与方案 / parity / 发布流程等文档，点进去都是可读页面
+索引页列出 32 个 crate 与方案 / parity / 发布流程等文档，点进去都是可读页面
 （不是 markdown 源码）。
 
 **为什么是 `cargo doc` 而不是 mdbook**：方案 Phase 3 原文是"`cargo doc` **或**
@@ -310,7 +329,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
    每个都强制「契约 + ≥2 后端 + conformance」。这样**同时得到可替换性与可定位性**。
 
 2. **宿主只是内核的一个消费者。**
-   TUI / Desktop / Web / Exec 不持有业务状态，只消费同一条事件流（Op / EventMsg）。
+   TUI / Desktop / Web / Exec / app-server 不持有业务状态，只消费同一条事件流（Op / EventMsg）。
    这是 Codex 多宿主设计的精髓，也是「改 UI 不动内核」的前提 ——
    并用 **T6 铁律**机器验证（同一事件流喂多个宿主后端，断言语义等价）。
 
@@ -328,7 +347,7 @@ proteus-code/                  ← 项目本体是 Rust 内核
 | `ModelProvider` | 换模型（流式增量，支持工具调用） | deepseek / scripted / mock ×2 | ✅ |
 | `SandboxBackend` | 换沙箱实现 | local(Seatbelt 真机) / mock ×2 | ✅ |
 | `SessionPersistence` | 换会话存储介质 | jsonl(真落盘) / in-memory / tampering(反例) | ✅ |
-| `HostBackend` | 换宿主（TUI/Desktop/Web/Exec） | desktop / tui / web / mock ×2 | ✅ 4 宿主 T6 等价 |
+| `HostBackend` | 换宿主（TUI/Desktop/Web/Exec/app-server） | desktop / tui / web / app-server / mock ×2 | ✅ 5 宿主 T6 等价 |
 | `Tool` | 加能力（Shell-First） | 3 内置 + mock ×4 | ✅ |
 | `Clipboard` | 交给系统剪贴板 | system(pbcopy/wl-copy/xclip) + noop | ✅ |
 | `Notify` | 让用户注意到某件事 | system(osascript/notify-send) + noop | ✅ |

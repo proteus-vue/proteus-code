@@ -11,6 +11,7 @@ use neo_core::{
     ToolCtx,
 };
 use neo_protocol::EventMsg;
+use neo_host_appserver::AppServerFacts;
 use neo_host_desktop::DesktopHost;
 use neo_host_egui::facts::GuiFacts;
 use neo_host_gpui::facts::GpuiFacts;
@@ -58,6 +59,8 @@ fn host_contract_holds_for_every_backend() {
     assert_host_contract(Box::new(DesktopHost::new()));
     assert_host_contract(Box::new(neo_host_tui::TuiFacts::new()));
     assert_host_contract(Box::new(neo_host_web::WebFacts::new()));
+    // stdio JSON-RPC 宿主：面向编辑器/IDE 的通用线协议入口
+    assert_host_contract(Box::new(AppServerFacts::new()));
     // 桌面原生 GUI（egui）：与其它宿主消费同一份事件流、抽同一组事实
     assert_host_contract(Box::new(GuiFacts::new()));
     // 桌面原生 GUI（GPUI）：NEO 的下一代 UI，同样必须事实等价
@@ -71,15 +74,18 @@ fn host_contract_compares_two_backends_on_the_same_stream() {
     let mut b = neo_host_tui::TuiFacts::new();
     let mut c = DesktopHost::new();
     let mut d = neo_host_web::WebFacts::new();
+    let mut e = AppServerFacts::new();
     for ev in shared_event_stream() {
         a.consume(&ev).unwrap();
         b.consume(&ev).unwrap();
         c.consume(&ev).unwrap();
         d.consume(&ev).unwrap();
+        e.consume(&ev).unwrap();
     }
     assert_eq!(a.facts(), b.facts(), "headless 与 TUI 的事实必须等价");
     assert_eq!(b.facts(), c.facts(), "TUI 与 desktop 的事实必须等价");
     assert_eq!(c.facts(), d.facts(), "desktop 与 web 的事实必须等价");
+    assert_eq!(d.facts(), e.facts(), "web 与 app-server 的事实必须等价");
 }
 
 /// 负向用例：坏宿主必须被契约抓住。

@@ -24,6 +24,9 @@ members = [
   "crates/neo-orchestration",
   "crates/neo-host-tui",
   "crates/neo-host-web",
+  # stdio JSON-RPC 宿主：给"已有自己进程"的客户端（编辑器/IDE/脚本）一条
+  # 通用线协议。与 Web 宿主并列而不是取代它 —— 两者传输不同、客户端不同。
+  "crates/neo-host-appserver",
   "crates/neo-host-desktop",
   "crates/neo-host-egui",
   "crates/neo-host-gpui",

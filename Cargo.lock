@@ -5244,6 +5244,7 @@ dependencies = [
  "neo-core",
  "neo-driver",
  "neo-exec",
+ "neo-host-appserver",
  "neo-host-desktop",
  "neo-host-egui",
  "neo-host-gpui",
@@ -5313,6 +5314,16 @@ dependencies = [
  "neo-orchestration",
  "neo-protocol",
  "neo-skill-loader",
+ "serde_json",
+]
+
+[[package]]
+name = "neo-host-appserver"
+version = "0.1.0"
+dependencies = [
+ "neo-core",
+ "neo-protocol",
+ "serde",
  "serde_json",
 ]
 
@@ -5430,6 +5441,7 @@ name = "neo-mock"
 version = "0.1.0"
 dependencies = [
  "neo-core",
+ "neo-host-appserver",
  "neo-host-desktop",
  "neo-host-egui",
  "neo-host-gpui",
