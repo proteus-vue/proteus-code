@@ -70,7 +70,7 @@ const logoLines = computed(() => LOGO_LARGE)
       <p class="meta">
         <span class="v">v0.1.0</span>
         <span class="sep">·</span>
-        <span>1102 测试</span>
+        <span>1104 测试</span>
         <span class="sep">·</span>
         <span>零 unsafe</span>
         <span class="sep">·</span>

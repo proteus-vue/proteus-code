@@ -5,7 +5,7 @@
 const stats = [
   { value: '5', label: '宿主共享一核', note: 'TUI / Desktop / Web / Exec / app-server' },
   { value: '32', label: 'crate 分层', note: 'L0–L5，依赖只能向下' },
-  { value: '1102', label: '测试全绿', note: '内核 / 内存 / SPI / 宿主' },
+  { value: '1104', label: '测试全绿', note: '内核 / 内存 / SPI / 宿主' },
   { value: '0', label: 'unsafe / warning', note: '生产代码，门禁强制' },
 ]
 </script>

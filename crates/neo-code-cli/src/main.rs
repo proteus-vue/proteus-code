@@ -66,6 +66,8 @@ app-server 选项：
   --workspace <dir>            工作区（默认当前目录）
   --mode <...>                 执行模式（同 serve）
   --provider <...>             模型后端（同 exec）
+  --listen <unix://path>       在本地 unix socket 上接多个客户端（共用一个内核）；
+                               不给则走 stdin/stdout（一对一）。暂不支持 TCP。
   stdin/stdout 是协议通道（JSON-RPC 2.0，一行一条），诊断一律走 stderr。
   流程：先 initialize 握手 → turn/start 提交 → 事件以 event 通知到达 →
   需要审批时收到 approval_request 通知，用 approval/respond 应答同一 id →
@@ -278,6 +280,7 @@ fn cmd_appserver(args: &[String]) -> i32 {
     let mut workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut provider = String::new();
     let mut mode = ExecMode::Default;
+    let mut listen: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -316,9 +319,28 @@ fn cmd_appserver(args: &[String]) -> i32 {
                     }
                 }
             }
+            "--listen" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => match v.strip_prefix("unix://") {
+                        // 只支持 unix socket：socket 文件的文件权限就是信任边界。
+                        // TCP 要另做鉴权（同 `serve` 的访问令牌），不在本次范围。
+                        Some(path) if !path.is_empty() => listen = Some(PathBuf::from(path)),
+                        _ => {
+                            eprintln!("[neo] --listen 只支持 unix://<路径>，收到：{v}");
+                            eprintln!("      （TCP 需要鉴权，未做 —— 远程客户端走 `neo serve`）");
+                            return 2;
+                        }
+                    },
+                    None => {
+                        eprintln!("[neo] --listen 需要一个 socket 路径（unix://<路径>）");
+                        return 2;
+                    }
+                }
+            }
             other => {
                 eprintln!("[neo] app-server 不认识的参数：{other}");
-                eprintln!("      它不从网络接收客户端（那是 `neo serve`），走 stdin/stdout");
+                eprintln!("      它不从网络接收客户端（那是 `neo serve`），走 stdin/stdout 或 --listen unix://");
                 return 2;
             }
         }
@@ -341,7 +363,15 @@ fn cmd_appserver(args: &[String]) -> i32 {
 
     // 横幅走 stderr（stdout 是协议通道）。人在终端里直接跑时它说明"没卡住"；
     // 程序化客户端读 stdout，不受影响。
-    eprintln!("[neo] app-server 就绪：stdin/stdout 上跑 JSON-RPC 2.0（一行一条），诊断走 stderr");
+    match &listen {
+        Some(socket) => eprintln!(
+            "[neo] app-server 就绪：unix socket {}（多个客户端共用一个内核），诊断走 stderr",
+            socket.display()
+        ),
+        None => eprintln!(
+            "[neo] app-server 就绪：stdin/stdout 上跑 JSON-RPC 2.0（一行一条），诊断走 stderr"
+        ),
+    }
     eprintln!(
         "[neo] 工作区 {} · 模式 {} · 模型 {model_name}",
         workspace.display(),
@@ -349,7 +379,8 @@ fn cmd_appserver(args: &[String]) -> i32 {
     );
 
     // 内核独占线程：Op 推进状态机；thread/* 操作会话库（切换要动同一个 Kernel）。
-    match neo_host_appserver::serve_stdio(move |job| match job {
+    // stdio 与 unix 两条传输共用这一个处理器 —— 差别只在"谁在连"，业务装配零重复。
+    let handle = move |job| match job {
         neo_host_appserver::Job::Op(op) => {
             let events = kernel
                 .submit(op)
@@ -359,7 +390,12 @@ fn cmd_appserver(args: &[String]) -> i32 {
         neo_host_appserver::Job::Thread { cmd, .. } => {
             neo_host_appserver::JobOut::Thread(thread_cmd(&mut kernel, &store, cmd))
         }
-    }) {
+    };
+    let result = match &listen {
+        Some(socket) => neo_host_appserver::serve_unix(socket, handle),
+        None => neo_host_appserver::serve_stdio(handle),
+    };
+    match result {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("[neo] app-server 传输失败：{e}");

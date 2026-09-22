@@ -1,27 +1,42 @@
-//! stdio 传输：请求行进，响应行 + 事件通知行出。
+//! 传输层：stdio（`neo app-server`，一行一条）与 unix socket（`--listen`，多客户端）。
 //!
 //! # 线程模型（与 Web 宿主同一条：内核独占线程）
 //!
 //! ```text
-//!  读取（本线程）──mpsc(Op)──▶ 内核线程 ──mpsc(行)──▶ 写线程 ──▶ stdout
-//!        └──────────── 响应行 ────────────────┘
+//!  读取（每连接一个）──(id,Job)──▶ 内核线程（全局唯一）─┬─响应行─▶ 该连接的写线程 ─▶ 客户端
+//!        └──────────── 响应行 ─────────────────────────┘ └─事件行─▶ **全部**连接的写线程（广播）
 //! ```
 //!
 //! 三条不变量：
-//! 1. **stdout 上只有协议行**：诊断一律走 stderr。任何一句 `println!` 都会
-//!    让客户端解析失败 —— 这是 stdio 协议最容易踩的坑。
-//! 2. **响应与通知共用一条通道**：两种行都经同一个 mpsc 进写线程，因此
-//!    "一行"始终完整，不会出现两个线程交叉写坏半行。
+//! 1. **输出流上只有协议行**：诊断一律走 stderr。任何一句 `println!` 都会让
+//!    客户端解析失败 —— 这是 stdio 协议最容易踩的坑（unix socket 同理）。
+//! 2. **响应与通知共用一条通道**：同一连接的两种行都经同一个 mpsc 进写线程，
+//!    因此"一行"始终完整，不会出现两个线程交叉写坏半行。
 //! 3. **响应表示已受理，不表示已完成**：`turn/start` 立即返回 `accepted`，
 //!    整轮进度以事件通知的形式陆续到达（与 Codex app-server 同款语义）。
 //!    这样客户端不必在"等到整轮跑完"和"界面冻结"之间二选一。
 //!
+//! # 多客户端（`--listen unix://`）：共用一个内核
+//!
+//! 多个客户端连同一个服务进程、共用**一个**内核 —— `Kernel` 不是 `Sync`，
+//! 串行是它的真实模型，宿主层不伪造并行。在这个前提下四条语义：
+//!
+//! - **事件广播**：内核事件推给**所有**连接；`seq` 是内核全局严格递增的
+//!   （它是事件流位置，与会话日志同序），不是每连接一套。
+//!   `thread/resume` 的历史同样广播 —— 切的是共用会话，所有客户端都要重画。
+//! - **响应回发起连接**：请求 id 只在自己的连接内有意义，不串台。
+//! - **审批同看同控**：`ApprovalRequest` 的 id 由内核单一事实源给出，哪个
+//!   连接答都算（与 Web 宿主 SSE 扇出同一语义：多看同控）。
+//! - **`shutdown` 关的是内核**（共用的那个）：收尾事件广播给所有连接，
+//!   然后全部收到 EOF、进程退出。**断开一个连接（EOF）只是这个客户端走了**，
+//!   其它连接照常。
+//!
 //! # 为什么不需要"事件重放/断线续订"
 //!
-//! stdio 连接的生命期就是进程生命期：客户端没有"断线重连到同一会话"这回事
-//! （重连 = 新进程 = 新会话）。Web 宿主需要游标，是因为浏览器标签会重连 ——
-//! 那是 SSE 的问题，不是 stdio 的。真要做跨进程续聊，正道是读会话日志
-//! （JSONL）重建，而不是在这里加缓冲区。
+//! stdio 连接的生命期就是进程生命期；unix 连接断开 = 这个客户端走了，重连
+//! 是一个新连接 —— 而事件流是内核全局的（`seq` 不因连接进出重置）。客户端
+//! 要"接着看"，正道是 `thread/history`（`facts_of` 投影）或读会话日志（JSONL）
+//! 重建，而不是在这条传输上加缓冲。
 //!
 //! 客户端还应当知道一条性质：**响应与通知之间没有先后保证**。两者由不同线程
 //! 写进同一条通道（内核慢时响应先到，快时通知先到），所以按 id 关联响应、
@@ -32,11 +47,16 @@
 //! 内核侧对**输出**有上限（截断 + `truncated` 如实标注）；这条传输对**输入**
 //! 同样设上限：单条请求行不得超过 [`MAX_REQUEST_BYTES`]，超限那一行**不缓冲、
 //! 不解析**地丢弃，并回一条 `invalid_request` 说明丢了多少字节。没有这条约束时，
-//! 一句不带换行的巨型输入就能把宿主的内存吃光 —— stdio 客户端虽然是本地进程，
-//! 但"新增可能产生大输出的路径必须受上限约束"这条义务与对端是谁无关。
+//! 一句不带换行的巨型输入就能把宿主的内存吃光 —— 本地客户端也不例外，
+//! "新增可能产生大输出的路径必须受上限约束"这条义务与对端是谁无关。
 
-use std::io::{BufRead, Write};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use neo_protocol::{EventMsg, Op};
 use serde_json::{json, Value};
@@ -52,6 +72,92 @@ use crate::jsonrpc::{
 /// 的文本、一次 `session/configure` 的参数都在几 KiB 量级，三个数量级的余量足够，
 /// 同时把失控或恶意客户端挡在有界内存内。
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+
+/// 全局关停信号（unix 模式）：所有客户端断开或收到 `shutdown` 后置位。
+///
+/// 为什么不是"关掉 listener"来唤醒阻塞的 `accept`：那在语义上说不通
+///（关停是协议动作，不该动传输层的句柄），实现上还要跨线程共享句柄。
+/// 用**一次自连**唤醒：本地 unix socket 上自己连自己，`accept` 立刻返回，
+/// 读到的是空流即知"不是真客户端" —— 等价于 self-pipe 写唤醒，但连额外的
+/// 管道都不用开，且拒绝一切轮询（见 ai-efficiency-rules）。
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// 连接 id：只用于把响应路由回发起它的那条连接。0 = 唯一连接（stdio）。
+type ConnId = u64;
+
+const SOLE_CONN: ConnId = 0;
+
+/// 连接 id 分配器（unix 模式下每条连接一个）。
+static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
+
+/// 每连接一条"待写行"通道；内核线程按 id 路由响应、按全员广播事件。
+type Outputs = Arc<Mutex<HashMap<ConnId, Sender<String>>>>;
+
+/// 把一行回给发起请求的那条连接（响应路径）。
+fn send_to(outputs: &Outputs, conn: ConnId, line: String) {
+    if let Some(tx) = outputs.lock().expect("输出表锁中毒").get(&conn) {
+        let _ = tx.send(line);
+    }
+}
+
+/// 把一行广播给**全部**连接（事件路径：内核事件、resume 历史、收尾）。
+fn send_all(outputs: &Outputs, line: String) {
+    for tx in outputs.lock().expect("输出表锁中毒").values() {
+        let _ = tx.send(line.clone());
+    }
+}
+
+/// 控制命令：读取线程 → 内核线程。
+enum Control {
+    /// 一个工作项（带发起它的连接 id，响应回那儿）
+    Job { conn: ConnId, job: Job },
+    /// 所有客户端断开：停内核线程（不再注入任何 Op —— EOF 不是协议动作）
+    Quit,
+}
+
+/// 处理一个工作项：返回（响应行，待广播的事件行）。
+///
+/// 单/多客户端共用这一份 —— 差别只在"响应行投给谁"，由调用方的 `conn` 决定。
+/// 抽成函数而不是在两处各写一遍：两份 `match handle(...)` 必然漂移。
+fn run_job(
+    handle: &mut impl FnMut(Job) -> JobOut,
+    seq: &mut u64,
+    job: Job,
+) -> (Option<String>, Vec<String>) {
+    let (events, reply) = match job {
+        Job::Op(op) => match handle(Job::Op(op)) {
+            JobOut::Events(ev) => (ev, None),
+            // Op 处理器不该回 ThreadResult；回了就如实报在 null id 上
+            JobOut::Thread(ThreadResult::Error(msg)) => {
+                (Vec::new(), Some(error_line(Value::Null, &RpcError::new(KERNEL_ERROR, msg))))
+            }
+            JobOut::Thread(ThreadResult::Value(v)) => {
+                (Vec::new(), Some(result_line(Value::Null, v)))
+            }
+            JobOut::Thread(ThreadResult::Resumed { history, .. }) => (history, None),
+        },
+        Job::Thread { id, cmd } => match handle(Job::Thread { id: id.clone(), cmd }) {
+            JobOut::Thread(ThreadResult::Value(v)) => (Vec::new(), Some(result_line(id, v))),
+            JobOut::Thread(ThreadResult::Resumed { result, history }) => {
+                (history, Some(result_line(id, result)))
+            }
+            JobOut::Thread(ThreadResult::Error(msg)) => (
+                Vec::new(),
+                Some(error_line(id, &RpcError::new(KERNEL_ERROR, msg))),
+            ),
+            JobOut::Events(ev) => (ev, None),
+        },
+    };
+    // seq 是**内核全局**的事件流位置（与会话日志同序），不是每连接一套
+    let broadcast = events
+        .iter()
+        .map(|e| {
+            *seq += 1;
+            notification(*seq, e).to_string()
+        })
+        .collect();
+    (reply, broadcast)
+}
 
 /// `thread/*` 的处理结果（由装配层给出，宿主只负责变成响应行）。
 #[derive(Debug)]
@@ -135,61 +241,38 @@ where
     W: Write + Send + 'static,
     F: FnMut(Job) -> JobOut + Send + 'static,
 {
+    // 唯一连接：多客户端模型的退化情形（conn = SOLE_CONN，广播 = 单发）
     let (out_tx, out_rx) = channel::<String>();
-    // (请求 id, 工作项)：thread/* 要用 id 回响应行；Op 的 id 由读线程自己回 accepted
-    let (job_tx, job_rx) = channel::<Job>();
+    let outputs: Outputs = Arc::new(Mutex::new(HashMap::from([(SOLE_CONN, out_tx)])));
+    let (job_tx, job_rx) = channel::<Control>();
 
     let writer = std::thread::spawn(move || write_lines(output, out_rx));
 
-    let events_tx = out_tx.clone();
+    let kernel_outputs = outputs.clone();
     let kernel = std::thread::spawn(move || {
         let mut seq: u64 = 0;
-        while let Ok(job) = job_rx.recv() {
-            let (events, reply) = match job {
-                Job::Op(op) => match handle(Job::Op(op)) {
-                    JobOut::Events(ev) => (ev, None),
-                    // Op 处理器不该回 ThreadResult；回了就如实报在 null id 上
-                    JobOut::Thread(ThreadResult::Error(msg)) => {
-                        (Vec::new(), Some(error_line(Value::Null, &RpcError::new(KERNEL_ERROR, msg))))
+        while let Ok(ctrl) = job_rx.recv() {
+            match ctrl {
+                Control::Job { conn, job } => {
+                    let (reply, broadcast) = run_job(&mut handle, &mut seq, job);
+                    if let Some(line) = reply {
+                        send_to(&kernel_outputs, conn, line);
                     }
-                    JobOut::Thread(ThreadResult::Value(v)) => {
-                        (Vec::new(), Some(result_line(Value::Null, v)))
+                    for line in broadcast {
+                        send_all(&kernel_outputs, line);
                     }
-                    JobOut::Thread(ThreadResult::Resumed { history, .. }) => (history, None),
-                },
-                Job::Thread { id, cmd } => match handle(Job::Thread { id: id.clone(), cmd }) {
-                    JobOut::Thread(ThreadResult::Value(v)) => (Vec::new(), Some(result_line(id, v))),
-                    JobOut::Thread(ThreadResult::Resumed { result, history }) => {
-                        (history, Some(result_line(id, result)))
-                    }
-                    JobOut::Thread(ThreadResult::Error(msg)) => (
-                        Vec::new(),
-                        Some(error_line(id, &RpcError::new(KERNEL_ERROR, msg))),
-                    ),
-                    JobOut::Events(ev) => (ev, None),
-                },
-            };
-            if let Some(line) = reply {
-                if events_tx.send(line).is_err() {
-                    return;
                 }
-            }
-            for event in events {
-                seq += 1;
-                let line = notification(seq, &event).to_string();
-                if events_tx.send(line).is_err() {
-                    return; // 写端已走
-                }
+                Control::Quit => return,
             }
         }
     });
 
-let result = read_loop(input, &out_tx, &job_tx);
-
-    // 收尾顺序：先关 Op 通道（内核跑完手头这一批），再关行通道（写线程写完）
-    drop(job_tx);
+    let result = read_loop(SOLE_CONN, input, &outputs, &job_tx).map(|_| ());
+    // stdio 的生命期 = 进程生命期：读到 EOF 或 shutdown 即整个会话结束，
+    // 但写线程要把手头的行写完（含内核的收尾事件），故最后才 drop
+    let _ = job_tx.send(Control::Quit);
     let _ = kernel.join();
-    drop(out_tx);
+    outputs.lock().expect("输出表锁中毒").remove(&SOLE_CONN);
     let _ = writer.join();
     result
 }
@@ -236,6 +319,149 @@ fn write_lines<W: Write>(mut out: W, rx: Receiver<String>) {
         if !ok {
             return; // 客户端已断开：不再尝试（读取侧会因 EOF/关停收尾）
         }
+    }
+}
+
+/// unix socket 上的多客户端服务（`neo app-server --listen unix://…`）。
+///
+/// 多个客户端共用**一个**内核：事件广播、响应回发起连接、审批同看同控、
+/// `shutdown` 全局收尾（模块头有四条语义的完整说明）。
+///
+/// 返回即"所有客户端都已断开或请求了关停"：内核线程与各写线程都已收尾。
+pub fn serve_unix<F>(socket_path: &Path, handle: F) -> std::io::Result<()>
+where
+    F: FnMut(Job) -> JobOut + Send + 'static,
+{
+    // 上次崩溃留下的旧 socket 文件会让 bind 失败；只有确认不是活的才清掉
+    if socket_path.exists() {
+        match UnixStream::connect(socket_path) {
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    format!(
+                        "{} 已有实例在监听（能连通）—— 先退出它，或换一个 socket 路径",
+                        socket_path.display()
+                    ),
+                ));
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(socket_path);
+            }
+        }
+    }
+    let listener = UnixListener::bind(socket_path)?;
+    SHUTDOWN.store(false, Ordering::SeqCst);
+    let outputs: Outputs = Arc::new(Mutex::new(HashMap::new()));
+    let (job_tx, job_rx) = channel::<Control>();
+
+    let kernel_outputs = outputs.clone();
+    let kernel = std::thread::spawn(move || {
+        let mut handle = handle;
+        let mut seq: u64 = 0;
+        while let Ok(ctrl) = job_rx.recv() {
+            match ctrl {
+                Control::Job { conn, job } => {
+                    let (reply, broadcast) = run_job(&mut handle, &mut seq, job);
+                    if let Some(line) = reply {
+                        send_to(&kernel_outputs, conn, line);
+                    }
+                    for line in broadcast {
+                        send_all(&kernel_outputs, line);
+                    }
+                }
+                // 停机本身不是内核动作：`shutdown` 方法已在它自己的 Job 里
+                // 让内核发过 ShutdownComplete；EOF 则什么协议事件都没有
+                Control::Quit => return,
+            }
+        }
+    });
+
+    let mut writers: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    let result = accept_loop(&listener, socket_path, &outputs, &job_tx, &mut writers);
+
+    // 收尾顺序：先停内核（它可能还在广播收尾事件），再让写线程写完
+    let _ = job_tx.send(Control::Quit);
+    let _ = kernel.join();
+    drop(job_tx);
+    outputs.lock().expect("输出表锁中毒").clear();
+    for w in writers {
+        let _ = w.join();
+    }
+    let _ = std::fs::remove_file(socket_path);
+    result
+}
+
+/// accept 循环：给每条新连接派读线程；`shutdown` 或全部断开后返回。
+///
+/// 关停唤醒用**一次自连**（[`SHUTDOWN`] 的注释）：不是轮询。唤醒自连到达时
+/// `SHUTDOWN` 必已置位（先置位、后自连），故 accept 返回后先查它 —— 是则
+/// 直接收尾，不需要 peek 区分真假客户端。
+fn accept_loop(
+    listener: &UnixListener,
+    socket_path: &Path,
+    outputs: &Outputs,
+    job_tx: &Sender<Control>,
+    writers: &mut Vec<std::thread::JoinHandle<()>>,
+) -> std::io::Result<()> {
+    let live = Arc::new(Mutex::new(0usize));
+    loop {
+        let (stream, _) = listener.accept()?;
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            return Ok(()); // 唤醒自连（或关停期间的迟到连接）：服务在收尾
+        }
+        *live.lock().expect("连接计数锁中毒") += 1;
+        let conn = NEXT_CONN.fetch_add(1, Ordering::SeqCst);
+        let (out_tx, out_rx) = channel::<String>();
+        outputs.lock().expect("输出表锁中毒").insert(conn, out_tx);
+
+        let write_half = stream.try_clone()?;
+        writers.push(std::thread::spawn(move || {
+            write_lines(write_half, out_rx)
+        }));
+
+        let conn_outputs = outputs.clone();
+        let conn_jobs = job_tx.clone();
+        let conn_live = live.clone();
+        let path = socket_path.to_path_buf();
+        std::thread::spawn(move || {
+            serve_connection(conn, stream, &conn_outputs, &conn_jobs, &conn_live, &path);
+        });
+    }
+}
+
+/// 一条连接的读线程：跑协议读取循环，走完负责注销自己与唤醒收尾。
+fn serve_connection(
+    conn: ConnId,
+    stream: UnixStream,
+    outputs: &Outputs,
+    job_tx: &Sender<Control>,
+    live: &Arc<Mutex<usize>>,
+    socket_path: &Path,
+) {
+    let end = read_loop(conn, BufReader::new(stream), outputs, job_tx).unwrap_or(ConnEnd::Eof);
+    let mut n = live.lock().expect("连接计数锁中毒");
+    *n -= 1;
+    let all_gone = *n == 0;
+    drop(n);
+
+    match end {
+        // EOF：这个客户端走了，通道即可注销（写线程随之收尾）
+        ConnEnd::Eof => {
+            outputs.lock().expect("输出表锁中毒").remove(&conn);
+        }
+        // shutdown：通道**留着** —— 内核的 ShutdownComplete 还要广播到它，
+        // 由 serve_unix 收尾时统一清
+        ConnEnd::Shutdown => {}
+    }
+
+    if all_gone || matches!(end, ConnEnd::Shutdown) {
+        SHUTDOWN.store(true, Ordering::SeqCst);
+        // 一次自连唤醒阻塞的 accept（见 SHUTDOWN 的注释）；连接失败就让它
+        // 继续阻塞到有真客户端 —— 反正服务已经在收尾，不值得为此轮询
+        let _ = UnixStream::connect(socket_path);
+    }
+    if matches!(end, ConnEnd::Shutdown) {
+        let _ = job_tx.send(Control::Quit);
     }
 }
 
@@ -286,30 +512,46 @@ fn envelope(value: &Value) -> Result<Envelope, RpcError> {
     Ok(Envelope { id, method, params })
 }
 
-/// 读取循环：逐行读、逐行分派。返回即"客户端 EOF 或请求了关停"。
+/// 一条连接的结束方式（读线程的退出原因）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnEnd {
+    /// 客户端关掉了流（EOF / 进程退出）：只是这个客户端走了
+    Eof,
+    /// 客户端请求了 `shutdown`：内核正在收尾，广播还会来
+    Shutdown,
+}
+
+/// 读取循环：逐行读、逐行分派。
+///
+/// 返回即这条连接读完了：[`ConnEnd::Eof`]（对端关流）或 [`ConnEnd::Shutdown`]。
 fn read_loop<R: BufRead>(
+    conn: ConnId,
     mut input: R,
-    out_tx: &Sender<String>,
-    job_tx: &Sender<Job>,
-) -> std::io::Result<()> {
+    outputs: &Outputs,
+    job_tx: &Sender<Control>,
+) -> std::io::Result<ConnEnd> {
     let mut initialized = false;
     let mut buf: Vec<u8> = Vec::new();
     loop {
         match read_line_bounded(&mut input, &mut buf)? {
-            LineRead::Eof => return Ok(()),
+            LineRead::Eof => return Ok(ConnEnd::Eof),
             LineRead::TooLong { discarded } => {
                 // 该行连解析都没做，没有可信的 id，按规范用 null
-                let _ = out_tx.send(error_line(
-                    Value::Null,
-                    &RpcError::with_data(
-                        INVALID_REQUEST,
-                        format!(
-                            "请求行超过上限（{MAX_REQUEST_BYTES} 字节），已整行丢弃（{} 字节）",
-                            discarded
+                send_to(
+                    outputs,
+                    conn,
+                    error_line(
+                        Value::Null,
+                        &RpcError::with_data(
+                            INVALID_REQUEST,
+                            format!(
+                                "请求行超过上限（{MAX_REQUEST_BYTES} 字节），已整行丢弃（{} 字节）",
+                                discarded
+                            ),
+                            json!({ "limit": MAX_REQUEST_BYTES, "discarded_bytes": discarded }),
                         ),
-                        json!({ "limit": MAX_REQUEST_BYTES, "discarded_bytes": discarded }),
                     ),
-                ));
+                );
                 continue;
             }
             LineRead::Line => {}
@@ -325,10 +567,7 @@ fn read_loop<R: BufRead>(
             Ok(v) => v,
             Err(e) => {
                 // 整行不是 JSON：没有可信的 id，按规范用 null
-                let _ = out_tx.send(error_line(
-                    Value::Null,
-                    &RpcError::new(PARSE_ERROR, format!("不是合法 JSON：{e}")),
-                ));
+                send_to(outputs, conn, error_line(Value::Null, &RpcError::new(PARSE_ERROR, format!("不是合法 JSON：{e}"))));
                 continue;
             }
         };
@@ -336,7 +575,7 @@ fn read_loop<R: BufRead>(
             Ok(e) => e,
             Err(e) => {
                 let id = value.get("id").cloned().unwrap_or(Value::Null);
-                let _ = out_tx.send(error_line(id, &e));
+                send_to(outputs, conn, error_line(id, &e));
                 continue;
             }
         };
@@ -346,14 +585,19 @@ fn read_loop<R: BufRead>(
 
         match jsonrpc::dispatch(&envelope.method, &envelope.params) {
             Err(e) => {
-                let _ = out_tx.send(error_line(id, &e));
+                send_to(outputs, conn, error_line(id, &e));
             }
             Ok(Action::Initialize(params)) => {
+                // 握手是**每连接**的事：多客户端模式下每条连接各自握一次手
                 if initialized {
-                    let _ = out_tx.send(error_line(
-                        id,
-                        &RpcError::new(ALREADY_INITIALIZED, "本连接已握手过：一个连接只握手一次"),
-                    ));
+                    send_to(
+                        outputs,
+                        conn,
+                        error_line(
+                            id,
+                            &RpcError::new(ALREADY_INITIALIZED, "本连接已握手过：一个连接只握手一次"),
+                        ),
+                    );
                     continue;
                 }
                 match jsonrpc::initialize_result(&params) {
@@ -363,52 +607,55 @@ fn read_loop<R: BufRead>(
                         // 不是为这条协议新造的字段。
                         result["host"] = crate::host_capabilities_json();
                         initialized = true;
-                        let _ = out_tx.send(result_line(id, result));
+                        send_to(outputs, conn, result_line(id, result));
                     }
                     // 版本不匹配：**不置 initialized**（客户端改正后可重来）
                     Err(e) => {
-                        let _ = out_tx.send(error_line(id, &e));
+                        send_to(outputs, conn, error_line(id, &e));
                     }
                 }
             }
             Ok(Action::Submit(op)) => {
                 if !initialized {
-                    let _ = out_tx.send(error_line(id, &not_initialized(&envelope.method)));
+                    send_to(outputs, conn, error_line(id, &not_initialized(&envelope.method)));
                     continue;
                 }
-                if job_tx.send(Job::Op(op)).is_err() {
-                    let _ = out_tx.send(error_line(
-                        id,
-                        &RpcError::new(KERNEL_ERROR, "内核通道已断（宿主正在退出）"),
-                    ));
+                if job_tx.send(Control::Job { conn, job: Job::Op(op) }).is_err() {
+                    send_to(
+                        outputs,
+                        conn,
+                        error_line(id, &RpcError::new(KERNEL_ERROR, "内核通道已断（宿主正在退出）")),
+                    );
                     continue;
                 }
                 // 受理 ≠ 完成：整轮进度以事件通知到达
-                let _ = out_tx.send(result_line(id, json!({ "accepted": true })));
+                send_to(outputs, conn, result_line(id, json!({ "accepted": true })));
             }
             Ok(Action::Thread(cmd)) => {
                 if !initialized {
-                    let _ = out_tx.send(error_line(id, &not_initialized(&envelope.method)));
+                    send_to(outputs, conn, error_line(id, &not_initialized(&envelope.method)));
                     continue;
                 }
                 // thread/* 是**同步**的：响应由内核线程在处理完后写回，
                 // 这里不提前发 accepted（list/get 没有后续事件可推）。
-                if job_tx.send(Job::Thread { id: id.clone(), cmd }).is_err() {
-                    let _ = out_tx.send(error_line(
-                        id,
-                        &RpcError::new(KERNEL_ERROR, "内核通道已断（宿主正在退出）"),
-                    ));
+                if job_tx.send(Control::Job { conn, job: Job::Thread { id: id.clone(), cmd } }).is_err() {
+                    send_to(
+                        outputs,
+                        conn,
+                        error_line(id, &RpcError::new(KERNEL_ERROR, "内核通道已断（宿主正在退出）")),
+                    );
                 }
             }
             Ok(Action::Shutdown) => {
                 if !initialized {
-                    let _ = out_tx.send(error_line(id, &not_initialized(&envelope.method)));
+                    send_to(outputs, conn, error_line(id, &not_initialized(&envelope.method)));
                     continue;
                 }
-                let _ = job_tx.send(Job::Op(Op::Shutdown));
-                let _ = out_tx.send(result_line(id, json!({ "accepted": true })));
-                // 停止读取：内核会把 ShutdownComplete 发出来，写线程写完即收尾
-                return Ok(());
+                // 关停的是**共用的那个内核**：Op::Shutdown 让内核发 ShutdownComplete
+                //（广播给所有连接，含本条），随后整个服务收尾
+                let _ = job_tx.send(Control::Job { conn, job: Job::Op(Op::Shutdown) });
+                send_to(outputs, conn, result_line(id, json!({ "accepted": true })));
+                return Ok(ConnEnd::Shutdown);
             }
         }
     }

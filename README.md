@@ -63,8 +63,11 @@ neo tui --provider demo        # Markdown 高亮 + 任务清单
 
 ### 程序化接入（`neo app-server`）
 
-编辑器 / IDE / 脚本这类**已有自己进程**的客户端走 stdio 上的 JSON-RPC 2.0
-（一行一条；stdout 只出协议行，诊断走 stderr）：
+编辑器 / IDE / 脚本这类**已有自己进程**的客户端走 JSON-RPC 2.0
+（一行一条；stdout 只出协议行，诊断走 stderr）。两种传输：
+**stdin/stdout**（一对一，客户端是父子进程）或 **`--listen unix://<路径>`**
+（多个客户端共用一个内核：事件广播、响应回发起连接、审批同看同控、
+`shutdown` 全局收尾；socket 文件权限就是信任边界，TCP 刻意未做 —— 那要鉴权）：
 
 ```bash
 printf '%s\n' \
@@ -72,6 +75,9 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":2,"method":"turn/start","params":{"text":"用一句话说明这个仓库"}}' \
   '{"jsonrpc":"2.0","id":3,"method":"shutdown","params":{}}' \
   | neo app-server --provider mock
+
+# 多客户端（本地）：服务端开 unix socket，N 个客户端各自 connect + initialize
+neo app-server --provider mock --listen unix:///tmp/neo.sock
 ```
 
 **协议契约产物**（给 GUI / IDE 生成绑定，不必猜字段）：
@@ -259,7 +265,7 @@ neo exec "用一句话回答 1+1" --mode plan
 # 需要 Rust —— 版本由 rust-toolchain.toml 钉定（1.95.0），rustup 会自动选用
 cargo run -p neo-code-cli -- tui --provider mock   # 不装 PATH，直接用 cargo 跑 TUI
 
-cargo test --workspace     # 1102 个测试
+cargo test --workspace     # 1104 个测试
 cargo check --workspace    # 32 个 crate，零 unsafe、零 warning
 
 bash scripts/verify.sh     # 全套门禁：架构 / 协议 / 会话 / 配置 / 模式矩阵 / SPI / 文档 / 性能预算 / 无障碍 / 执行效率 / 测试

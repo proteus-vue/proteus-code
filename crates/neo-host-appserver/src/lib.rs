@@ -21,8 +21,10 @@
 //!
 //! # 与 Web 宿主的四处刻意不同
 //!
-//! 1. **传输是 stdio，不是回环端口**：进程的标准流就是信任边界，故不需要
-//!    访问令牌；也不需要 TLS —— 客户端与内核是父子进程。
+//! 1. **传输是 stdio（或本地 unix socket），不是回环端口**：进程的标准流 /
+//!    socket 文件的文件权限就是信任边界，故不需要访问令牌；也不需要 TLS ——
+//!    客户端与内核同机。`--listen unix://…` 下多个客户端共用一个内核
+//!    （事件广播、响应回发起连接），语义见 `serve` 模块头。
 //! 2. **事件通知的载荷嵌在 `payload` 下**（`{"seq":1,"kind":"tool_call_begin",
 //!    "payload":{…}}`），不摊平到顶层：摊平会撞键 —— `ApprovalRequest` 自带
 //!    `kind` 字段（内核判定的调用类别 read/write/network/interactive），
@@ -52,7 +54,7 @@ pub mod serve;
 pub mod schema;
 
 pub use jsonrpc::{Action, ClientInfo, InitializeParams, RpcError, ThreadCmd, PROTOCOL_VERSION};
-pub use serve::{serve, serve_ops, serve_stdio, serve_stdio_ops, Job, JobOut, ThreadResult};
+pub use serve::{serve, serve_ops, serve_stdio, serve_stdio_ops, serve_unix, Job, JobOut, ThreadResult};
 
 use neo_core::{DiffSupport, HostBackend, HostCapabilities, ImageSupport};
 use neo_protocol::{EventMsg, Fact};

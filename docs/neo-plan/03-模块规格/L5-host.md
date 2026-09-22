@@ -16,7 +16,7 @@
 | `neo-host-tui` | ratatui + crossterm | 终端 / SSH / CI 旁路 | ~2–5 MB |
 | **`neo-host-desktop`** | **wry（系统 webview）** | 桌面 webview 入口（第二后端） | **~5–10 MB** |
 | `neo-host-web` | **手写 HTTP/1.1 + SSE（零框架依赖）** | 远程 / 多端浏览器 | ~5–10 MB |
-| `neo-host-appserver` | **stdio 上的 JSON-RPC 2.0（标准库）** | 编辑器 / IDE / 脚本接入 | ~0（纯标准库） |
+| `neo-host-appserver` | **JSON-RPC 2.0（标准库）：stdio 或 unix socket** | 编辑器 / IDE / 脚本接入 | ~0（纯标准库） |
 | `neo-exec` | 无头，零交互 | CI / 脚本 / 管道 | ~2–5 MB |
 
 > 表中两处与早期规格不同，均为**实现后的纠偏**：Web 宿主最终没有引 axum/WebSocket，
