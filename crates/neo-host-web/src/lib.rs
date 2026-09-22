@@ -77,6 +77,14 @@ impl HostBackend for WebFacts {
 /// 前端要写 `m[k].delta` 这种别扭的取值。宿主负责把它规范成扁平信封
 /// （`{"kind":"agent_message_delta","delta":"x"}`）—— 这是**渲染适配**，
 /// 不是业务逻辑：事实语义仍由协议层的 `facts_of` 定义。
+///
+/// 两条不变量：
+/// 1. **`kind` 永远是事件名**（前端据此分派）。载荷自带 `kind` 的变体
+///    （`ApprovalRequest` 的调用类别 read/write/network/interactive）摊平时会
+///    撞键 —— 那份值不丢，见下一条。
+/// 2. **`payload` 是未摊平的原始载荷**，形状与 JSONL 日志、app-server 通知一致
+///    （`{kind, payload}`）。顶层摊平字段可能与信封键撞名（上一条就是实例），
+///    机器消费一律读 `payload`，不要读顶层。
 pub fn wire_event(event: &EventMsg) -> String {
     let v = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
     let (kind, payload) = match v {
@@ -85,18 +93,21 @@ pub fn wire_event(event: &EventMsg) -> String {
             let inner = map.remove(&k).unwrap_or(serde_json::Value::Null);
             (k, inner)
         }
+        // 单元变体（`ShutdownComplete`）：serde 产出裸字符串，它就是事件名
+        serde_json::Value::String(k) => (k, serde_json::Value::Null),
         other => (String::new(), other),
     };
-    let mut obj = match payload {
-        serde_json::Value::Object(m) => m,
+    let mut obj = match &payload {
+        serde_json::Value::Object(m) => m.clone(),
         other => {
             let mut m = serde_json::Map::new();
             if !other.is_null() {
-                m.insert("value".to_string(), other);
+                m.insert("value".to_string(), other.clone());
             }
             m
         }
     };
+    obj.insert("payload".to_string(), payload);
     obj.insert("kind".to_string(), serde_json::Value::String(kind));
     serde_json::Value::Object(obj).to_string()
 }
@@ -435,11 +446,35 @@ mod tests {
 
     #[test]
     fn wire_format_is_flat_and_tagged() {
-        // 前端契约：kind 在顶层，字段也展开在顶层
+        // 前端契约：kind 在顶层，字段也展开在顶层；payload 另有未摊平的原始载荷
         let line = wire_event(&EventMsg::AgentMessageDelta { delta: "hi".into() });
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["kind"], "agent_message_delta");
         assert_eq!(v["delta"], "hi");
+        assert_eq!(v["payload"]["delta"], "hi");
+    }
+
+    #[test]
+    fn approval_request_keeps_both_kinds() {
+        // 用 ApprovalRequest 当样本是**故意的**：它自带 `kind`（内核判定的调用
+        // 类别），与事件名同键。顶层 `kind` 归事件名（分派键），放行范围在
+        // `payload.kind` —— 摊平不得把它覆盖掉（覆盖过一次，放行范围在线上丢了）
+        let line = wire_event(&EventMsg::ApprovalRequest {
+            id: "ap-1".into(),
+            detail: "bash rm -rf build".into(),
+            kind: "write".into(),
+        });
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["kind"], "approval_request", "顶层 kind 是事件名");
+        assert_eq!(v["payload"]["kind"], "write", "放行范围在 payload 下，不许丢");
+    }
+
+    #[test]
+    fn unit_variant_reports_its_name_as_kind() {
+        // 单元变体 serde 出来是裸字符串 —— 它就是事件名，不能变成空串
+        let line = wire_event(&EventMsg::ShutdownComplete);
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["kind"], "shutdown_complete");
     }
 
     #[test]

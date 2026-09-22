@@ -113,8 +113,10 @@ fn real_binary_handshakes_runs_a_turn_and_shuts_down() {
     assert!(answered.contains("mock provider"), "桩 provider 的文本应送达：{answered}");
     wait_for(&rx, Duration::from_secs(60), "turn_complete 通知", |l| l.contains("turn_complete"));
 
-    // ④ 会话真的落盘了（AGENTS.md「模型可见即已落日志」：这一轮必须能回放）
-    let log = ws.join(".neo/sessions/neo-appserver.jsonl");
+    // ④ 会话真的落盘了（AGENTS.md「模型可见即已落日志」：这一轮必须能回放）。
+    // 文件名跟着会话库走（`SessionStore::path_for`，起动 id 是 `appserver`）——
+    // thread/* 那轮把固定名改成了会话库命名，这里的断言要跟上，否则红的是路径不是功能
+    let log = ws.join(".neo/sessions/appserver.jsonl");
     let text = std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("会话日志 {} 读不到：{e}", log.display()));
     assert!(text.contains("user_submitted"), "日志应含用户消息：{text}");
 
