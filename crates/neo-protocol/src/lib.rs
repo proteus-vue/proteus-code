@@ -515,7 +515,12 @@ pub struct ToolOutput {
 //   本函数回答"发生了什么"（Fact），宿主回答"怎么画"（文本/颜色/布局）。
 
 /// 一条用户必须知道的事实。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **可序列化**：app-server 的 `thread/history` 直接把它推上线，
+/// 线格式 = T6 比较对象，没有第二套「投影类型」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 pub enum Fact {
     /// 用户说了什么（转录的第一类事实）
     UserSaid(String),

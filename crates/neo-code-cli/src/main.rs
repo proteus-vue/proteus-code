@@ -445,6 +445,29 @@ fn thread_cmd(
                 Err(e) => ThreadResult::Error(e.to_string()),
             }
         }
+        ThreadCmd::History { id } => {
+            // 只读投影，**不切换**：侧栏预览别的会话不该打断当前对话。
+            let id = id.unwrap_or_else(|| kernel.session_id().to_string());
+            if !store.exists(&id) {
+                return ThreadResult::Error(format!("会话 {id} 不存在"));
+            }
+            let path = store.path_for(&id);
+            let events: Vec<EventMsg> = match neo_session::replay(&path) {
+                Ok(recs) => recs
+                    .into_iter()
+                    .filter(|r| r.kind == "event")
+                    .filter_map(|r| serde_json::from_value::<EventMsg>(r.payload).ok())
+                    .collect(),
+                Err(e) => return ThreadResult::Error(format!("读会话日志失败：{e}")),
+            };
+            // 与 T6 同源：投影就是 facts_of，没有第二套判定
+            let items = neo_protocol::facts_of(&events);
+            ThreadResult::Value(serde_json::json!({
+                "id": id,
+                "events_replayed": events.len(),
+                "items": items,
+            }))
+        }
     }
 }
 

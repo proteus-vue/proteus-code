@@ -93,6 +93,9 @@ bash scripts/gen_protocol_schema.sh   # → crates/neo-host-appserver/schema/
 `thread/list` 列摘要 · `thread/get` 取单条 · `thread/resume` 切换并重建历史
 （历史以 `event` 通知推送）· `thread/create` 新建 · `thread/delete` 删除
 （不允许删当前会话）。与 TUI/桌面同一 `.neo/sessions/` 目录，不是孤岛。
+另有 `thread/history`：历史投影 = **`facts_of` 的结果**（T6 比较对象本身），
+不是第二套 UI 判定 —— 线格式反序列化后必须与 `facts_of(events)` 逐条相等
+（集成测试钉住）。给定 `id` 时只读投影，**不切换**当前会话。
 
 **离线验不到的**（必须真实模型）：真实推理质量、多轮工具编排、
 模型是否真的会调 `todowrite` 维护清单。压缩策略（`/compact`）、引用解析

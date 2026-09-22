@@ -120,6 +120,9 @@ pub enum ThreadCmd {
     Create,
     /// `thread/delete`：删除（不允许删当前会话）
     Delete { id: String },
+    /// `thread/history`：历史投影（`facts_of` 的结果，与 T6 同源）。
+    /// `id` 缺省 = 当前会话；给定 id 则只读投影，**不切换**。
+    History { id: Option<String> },
 }
 
 /// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，17 个）。
@@ -155,6 +158,7 @@ pub const THREAD_METHODS: &[&str] = &[
     "thread/resume",
     "thread/create",
     "thread/delete",
+    "thread/history",
 ];
 
 /// 全部方法名（握手用）：`initialize` + 17 个 Op + 5 个 thread。
@@ -201,6 +205,7 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "goal/set" => &["goal"],
         "goal/pause" | "goal/resume" => &["goal_id"],
         "thread/get" | "thread/resume" | "thread/delete" => &["id"],
+        "thread/history" => &["id"],
         "thread/list" | "thread/create" => &[],
         _ => return None,
     })
@@ -323,6 +328,10 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             let p: IdParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::Delete { id: p.id })
         }
+        "thread/history" => {
+            let p: HistoryParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::History { id: p.id })
+        }
         "shutdown" => Action::Shutdown,
         // 不可达：method 已在上面按 OP_METHODS 拦过。
         other => return Err(RpcError::new(METHOD_NOT_FOUND, format!("不认识的方法：{other}"))),
@@ -377,6 +386,13 @@ struct GoalIdParams {
 #[derive(Debug, Deserialize)]
 struct IdParams {
     id: String,
+}
+
+/// `thread/history` 参数：`id` 可省（= 当前会话）。
+#[derive(Debug, Deserialize)]
+struct HistoryParams {
+    #[serde(default)]
+    id: Option<String>,
 }
 
 /// 审批应答的三个字段（两个方法共用）。`decision` 直接反序列化成协议层的
@@ -485,7 +501,7 @@ mod tests {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(23),
+            Some(24),
             "initialize + 17 Op + 5 thread"
         );
 

@@ -149,5 +149,12 @@
       "id"
     ],
     "handshake_only": false
+  },
+  {
+    "name": "thread/history",
+    "params": [
+      "id"
+    ],
+    "handshake_only": false
   }
 ]

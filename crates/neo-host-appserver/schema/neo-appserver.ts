@@ -33,6 +33,7 @@ export const METHODS = [
   "thread/resume",
   "thread/create",
   "thread/delete",
+  "thread/history",
 ] as const;
 export type MethodName = (typeof METHODS)[number];
 
@@ -73,6 +74,7 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "thread/resume": ["id"],
   "thread/create": [],
   "thread/delete": ["id"],
+  "thread/history": ["id"],
 };
 
 export type ApprovalParams = { id: string, decision: Decision, reason: string | null, };
@@ -113,6 +115,13 @@ arguments: unknown, } } | { "tool_call_end": { id: string, exit_code: number,
 stdout: string, stderr: string, truncated: boolean, } } | { "approval_request": { id: string, detail: string, kind: string, } } | { "patch_proposed": { path: string, diff: string, } } | { "checkpoint_saved": { checkpoint_id: string, } } | { "file_changed": { path: string, additions: number, deletions: number, } } | { "files_changed": { files: Array<FileChange>, } } | { "context_compacted": { removed_messages: number, summary: string, } } | { "rewound": { turns: number, removed_messages: number, files_kept: number, } } | { "todo_updated": { items: Array<TodoEntry>, } } | { "goal_progress": { goal_id: string, done: number, total: number, } } | { "goal_updated": { snapshot: GoalSnapshot, } } | { "goal_cleared": { goal_id: string, } } | { "error": { message: string, } } | { "turn_complete": { input_tokens: number, output_tokens: number, } } | "shutdown_complete";
 export type EventNotification = { seq: number, kind: string, payload: unknown, };
 export type ExecMode = "plan" | "confirm_before" | "default" | "auto_edit" | "full_access";
+export type Fact = { "user_said": string } | { "refs_resolved": Array<string> } | { "assistant_said": string } | { "assistant_thought": string } | { "tool_finished": { name: string, exit_code: number, stdout: string, stderr: string, truncated: boolean, 
+/**
+ * 调用参数原文（来自 ToolCallBegin.arguments 的 JSON 文本）。
+ * 宿主据此在工具行上显示"执行了什么"（如 bash 的命令），
+ * 不用展开详情。派生视图，非事件流内容。
+ */
+args: string | null, } } | { "approval_needed": { detail: string, } } | { "todo_list": Array<TodoEntry> } | { "context_compacted": { removed_messages: number, } } | { "rewound": { turns: number, removed_messages: number, files_kept: number, } } | { "files_changed": Array<FileChange> } | { "patch_preview": { path: string, diff: string, } } | { "failed": string } | { "turn_finished": { input_tokens: number, output_tokens: number, } } | { "session_ready": { session_id: string, } } | { "instructions_loaded": { sources: Array<string>, truncated: boolean, } } | { "model_switched": { model: string, context_limit: number, } } | { "goal": string } | { "goal_cleared": string };
 export type FileChange = { path: string, additions: number, deletions: number, };
 export type GoalIdParams = { goal_id: string, };
 export type GoalParams = { goal: string, };

@@ -16,7 +16,7 @@
 //!   重生成后必须与入库版本逐字节一致（`check_protocol_schema.py`）。
 
 use neo_protocol::{
-    ApprovalPolicy, ContextRef, Decision, EventMsg, ExecMode, FileChange, GoalPhase,
+    ApprovalPolicy, ContextRef, Decision, EventMsg, ExecMode, Fact, FileChange, GoalPhase,
     GoalSnapshot, GoalSubtask, Op, RefKind, SandboxMode, SessionPatch, TodoEntry, TodoStatus,
     ToolOutput, SCHEMA_VERSION,
 };
@@ -216,6 +216,7 @@ pub const ROOT_TYPES: &[&str] = &[
     "EventNotification",
     "MethodDoc",
     "ThreadSummary",
+    "Fact",
 ];
 
 /// 组合 JSON Schema 文档（draft 2020-12，schemars 1.x 默认）。
@@ -261,6 +262,7 @@ pub fn json_schema_document() -> Value {
     add!(EventNotification);
     add!(MethodDoc);
     add!(ThreadSummary);
+    add!(Fact);
 
     // 元数据 + 根引用表：客户端可以按名取到每个根类型的 schema。
     json!({
@@ -420,6 +422,7 @@ pub fn typescript_source() -> String {
     emit!(EventNotification);
     emit!(MethodDoc);
     emit!(ThreadSummary);
+    emit!(Fact);
 
     // 稳定顺序：按名字排，避免 HashMap 遍历导致产物抖动
     // （decls 本身已按 ROOT 优先、依赖补充的顺序压入；再按内容排序会让
@@ -474,7 +477,7 @@ mod tests {
     fn method_docs_cover_all_ops() {
         let docs = method_docs();
         // initialize + 17 个 Op + 5 个 thread
-        assert_eq!(docs.len(), 23, "方法表应为 initialize + 17 Op + 5 thread");
+        assert_eq!(docs.len(), 24, "方法表应为 initialize + 17 Op + 6 thread");
         assert!(docs[0].handshake_only);
         assert_eq!(docs[0].name, "initialize");
         assert!(docs.iter().any(|d| d.name == "thread/resume"));

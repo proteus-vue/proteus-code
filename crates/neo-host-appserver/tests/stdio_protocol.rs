@@ -112,7 +112,7 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 23, "initialize + 17 Op + 5 thread");
+    assert_eq!(methods.len(), 24, "initialize + 17 Op + 6 thread");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
     // 宿主能力（SPI 的既有数据，不是这条协议新造的）
@@ -431,6 +431,7 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 },
                 ThreadCmd::Create => ThreadResult::Value(json!({"id": "t-new"})),
                 ThreadCmd::Delete { id } => ThreadResult::Value(json!({"removed": id == "t-1"})),
+                ThreadCmd::History { .. } => ThreadResult::Value(json!({"items": []})),
             }),
         },
     )
@@ -505,4 +506,87 @@ fn thread_methods_without_session_store_fail_honestly() {
         .as_str()
         .unwrap_or_default()
         .contains("会话库"));
+}
+
+
+/// `thread/history`：投影 = `facts_of`（T6 同源），不是第二套判定。
+#[test]
+fn thread_history_returns_facts_of_events_not_a_second_projection() {
+    use neo_host_appserver::{Job, JobOut, ThreadCmd, ThreadResult};
+    use neo_protocol::facts_of;
+
+    let events = vec![
+        EventMsg::UserSubmitted { text: "看下日志".into() },
+        EventMsg::AgentMessageDone { text: "好的".into() },
+        EventMsg::ToolCallBegin {
+            id: "t1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "ls"}),
+        },
+        EventMsg::ToolCallEnd {
+            id: "t1".into(),
+            exit_code: 0,
+            stdout: "a.rs\n".into(),
+            stderr: String::new(),
+            truncated: false,
+        },
+    ];
+    let expected = facts_of(&events);
+
+    let input = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"thread/history","params":{}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"thread/history","params":{"id":"other"}}),
+    ];
+    let text = input.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+    let sink = SharedBuf::default();
+    serve_jobs(
+        Cursor::new(text.into_bytes()),
+        sink.clone(),
+        move |job| match job {
+            Job::Op(_) => JobOut::Events(vec![]),
+            Job::Thread { cmd, .. } => JobOut::Thread(match cmd {
+                ThreadCmd::History { id } => {
+                    let id = id.unwrap_or_else(|| "current".into());
+                    if id == "other" {
+                        ThreadResult::Error(format!("会话 {id} 不存在"))
+                    } else {
+                        ThreadResult::Value(json!({
+                            "id": id,
+                            "events_replayed": events.len(),
+                            "items": facts_of(&events),
+                        }))
+                    }
+                }
+                _ => ThreadResult::Value(json!({})),
+            }),
+        },
+    )
+    .expect("serve 不该失败");
+
+    let raw = String::from_utf8(sink.0.lock().expect("锁中毒").clone()).expect("UTF-8");
+    let lines: Vec<Value> = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("行应是 JSON"))
+        .collect();
+
+    let hist = lines
+        .iter()
+        .find(|v| v["id"] == json!(2) && v.get("result").is_some())
+        .expect("id=2 应有 result");
+    let items = hist["result"]["items"].as_array().expect("items 应是数组");
+    assert_eq!(items.len(), expected.len(), "投影条数必须等于 facts_of");
+
+    // 关键断言：线格式反序列化后与 facts_of 逐条相等（同源，不是长得像）
+    let wire: Vec<neo_protocol::Fact> =
+        serde_json::from_value(hist["result"]["items"].clone()).expect("items 应能反序列化为 Fact");
+    assert_eq!(wire, expected, "thread/history 的 items 必须就是 facts_of 的结果");
+
+    // 不存在的 id：error
+    let err = lines
+        .iter()
+        .find(|v| v["id"] == json!(3) && v.get("error").is_some())
+        .expect("id=3 应有 error");
+    assert!(err["error"]["message"].as_str().unwrap_or_default().contains("不存在"));
 }

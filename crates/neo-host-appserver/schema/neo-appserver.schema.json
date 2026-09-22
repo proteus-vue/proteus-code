@@ -954,6 +954,443 @@
       "title": "ExecMode",
       "type": "string"
     },
+    "Fact": {
+      "$defs": {
+        "FileChange": {
+          "description": "一个文件的改动统计（供侧栏\"已修改文件\"面板）。",
+          "properties": {
+            "additions": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "deletions": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "additions",
+            "deletions"
+          ],
+          "type": "object"
+        },
+        "TodoEntry": {
+          "description": "任务清单的一项（模型通过 `todowrite` 工具维护）。",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/TodoStatus"
+            }
+          },
+          "required": [
+            "content",
+            "status"
+          ],
+          "type": "object"
+        },
+        "TodoStatus": {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "一条用户必须知道的事实。\n\n**可序列化**：app-server 的 `thread/history` 直接把它推上线，\n线格式 = T6 比较对象，没有第二套「投影类型」。",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "用户说了什么（转录的第一类事实）",
+          "properties": {
+            "user_said": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "user_said"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "用户引用（`@file` / `$skill`）被解析成内容的**一行摘要**。\n\n只把摘要纳入事实、不把注入内容纳入：用户需要知道\"引用的文件到底读到了没有、\n哪条失败\"，但不需要在转录里看到几百行文件正文（那是模型上下文，\n不是人要读的对话）。内容本身仍随事件落盘，回放与审计不受影响。",
+          "properties": {
+            "refs_resolved": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "refs_resolved"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "助手说了这段话（流式增量已合并为完整消息）。",
+          "properties": {
+            "assistant_said": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "assistant_said"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "模型的推理过程（`ReasoningDelta` 合并而成）。\n\n与 `AssistantSaid` **分开**：推理是\"模型怎么想的\"，答复是\"模型说了什么\"。\n混在一起会让宿主无法独立控制显隐（`/thinking` 就做不到）。",
+          "properties": {
+            "assistant_thought": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "assistant_thought"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "某次工具调用结束（含输出）。\n\n输出是**用户必须知道的**：没有它，工具调用只是一行\"成功\"，\n用户无法判断这次执行到底做了什么。",
+          "properties": {
+            "tool_finished": {
+              "properties": {
+                "args": {
+                  "description": "调用参数原文（来自 ToolCallBegin.arguments 的 JSON 文本）。\n宿主据此在工具行上显示\"执行了什么\"（如 bash 的命令），\n不用展开详情。派生视图，非事件流内容。",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "exit_code": {
+                  "format": "int32",
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "stderr": {
+                  "type": "string"
+                },
+                "stdout": {
+                  "type": "string"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "name",
+                "exit_code",
+                "stdout",
+                "stderr",
+                "truncated"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "tool_finished"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "需要用户审批。",
+          "properties": {
+            "approval_needed": {
+              "properties": {
+                "detail": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "detail"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "approval_needed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "任务清单（模型自述的进度）。",
+          "properties": {
+            "todo_list": {
+              "items": {
+                "$ref": "#/$defs/TodoEntry"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "todo_list"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "上下文已压缩。",
+          "properties": {
+            "context_compacted": {
+              "properties": {
+                "removed_messages": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "removed_messages"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "context_compacted"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "对话已回退（回退了 N 轮，删掉 M 条消息，有 K 个文件改动被保留）。",
+          "properties": {
+            "rewound": {
+              "properties": {
+                "files_kept": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "removed_messages": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "turns": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "turns",
+                "removed_messages",
+                "files_kept"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "rewound"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "本次会话已修改的文件（含增删行数）。",
+          "properties": {
+            "files_changed": {
+              "items": {
+                "$ref": "#/$defs/FileChange"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "files_changed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "待审批改动的预览（路径 + unified diff）。\n\n与 `ApprovalNeeded` 分开建模：一个是\"需要你决定\"，\n一个是\"你要决定的内容是什么\"。合并会让没有 diff 的审批\n（如网络类）无法表达。",
+          "properties": {
+            "patch_preview": {
+              "properties": {
+                "diff": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "diff"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "patch_preview"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "出错。",
+          "properties": {
+            "failed": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "failed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "一轮结束（含用量）。",
+          "properties": {
+            "turn_finished": {
+              "properties": {
+                "input_tokens": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "output_tokens": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_tokens",
+                "output_tokens"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "turn_finished"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "会话已就绪。",
+          "properties": {
+            "session_ready": {
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "session_ready"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "项目指令已加载（`AGENTS.md` 级联）。\n\n纳入事实的理由：用户应当知道\"这个会话受哪些约定约束\"，\n尤其是**截断**时 —— 否则会以为整套约定都在生效。",
+          "properties": {
+            "instructions_loaded": {
+              "properties": {
+                "sources": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "sources",
+                "truncated"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "instructions_loaded"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "模型已切换（含新模型的上下文窗口，0 = 未知）。",
+          "properties": {
+            "model_switched": {
+              "properties": {
+                "context_limit": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "model": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "model",
+                "context_limit"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "model_switched"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "目标编排状态（单行摘要，由 `GoalSnapshot::summary` 生成 ——\n摘要在协议层拼好，宿主直接展示，不各自拼一套）。",
+          "properties": {
+            "goal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "goal"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "目标已清除（宿主应撤掉目标显示，而不是读最后一条快照 ——\n快照是历史，清除是现在时）。",
+          "properties": {
+            "goal_cleared": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "goal_cleared"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "Fact"
+    },
     "FileChange": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "一个文件的改动统计（供侧栏\"已修改文件\"面板）。",
@@ -2057,7 +2494,8 @@
     "thread/get",
     "thread/resume",
     "thread/create",
-    "thread/delete"
+    "thread/delete",
+    "thread/history"
   ],
   "x-notification": {
     "event": {
@@ -2098,6 +2536,7 @@
     "GoalIdParams",
     "EventNotification",
     "MethodDoc",
-    "ThreadSummary"
+    "ThreadSummary",
+    "Fact"
   ]
 }
