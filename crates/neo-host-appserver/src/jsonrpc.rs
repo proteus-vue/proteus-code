@@ -123,6 +123,12 @@ pub enum ThreadCmd {
     /// `thread/history`：历史投影（`facts_of` 的结果，与 T6 同源）。
     /// `id` 缺省 = 当前会话；给定 id 则只读投影，**不切换**。
     History { id: Option<String> },
+    /// `thread/export`：导出对话（markdown / json），只读、不切换。
+    Export { id: Option<String>, format: Option<String> },
+    /// `tools/list`：工具目录（name / description / parameters）
+    Tools,
+    /// `git/info`：工作区 git 元数据（branch / sha / origin_url）—— 零子进程
+    GitInfo { cwd: Option<String> },
 }
 
 /// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，17 个）。
@@ -159,6 +165,9 @@ pub const THREAD_METHODS: &[&str] = &[
     "thread/create",
     "thread/delete",
     "thread/history",
+    "thread/export",
+    "tools/list",
+    "git/info",
 ];
 
 /// 全部方法名（握手用）：`initialize` + 17 个 Op + 5 个 thread。
@@ -206,7 +215,9 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "goal/pause" | "goal/resume" => &["goal_id"],
         "thread/get" | "thread/resume" | "thread/delete" => &["id"],
         "thread/history" => &["id"],
-        "thread/list" | "thread/create" => &[],
+        "thread/export" => &["id", "format"],
+        "thread/list" | "thread/create" | "tools/list" => &[],
+        "git/info" => &["cwd"],
         _ => return None,
     })
 }
@@ -332,6 +343,15 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             let p: HistoryParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::History { id: p.id })
         }
+        "thread/export" => {
+            let p: ExportParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::Export { id: p.id, format: p.format })
+        }
+        "tools/list" => Action::Thread(ThreadCmd::Tools),
+        "git/info" => {
+            let p: GitInfoParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::GitInfo { cwd: p.cwd })
+        }
         "shutdown" => Action::Shutdown,
         // 不可达：method 已在上面按 OP_METHODS 拦过。
         other => return Err(RpcError::new(METHOD_NOT_FOUND, format!("不认识的方法：{other}"))),
@@ -393,6 +413,23 @@ struct IdParams {
 struct HistoryParams {
     #[serde(default)]
     id: Option<String>,
+}
+
+/// `thread/export` 参数。
+#[derive(Debug, Deserialize)]
+struct ExportParams {
+    #[serde(default)]
+    id: Option<String>,
+    /// `markdown`（缺省）或 `json`
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// `git/info` 参数。
+#[derive(Debug, Deserialize)]
+struct GitInfoParams {
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 /// 审批应答的三个字段（两个方法共用）。`decision` 直接反序列化成协议层的
@@ -501,7 +538,7 @@ mod tests {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(24),
+            Some(27),
             "initialize + 17 Op + 5 thread"
         );
 

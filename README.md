@@ -97,6 +97,9 @@ bash scripts/gen_protocol_schema.sh   # → crates/neo-host-appserver/schema/
 不是第二套 UI 判定 —— 线格式反序列化后必须与 `facts_of(events)` 逐条相等
 （集成测试钉住）。给定 `id` 时只读投影，**不切换**当前会话。
 
+**控制面另三件**：`tools/list` 工具目录 · `git/info` 仓库元数据（读 `.git`，
+零子进程）· `thread/export` 导出 markdown/json。
+
 **离线验不到的**（必须真实模型）：真实推理质量、多轮工具编排、
 模型是否真的会调 `todowrite` 维护清单。压缩策略（`/compact`）、引用解析
 （`@file` / `$skill`）与项目指令级联（`AGENTS.md`）都已在离线桩上端到端验证：

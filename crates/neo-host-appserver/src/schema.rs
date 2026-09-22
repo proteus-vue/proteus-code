@@ -477,10 +477,12 @@ mod tests {
     fn method_docs_cover_all_ops() {
         let docs = method_docs();
         // initialize + 17 个 Op + 5 个 thread
-        assert_eq!(docs.len(), 24, "方法表应为 initialize + 17 Op + 6 thread");
+        assert_eq!(docs.len(), 27, "方法表应为 initialize + 17 Op + 9 control");
         assert!(docs[0].handshake_only);
         assert_eq!(docs[0].name, "initialize");
         assert!(docs.iter().any(|d| d.name == "thread/resume"));
+        assert!(docs.iter().any(|d| d.name == "tools/list"));
+        assert!(docs.iter().any(|d| d.name == "git/info"));
     }
 
     /// 写盘：`cargo test -p neo-host-appserver --features schema export_schema -- --ignored`

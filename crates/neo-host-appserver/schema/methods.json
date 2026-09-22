@@ -156,5 +156,25 @@
       "id"
     ],
     "handshake_only": false
+  },
+  {
+    "name": "thread/export",
+    "params": [
+      "id",
+      "format"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "tools/list",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "git/info",
+    "params": [
+      "cwd"
+    ],
+    "handshake_only": false
   }
 ]

@@ -6254,7 +6254,23 @@ CoC 是形式主义。缺口表里如实挂着（**等有外部贡献者再补**
 判据（集成测试钉住）：`serde_json::from_value::<Vec<Fact>>(items) == facts_of(&events)`。
 给定 `id` 时只读投影、**不切换**（侧栏预览不该打断当前对话）。
 
-**下一步（T4）**：Git 元数据 · 会话导出 · 工具目录。
+**下一步（T4）**：~~Git 元数据 · 会话导出 · 工具目录~~ **已完成（见下）**。
+
+---
+
+## 会话接续点（最近：2026-09-22 · T4 控制面三件）
+
+| 方法 | 说明 |
+|---|---|
+| `tools/list` | `Kernel::tool_schemas()` —— name/description/parameters，顺序与 prompt 一致 |
+| `git/info` | branch/sha/origin_url/root，**零子进程**读 `.git`（含 packed-refs 兜底） |
+| `thread/export` | markdown（人读）/ json（= history 的 items）；未知格式如实报错 |
+
+app-server 桌面后端能力对照 Codex（不含账号）的 P0+P1 至此闭环：
+类型导出 · thread 生命周期 · 历史投影 · Git/导出/工具目录。
+
+**本轮完成 app-server 对照清单的 P0+P1。** 若继续，可选：
+Web 宿主 `kind` 撞键修复、`--listen unix://`、或回到产品层（签名分发）。
 
 ---
 

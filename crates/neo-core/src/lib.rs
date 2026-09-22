@@ -920,7 +920,17 @@ impl Kernel {
     pub fn system_prompt(&self) -> &str { &self.system_prompt }
     pub fn state(&self) -> &KernelState { &self.state }
     pub fn messages(&self) -> &[Message] { &self.messages }
+    /// 工具目录（给客户端的 tools/list）。顺序与 prompt 渲染一致（稳定）。
+    pub fn tool_schemas(&self) -> Vec<ToolSchema> {
+        self.tools.schemas()
+    }
+
     pub fn session_id(&self) -> &str { &self.session_id }
+
+    /// 内核工作区（工具解析相对路径的基准；git/info 缺省也用它）。
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
 
     /// 当前生效的执行语义（三维）。
     ///

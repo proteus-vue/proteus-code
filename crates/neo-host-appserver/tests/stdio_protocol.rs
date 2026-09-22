@@ -112,7 +112,7 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 24, "initialize + 17 Op + 6 thread");
+    assert_eq!(methods.len(), 27, "initialize + 17 Op + 9 control");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
     // 宿主能力（SPI 的既有数据，不是这条协议新造的）
@@ -432,6 +432,9 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 ThreadCmd::Create => ThreadResult::Value(json!({"id": "t-new"})),
                 ThreadCmd::Delete { id } => ThreadResult::Value(json!({"removed": id == "t-1"})),
                 ThreadCmd::History { .. } => ThreadResult::Value(json!({"items": []})),
+                ThreadCmd::Export { .. } => ThreadResult::Value(json!({"content": "# ok"})),
+                ThreadCmd::Tools => ThreadResult::Value(json!({"tools": [{"name":"bash"}]})),
+                ThreadCmd::GitInfo { .. } => ThreadResult::Value(json!({"in_repo": false})),
             }),
         },
     )
@@ -589,4 +592,77 @@ fn thread_history_returns_facts_of_events_not_a_second_projection() {
         .find(|v| v["id"] == json!(3) && v.get("error").is_some())
         .expect("id=3 应有 error");
     assert!(err["error"]["message"].as_str().unwrap_or_default().contains("不存在"));
+}
+
+
+/// `tools/list` / `git/info` / `thread/export`：控制面三件套。
+#[test]
+fn tools_list_git_info_and_thread_export() {
+    use neo_host_appserver::{Job, JobOut, ThreadCmd, ThreadResult};
+
+    let input = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"git/info","params":{}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"thread/export","params":{"format":"markdown"}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"thread/export","params":{"format":"yaml"}}),
+    ];
+    let text = input.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+    let sink = SharedBuf::default();
+    serve_jobs(
+        Cursor::new(text.into_bytes()),
+        sink.clone(),
+        |job| match job {
+            Job::Op(_) => JobOut::Events(vec![]),
+            Job::Thread { cmd, .. } => JobOut::Thread(match cmd {
+                ThreadCmd::Tools => ThreadResult::Value(json!({
+                    "tools": [
+                        {"name":"bash","description":"执行命令","parameters":{"type":"object"}},
+                        {"name":"apply_patch","description":"落盘","parameters":{"type":"object"}},
+                    ]
+                })),
+                ThreadCmd::GitInfo { .. } => ThreadResult::Value(json!({
+                    "in_repo": true, "branch": "main", "sha": "abc1234",
+                    "origin_url": "https://example.com/r.git", "root": "/ws"
+                })),
+                ThreadCmd::Export { format, .. } => {
+                    let fmt = format.as_deref().unwrap_or("markdown");
+                    if fmt == "yaml" {
+                        ThreadResult::Error("不支持的导出格式：yaml（可选 markdown / json）".into())
+                    } else {
+                        ThreadResult::Value(json!({"format": fmt, "content": "# 会话\n"}))
+                    }
+                }
+                _ => ThreadResult::Value(json!({})),
+            }),
+        },
+    )
+    .expect("serve 不该失败");
+
+    let raw = String::from_utf8(sink.0.lock().expect("锁中毒").clone()).expect("UTF-8");
+    let lines: Vec<Value> = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("行应是 JSON"))
+        .collect();
+
+    let res = |id: u64| {
+        lines
+            .iter()
+            .find(|v| v["id"] == json!(id) && v.get("result").is_some())
+            .unwrap_or_else(|| panic!("id={id} 应有 result"))
+            .clone()
+    };
+    assert_eq!(res(2)["result"]["tools"][0]["name"], "bash");
+    assert_eq!(res(2)["result"]["tools"].as_array().unwrap().len(), 2);
+    assert_eq!(res(3)["result"]["branch"], "main");
+    assert_eq!(res(3)["result"]["origin_url"], "https://example.com/r.git");
+    assert_eq!(res(4)["result"]["format"], "markdown");
+    assert!(res(4)["result"]["content"].as_str().unwrap().contains("会话"));
+
+    let err = lines
+        .iter()
+        .find(|v| v["id"] == json!(5) && v.get("error").is_some())
+        .expect("未知格式应报错");
+    assert!(err["error"]["message"].as_str().unwrap_or_default().contains("yaml"));
 }

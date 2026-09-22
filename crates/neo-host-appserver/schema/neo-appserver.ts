@@ -34,6 +34,9 @@ export const METHODS = [
   "thread/create",
   "thread/delete",
   "thread/history",
+  "thread/export",
+  "tools/list",
+  "git/info",
 ] as const;
 export type MethodName = (typeof METHODS)[number];
 
@@ -75,6 +78,9 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "thread/create": [],
   "thread/delete": ["id"],
   "thread/history": ["id"],
+  "thread/export": ["id", "format"],
+  "tools/list": [],
+  "git/info": ["cwd"],
 };
 
 export type ApprovalParams = { id: string, decision: Decision, reason: string | null, };

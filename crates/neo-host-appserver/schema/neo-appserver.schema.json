@@ -2495,7 +2495,10 @@
     "thread/resume",
     "thread/create",
     "thread/delete",
-    "thread/history"
+    "thread/history",
+    "thread/export",
+    "tools/list",
+    "git/info"
   ],
   "x-notification": {
     "event": {

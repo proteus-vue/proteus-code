@@ -368,6 +368,203 @@ fn cmd_appserver(args: &[String]) -> i32 {
     }
 }
 
+
+/// 内核工作区路径（git/info 的缺省 cwd）。
+fn workspace_for_git(kernel: &neo_core::Kernel) -> std::path::PathBuf {
+    kernel.cwd().to_path_buf()
+}
+
+/// 工作区 git 元数据（**零子进程**：只读 `.git` 文件）。
+///
+/// 与 `detect_branch` 同一立场：启动/列举时不该为装饰性信息去 fork `git`，
+/// 也不该假设用户装了 git。探测不到的字段留空串，客户端按"不在仓库里"显示。
+fn git_info(ws: &std::path::Path) -> serde_json::Value {
+    let mut root: Option<std::path::PathBuf> = None;
+    let mut cur = Some(ws);
+    while let Some(dir) = cur {
+        if dir.join(".git").exists() {
+            root = Some(dir.to_path_buf());
+            break;
+        }
+        cur = dir.parent();
+    }
+    let Some(root) = root else {
+        return serde_json::json!({
+            "in_repo": false, "branch": "", "sha": "", "origin_url": "", "root": "",
+        });
+    };
+    let gitdir_raw = root.join(".git");
+    // worktree/submodule：`.git` 是文件，内容 "gitdir: <path>"
+    let gitdir = if gitdir_raw.is_file() {
+        std::fs::read_to_string(&gitdir_raw)
+            .ok()
+            .and_then(|s| {
+                s.strip_prefix("gitdir:")
+                    .map(|p| std::path::PathBuf::from(p.trim()))
+            })
+            .unwrap_or_else(|| gitdir_raw.clone())
+    } else {
+        gitdir_raw.clone()
+    };
+    // gitdir 可能是相对路径
+    let gitdir = if gitdir.is_relative() {
+        root.join(gitdir)
+    } else {
+        gitdir
+    };
+
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).unwrap_or_default();
+    let head = head.trim();
+    let (branch, sha) = if let Some(r) = head.strip_prefix("ref: refs/heads/") {
+        let branch = r.to_string();
+        let ref_path = gitdir.join("refs/heads").join(&branch);
+        let sha = std::fs::read_to_string(&ref_path)
+            .map(|s| s.trim().chars().take(7).collect::<String>())
+            .or_else(|_| {
+                // packed-refs 兜底
+                let packed = std::fs::read_to_string(gitdir.join("packed-refs")).unwrap_or_default();
+                for line in packed.lines() {
+                    if let Some(rest) = line.strip_prefix("#") {
+                        let _ = rest;
+                        continue;
+                    }
+                    let mut it = line.split_whitespace();
+                    if let (Some(h), Some(name)) = (it.next(), it.next()) {
+                        if name == format!("refs/heads/{branch}") {
+                            return Ok(h.chars().take(7).collect::<String>());
+                        }
+                    }
+                }
+                Err(())
+            })
+            .unwrap_or_default();
+        (branch, sha)
+    } else if head.len() >= 7 {
+        (String::new(), head.chars().take(7).collect())
+    } else {
+        (String::new(), String::new())
+    };
+
+    let config = std::fs::read_to_string(gitdir.join("config")).unwrap_or_default();
+    let mut origin_url = String::new();
+    let mut in_origin = false;
+    for line in config.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            in_origin = l == "[remote \"origin\"]" || l.starts_with("[remote \"origin\"]");
+            continue;
+        }
+        if in_origin && l.starts_with("url") {
+            if let Some((_, v)) = l.split_once('=') {
+                origin_url = v.trim().to_string();
+            }
+        }
+    }
+
+    serde_json::json!({
+        "in_repo": true,
+        "branch": branch,
+        "sha": sha,
+        "origin_url": origin_url,
+        "root": root.display().to_string(),
+    })
+}
+
+/// 把 Fact 列表渲染成可读 Markdown（`thread/export format=markdown`）。
+fn facts_to_markdown(id: &str, items: &[neo_protocol::Fact]) -> String {
+    use neo_protocol::Fact;
+    let mut out = format!("# 会话 {id}\n\n");
+    for f in items {
+        match f {
+            Fact::UserSaid(s) => {
+                out.push_str("## 用户\n\n");
+                out.push_str(s);
+                out.push_str("\n\n");
+            }
+            Fact::AssistantSaid(s) | Fact::AssistantThought(s) => {
+                out.push_str("## 助手\n\n");
+                out.push_str(s);
+                out.push_str("\n\n");
+            }
+            Fact::ToolFinished { name, exit_code, stdout, stderr, truncated, args } => {
+                out.push_str(&format!("### 工具 `{name}` (exit {exit_code})\n\n"));
+                if let Some(a) = args {
+                    out.push_str(&format!("参数：`{a}`\n\n"));
+                }
+                if !stdout.is_empty() {
+                    out.push_str("```\n");
+                    out.push_str(stdout);
+                    if *truncated {
+                        out.push_str("\n…（已截断）\n");
+                    }
+                    out.push_str("```\n\n");
+                }
+                if !stderr.is_empty() {
+                    out.push_str("stderr:\n\n```\n");
+                    out.push_str(stderr);
+                    out.push_str("```\n\n");
+                }
+            }
+            Fact::Failed(s) => {
+                out.push_str(&format!("**失败**：{s}\n\n"));
+            }
+            Fact::TurnFinished { input_tokens, output_tokens } => {
+                out.push_str(&format!(
+                    "---\n\n_本轮用量：input {input_tokens} / output {output_tokens}_\n\n"
+                ));
+            }
+            Fact::PatchPreview { path, .. } => {
+                out.push_str(&format!("### 改动预览 `{path}`\n\n"));
+            }
+            Fact::ApprovalNeeded { detail } => {
+                out.push_str(&format!("**待审批**：{detail}\n\n"));
+            }
+            Fact::TodoList(items) => {
+                out.push_str("### 任务清单\n\n");
+                for it in items {
+                    out.push_str(&format!("- [{}] {}\n", it.status as u8, it.content));
+                }
+                out.push_str("\n");
+            }
+            Fact::RefsResolved(lines) => {
+                out.push_str(&format!("> 引用：{}\n\n", lines.join("；")));
+            }
+            Fact::InstructionsLoaded { sources, truncated } => {
+                out.push_str(&format!(
+                    "> 指令：{}{}\n\n",
+                    sources.join("，"),
+                    if *truncated { "（已截断）" } else { "" }
+                ));
+            }
+            Fact::SessionReady { session_id } => {
+                out.push_str(&format!("_会话 {session_id} 就绪_\n\n"));
+            }
+            Fact::ModelSwitched { model, context_limit } => {
+                out.push_str(&format!("_模型 → {model}（窗口 {context_limit}）_\n\n"));
+            }
+            Fact::ContextCompacted { removed_messages } => {
+                out.push_str(&format!("_上下文已压缩（移除 {removed_messages} 条）_\n\n"));
+            }
+            Fact::Rewound { turns, removed_messages, files_kept } => {
+                out.push_str(&format!(
+                    "_已回退 {turns} 轮（删 {removed_messages} 条，保留 {files_kept} 个文件改动）_\n\n"
+                ));
+            }
+            Fact::FilesChanged(files) => {
+                out.push_str("### 已修改文件\n\n");
+                for f in files {
+                    out.push_str(&format!("- `{}` +{} -{}\n", f.path, f.additions, f.deletions));
+                }
+                out.push_str("\n");
+            }
+            Fact::Goal(s) | Fact::GoalCleared(s) => {
+                out.push_str(&format!("> 目标：{s}\n\n"));
+            }
+        }
+    }
+    out
+}
+
 /// `thread/*` 的装配层实现：会话库 + 内核切换。
 ///
 /// 与 TUI/桌面的 `Sessions` 同一套语义，但那边要经 `KernelHandle` 跨线程
@@ -443,6 +640,59 @@ fn thread_cmd(
             match store.delete(&id) {
                 Ok(removed) => ThreadResult::Value(serde_json::json!({ "removed": removed })),
                 Err(e) => ThreadResult::Error(e.to_string()),
+            }
+        }
+        ThreadCmd::Tools => {
+            let tools: Vec<serde_json::Value> = kernel
+                .tool_schemas()
+                .into_iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "description": s.description,
+                        "parameters": s.parameters,
+                    })
+                })
+                .collect();
+            ThreadResult::Value(serde_json::json!({ "tools": tools }))
+        }
+        ThreadCmd::GitInfo { cwd } => {
+            let ws = cwd
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| workspace_for_git(kernel));
+            ThreadResult::Value(git_info(&ws))
+        }
+        ThreadCmd::Export { id, format } => {
+            let id = id.unwrap_or_else(|| kernel.session_id().to_string());
+            if !store.exists(&id) {
+                return ThreadResult::Error(format!("会话 {id} 不存在"));
+            }
+            let path = store.path_for(&id);
+            let events: Vec<EventMsg> = match neo_session::replay(&path) {
+                Ok(recs) => recs
+                    .into_iter()
+                    .filter(|r| r.kind == "event")
+                    .filter_map(|r| serde_json::from_value::<EventMsg>(r.payload).ok())
+                    .collect(),
+                Err(e) => return ThreadResult::Error(format!("读会话日志失败：{e}")),
+            };
+            let items = neo_protocol::facts_of(&events);
+            let fmt = format.as_deref().unwrap_or("markdown");
+            match fmt {
+                "markdown" | "md" => ThreadResult::Value(serde_json::json!({
+                    "id": id,
+                    "format": "markdown",
+                    "content": facts_to_markdown(&id, &items),
+                })),
+                "json" => ThreadResult::Value(serde_json::json!({
+                    "id": id,
+                    "format": "json",
+                    "events_replayed": events.len(),
+                    "items": items,
+                })),
+                other => ThreadResult::Error(format!(
+                    "不支持的导出格式：{other}（可选 markdown / json）"
+                )),
             }
         }
         ThreadCmd::History { id } => {
