@@ -5088,3 +5088,193 @@ button.ctx-chip:hover {
 .composer .ctx-chip.primary:hover {
   opacity: 0.9;
 }
+
+/* ═══════ IA-23 对话流连续阅读（ZCode/Codex）═══════
+   目标：一份连续转录，不是一叠卡片 */
+
+.stream-inner {
+  gap: 8px;
+}
+
+/* 助手：纯正文，无框无底 */
+.msg.assistant .bubble.assistant,
+.bubble.assistant {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 2px 0 !important;
+  border-radius: 0 !important;
+}
+
+.msg.assistant {
+  gap: 0;
+  margin-bottom: 4px;
+}
+
+/* 角色条默认不出现（hover 再考虑；截图无 NEO 大字） */
+.msg.assistant .msg-role {
+  display: none !important;
+}
+
+/* 用户：中性灰实心泡，去掉描边/橙调/阴影 */
+.msg.user .bubble.user,
+.bubble.user {
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent) !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 16px 16px 4px 16px !important;
+  color: var(--text-primary);
+}
+
+.msg.user {
+  margin-top: 8px;
+  margin-bottom: 6px;
+}
+
+/* 工具时间线：无卡片壳，一行弱化元数据 */
+.timeline-card,
+.timeline-card.single {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  overflow: visible !important;
+}
+
+.timeline-head {
+  padding: 4px 0 !important;
+  gap: 8px !important;
+  color: var(--text-tertiary) !important;
+  font-size: var(--text-ui-sm) !important;
+  font-weight: 400 !important;
+}
+
+.timeline-head:hover:not(:disabled) {
+  background: transparent !important;
+  color: var(--text-secondary) !important;
+}
+
+.tl-icon {
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+  font-size: var(--text-ui-sm);
+}
+
+.tl-label {
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+.tl-meta {
+  color: var(--text-tertiary);
+  font-weight: 400;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 展开后的行：细字，无分隔条堆叠感 */
+.timeline-rows {
+  border-top: none !important;
+  margin-top: 0;
+  padding-left: 0;
+}
+
+.timeline-rows > li {
+  border-bottom: none !important;
+}
+
+.tl-row {
+  padding: 3px 0 !important;
+  font-size: var(--text-ui-sm);
+  color: var(--text-secondary);
+}
+
+.tl-row .nm {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* 单工具 / Diff 卡：收成一行，diff 正文默认藏（点标题开全屏） */
+.tool-card {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  overflow: visible !important;
+}
+
+.tool-card header {
+  background: transparent !important;
+  padding: 4px 0 !important;
+  border: none !important;
+  color: var(--text-tertiary) !important;
+  font-size: var(--text-ui-sm) !important;
+}
+
+.tool-card header:hover {
+  background: transparent !important;
+  color: var(--text-secondary) !important;
+}
+
+.tool-card header .name {
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-weight: 500;
+}
+
+.tool-card.patch-card .diff-view,
+.tool-card.patch-card .diff-split {
+  display: none !important;
+}
+
+/* 文件改动摘要：一行细字，无色块重描边 */
+.summary-bar.files {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: var(--text-tertiary) !important;
+  font-size: var(--text-ui-sm) !important;
+  font-weight: 400 !important;
+  padding: 4px 0 !important;
+  border-radius: 0 !important;
+}
+
+/* 思考：更轻 */
+.thinking {
+  border: none !important;
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+.thinking-head {
+  padding: 4px 0 !important;
+  color: var(--text-tertiary) !important;
+  font-weight: 400 !important;
+}
+
+/* 审批块：别太像弹层卡片打断阅读 —— 仍需醒目，但少描边 */
+.approval {
+  border-radius: 12px;
+}
+
+/* 文档流整体更像一份 transcript */
+.center .stream {
+  gap: 0;
+}
+
+.stream-tools {
+  margin: 4px 0;
+}
+
+.stream-tools input {
+  border: none;
+  background: transparent;
+  padding: 4px 0;
+  font-size: var(--text-ui-sm);
+  color: var(--text-tertiary);
+}
