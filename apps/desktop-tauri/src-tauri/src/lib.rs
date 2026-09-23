@@ -558,7 +558,7 @@ async fn fetch_url(url: String) -> Result<String, String> {
     }
     tauri::async_runtime::spawn_blocking(move || {
         let out = std::process::Command::new("curl")
-            .args(["-sL", "--max-time", "20", "--compressed", "-A", "NEO-Desktop/0.1", &u])
+            .args(["-sL", "--connect-timeout", "5", "--max-time", "20", "--compressed", "-A", "NEO-Desktop/0.1", &u])
             .output()
             .map_err(|e| format!("curl 失败：{e}"))?;
         if !out.status.success() {
