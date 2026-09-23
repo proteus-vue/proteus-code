@@ -10,7 +10,6 @@ import type {
   WireEvent,
 } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
-import { formatRelative } from "./lib/time";
 import { CommandPalette, type CommandItem } from "./components/CommandPalette";
 import { DiffView } from "./components/DiffView";
 import { DiffModal } from "./components/DiffModal";
@@ -54,10 +53,20 @@ import {
   unpackEvent,
 } from "./lib/rpc";
 import { listWorkspace } from "./components/FileTree";
+import { Sidebar } from "./components/Sidebar";
+import { SettingsModal } from "./components/SettingsModal";
+import { WorkbenchShell, type WorkbenchId } from "./components/WorkbenchShell";
+import {
+  deleteThread,
+  renameThread,
+  threadHistory,
+} from "./lib/rpc";
 import "./styles/tokens.css";
 import "./styles/app.css";
+import "./styles/layout.css";
 
 type Status = "boot" | "ready" | "busy" | "error";
+type WB = WorkbenchId;
 
 const EXEC_MODES: { id: ExecMode; label: string }[] = [
   { id: "plan", label: "Plan" },
@@ -86,6 +95,10 @@ export default function App() {
   const [execMode, setExecMode] = useState<ExecMode>("default");
   const [panelOpen, setPanelOpen] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  /** 浏览器式标签：已打开的右栏页（可多开，× 关闭） */
+  const [openTabs, setOpenTabs] = useState<WB[]>(["review"]);
+  const [panelTab, setPanelTab] = useState<WB>("review");
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [lastPatch, setLastPatch] = useState<{ path: string; diff: string } | null>(null);
   const [files, setFiles] = useState<FileChange[]>([]);
   const [goal, setGoal] = useState<GoalSnapshot | null>(null);
@@ -93,9 +106,13 @@ export default function App() {
   const [thinkingSearch, setThinkingSearch] = useState("");
   const [threadQuery, setThreadQuery] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [panelTab, setPanelTab] = useState<
-    "goal" | "files" | "changes" | "diff" | "wiki"
-  >("goal");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** threadId → history 纯文本摘要（内容级搜索缓存，只增不刷） */
+  const [contentHits, setContentHits] = useState<Map<string, string>>(new Map());
+  /** 正在拉 history 的 id，避免同 id 并发重复请求 */
+  const contentInflight = useRef<Set<string>>(new Set());
+  const [termLog, setTermLog] = useState<{ cmd: string; ok: boolean }[]>([]);
+  const [termInput, setTermInput] = useState("");
   const [diffModal, setDiffModal] = useState<{ path: string; diff: string } | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -529,6 +546,119 @@ export default function App() {
     }
   }, [append, busy, refreshThreads]);
 
+  const runTerminal = useCallback(
+    async (cmd: string) => {
+      const c = cmd.trim();
+      if (!c) return;
+      try {
+        await commandExec(c);
+        setTermLog((log) => [...log.slice(-200), { cmd: c, ok: true }]);
+        setTermInput("");
+        append({ type: "status", message: `$ ${c}` });
+      } catch (e) {
+        setTermLog((log) => [...log.slice(-200), { cmd: c, ok: false }]);
+        append({ type: "error", message: String(e) });
+      }
+    },
+    [append],
+  );
+
+  const openWorkbench = useCallback((tab: WB) => {
+    setOpenTabs((tabs) => (tabs.includes(tab) ? tabs : [...tabs, tab]));
+    setPanelTab(tab);
+    setPanelOpen(true);
+    setAddMenuOpen(false);
+  }, []);
+
+  const closeWorkbenchTab = useCallback((tab: WB) => {
+    setOpenTabs((tabs) => {
+      const next = tabs.filter((t) => t !== tab);
+      if (next.length === 0) setPanelOpen(false);
+      setPanelTab((cur) => (cur !== tab ? cur : next[0] ?? cur));
+      return next;
+    });
+    setAddMenuOpen(false);
+  }, []);
+
+  // 点菜单外关闭 —— WorkbenchShell 内部自管；此处保留兼容
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest(".btab-add")) setAddMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [addMenuOpen]);
+
+  // 内容级会话搜索：查询 ≥2 字时懒拉 thread/history（并行、只拉缺失的）
+  useEffect(() => {
+    const q = threadQuery.trim();
+    if (q.length < 2) return;
+    const need = threads
+      .map((t) => t.id)
+      .filter((id) => !contentHits.has(id) && !contentInflight.current.has(id));
+    if (need.length === 0) return;
+    for (const id of need) contentInflight.current.add(id);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const results = await Promise.all(
+          need.map(async (id) => {
+            try {
+              const h = await threadHistory(id);
+              const parts = (h.items ?? []).flatMap((fact) => {
+                const rec = fact as Record<string, unknown>;
+                if (typeof rec.user_said === "string") return [rec.user_said];
+                if (typeof rec.assistant_said === "string") return [rec.assistant_said];
+                if (typeof rec.failed === "string") return [rec.failed];
+                return [];
+              });
+              return [id, parts.join("\n")] as const;
+            } catch {
+              return [id, ""] as const;
+            }
+          }),
+        );
+        // 即使查询已变也写入缓存：history 与查询词无关，写入后无需为旧词重拉
+        setContentHits((prev) => {
+          const next = new Map(prev);
+          for (const [id, text] of results) next.set(id, text);
+          return next;
+        });
+      } finally {
+        for (const id of need) contentInflight.current.delete(id);
+        void cancelled;
+      }
+    })();
+  }, [threadQuery, threads, contentHits]);
+
+  const onDeleteSession = useCallback(
+    async (id: string) => {
+      try {
+        await deleteThread(id);
+        if (activeThread === id) setActiveThread(null);
+        await refreshThreads();
+        append({ type: "status", message: `已删除会话 ${id}` });
+      } catch (e) {
+        append({ type: "error", message: String(e) });
+      }
+    },
+    [activeThread, append, refreshThreads],
+  );
+
+  const onRenameSession = useCallback(
+    async (id: string, title: string) => {
+      try {
+        await renameThread(id, title);
+        await refreshThreads();
+      } catch (e) {
+        append({ type: "error", message: String(e) });
+      }
+    },
+    [append, refreshThreads],
+  );
+
   const atMatches = useMemo(() => {
     if (!atQuery) return [];
     const q = atQuery.q.toLowerCase();
@@ -596,6 +726,12 @@ export default function App() {
         run: cycleMode,
       },
       {
+        id: "settings",
+        label: "打开设置",
+        hint: "⌘,",
+        run: () => setSettingsOpen(true),
+      },
+      {
         id: "compact",
         label: "压缩上下文 /compact",
         run: async () => {
@@ -651,6 +787,16 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key === ",") {
+        e.preventDefault();
+        setSettingsOpen((v) => !v);
+        return;
+      }
+      if (settingsOpen && e.key === "Escape") {
+        e.preventDefault();
+        setSettingsOpen(false);
+        return;
+      }
       if (mod && !e.shiftKey && (e.key === "k" || e.key === "p")) {
         e.preventDefault();
         setPaletteOpen(true);
@@ -678,7 +824,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [approval, busy, cycleMode, onNewThread, paletteOpen, stop]);
+  }, [approval, busy, cycleMode, onNewThread, paletteOpen, settingsOpen, stop]);
 
   const [theme, setTheme] = useState<"light" | "dark">(
     () =>
@@ -742,6 +888,20 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         commands={commands}
       />
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        theme={theme}
+        onTheme={setTheme}
+        model={model}
+        models={modelsList}
+        onModel={(n) => void onModelChange(n)}
+        execMode={execMode}
+        onMode={(m) => void onModeChange(m)}
+        protocolVersion={init?.protocol_version ?? "—"}
+        methodCount={methods.length}
+        workspaceRoot={workspaceRoot}
+      />
       {diffModal && (
         <DiffModal
           path={diffModal.path}
@@ -750,185 +910,28 @@ export default function App() {
         />
       )}
 
-      {sidebarOpen && (
-        <aside className="sidebar">
-          <div className="brand-row">
-            <span className="brand-mark" aria-hidden>
-              N
-            </span>
-            <span className="brand-name">NEO</span>
-            <span className="brand-sub">Desktop</span>
-          </div>
-          <div className="sidebar-actions">
-            <button
-              type="button"
-              className="btn-new"
-              onClick={() => void onNewThread()}
-              title="⌘N"
-            >
-              <span aria-hidden>＋</span> 新建任务
-            </button>
-            <div className="sidebar-tools">
-              <button
-                type="button"
-                className="tool-btn"
-                onClick={() => setPaletteOpen(true)}
-                title="⌘K 命令"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
-                <span>搜索</span>
-              </button>
-              <button
-                type="button"
-                className="tool-btn"
-                onClick={() => void onNewThread()}
-                title="⌘N"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
-                <span>新建</span>
-              </button>
-            </div>
-          </div>
-          <div className="sidebar-section">
-            <span className="proj-label" title={workspaceRoot}>
-              ▸ {projectLabel}
-            </span>
-          </div>
-          <div className="sidebar-search">
-            <input
-              value={threadQuery}
-              placeholder="搜索会话…"
-              onChange={(e) => setThreadQuery(e.target.value)}
-            />
-          </div>
-          <ul className="sidebar-list">
-            {threads.length === 0 && (
-              <li>
-                <button type="button" className="active">
-                  <span className="row1">
-                    <span className="dot st-idle" />
-                    当前任务
-                  </span>
-                  <span className="meta">尚未落盘</span>
-                </button>
-              </li>
-            )}
-            {threads
-              .filter((t) => {
-                const s = threadQuery.trim().toLowerCase();
-                if (!s) return true;
-                return (
-                  (t.title ?? "").toLowerCase().includes(s) ||
-                  t.id.toLowerCase().includes(s)
-                );
-              })
-              .map((t) => {
-                const rel = formatRelative(t.updated_ms);
-                return (
-              <li key={t.id}>
-                <button
-                  type="button"
-                  className={activeThread === t.id ? "active" : ""}
-                  onClick={() => void onResume(t.id)}
-                >
-                  <span className="row1">
-                    <span className={`dot st-${t.state ?? "empty"}`} />
-                    <span
-                      className={`title ${t.has_title === false ? "faded" : ""}`}
-                    >
-                      {t.title || t.id}
-                    </span>
-                    {t.additions != null &&
-                      t.deletions != null &&
-                      t.additions + t.deletions > 0 && (
-                        <span className="delta">
-                          +{t.additions} −{t.deletions}
-                        </span>
-                      )}
-                    {rel && <span className="rel">{rel}</span>}
-                  </span>
-                  <span className="meta">
-                    {t.state ?? "empty"}
-                    {t.records != null && t.records > 0 && ` · ${t.records} 条`}
-                  </span>
-                </button>
-              </li>
-                );
-              })}
-          </ul>
-          {files.length > 0 && (
-            <div className="sidebar-foot">
-              改动 +{totalAdd} −{totalDel} · {files.length} 文件
-            </div>
-          )}
-        </aside>
-      )}
+      <Sidebar
+        open={sidebarOpen}
+        onToggle={() => setSidebarOpen((v) => !v)}
+        onNew={() => void onNewThread()}
+        onCommand={() => setPaletteOpen(true)}
+        onTheme={() => setTheme((v) => (v === "light" ? "dark" : "light"))}
+        onSettings={() => setSettingsOpen(true)}
+        theme={theme}
+        threads={threads}
+        activeId={activeThread}
+        onResume={(id) => void onResume(id)}
+        onRename={(id, title) => void onRenameSession(id, title)}
+        onDelete={(id) => void onDeleteSession(id)}
+        query={threadQuery}
+        onQuery={setThreadQuery}
+        contentHits={contentHits}
+        projectLabel={projectLabel}
+        workspaceRoot={workspaceRoot}
+        filesFoot={files.length > 0 ? `改动 +${totalAdd} −${totalDel} · ${files.length} 文件` : undefined}
+      />
 
-      <header className="toolbar">
-        {!sidebarOpen && (
-          <button type="button" className="icon-btn" onClick={() => setSidebarOpen(true)} title="⌘B">
-            ☰
-          </button>
-        )}
-        <div className="tb-left">
-          <span className="tb-workspace" title={workspaceRoot || branch}>
-            <span className="tb-icon">⎇</span>
-            {branch}
-          </span>
-          <span className="tb-sep" />
-          <label className="tb-select" title="模型">
-            <select
-              value={model}
-              onChange={(e) => void onModelChange(e.target.value)}
-              disabled={busy}
-            >
-              {(modelsList.length
-                ? modelsList
-                : [{ name: model }]
-              ).map((m) => (
-                <option key={m.name} value={m.name}>
-                  {m.name}
-                  {m.production === false ? "（桩）" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          <span className="tb-mode">{execMode.replace(/_/g, " ")}</span>
-          {execMode === "full_access" && (
-            <span className="tb-risk">高风险</span>
-          )}
-          {approval && <span className="tb-wait">待审批</span>}
-        </div>
-        <span className="spacer" />
-        <span
-          className={`status ${status === "error" ? "err" : status === "ready" || status === "busy" ? "ok" : ""}`}
-        >
-          {status === "error" ? statusMsg : status === "busy" ? "生成中" : "已连接"}
-        </span>
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
-          title="切换主题"
-        >
-          {theme === "light" ? "☾" : "☀"}
-        </button>
-        <button type="button" className="icon-btn" onClick={() => setPaletteOpen(true)} title="⌘K">
-          ⌘K
-        </button>
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => setPanelOpen((v) => !v)}
-          title="⌘J"
-        >
-          ⌫
-        </button>
-        <button type="button" className="ghost-btn" onClick={() => void boot()} disabled={status === "boot"}>
-          重连
-        </button>
-      </header>
-
+      <div className="center">
       <main className="stream" ref={streamRef}>
         {goal && !floatCollapsed && (
           <ProgressFloat
@@ -996,20 +999,17 @@ export default function App() {
               case "user":
                 return (
                   <div key={i} className="msg user">
-                    <div className="msg-role">
-                      <span>你</span>
-                      {it.text === lastUserText && !busy && !approval && (
-                        <button
-                          type="button"
-                          className="ghost-btn edit-btn"
-                          onClick={() => void onEditLastUser()}
-                          title="编辑并重发（回退一轮）"
-                        >
-                          编辑
-                        </button>
-                      )}
-                    </div>
                     <div className="bubble user">{it.text}</div>
+                    {it.text === lastUserText && !busy && !approval && (
+                      <button
+                        type="button"
+                        className="ghost-btn edit-btn"
+                        onClick={() => void onEditLastUser()}
+                        title="编辑并重发"
+                      >
+                        编辑
+                      </button>
+                    )}
                   </div>
                 );
               case "assistant":
@@ -1073,9 +1073,9 @@ export default function App() {
                 return null;
               case "summary":
                 return (
-                  <div key={i} className="summary-bar" title="D6 轮摘要">
-                    本轮 +{it.input_tokens}/−{it.output_tokens} tok ·{" "}
-                    {(it.ms / 1000).toFixed(1)}s
+                  <div key={i} className="turn-meta" title="轮摘要">
+                    已处理 <b>{(it.ms / 1000).toFixed(0)}s</b>
+                    <span className="dim"> · +{it.input_tokens}/−{it.output_tokens} tok</span>
                   </div>
                 );
               case "files":
@@ -1135,246 +1135,6 @@ export default function App() {
           )}
         </div>
       </main>
-
-      {panelOpen && (
-        <aside className="panel">
-          <div className="panel-head">
-            <div className="panel-tabs" role="tablist">
-              {(
-                [
-                  ["goal", "Goal"],
-                  ["files", "文件"],
-                  ["changes", "改动"],
-                  ["diff", "Diff"],
-                  ["wiki", "Wiki"],
-                ] as const
-              ).map(([id, label]) => (
-                <button
-                  key={id}
-                  type="button"
-                  role="tab"
-                  aria-selected={panelTab === id}
-                  className={panelTab === id ? "tab active" : "tab"}
-                  onClick={() => setPanelTab(id)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <button type="button" className="icon-btn" onClick={() => setPanelOpen(false)}>
-              ×
-            </button>
-          </div>
-          <div className="panel-body">
-            {panelTab === "goal" && (
-              <section className="panel-card">
-                <h3>Goal</h3>
-                <div className="goal-form">
-                  <input
-                    value={goalInput}
-                    placeholder="设定目标，每行一个子任务…"
-                    onChange={(e) => setGoalInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void onSetGoal();
-                    }}
-                  />
-                  <button type="button" className="primary" onClick={() => void onSetGoal()}>
-                    设定
-                  </button>
-                </div>
-                {goal ? (
-                  <div className="goal-card">
-                    <div className="goal-text">{goal.goal}</div>
-                    <div className="muted">
-                      {goal.paused ? "已暂停" : goal.stopped ? `已停：${goal.stopped}` : "运行中"}
-                      {" · iter "}
-                      {goal.iterations} · 剩余 {goal.turns_remaining} 轮
-                    </div>
-                    <ul className="goal-subtasks">
-                      {goal.subtasks.map((s) => (
-                        <li key={s.id}>
-                          <span className="phase">{s.phase ?? "—"}</span> {s.title}
-                        </li>
-                      ))}
-                    </ul>
-                    <div className="mode-grid">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void (goal.paused
-                            ? goalResume(goal.goal_id)
-                            : goalPause(goal.goal_id))
-                        }
-                      >
-                        {goal.paused ? "恢复" : "暂停"}
-                      </button>
-                      <button type="button" onClick={() => void goalClear()}>
-                        清除
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="muted">未设定目标</p>
-                )}
-                <div className="mode-grid" style={{ marginTop: 12 }}>
-                  {EXEC_MODES.map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      className={execMode === m.id ? "primary" : ""}
-                      onClick={() => void onModeChange(m.id)}
-                      disabled={busy}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {panelTab === "files" && (
-              <section className="panel-card files-card">
-                <h3>工作区</h3>
-                <FileTree
-                  root={workspaceRoot || undefined}
-                  selected={filePreview?.path ?? null}
-                  onSelect={(p) => {
-                    setPreviewLoading(true);
-                    void readWorkspaceFile(workspaceRoot || undefined, p)
-                      .then((r) => setFilePreview(r))
-                      .catch((e) =>
-                        setFilePreview({
-                          path: p,
-                          binary: false,
-                          content: String(e),
-                          bytes: 0,
-                        }),
-                      )
-                      .finally(() => setPreviewLoading(false));
-                  }}
-                />
-                {filePreview && (
-                  <div className="file-preview">
-                    <div className="preview-head">
-                      <span className="path" title={filePreview.path}>
-                        {filePreview.path}
-                      </span>
-                      <span className="bytes">{filePreview.bytes} B</span>
-                      <button
-                        type="button"
-                        className="primary"
-                        onClick={() => {
-                          const ref = formatFileRef(filePreview.path);
-                          if (!ref) return;
-                          setInput((v) => (v ? `${v.trimEnd()} ${ref}` : ref));
-                          inputRef.current?.focus();
-                        }}
-                      >
-                        加入引用
-                      </button>
-                    </div>
-                    {previewLoading ? (
-                      <p className="muted">读取中…</p>
-                    ) : filePreview.binary ? (
-                      <p className="muted">二进制文件，不当作文本预览</p>
-                    ) : (
-                      <pre className="preview-body">
-                        {filePreview.content ?? ""}
-                      </pre>
-                    )}
-                  </div>
-                )}
-                <p className="muted">点文件预览 ·「加入引用」写入 @ref</p>
-              </section>
-            )}
-
-            {panelTab === "changes" && (
-              <section className="panel-card">
-                <h3>改动文件</h3>
-                {files.length === 0 ? (
-                  <p className="muted">本轮尚无文件变更</p>
-                ) : (
-                  <ul className="file-list">
-                    {files.map((f) => (
-                      <li key={f.path}>
-                        <span className="path" title={f.path}>
-                          {f.path}
-                        </span>
-                        <span className="stat">
-                          <span className="add">+{f.additions}</span>{" "}
-                          <span className="del">−{f.deletions}</span>
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
-            )}
-
-            {panelTab === "diff" && (
-              <section className="panel-card">
-                <h3>Diff</h3>
-                {lastPatch ? (
-                  <>
-                    <div className="panel-path">
-                      {lastPatch.path}{" "}
-                      <button
-                        type="button"
-                        className="ghost-btn"
-                        onClick={() => setDiffModal({ ...lastPatch })}
-                      >
-                        全屏
-                      </button>
-                    </div>
-                    <DiffView diff={lastPatch.diff} />
-                  </>
-                ) : (
-                  <p className="muted">审批预览或 apply_patch 会出现在这里</p>
-                )}
-              </section>
-            )}
-
-            {panelTab === "wiki" && (
-              <section className="panel-card wiki-card">
-                <h3>Repo Wiki</h3>
-                <RepoWiki root={workspaceRoot || undefined} />
-              </section>
-            )}
-
-            <section className="panel-card">
-              <h3>连接</h3>
-              <p className="muted mono">
-                {init?.server?.name ?? "neo-app-server"} · v{init?.protocol_version ?? "—"} ·{" "}
-                {methods.length} methods
-              </p>
-              {workspaceRoot && (
-                <p className="muted mono path-line" title={workspaceRoot}>
-                  {workspaceRoot}
-                </p>
-              )}
-            </section>
-          </div>
-        </aside>
-      )}
-
-      <div className="status-bar">
-        <span className="sb-left">
-          <span className="sb-item">{branch || "—"}</span>
-          <span className="sb-item">{execMode.replace(/_/g, " ")}</span>
-          {approval && <span className="sb-item warn">待审批</span>}
-        </span>
-        <span className="sb-right">
-          {lastSummary && (
-            <span className="sb-item">
-              +{lastSummary.in}/−{lastSummary.out} tok
-            </span>
-          )}
-          <span className="sb-item">{model}</span>
-          <span className={`sb-item ${status === "error" ? "err" : "ok"}`}>
-            {status === "busy" ? "运行中" : status === "error" ? "异常" : "就绪"}
-          </span>
-        </span>
-      </div>
 
       <footer className="composer">
         <div className="composer-card">
@@ -1485,6 +1245,258 @@ export default function App() {
           </div>
         </div>
       </footer>
+      </div>
+      {/* 右侧：浏览器式标签页（× 关闭 · + 下拉开新），不是全部 tab 挤一行 */}
+      {panelOpen && openTabs.length > 0 && (
+        <WorkbenchShell
+          openTabs={openTabs}
+          active={panelTab}
+          onActive={setPanelTab}
+          onCloseTab={(id) => closeWorkbenchTab(id)}
+          onOpen={(id) => openWorkbench(id)}
+          onClosePanel={() => setPanelOpen(false)}
+        >
+            {panelTab === "review" && (
+              <div className="wb-section">
+                <div className="wb-sub">改动文件</div>
+                {files.length === 0 ? (
+                  <p className="muted pad">本轮尚无文件变更</p>
+                ) : (
+                  <ul className="file-list flush">
+                    {files.map((f) => (
+                      <li key={f.path}>
+                        <span className="path" title={f.path}>{f.path}</span>
+                        <span className="stat">
+                          <span className="add">+{f.additions}</span>{" "}
+                          <span className="del">−{f.deletions}</span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="wb-sub">Diff</div>
+                {lastPatch ? (
+                  <>
+                    <div className="panel-path">
+                      {lastPatch.path}{" "}
+                      <button type="button" className="ghost-btn" onClick={() => setDiffModal({ ...lastPatch })}>
+                        全屏
+                      </button>
+                    </div>
+                    <DiffView diff={lastPatch.diff} />
+                  </>
+                ) : (
+                  <p className="muted pad">审批预览 / apply_patch 会出现在这里</p>
+                )}
+              </div>
+            )}
+
+            {panelTab === "terminal" && (
+              <div className="wb-section terminal">
+                <div className="term-log">
+                  {termLog.length === 0 && (
+                    <div className="muted">命令台（不经模型 · 走沙箱）。输入命令回车执行。</div>
+                  )}
+                  {termLog.map((row, i) => (
+                    <div key={i} className={`term-line ${row.ok ? "ok" : "fail"}`}>
+                      <span className="prompt">$</span> {row.cmd}
+                      {!row.ok && <span className="err"> ✗</span>}
+                    </div>
+                  ))}
+                </div>
+                <form
+                  className="term-input"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void runTerminal(termInput);
+                  }}
+                >
+                  <span className="prompt">$</span>
+                  <input
+                    value={termInput}
+                    onChange={(e) => setTermInput(e.target.value)}
+                    placeholder="ls -la"
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </form>
+              </div>
+            )}
+
+            {panelTab === "files" && (
+              <div className="wb-section">
+                <FileTree
+                  root={workspaceRoot || undefined}
+                  selected={filePreview?.path ?? null}
+                  onSelect={(p) => {
+                    setPreviewLoading(true);
+                    void readWorkspaceFile(workspaceRoot || undefined, p)
+                      .then((r) => setFilePreview(r))
+                      .catch((e) =>
+                        setFilePreview({ path: p, binary: false, content: String(e), bytes: 0 }),
+                      )
+                      .finally(() => setPreviewLoading(false));
+                  }}
+                />
+                {filePreview && (
+                  <div className="file-preview">
+                    <div className="preview-head">
+                      <span className="path" title={filePreview.path}>{filePreview.path}</span>
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={() => {
+                          const ref = formatFileRef(filePreview.path);
+                          if (!ref) return;
+                          setInput((v) => (v ? `${v.trimEnd()} ${ref}` : ref));
+                          inputRef.current?.focus();
+                        }}
+                      >
+                        加入引用
+                      </button>
+                    </div>
+                    {previewLoading ? (
+                      <p className="muted">读取中…</p>
+                    ) : filePreview.binary ? (
+                      <p className="muted">二进制文件</p>
+                    ) : (
+                      <pre className="preview-body">{filePreview.content ?? ""}</pre>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {panelTab === "browser" && (
+              <div className="wb-section">
+                <div className="wb-sub">本地预览</div>
+                {filePreview ? (
+                  <>
+                    <div className="panel-path">{filePreview.path}</div>
+                    {filePreview.binary ? (
+                      <p className="muted pad">二进制 — 不当作文本预览</p>
+                    ) : (
+                      <pre className="preview-body">{filePreview.content ?? ""}</pre>
+                    )}
+                  </>
+                ) : (
+                  <p className="muted pad">在「文件」中选择文件后，此处可预览内容（浏览器工作台）。</p>
+                )}
+                <div className="wb-sub">Repo Wiki</div>
+                <RepoWiki root={workspaceRoot || undefined} />
+              </div>
+            )}
+
+            {panelTab === "chat" && (
+              <div className="wb-section side-chat">
+                <div className="wb-sub">侧边聊天 · 当前会话摘要</div>
+                <div className="chat-log">
+                  {items.filter((i) => i.type === "user" || i.type === "assistant" || i.type === "error").slice(-30).map((it, i) =>
+                    it.type === "user" ? (
+                      <div key={i} className="chat-row user"><b>你</b> {it.text}</div>
+                    ) : it.type === "error" ? (
+                      <div key={i} className="chat-row err">{it.message}</div>
+                    ) : (
+                      <div key={i} className="chat-row bot">
+                        <b>NEO</b> {it.text.slice(0, 280)}
+                        {it.text.length > 280 ? "…" : ""}
+                      </div>
+                    ),
+                  )}
+                  {items.every((i) => i.type === "turn" || i.type === "summary" || i.type === "files") && (
+                    <p className="muted pad">暂无对话 — 在中栏输入任务</p>
+                  )}
+                </div>
+                {approval && (
+                  <div className="approval compact">
+                    <div className="title">待审批 · {approval.kind}</div>
+                    <div className="detail">{approval.detail}</div>
+                    <div className="actions">
+                      <button type="button" className="primary" onClick={() => void onApproval("allow")}>允许</button>
+                      <button type="button" className="danger" onClick={() => void onApproval("deny")}>拒绝</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {panelTab === "sim" && (
+              <div className="wb-section sim">
+                <div className="wb-sub">模拟器</div>
+                <p className="muted pad">设备/场景模拟器 — P2 占位。当前连接：</p>
+                <ul className="sim-list">
+                  <li>app-server · v{init?.protocol_version ?? "—"}</li>
+                  <li>model · {model}</li>
+                  <li>mode · {execMode}</li>
+                  <li>branch · {branch || "—"}</li>
+                </ul>
+                <div className="mode-grid">
+                  {EXEC_MODES.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      className={execMode === m.id ? "primary" : ""}
+                      onClick={() => void onModeChange(m.id)}
+                      disabled={busy}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {panelTab === "goal" && (
+              <div className="wb-section">
+                <div className="goal-form">
+                  <input
+                    value={goalInput}
+                    placeholder="设定目标，每行一个子任务…"
+                    onChange={(e) => setGoalInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void onSetGoal();
+                    }}
+                  />
+                  <button type="button" className="primary" onClick={() => void onSetGoal()}>
+                    设定
+                  </button>
+                </div>
+                {goal ? (
+                  <div className="goal-card flat">
+                    <div className="goal-text">{goal.goal}</div>
+                    <div className="muted">
+                      {goal.paused ? "已暂停" : goal.stopped ? `已停` : "运行中"}
+                      {" · iter "}
+                      {goal.iterations} · 剩余 {goal.turns_remaining} 轮
+                    </div>
+                    <ul className="goal-subtasks">
+                      {goal.subtasks.map((s) => (
+                        <li key={s.id}>
+                          <span className="phase">{s.phase ?? "—"}</span> {s.title}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mode-grid">
+                      <button
+                        type="button"
+                        onClick={() => void (goal.paused ? goalResume(goal.goal_id) : goalPause(goal.goal_id))}
+                      >
+                        {goal.paused ? "恢复" : "暂停"}
+                      </button>
+                      <button type="button" onClick={() => void goalClear()}>清除</button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="muted pad">未设定目标</p>
+                )}
+                <div className="wb-sub">连接</div>
+                <p className="muted mono pad">
+                  {init?.server?.name ?? "neo-app-server"} · {methods.length} methods
+                </p>
+              </div>
+            )}
+        </WorkbenchShell>
+      )}
     </div>
   );
 }

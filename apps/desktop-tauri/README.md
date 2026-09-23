@@ -37,6 +37,9 @@ npm run tauri dev
 - `thread/*`、`models/list`、`git/info`、`approval/respond`
 - Enter 发送 · Shift+Enter 换行 · Esc 中断
 
+> **产品形态真源**：先读 [`docs/PRODUCT-IA.md`](docs/PRODUCT-IA.md)，再改 UI。
+> 禁止单靠截图打补丁。
+
 ## 复刻标准进度（对照 `docs/desktop-parity.md` D1–D12）
 
 | # | 项 | 状态 |

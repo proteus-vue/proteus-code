@@ -1,0 +1,124 @@
+/**
+ * PRODUCT-IA 三区布局权威层 —— 必须最后加载，覆盖历史补丁 CSS。
+ * 依据：docs/PRODUCT-IA.md §0 §2
+ */
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+.app {
+  display: flex !important;
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  grid-template-areas: none !important;
+}
+
+.sidebar,
+.rail.left-rail,
+.center,
+.panel.workbench {
+  height: 100%;
+  min-height: 0;
+  flex-shrink: 0;
+}
+
+.sidebar {
+  width: var(--sidebar-width);
+  flex: 0 0 var(--sidebar-width);
+  display: flex;
+  flex-direction: column;
+}
+
+.rail.left-rail {
+  width: 48px;
+  flex: 0 0 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding-top: calc(env(titlebar-area-height, 0px) + 10px);
+  background: var(--surface-sidebar);
+  border-right: 1px solid var(--line);
+}
+
+.center {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--surface-app);
+}
+
+.center .toolbar {
+  display: none !important;
+}
+
+.center .stream {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  overflow: auto;
+  padding-top: calc(env(titlebar-area-height, 0px) + 16px);
+  display: flex;
+  flex-direction: column;
+}
+
+.center .stream-inner {
+  flex: 1;
+  width: min(100%, var(--content-max-width));
+  margin: 0 auto;
+}
+
+.center .composer {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 0 20px 12px;
+}
+
+.panel.workbench {
+  flex: 0 0 min(380px, 36vw);
+  width: min(380px, 36vw);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: visible !important;
+  border-left: 1px solid var(--line);
+  background: var(--surface-sidebar);
+}
+
+.panel.workbench .wb-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.browser-tabs {
+  overflow: visible !important;
+  z-index: 20;
+  flex-shrink: 0;
+}
+
+.status-bar {
+  display: none !important;
+}
+
+/* 菜单外点关闭遮罩 */
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-modal) - 1);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: default;
+}

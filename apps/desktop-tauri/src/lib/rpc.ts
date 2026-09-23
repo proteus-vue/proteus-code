@@ -46,6 +46,24 @@ export async function resumeThread(id: string): Promise<unknown> {
   return rpc("thread/resume", { id });
 }
 
+export async function deleteThread(id: string): Promise<boolean> {
+  const r = await rpc<{ removed?: boolean }>("thread/delete", { id });
+  return Boolean(r.removed);
+}
+
+/** 用户改名：同一会话 JSONL 追加 op/set_title。 */
+export async function renameThread(
+  id: string,
+  title: string,
+): Promise<{ id: string; title: string; has_title?: boolean }> {
+  return rpc("thread/rename", { id, title });
+}
+
+/** 历史事实投影（facts_of），不切换会话。 */
+export async function threadHistory(id?: string): Promise<import("./protocol").HistoryResult> {
+  return rpc("thread/history", id ? { id } : {});
+}
+
 export async function startTurn(text: string): Promise<unknown> {
   return rpc("turn/start", { text });
 }
