@@ -60,15 +60,93 @@ function ensurePickChrome(doc: Document) {
     const st = doc.createElement("style");
     st.id = HL_STYLE_ID;
     st.textContent = `
-      .neo-hl { outline: 2px solid #3b82f6 !important; outline-offset: 2px !important; }
+      /* Codex 式：整页压暗 + 细蓝框 + 双列信息卡 */
+      html.neo-pick-on, html.neo-pick-on body {
+        cursor: crosshair !important;
+      }
+      html.neo-pick-on::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.18);
+        z-index: 2147483000;
+        pointer-events: none;
+      }
+      .neo-hl {
+        outline: 2px solid #3b82f6 !important;
+        outline-offset: 1px !important;
+        box-shadow: 0 0 0 1px rgba(59,130,246,0.35) !important;
+      }
       #${BANNER_ID} {
-        position: fixed; left: 12px; bottom: 48px; z-index: 2147483647;
-        background: #1f2937; color: #f9fafb; font: 12px/1.45 ui-monospace, monospace;
-        padding: 8px 10px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
-        max-width: min(420px, 90vw); pointer-events: none; white-space: pre-wrap;
+        position: fixed;
+        z-index: 2147483647;
+        min-width: 220px;
+        max-width: min(360px, 92vw);
+        background: #3a4150;
+        color: #f3f4f6;
+        border-radius: 14px;
+        padding: 14px 16px;
+        box-shadow: 0 12px 40px rgba(0,0,0,.4);
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        font-size: 15px;
+        line-height: 1.35;
+        pointer-events: none;
+      }
+      #${BANNER_ID} .neo-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        margin-top: 6px;
+      }
+      #${BANNER_ID} .neo-row:first-child { margin-top: 0; }
+      #${BANNER_ID} .neo-k {
+        color: #9ca3af;
+        font-weight: 500;
+        font-size: 14px;
+        flex-shrink: 0;
+      }
+      #${BANNER_ID} .neo-v {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        text-align: right;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+      #${BANNER_ID} .neo-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 20px;
+        margin-bottom: 4px;
+      }
+      #${BANNER_ID} .neo-tag {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: #fff;
+      }
+      #${BANNER_ID} .neo-size {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: #fff;
+        font-variant-numeric: tabular-nums;
+      }
+      #${BANNER_ID} .neo-hint {
+        margin-top: 10px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(255,255,255,0.12);
+        color: #9ca3af;
+        font-size: 12px;
       }
     `;
     (doc.head || doc.documentElement).appendChild(st);
+  }
+  if (!doc.documentElement.classList.contains("neo-pick-on")) {
+    doc.documentElement.classList.add("neo-pick-on");
   }
 }
 
@@ -79,6 +157,8 @@ function clearHover(doc: Document) {
 function removeChrome(doc: Document) {
   clearHover(doc);
   doc.getElementById(BANNER_ID)?.remove();
+  doc.documentElement.classList.remove("neo-pick-on");
+  doc.body?.classList.remove("neo-pick-on");
 }
 
 function describeEl(el: Element): { w: number; h: number; color: string; font: string } {
@@ -87,9 +167,16 @@ function describeEl(el: Element): { w: number; h: number; color: string; font: s
   return {
     w: Math.round(r.width),
     h: Math.round(r.height),
-    color: cs?.color || "",
+    color: rgbToHex(cs?.color || ""),
     font: (cs?.font || "").slice(0, 48),
   };
+}
+
+function rgbToHex(c: string): string {
+  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(c);
+  if (!m) return c;
+  const hex = [1, 2, 3].map((i) => Number(m[i]).toString(16).padStart(2, "0")).join("");
+  return `#${hex}`;
 }
 
 /** 父页对同源 iframe 挂点选；返回 detach。失败返回 null（跨域）。 */
@@ -121,18 +208,23 @@ function attachPicker(
       doc.body.appendChild(banner);
     }
     const tag = t.tagName.toLowerCase();
-    banner.textContent = [
-      tag,
-      `${meta.w}×${meta.h}`,
-      meta.color ? `Color ${meta.color}` : "",
-      meta.font ? `Font ${meta.font}` : "",
-      "点击加入对话 · Esc 取消",
-    ]
-      .filter(Boolean)
-      .join("\n");
-    // 靠近光标
-    banner.style.left = `${Math.min(ev.clientX + 14, (doc.defaultView?.innerWidth ?? 800) - 200)}px`;
-    banner.style.top = `${Math.min(ev.clientY + 14, (doc.defaultView?.innerHeight ?? 600) - 80)}px`;
+    banner.innerHTML =
+      `<div class="neo-head">` +
+      `<span class="neo-tag"></span>` +
+      `<span class="neo-size"></span>` +
+      `</div>` +
+      `<div class="neo-row"><span class="neo-k">Color</span><span class="neo-v neo-color"></span></div>` +
+      `<div class="neo-row"><span class="neo-k">Font</span><span class="neo-v neo-font"></span></div>` +
+      `<div class="neo-hint">点击加入对话 · Esc 取消</div>`;
+    (banner.querySelector(".neo-tag") as HTMLElement).textContent = tag;
+    (banner.querySelector(".neo-size") as HTMLElement).textContent = `${meta.w}×${meta.h}`;
+    (banner.querySelector(".neo-color") as HTMLElement).textContent = meta.color || "—";
+    (banner.querySelector(".neo-font") as HTMLElement).textContent = (meta.font || "—").slice(0, 42);
+    const vw = doc.defaultView?.innerWidth ?? 800;
+    const vh = doc.defaultView?.innerHeight ?? 600;
+    banner.style.left = `${Math.min(ev.clientX + 16, vw - 280)}px`;
+    banner.style.top = `${Math.min(ev.clientY + 16, vh - 160)}px`;
+    banner.style.right = "auto";
     banner.style.bottom = "auto";
   };
 

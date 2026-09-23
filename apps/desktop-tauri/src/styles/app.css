@@ -5811,3 +5811,21 @@ button.ctx-chip:hover {
 .br-pick-bar .ghost-btn {
   margin-left: auto;
 }
+
+/* IA-34 Codex 式点选工具钮 */
+.br-btn.br-pick {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+.br-btn.br-pick.active {
+  background: #111 !important;
+  color: #fff !important;
+  border-color: #111 !important;
+}
+
+:root[data-theme="dark"] .br-btn.br-pick.active {
+  background: #f2f2f2 !important;
+  color: #111 !important;
+}
