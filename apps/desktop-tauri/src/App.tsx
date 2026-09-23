@@ -20,7 +20,7 @@ import {
   readWorkspaceFile,
   type FilePreview,
 } from "./components/FileTree";
-import { BrowserPane } from "./components/BrowserPane";
+import { BrowserPane, type WebElementPick } from "./components/BrowserPane";
 import {
   ThinkingBlock,
   ToolGroup,
@@ -198,6 +198,8 @@ export default function App() {
   const [items, setItems] = useState<UiItem[]>([]);
   const [approval, setApproval] = useState<ApprovalState | null>(null);
   const [input, setInput] = useState("");
+  /** IA-35：选中的网页元素附件（chip），不塞进 textarea */
+  const [webPicks, setWebPicks] = useState<WebElementPick[]>([]);
   const [stderrLines, setStderrLines] = useState<string[]>([]);
   const [execMode, setExecMode] = useState<ExecMode>("default");
   const [panelOpen, setPanelOpen] = useState(true);
@@ -637,6 +639,7 @@ export default function App() {
     setFileEntries([]);
     setFilePreview(null);
     setInput("");
+    setWebPicks([]);
   }, []);
 
   /** 真切换到某个项目目录 */
@@ -702,22 +705,39 @@ export default function App() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [items, approval]);
 
+  const formatWebPick = (el: WebElementPick): string => {
+    const parts: string[] = [`【网页元素】 ${el.url}`, `selector: \`${el.selector}\``];
+    if (el.size) parts.push(`size: ${el.size}`);
+    if (el.color) parts.push(`color: ${el.color}`);
+    if (el.font) parts.push(`font: ${el.font}`);
+    if (el.text) parts.push(`\ntext:\n${el.text}`);
+    if (el.html) parts.push(`\nhtml:\n${el.html}`);
+    return parts.join("\n");
+  };
+
   const send = useCallback(async () => {
     const text = input.trim();
-    if (!text || blocked) return;
-    // IA-10：整行斜杠由壳执行（在 runSlashLine 挂上后生效）
-    if (await slashRunnerRef.current(text)) {
+    if ((!text && webPicks.length === 0) || blocked) return;
+    // 附件在发送时拼进消息，不占输入框
+    const withAtt =
+      webPicks.length > 0
+        ? [text, ...webPicks.map(formatWebPick)].filter(Boolean).join("\n\n")
+        : text;
+    if (!withAtt) return;
+    if (await slashRunnerRef.current(text || withAtt)) {
       setInput("");
+      setWebPicks([]);
       return;
     }
     setInput("");
+    setWebPicks([]);
     try {
-      await startTurn(text);
+      await startTurn(withAtt);
     } catch (e) {
       append({ type: "error", message: String(e) });
       setStatus("error");
     }
-  }, [append, blocked, input]);
+  }, [append, blocked, input, webPicks]);
 
   const stop = useCallback(async () => {
     try {
@@ -1690,6 +1710,33 @@ export default function App() {
           )}
         </div>
         <div className="composer-card">
+          {webPicks.length > 0 && (
+            <div className="attach-chips" role="list" aria-label="网页元素附件">
+              <span
+                className="attach-chip"
+                role="listitem"
+                title={webPicks.map((e) => `${e.tag} ${e.selector}`).join("\n")}
+              >
+                <Icon name="browser" size={13} />
+                <span className="attach-label">
+                  {webPicks.length === 1
+                    ? `${webPicks[0].tag} 元素`
+                    : `${webPicks.length} 个网页元素`}
+                </span>
+                <button
+                  type="button"
+                  className="attach-x"
+                  aria-label="移除全部网页元素"
+                  onClick={() => setWebPicks([])}
+                >
+                  <Icon name="close" size={12} />
+                </button>
+              </span>
+              {webPicks.length > 1 && (
+                <span className="attach-more">+{webPicks.length - 1}</span>
+              )}
+            </div>
+          )}
           <div className="at-wrap">
             <textarea
               ref={inputRef}
@@ -1697,11 +1744,13 @@ export default function App() {
               placeholder={
                 approval
                   ? "待审批 — 输入已锁定"
-                  : isNewTask
-                    ? "描述要做的任务，用 @ 引用文件、/ 命令，或 ⌘K…"
-                    : busy
-                      ? "继续输入以排队后续修改"
-                      : "继续输入…"
+                  : webPicks.length
+                    ? "对选中的网页元素提出后续修改要求…"
+                    : isNewTask
+                      ? "描述要做的任务，用 @ 引用文件、/ 命令，或 ⌘K…"
+                      : busy
+                        ? "继续输入以排队后续修改"
+                        : "继续输入…"
               }
               onChange={(e) => onInputChange(e.target.value)}
               onKeyDown={(e) => {
@@ -1835,7 +1884,7 @@ export default function App() {
               type="button"
               className="send-circle"
               onClick={() => void send()}
-              disabled={blocked || !input.trim()}
+              disabled={blocked || (!input.trim() && webPicks.length === 0)}
               aria-label="发送"
             >
               <Icon name={busy ? "stop" : "send"} size={16} />
@@ -2204,27 +2253,12 @@ export default function App() {
                 filePreview={filePreview}
                 workspaceRoot={workspaceRoot || undefined}
                 onPickElement={(el) => {
-                  const block = [
-                    `【网页元素】 ${el.url}`,
-                    `selector: \`${el.selector}\``,
-                    el.text ? `
-${el.text}` : "",
-                    el.html ? `
-\`\`\`html
-${el.html}
-\`\`\`` : "",
-                  ]
-                    .filter(Boolean)
-                    .join("\n");
-                  setInput((v) => (v ? `${v.trimEnd()}\n\n${block}` : block));
-                  requestAnimationFrame(() => {
-                    inputRef.current?.focus();
-                    inputRef.current?.setSelectionRange(
-                      inputRef.current.value.length,
-                      inputRef.current.value.length,
-                    );
+                  setWebPicks((prev) => [...prev, el].slice(-6));
+                  requestAnimationFrame(() => inputRef.current?.focus());
+                  append({
+                    type: "status",
+                    message: `已附加网页元素 ${el.tag}${el.selector ? ` ${el.selector}` : ""}`,
                   });
-                  append({ type: "status", message: `已加入网页元素 ${el.selector}` });
                 }}
               />
             )}
