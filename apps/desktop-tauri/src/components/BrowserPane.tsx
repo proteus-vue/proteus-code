@@ -1,10 +1,11 @@
 /**
- * 浏览器工作台（RpBrowser · IA-30/32）：
- * 地址栏 + 预览 + **点选元素加入对话** + Wiki。
+ * 浏览器工作台（RpBrowser · IA-30/32/33）：
+ * 地址栏 + 预览 + **点选元素入对话** + Wiki。
  *
- * 点选：本地/抓取后的 srcdoc 注入脚本；跨域 iframe 先 fetch_url 转 srcdoc。
+ * 点选不依赖页内 CSP 脚本：父页面对**同源 iframe**（srcdoc/抓取页）
+ * 直接挂 mousemove/click，画蓝框 + 元素信息浮层（对齐 ZCode 观感）。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "./Icon";
 import { fetchUrl, openUrl } from "../lib/rpc";
 import { RepoWiki } from "./RepoWiki";
@@ -16,6 +17,9 @@ export type WebElementPick = {
   tag: string;
   text: string;
   html: string;
+  size?: string;
+  color?: string;
+  font?: string;
 };
 
 type Mode = "web" | "wiki";
@@ -28,72 +32,144 @@ function normalizeUrl(raw: string): string {
   return `https://www.google.com/search?q=${encodeURIComponent(s)}`;
 }
 
-/** 注入 iframe 的点选脚本（仅 srcdoc/同源可控 DOM） */
-const PICKER_SCRIPT = `
-<style id="neo-pick-style">
-  [data-neo-hl]{outline:2px solid #ff6a2b !important;outline-offset:2px !important;cursor:crosshair !important;}
-  #neo-pick-banner{position:fixed;left:12px;bottom:12px;z-index:2147483647;background:#111;color:#fff;
-    font:12px/1.4 system-ui,sans-serif;padding:6px 10px;border-radius:8px;pointer-events:none}
-</style>
-<script id="neo-pick-script">
-(function(){
-  if (window.__neoPick) return;
-  var onMove = function(e){
-    var t = e.target;
-    if (!(t instanceof Element)) return;
-    Array.prototype.forEach.call(document.querySelectorAll('[data-neo-hl]'), function(el){ el.removeAttribute('data-neo-hl'); });
-    t.setAttribute('data-neo-hl','1');
-    var b = document.getElementById('neo-pick-banner');
-    if (!b){ b = document.createElement('div'); b.id='neo-pick-banner'; document.body.appendChild(b); }
-    b.textContent = '选取元素 · 点击加入对话 · Esc 取消  ·  ' + t.tagName.toLowerCase();
-  };
-  var onClick = function(e){
-    e.preventDefault(); e.stopPropagation();
-    var t = e.target;
-    if (!(t instanceof Element)) return;
-    function sel(el){
-      if (el.id) return '#' + CSS.escape(el.id);
-      var parts = [];
-      var n = el;
-      while (n && n.nodeType === 1 && n !== document.body && parts.length < 5){
-        var tag = n.tagName.toLowerCase();
-        var i = 1, s = n.previousElementSibling;
-        while (s){ if (s.tagName === n.tagName) i++; s = s.previousElementSibling; }
-        parts.unshift(tag + ':nth-child(' + i + ')');
-        n = n.parentElement;
-      }
-      return 'body > ' + parts.join(' > ');
+function cssPath(el: Element): string {
+  if (el.id) return `#${CSS.escape(el.id)}`;
+  const parts: string[] = [];
+  let n: Element | null = el;
+  let i = 0;
+  while (n && n.nodeType === 1 && n !== n.ownerDocument?.body && i < 6) {
+    const tag = n.tagName.toLowerCase();
+    let idx = 1;
+    let s = n.previousElementSibling;
+    while (s) {
+      if (s.tagName === n.tagName) idx++;
+      s = s.previousElementSibling;
     }
-    var payload = {
-      type: 'neo-pick-element',
-      url: location.href,
-      selector: sel(t),
-      tag: t.tagName.toLowerCase(),
-      text: (t.innerText || t.textContent || '').trim().slice(0, 4000),
-      html: t.outerHTML.slice(0, 8000)
-    };
-    window.parent.postMessage(payload, '*');
-    if (window.top) window.top.postMessage(payload, '*');
-    cleanup();
-  };
-  var onKey = function(e){ if (e.key === 'Escape') cleanup(); };
-  function cleanup(){
-    document.removeEventListener('mousemove', onMove, true);
-    document.removeEventListener('click', onClick, true);
-    document.removeEventListener('keydown', onKey, true);
-    Array.prototype.forEach.call(document.querySelectorAll('[data-neo-hl]'), function(el){ el.removeAttribute('data-neo-hl'); });
-    var b = document.getElementById('neo-pick-banner'); if (b) b.remove();
-    window.__neoPick = false;
+    parts.unshift(`${tag}:nth-child(${idx})`);
+    n = n.parentElement;
+    i++;
   }
-  window.__neoPick = true;
-  document.addEventListener('mousemove', onMove, true);
-  document.addEventListener('click', onClick, true);
-  document.addEventListener('keydown', onKey, true);
-  var b = document.getElementById('neo-pick-banner');
-  if (!b){ b = document.createElement('div'); b.id='neo-pick-banner'; document.body.appendChild(b); }
-  b.textContent = '选取元素 · 点击加入对话 · Esc 取消';
-})();
-`;
+  return `body > ${parts.join(" > ")}`;
+}
+
+const HL_STYLE_ID = "neo-pick-style";
+const BANNER_ID = "neo-pick-banner";
+
+function ensurePickChrome(doc: Document) {
+  if (!doc.getElementById(HL_STYLE_ID)) {
+    const st = doc.createElement("style");
+    st.id = HL_STYLE_ID;
+    st.textContent = `
+      .neo-hl { outline: 2px solid #3b82f6 !important; outline-offset: 2px !important; }
+      #${BANNER_ID} {
+        position: fixed; left: 12px; bottom: 48px; z-index: 2147483647;
+        background: #1f2937; color: #f9fafb; font: 12px/1.45 ui-monospace, monospace;
+        padding: 8px 10px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+        max-width: min(420px, 90vw); pointer-events: none; white-space: pre-wrap;
+      }
+    `;
+    (doc.head || doc.documentElement).appendChild(st);
+  }
+}
+
+function clearHover(doc: Document) {
+  doc.querySelectorAll(".neo-hl").forEach((e) => e.classList.remove("neo-hl"));
+}
+
+function removeChrome(doc: Document) {
+  clearHover(doc);
+  doc.getElementById(BANNER_ID)?.remove();
+}
+
+function describeEl(el: Element): { w: number; h: number; color: string; font: string } {
+  const cs = (el.ownerDocument?.defaultView as Window | null)?.getComputedStyle(el);
+  const r = el.getBoundingClientRect();
+  return {
+    w: Math.round(r.width),
+    h: Math.round(r.height),
+    color: cs?.color || "",
+    font: (cs?.font || "").slice(0, 48),
+  };
+}
+
+/** 父页对同源 iframe 挂点选；返回 detach。失败返回 null（跨域）。 */
+function attachPicker(
+  iframe: HTMLIFrameElement,
+  pageUrl: string,
+  onPick: (el: WebElementPick) => void,
+): (() => void) | null {
+  let doc: Document;
+  try {
+    doc = iframe.contentDocument as Document;
+  } catch {
+    return null;
+  }
+  if (!doc || !doc.body) return null;
+
+  ensurePickChrome(doc);
+
+  const onMove = (ev: MouseEvent) => {
+    const t = ev.target as Element | null;
+    if (!t || t.nodeType !== 1) return;
+    clearHover(doc);
+    t.classList.add("neo-hl");
+    const meta = describeEl(t);
+    let banner = doc.getElementById(BANNER_ID);
+    if (!banner) {
+      banner = doc.createElement("div");
+      banner.id = BANNER_ID;
+      doc.body.appendChild(banner);
+    }
+    const tag = t.tagName.toLowerCase();
+    banner.textContent = [
+      tag,
+      `${meta.w}×${meta.h}`,
+      meta.color ? `Color ${meta.color}` : "",
+      meta.font ? `Font ${meta.font}` : "",
+      "点击加入对话 · Esc 取消",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    // 靠近光标
+    banner.style.left = `${Math.min(ev.clientX + 14, (doc.defaultView?.innerWidth ?? 800) - 200)}px`;
+    banner.style.top = `${Math.min(ev.clientY + 14, (doc.defaultView?.innerHeight ?? 600) - 80)}px`;
+    banner.style.bottom = "auto";
+  };
+
+  const onClick = (ev: MouseEvent) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const t = ev.target as Element | null;
+    if (!t || t.nodeType !== 1) return;
+    const meta = describeEl(t);
+    onPick({
+      url: pageUrl || doc.URL || "",
+      selector: cssPath(t),
+      tag: t.tagName.toLowerCase(),
+      text: (t.textContent || "").trim().slice(0, 4000),
+      html: t.outerHTML.slice(0, 8000),
+      size: `${meta.w}×${meta.h}`,
+      color: meta.color,
+      font: meta.font,
+    });
+  };
+
+  const onKey = (ev: KeyboardEvent) => {
+    if (ev.key === "Escape") detach();
+  };
+
+  const detach = () => {
+    doc.removeEventListener("mousemove", onMove, true);
+    doc.removeEventListener("click", onClick, true);
+    (doc.defaultView || window).removeEventListener("keydown", onKey, true);
+    removeChrome(doc);
+  };
+
+  doc.addEventListener("mousemove", onMove, true);
+  doc.addEventListener("click", onClick, true);
+  (doc.defaultView || window).addEventListener("keydown", onKey, true);
+  return detach;
+}
 
 export function BrowserPane({
   filePreview,
@@ -115,57 +191,80 @@ export function BrowserPane({
   const [iframeKey, setIframeKey] = useState(0);
   const [err, setErr] = useState<string | null>(null);
   const [pickMode, setPickMode] = useState(false);
-  const [picking, setPicking] = useState(false);
-  const pickBusy = useRef(false);
+  const detachRef = useRef<(() => void) | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+
+  const teardownPick = useCallback(() => {
+    detachRef.current?.();
+    detachRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (mode !== "web") return;
-    if (filePreview && /\.html?$/i.test(filePreview.path) && !filePreview.binary && filePreview.content) {
+    if (
+      filePreview &&
+      /\.html?$/i.test(filePreview.path) &&
+      !filePreview.binary &&
+      filePreview.content
+    ) {
       setSrcDoc(filePreview.content);
       setUrl(`file://${filePreview.path}`);
       setInput(`file://${filePreview.path}`);
       setErr(null);
+      setPickMode(false);
     }
   }, [filePreview, mode]);
 
-  // 父窗口收 iframe 点选结果
+  useEffect(() => () => teardownPick(), [teardownPick]);
+
+  // 收旧 postMessage（兼容）
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
-      const d = e.data;
-      if (!d || typeof d !== "object" || (d as { type?: string }).type !== "neo-pick-element") return;
-      const pick = d as unknown as WebElementPick;
+      const d = e.data as { type?: string } | null;
+      if (!d || d.type !== "neo-pick-element") return;
       setPickMode(false);
-      setPicking(false);
-      onPickElement?.(pick);
+      teardownPick();
+      onPickElement?.(e.data as unknown as WebElementPick);
     };
     window.addEventListener("message", onMsg);
     return () => window.removeEventListener("message", onMsg);
-  }, [onPickElement]);
+  }, [onPickElement, teardownPick]);
 
-  // pickMode 时把脚本附到 srcdoc 并强制重载 iframe
-  const viewDoc = useMemo(() => {
-    if (!srcDoc) return null;
-    if (!pickMode) return srcDoc;
-    if (srcDoc.includes("neo-pick-script")) {
-      // 已含脚本则不再追加；切换 pick 仍靠 iframeKey 重挂
-      return srcDoc;
-    }
-    return `${srcDoc}\n${PICKER_SCRIPT}`;
-  }, [srcDoc, pickMode]);
+  const attachFromIframe = useCallback(
+    (iframe: HTMLIFrameElement | null) => {
+      teardownPick();
+      if (!pickMode || !iframe) return;
+      const det = attachPicker(iframe, url, (el) => {
+        setPickMode(false);
+        teardownPick();
+        onPickElement?.(el);
+      });
+      if (!det) {
+        setErr("无法读取该页面（跨域）— 点「选取」会先抓取为可注入预览");
+      } else {
+        detachRef.current = det;
+        setErr(null);
+      }
+    },
+    [onPickElement, pickMode, teardownPick, url],
+  );
 
+  // srcdoc / key 变化后挂上
   useEffect(() => {
-    if (mode === "web") setIframeKey((k) => k + 1);
-  }, [pickMode, mode]);
+    if (!pickMode || mode !== "web") return;
+    const id = window.setTimeout(() => attachFromIframe(iframeRef.current), 50);
+    return () => window.clearTimeout(id);
+  }, [attachFromIframe, iframeKey, pickMode, mode, srcDoc]);
 
   const navigate = (raw: string) => {
     const next = normalizeUrl(raw);
     if (!next) return;
+    teardownPick();
+    setPickMode(false);
     setUrl(next);
     setInput(next);
     setSrcDoc(null);
     setErr(null);
-    setPickMode(false);
-    setPicking(false);
     localStorage.setItem("neo-browser-url", next);
     setHistory((h) => {
       const cut = h.slice(0, hi + 1);
@@ -198,7 +297,10 @@ export function BrowserPane({
     setIframeKey((k) => k + 1);
   };
 
-  const reload = () => setIframeKey((k) => k + 1);
+  const reload = () => {
+    teardownPick();
+    setIframeKey((k) => k + 1);
+  };
 
   const external = async () => {
     try {
@@ -209,38 +311,44 @@ export function BrowserPane({
   };
 
   const startPick = useCallback(async () => {
-    if (pickBusy.current) return;
-    pickBusy.current = true;
-    setPicking(true);
+    setMode("web");
     setErr(null);
-    try {
-      // 远程页没有 srcdoc → 先抓 HTML，再注入点选脚本
-      if (!srcDoc && /^https?:\/\//i.test(url)) {
+    // 远程且尚无可注入 HTML → 先抓
+    const needFetch =
+      /^https?:\/\//i.test(url) &&
+      (!srcDoc || !srcDoc.includes("<html") && !srcDoc.includes("<!DOCTYPE"));
+    // 更稳：远程始终抓一次，保证同源可操纵
+    const isHttp = /^https?:\/\//i.test(url);
+    if (isHttp) {
+      try {
         const html = await fetchUrl(url);
-        if (!html || !html.includes("<")) {
-          throw new Error("页面内容不像 HTML，无法点选");
+        if (html && /</.test(html)) {
+          setSrcDoc(html);
+        } else {
+          setErr("抓取页面失败，无法点选");
+          return;
         }
-        setSrcDoc(html);
-      } else if (!srcDoc && !/^https?:/i.test(url)) {
-        throw new Error("当前无可注入页面 — 先打开网页或选择 .html 文件");
+      } catch (e) {
+        setErr(String(e));
+        return;
       }
-      setPickMode(true);
-      setMode("web");
-      setIframeKey((k) => k + 1);
-    } catch (e) {
-      setPicking(false);
-      setErr(String(e));
-      setPickMode(false);
-    } finally {
-      pickBusy.current = false;
+    } else if (!srcDoc && !/file:/i.test(url)) {
+      setErr("请先打开网页，或在文件中选择 .html");
+      return;
     }
+    void needFetch;
+    setPickMode(true);
+    setIframeKey((k) => k + 1);
   }, [srcDoc, url]);
 
   const stopPick = () => {
+    teardownPick();
     setPickMode(false);
-    setPicking(false);
     setIframeKey((k) => k + 1);
   };
+
+  // 本地 html 用 srcdoc；远程抓取后也用 srcdoc，保证可 attach
+  const useSrc = Boolean(srcDoc);
 
   return (
     <div className="wb-section browser-pane">
@@ -320,8 +428,7 @@ export function BrowserPane({
       {err && <div className="br-err">{err}</div>}
       {pickMode && (
         <div className="br-pick-bar">
-          选取模式：悬停高亮 · <b>点击元素</b>加入对话 · <kbd>Esc</kbd> 取消
-          {picking && srcDoc ? " · 准备中…" : ""}
+          选取中：悬停 <b style={{ color: "#3b82f6" }}>蓝框</b> + 元素信息 · 点击加入对话 · Esc 结束
           <button type="button" className="ghost-btn" onClick={stopPick}>
             结束
           </button>
@@ -330,43 +437,39 @@ export function BrowserPane({
 
       {mode === "web" ? (
         <div className="br-frame">
-          {viewDoc ? (
+          {useSrc ? (
             <iframe
               key={`doc-${iframeKey}`}
+              ref={iframeRef}
               title="页面预览"
               className="br-iframe"
+              // srcdoc 同源：父页可直接操作 DOM（不塞页内脚本，避开 CSP）
               sandbox="allow-scripts allow-same-origin allow-modals"
-              srcDoc={viewDoc}
-              onLoad={() => {
-                // 同源/ srcdoc 时也可补注入（fetch 后已含脚本则 noop）
-                try {
-                  const doc = (document.getElementById("neo-br") as HTMLIFrameElement | null)
-                    ?.contentDocument;
-                  void doc;
-                } catch {
-                  /* cross-origin */
-                }
+              srcDoc={srcDoc ?? ""}
+              onLoad={(e) => {
+                // 等 body 就绪再 attach
+                requestAnimationFrame(() => attachFromIframe(e.currentTarget));
               }}
             />
           ) : (
             <iframe
               key={`web-${iframeKey}`}
-              id="neo-br"
+              ref={iframeRef}
               title="网页预览"
               className="br-iframe"
               src={url}
               sandbox="allow-scripts allow-forms allow-same-origin"
-              onLoad={() => setErr(null)}
+              onLoad={() => {
+                if (pickMode) attachFromIframe(iframeRef.current);
+                else setErr(null);
+              }}
               onError={() => setErr("页面加载失败 — 可点右侧「系统打开」")}
             />
           )}
           <p className="br-hint">
             {pickMode
-              ? "点选模式开启中；远程页已尽量转为可注入预览。"
-              : "部分站点禁止内嵌；失败请用「系统打开」。「选取」可把元素送入对话。"}
-            {filePreview && /\.html?$/i.test(filePreview.path) && (
-              <> · 当前：<code>{filePreview.path}</code></>
-            )}
+              ? "蓝框悬停 · 点击元素写入对话；远程页点「选取」会先抓取为可注入预览。"
+              : "部分站点禁止内嵌；失败用「系统打开」。选取可把元素送入对话。"}
           </p>
         </div>
       ) : (
