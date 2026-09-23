@@ -6584,3 +6584,54 @@ Web 宿主 `kind` 撞键修复、`--listen unix://`、或回到产品层（签�
   与"没什么进展"的直觉印象**不同**。盘点本身就是产出：它把"感觉"换成了一张
   可逐项核对的表，也顺带暴露了三处从未登记进缺口表的欠账。
 
+
+## 会话接续点（最近：2026-09-23/24 · Tauri 桌面 IA 对齐 + 协议 thread/rename）
+
+**范围**：`apps/desktop-tauri` 壳 + `thread/rename` 协议；真源是仓库内
+**`apps/desktop-tauri/docs/PRODUCT-IA.md`**（不是 session notes）。  
+工作树干净时 **origin/main ahead 37**（本条写入后连同 PROJECT_MEMORY 再 +1 再 push）。
+
+### 已落地（PRODUCT-IA §9 IA-1…40 主体）
+
+| 类 | 项 |
+| --- | --- |
+| 协议 | `thread/rename` + `SessionStore::set_title`（同一 JSONL `op/set_title`，append-only）；方法表 29；schema 重生成 |
+| 三区壳 | 无中栏芯片条 · 浏览器标签 + · 分栏拖拽 persist · 侧栏图标轨 |
+| 会话 | 列表极简 · 双击改名 · 两击删（非 `window.confirm`）· 当前会话先切走再删 · 标题 hover marquee |
+| 项目 | **projectMode = workspace \| none**；`~/.neo/no-project`；Composer 芯片下拉（不在项目中工作 / 最近 / 打开文件夹）；**仅欢迎页显示选择器**（IA-36） |
+| Composer | 新建任务 vs 对话分态 · 斜杠 11 条 · 附件 chip（网页元素 IA-35） |
+| 右栏 | 浏览器地址栏+iframe+Wiki · 点选元素入附件 · 子智能体 `agent_*` · Automations · **+ 菜单右锚定防出屏** · 标题贴图标左 |
+| 设计 | Icon.tsx / Select.tsx · 去原生 select · 悬停近黑修复 |
+| 内核 UX | 命令台 stdout 回显（非 PTY，诚实边界） |
+
+### 关键坑（复用）
+
+1. **`.composer { pointer-events:none }`** 只给卡片 `auto` → 兄弟节点芯片点不穿（IA-26）。  
+2. **全屏 `position:fixed` backdrop + Overlay 标题栏** → macOS 整窗灰、鼠标移出才重绘（IA-29）；点 + 菜单 **right 锚定**（IA-37）。  
+3. **同步 `osascript` 堵 Tauri 主线程** → 黑屏；必须 `async` + `spawn_blocking`（pick_folder / open_url / fetch_url）。  
+4. **`window.confirm/alert` 不可靠** → 会话删除改两击内联确认。  
+5. **点选跨域/CSP**：父页操纵**同源 srcdoc**（先 `fetch_url` 转页），不塞页内脚本。  
+6. **改错对象**：输入区附件 chip ≠ 页面检测器 ≠ **+ 菜单标题**；UI 需求先钉死红框元素再改（用户多轮纠正）。  
+7. **`rfd` 离线装不上** → 打开文件夹用 `osascript choose folder`。  
+8. 效率规范：无盲等；GUI 截图要 window id 且不抢焦点；本会话多次因缺辅助功能权限无法截窗，靠用户截图验收。
+
+### 真源与门禁
+
+- 改 UI 前改 **`apps/desktop-tauri/docs/PRODUCT-IA.md` §9**，禁止单截图补丁。  
+- 回归：`apps/desktop-tauri` 的 `npm run build`；动协议则 `check_protocol_schema` / `cargo test -p neo-host-appserver`。  
+- 跑壳：`cargo build -p neo-code-cli`（二进制名 **`target/debug/neo`**）· `cd apps/desktop-tauri && npm run tauri dev`。  
+- **新 Rust 命令必须重启 tauri dev**（HMR 只刷前端）。
+
+### 仍开（§9 / P2）
+
+- **IA-9 真 PTY / xterm**（现为命令台回显，非交互式）  
+- **IA-10 图片附件**（L0 多模态；斜杠已 ✅）  
+- P3+ 插件市场 / Worktree / 分享  
+- `⌘⇧K` / `⌘F` 快捷键  
+
+### 给下一轮的协作约定（用户明确要求）
+
+1. **先确认改的是哪块 UI**（截图红框 / 控件名），再动手。  
+2. **改完要对照截图验收**再报完成；禁止只 build 绿就勾 IA。  
+3. 产品形态真源 = 本仓 `PRODUCT-IA.md`，不是 session 目录。
+
