@@ -3955,3 +3955,75 @@ html, body, #root {
   color: var(--text-tertiary);
   font-size: var(--text-ui-xs);
 }
+
+/* 命令台回显（IA-9 过渡：stdout/stderr，非 PTY） */
+.term-note {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--text-ui-xs);
+  color: var(--text-tertiary);
+}
+
+.term-line {
+  margin-bottom: 10px;
+}
+
+.term-line.ok .ok-mark {
+  color: var(--diff-add, #1a7f37);
+}
+
+.term-line.running {
+  opacity: 0.85;
+}
+
+.term-out,
+.term-err {
+  margin: 4px 0 0 14px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface-muted, var(--surface-panel));
+  font-family: var(--font-mono);
+  font-size: var(--text-ui-xs);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.term-err {
+  background: color-mix(in srgb, var(--danger, #c00) 12%, var(--surface-panel));
+}
+
+.term-trunc {
+  margin-left: 14px;
+  font-size: var(--text-ui-xs);
+}
+
+/* IA-14 子智能体列表 */
+.agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 12px 12px;
+}
+
+.agent-list li {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--surface-panel);
+}
+
+.agent-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-ui-sm);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.agent-desc {
+  font-size: var(--text-ui-xs);
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  line-height: 1.45;
+}

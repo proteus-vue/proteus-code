@@ -58,8 +58,10 @@ import { SettingsModal } from "./components/SettingsModal";
 import { WorkbenchShell, type WorkbenchId } from "./components/WorkbenchShell";
 import {
   deleteThread,
+  listTools,
   renameThread,
   threadHistory,
+  type ToolInfo,
 } from "./lib/rpc";
 import "./styles/tokens.css";
 import "./styles/app.css";
@@ -171,8 +173,20 @@ export default function App() {
   const [contentHits, setContentHits] = useState<Map<string, string>>(new Map());
   /** 正在拉 history 的 id，避免同 id 并发重复请求 */
   const contentInflight = useRef<Set<string>>(new Set());
-  const [termLog, setTermLog] = useState<{ cmd: string; ok: boolean }[]>([]);
+  const [termLog, setTermLog] = useState<
+    {
+      id?: string;
+      cmd: string;
+      /** null = 进行中（等 tool_call_end） */
+      ok: boolean | null;
+      stdout?: string;
+      stderr?: string;
+      truncated?: boolean;
+    }[]
+  >([]);
   const [termInput, setTermInput] = useState("");
+  /** IA-14：tools/list 里的 agent_* 子代理 */
+  const [agentTools, setAgentTools] = useState<ToolInfo[]>([]);
   const [diffModal, setDiffModal] = useState<{ path: string; diff: string } | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -261,20 +275,47 @@ export default function App() {
         case "reasoning_delta":
           mergeReasoningDelta(String(payload.delta ?? ""));
           break;
-        case "tool_call_begin":
+        case "tool_call_begin": {
+          const evId = String(payload.id ?? "");
+          const evName = String(payload.name ?? "tool");
+          const args = payload.arguments as { cmd?: unknown } | undefined;
+          // 用户命令台：Op::Shell → id shell-* / name bash
+          if (evId.startsWith("shell-")) {
+            setTermLog((log) => [
+              ...log.slice(-200),
+              { id: evId, cmd: String(args?.cmd ?? ""), ok: null },
+            ]);
+          }
           append({
             type: "tool",
-            id: String(payload.id ?? ""),
-            name: String(payload.name ?? "tool"),
+            id: evId,
+            name: evName,
             args: payload.arguments,
             status: "running",
           });
           break;
-        case "tool_call_end":
+        }
+        case "tool_call_end": {
+          const evId = String(payload.id ?? "");
+          const code = Number(payload.exit_code ?? -1);
+          if (evId.startsWith("shell-")) {
+            setTermLog((log) =>
+              log.map((row) =>
+                row.id === evId
+                  ? {
+                      ...row,
+                      ok: code === 0,
+                      stdout: String(payload.stdout ?? ""),
+                      stderr: String(payload.stderr ?? ""),
+                      truncated: Boolean(payload.truncated),
+                    }
+                  : row,
+              ),
+            );
+          }
           setItems((prev) =>
             prev.map((it) => {
               if (it.type === "tool" && it.id === payload.id) {
-                const code = Number(payload.exit_code ?? -1);
                 return {
                   ...it,
                   status: code === 0 ? "ok" : "fail",
@@ -288,6 +329,7 @@ export default function App() {
             }),
           );
           break;
+        }
         case "approval_request":
           setApproval({
             id: String(payload.id ?? ""),
@@ -448,6 +490,14 @@ export default function App() {
           })),
         );
       }
+      // IA-14：子代理目录（装配期加载；列表随 tools/list）
+      void listTools()
+        .then((r) =>
+          setAgentTools(
+            (r.tools ?? []).filter((t) => t.name.startsWith("agent_")),
+          ),
+        )
+        .catch(() => setAgentTools([]));
       const g = await gitInfo().catch(() => null);
       if (g && typeof g.branch === "string") setBranch(g.branch);
       if (g && typeof g.root === "string") {
@@ -685,12 +735,15 @@ export default function App() {
       const c = cmd.trim();
       if (!c) return;
       try {
+        // 只清输入；结果行由 shell-* 的 tool_call_begin/end 回填（含 stdout）
         await commandExec(c);
-        setTermLog((log) => [...log.slice(-200), { cmd: c, ok: true }]);
         setTermInput("");
         append({ type: "status", message: `$ ${c}` });
       } catch (e) {
-        setTermLog((log) => [...log.slice(-200), { cmd: c, ok: false }]);
+        setTermLog((log) => [
+          ...log.slice(-200),
+          { cmd: c, ok: false, stderr: String(e) },
+        ]);
         append({ type: "error", message: String(e) });
       }
     },
@@ -1552,14 +1605,29 @@ export default function App() {
 
             {panelTab === "terminal" && (
               <div className="wb-section terminal">
+                <div className="term-note">
+                  命令台 · 每条一个进程 · 走沙箱 · 不经模型（非交互式 PTY）
+                </div>
                 <div className="term-log">
                   {termLog.length === 0 && (
-                    <div className="muted">命令台（不经模型 · 走沙箱）。输入命令回车执行。</div>
+                    <div className="muted">输入命令回车执行，stdout/stderr 显示在下方。</div>
                   )}
                   {termLog.map((row, i) => (
-                    <div key={i} className={`term-line ${row.ok ? "ok" : "fail"}`}>
-                      <span className="prompt">$</span> {row.cmd}
-                      {!row.ok && <span className="err"> ✗</span>}
+                    <div
+                      key={row.id ?? i}
+                      className={`term-line ${row.ok === false ? "fail" : row.ok ? "ok" : "running"}`}
+                    >
+                      <div>
+                        <span className="prompt">$</span> {row.cmd}
+                        {row.ok === null && <span className="dim"> ·…</span>}
+                        {row.ok === false && <span className="err"> ✗</span>}
+                        {row.ok === true && <span className="ok-mark"> ✓</span>}
+                      </div>
+                      {row.stdout && <pre className="term-out">{row.stdout}</pre>}
+                      {row.stderr && <pre className="term-err">{row.stderr}</pre>}
+                      {row.truncated && (
+                        <div className="muted term-trunc">输出已截断（有界）</div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1579,6 +1647,42 @@ export default function App() {
                     autoComplete="off"
                   />
                 </form>
+              </div>
+            )}
+
+            {panelTab === "subagents" && (
+              <div className="wb-section">
+                <div className="wb-sub">子智能体 · tools/list 中的 agent_*</div>
+                <p className="muted pad">
+                  定义放 <code>.neo/agents/*.md</code>（或 <code>~/.neo/agents/</code>）；
+                  装配期加载，新增需重启 app-server。主对话里模型可直接调用这些工具。
+                </p>
+                {agentTools.length === 0 ? (
+                  <p className="muted pad">当前工作区未注册子代理。</p>
+                ) : (
+                  <ul className="agent-list">
+                    {agentTools.map((t) => (
+                      <li key={t.name}>
+                        <div className="agent-name">{t.name}</div>
+                        <div className="agent-desc">{t.description || "—"}</div>
+                        <button
+                          type="button"
+                          className="ghost-btn"
+                          onClick={() => {
+                            setInput(
+                              (v) =>
+                                (v ? `${v.trimEnd()}\n` : "") +
+                                `请调用 ${t.name} 处理：`,
+                            );
+                            inputRef.current?.focus();
+                          }}
+                        >
+                          插入任务
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             )}
 

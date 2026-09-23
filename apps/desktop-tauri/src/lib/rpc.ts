@@ -98,6 +98,17 @@ export async function listModels(): Promise<ModelsResult> {
   return rpc<ModelsResult>("models/list");
 }
 
+export type ToolInfo = {
+  name: string;
+  description?: string;
+  parameters?: unknown;
+};
+
+/** `tools/list` —— 含 `agent_*` 子代理（装配时从 .neo/agents 加载）。 */
+export async function listTools(): Promise<{ tools?: ToolInfo[] }> {
+  return rpc("tools/list", {});
+}
+
 export type ExecMode =
   | "plan"
   | "confirm_before"
