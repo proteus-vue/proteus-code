@@ -1646,7 +1646,8 @@ export default function App() {
       </main>
 
       <footer className={`composer ${isNewTask ? "mode-new" : "mode-chat"}`}>
-        {/* IA-24/25：ZCode 芯片 —— 选择项目 / 目录名 · 点击弹上方菜单 */}
+        {/* IA-36：仅欢迎页显示项目选择器；进入对话后输入框上方清空 */}
+        {isNewTask && (
         <div className="ctx-chips" aria-label="工作区上下文">
           <div className="ctx-anchor">
             <button
@@ -1709,6 +1710,7 @@ export default function App() {
             </span>
           )}
         </div>
+        )}
         <div className="composer-card">
           {webPicks.length > 0 && (
             <div className="attach-chips" role="list" aria-label="网页元素附件">
