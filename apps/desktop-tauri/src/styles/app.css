@@ -3939,3 +3939,19 @@ html, body, #root {
   border-top: 1px solid var(--line);
   font-size: var(--text-ui-xs);
 }
+
+/* IA-10 斜杠命令菜单（复用 at-menu 形态） */
+.at-menu.slash-menu li button {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: var(--font-sans);
+}
+.at-menu.slash-menu li button .cmd {
+  font-family: var(--font-mono);
+  font-weight: 550;
+}
+.at-menu.slash-menu li button .desc {
+  color: var(--text-tertiary);
+  font-size: var(--text-ui-xs);
+}

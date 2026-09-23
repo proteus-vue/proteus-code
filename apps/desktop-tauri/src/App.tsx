@@ -95,6 +95,35 @@ function readStoredPx(key: string, fallback: number, min: number, max: number): 
   return clamp(Math.round(raw), min, max);
 }
 
+/** IA-10 壳侧斜杠命令 —— 只列**真有动作**的（对齐 TUI「不实现不列出」） */
+const SLASH_COMMANDS: {
+  id: string;
+  name: string;
+  aliases?: string[];
+  desc: string;
+}[] = [
+  { id: "compact", name: "compact", aliases: ["summarize"], desc: "压缩上下文" },
+  { id: "new", name: "new", aliases: ["clear"], desc: "新建会话" },
+  { id: "fork", name: "fork", desc: "分叉当前会话" },
+  { id: "undo", name: "undo", aliases: ["rewind"], desc: "回退一轮" },
+  { id: "settings", name: "settings", aliases: ["config"], desc: "打开设置 ⌘," },
+  { id: "theme", name: "theme", aliases: ["themes"], desc: "切换浅色/深色" },
+  { id: "sidebar", name: "sidebar", desc: "切换侧栏 ⌘B" },
+  { id: "panel", name: "panel", desc: "切换右栏 ⌘J" },
+  { id: "mode", name: "mode", desc: "循环执行模式 ⇧Tab" },
+  { id: "models", name: "models", aliases: ["model"], desc: "打开模型设置" },
+  { id: "help", name: "help", desc: "命令面板 ⌘K" },
+];
+
+function matchSlash(q: string) {
+  const s = q.toLowerCase();
+  return SLASH_COMMANDS.filter(
+    (c) =>
+      c.name.startsWith(s) ||
+      (c.aliases ?? []).some((a) => a.startsWith(s)),
+  );
+}
+
 export default function App() {
   const [status, setStatus] = useState<Status>("boot");
   const [statusMsg, setStatusMsg] = useState("正在连接 app-server…");
@@ -133,6 +162,11 @@ export default function App() {
   const [threadQuery, setThreadQuery] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark">(
+    () =>
+      (localStorage.getItem("neo-theme") as "light" | "dark" | null) ??
+      "light",
+  );
   /** threadId → history 纯文本摘要（内容级搜索缓存，只增不刷） */
   const [contentHits, setContentHits] = useState<Map<string, string>>(new Map());
   /** 正在拉 history 的 id，避免同 id 并发重复请求 */
@@ -146,6 +180,8 @@ export default function App() {
   const [fileEntries, setFileEntries] = useState<string[]>([]);
   const [atQuery, setAtQuery] = useState<{ prefix: string; q: string } | null>(null);
   const [atIdx, setAtIdx] = useState(0);
+  /** IA-10：整行 `/query` 时的斜杠候选下标 */
+  const [slashIdx, setSlashIdx] = useState(0);
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [lastSummary, setLastSummary] = useState<{
     in: number;
@@ -154,6 +190,10 @@ export default function App() {
   } | null>(null);
   const streamRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  /** 斜杠执行器：定义在 onFork/cycleMode 之后，经 ref 注入 send */
+  const slashRunnerRef = useRef<(text: string) => Promise<boolean>>(
+    async () => false,
+  );
 
   const busy = status === "busy";
   const blocked = busy || !!approval;
@@ -456,6 +496,11 @@ export default function App() {
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || blocked) return;
+    // IA-10：整行斜杠由壳执行（在 runSlashLine 挂上后生效）
+    if (await slashRunnerRef.current(text)) {
+      setInput("");
+      return;
+    }
     setInput("");
     try {
       await startTurn(text);
@@ -571,6 +616,69 @@ export default function App() {
       append({ type: "error", message: String(e) });
     }
   }, [append, busy, refreshThreads]);
+
+  /** IA-10：整行 `/cmd` 由壳执行；未命中则交给 turn/start */
+  const runSlashLine = useCallback(
+    async (text: string): Promise<boolean> => {
+      if (!text.startsWith("/")) return false;
+      const token = text.slice(1).split(/\s+/)[0]?.toLowerCase() ?? "";
+      const hit = SLASH_COMMANDS.find(
+        (c) => c.name === token || (c.aliases ?? []).includes(token),
+      );
+      if (!hit) return false;
+      switch (hit.id) {
+        case "compact":
+          try {
+            await compactSession();
+            append({ type: "status", message: "已请求上下文压缩" });
+          } catch (e) {
+            append({ type: "error", message: String(e) });
+          }
+          break;
+        case "new":
+          await onNewThread();
+          break;
+        case "fork":
+          await onFork();
+          break;
+        case "undo":
+          try {
+            await rewindTurns(1);
+            append({ type: "status", message: "已回退一轮" });
+          } catch (e) {
+            append({ type: "error", message: String(e) });
+          }
+          break;
+        case "settings":
+        case "models":
+          setSettingsOpen(true);
+          break;
+        case "theme":
+          setTheme((v) => (v === "light" ? "dark" : "light"));
+          break;
+        case "sidebar":
+          setSidebarOpen((v) => !v);
+          break;
+        case "panel":
+          setPanelOpen((v) => !v);
+          break;
+        case "mode":
+          cycleMode();
+          break;
+        case "help":
+          setPaletteOpen(true);
+          break;
+        default:
+          return false;
+      }
+      return true;
+    },
+    [append, cycleMode, onFork, onNewThread],
+  );
+
+  useEffect(() => {
+    slashRunnerRef.current = runSlashLine;
+  }, [runSlashLine]);
 
   const runTerminal = useCallback(
     async (cmd: string) => {
@@ -711,6 +819,13 @@ export default function App() {
 
   const onInputChange = (value: string) => {
     setInput(value);
+    // 斜杠：整行 `/query`（IA-10）
+    const sm = /^\/([\w-]*)$/.exec(value.trim());
+    if (sm) {
+      setAtQuery(null);
+      setSlashIdx(0);
+      return;
+    }
     // 检测光标前的 @ 查询（简化：文末）
     const m = /(?:^|\s)@([\w./-]*)$/.exec(value);
     if (m && fileEntries.length) {
@@ -721,6 +836,11 @@ export default function App() {
       setAtQuery(null);
     }
   };
+
+  /** 整行斜杠候选（IA-10 菜单） */
+  const slashOpen = /^\/([\w-]*)$/.test(input.trim());
+  const slashQ = slashOpen ? input.trim().slice(1) : "";
+  const slashMatches = slashOpen ? matchSlash(slashQ) : [];
 
   const commands: CommandItem[] = useMemo(
     () => [
@@ -851,12 +971,6 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [approval, busy, cycleMode, onNewThread, paletteOpen, settingsOpen, stop]);
-
-  const [theme, setTheme] = useState<"light" | "dark">(
-    () =>
-      (localStorage.getItem("neo-theme") as "light" | "dark" | null) ??
-      "light",
-  );
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -1054,8 +1168,8 @@ export default function App() {
                 ))}
               </div>
               <div className="hero-keys">
-                <kbd>⌘K</kbd> 命令 · <kbd>⌘N</kbd> 新任务 · <kbd>Esc</kbd> 中断 ·{" "}
-                <kbd>⇧Tab</kbd> 切换模式
+                <kbd>⌘K</kbd> 命令 · <kbd>⌘N</kbd> 新任务 · <kbd>/</kbd> 斜杠 ·{" "}
+                <kbd>Esc</kbd> 中断 · <kbd>⇧Tab</kbd> 模式
               </div>
               <p className="hero-status">
                 {status === "boot"
@@ -1230,10 +1344,38 @@ export default function App() {
               placeholder={
                 approval
                   ? "待审批 — 输入已锁定"
-                  : "描述任务，输入 @ 引用文件，或 ⌘K 命令…"
+                  : "描述任务，输入 @ 引用文件、/ 命令，或 ⌘K…"
               }
               onChange={(e) => onInputChange(e.target.value)}
               onKeyDown={(e) => {
+                if (slashOpen && slashMatches.length) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setSlashIdx((i) => Math.min(i + 1, slashMatches.length - 1));
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setSlashIdx((i) => Math.max(i - 1, 0));
+                    return;
+                  }
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    const pick = slashMatches[Math.min(slashIdx, slashMatches.length - 1)];
+                    if (pick) {
+                      setInput(`/${pick.name}`);
+                      // 下一拍由 send 执行（或用户继续输入）
+                      void slashRunnerRef.current(`/${pick.name}`);
+                      setInput("");
+                    }
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setInput("");
+                    return;
+                  }
+                }
                 if (atQuery && atMatches.length) {
                   if (e.key === "ArrowDown") {
                     e.preventDefault();
@@ -1279,6 +1421,26 @@ export default function App() {
                       onClick={() => applyAtPick(p)}
                     >
                       {p}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {slashOpen && slashMatches.length > 0 && !atQuery && (
+              <ul className="at-menu slash-menu" role="listbox" aria-label="斜杠命令">
+                {slashMatches.map((c, i) => (
+                  <li key={c.id}>
+                    <button
+                      type="button"
+                      className={i === Math.min(slashIdx, slashMatches.length - 1) ? "active" : ""}
+                      onMouseEnter={() => setSlashIdx(i)}
+                      onClick={() => {
+                        void slashRunnerRef.current(`/${c.name}`);
+                        setInput("");
+                      }}
+                    >
+                      <span className="cmd">/{c.name}</span>
+                      <span className="desc">{c.desc}</span>
                     </button>
                   </li>
                 ))}
