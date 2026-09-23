@@ -209,6 +209,12 @@ pub struct SessionPatch {
     pub sandbox_mode: Option<SandboxMode>,
     pub approval_policy: Option<ApprovalPolicy>,
     pub model: Option<String>,
+    /// 会话级 token 预算（护栏 #9）。`Some(0)` = 清除预算（不限）。
+    ///
+    /// 缺省 `None` = **不改**现有预算（与其它字段同语义）。
+    /// 要"不限"必须显式传 `0`，不能靠缺省——否则桌面端漏传会静默抹掉用户设过的预算。
+    #[serde(default)]
+    pub token_budget: Option<u64>,
 }
 
 /// ZCode 五档执行模式（UI 档位，映射到沙箱 × 审批双轴）
@@ -449,9 +455,11 @@ pub enum EventMsg {
     },
     /// 需要用户审批。
     ///
-    /// `kind` 是内核判定的**调用类别**（read / write / network / interactive），
-    /// 不是工具名 —— "总是允许"将放行的范围由它定义。它必须由内核单一事实源
-    /// 给出：宿主若按工具名自行推断，bash 这类"按命令内容分类"的工具就会
+    /// `kind` 是内核判定的**调用类别**（read / write / network / interactive /
+    /// **loop**），不是工具名 —— "总是允许"将放行的范围由它定义。
+    /// `loop` = doom-loop 循环检测闸门（护栏 #6）：**不参与类别 granted**，
+    /// 单次放行不得被映射成「总是允许 read/write」。
+    /// 宿主若按工具名自行推断，bash 这类"按命令内容分类"的工具就会
     /// 显示成与内核实际放行范围不一致的类别（显示"只读"、实际放行"写入"）。
     ApprovalRequest { id: ApprovalId, detail: String, #[serde(default)] kind: String },
     PatchProposed { path: String, diff: String },

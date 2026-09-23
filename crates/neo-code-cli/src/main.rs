@@ -692,6 +692,23 @@ fn thread_cmd(
                 .collect();
             ThreadResult::Value(serde_json::json!({ "tools": tools }))
         }
+        ThreadCmd::Models => {
+            let current = kernel.current_model().to_string();
+            let models: Vec<serde_json::Value> = kernel
+                .available_models()
+                .into_iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "name": m.name,
+                        "description": m.description,
+                        "context_limit": m.context_limit,
+                        "production": m.production,
+                        "current": m.name == current,
+                    })
+                })
+                .collect();
+            ThreadResult::Value(serde_json::json!({ "models": models, "current": current }))
+        }
         ThreadCmd::GitInfo { cwd } => {
             let ws = cwd
                 .map(std::path::PathBuf::from)

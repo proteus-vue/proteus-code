@@ -31,6 +31,28 @@ use std::sync::Arc;
 
 /// 一步内允许的最大工具调用数（防御失控模型）。
 pub const MAX_TOOL_CALLS_PER_STEP: usize = 32;
+
+/// 连续**完全相同**的工具调用达到该次数时，在上下文里提醒模型（护栏 #1）。
+/// 对齐 ZCode 的 `detectRepeatedToolCallWarnings`（第 3 次相同即提醒）。
+pub const REPEATED_CALL_WARN_AT: usize = 3;
+/// 单轮内护栏提醒最多注入次数 —— 防止模型刷屏式地触发提醒又忽略。
+pub const MAX_GUARD_WARNINGS_PER_TURN: usize = 3;
+/// 单轮工具调用数达到该阈值时提醒模型收尾（护栏 #2，**低于**熔断）。
+pub const TOOL_CALL_BUDGET_WARN_PER_TURN: usize = 10;
+/// 单轮工具调用数熔断。超过即停止本轮 —— 不是"工作限额"，是失控刹车。
+/// 提醒阈值刻意低于它，留一档让模型自我纠正（护栏 #2）。
+pub const TOOL_CALL_FUSE_PER_TURN: usize = 32;
+
+/// 会话 token 预算达到该百分比时，向模型与用户各提醒一次（护栏 #9）。
+pub const SESSION_BUDGET_WARN_PERCENT: u64 = 70;
+
+/// 只读工具并行的并发上限（护栏 #8）。对齐 ZCode `maxConcurrency: 10`。
+/// 超过分批（12 个 read → 10 + 2）；**写操作永不在并行组里**。
+pub const MAX_TOOL_CONCURRENCY: usize = 10;
+
+/// 连续相同调用触发 **doom-loop 独立闸门** 的次数（护栏 #6）。
+/// 第 3 次已有上下文提醒（#1）；第 4 次起必须问人 —— **最高权限档也不静默放行**。
+pub const DOOM_LOOP_GATE_AT: usize = 4;
 /// 一轮内允许的最大步数。超出即报错结束该轮，不无限循环。
 /// 单轮最大步数（一步 = 一次模型请求 + 它要求的工具执行）。
 ///
@@ -617,6 +639,11 @@ fn describe_kind(kind: CallKind) -> &'static str {
     }
 }
 
+/// 调用签名：工具名 + 参数稳定序列化（护栏 #1 / #6 共用）。
+fn call_signature(call: &ToolInvocation) -> String {
+    format!("{}|{}", call.name, serde_json::to_string(&call.arguments).unwrap_or_default())
+}
+
 /// 参数里的第一个字符串值的摘要(≤40 字符) —— 审批 detail 的动作部分。
 /// 内核不解析工具特有参数名(那是工具的知识),只取"第一个字符串"作示意:
 /// apply_patch → path,bash → cmd,覆盖常见形态。
@@ -673,6 +700,11 @@ pub enum KernelError {
     /// 为什么不静默丢弃最老的：模型的视角必须与日志一致（"模型可见即已落盘"）。
     /// 悄悄丢消息会让回放出的历史与实际请求不符 —— 那比报错危险得多。
     ContextBudgetExceeded { messages: usize, limit: usize },
+    /// 会话 token 预算已用尽（护栏 #9）：拒绝开启新轮，已完成的工作保留。
+    ///
+    /// 与 `ContextBudgetExceeded` 分开：一个说"历史太长要压缩"，
+    /// 一个说"预算用完要提额或开新会"——混用会让用户去点错按钮。
+    SessionTokenBudgetExceeded { used: u64, limit: u64 },
     /// Goal 系列无法执行：没配置编排策略，或目标已暂停/停止/无待执行轮。
     ///
     /// 单独变体：让 "没配策略" 与 "目标此刻不可推进" 有各自的措辞，
@@ -700,6 +732,10 @@ impl std::fmt::Display for KernelError {
             Self::ContextBudgetExceeded { messages, limit } => write!(
                 f,
                 "上下文超上限（{messages} > {limit} 条），需压缩后再继续；压缩属 L4 职责，当前未实现"
+            ),
+            Self::SessionTokenBudgetExceeded { used, limit } => write!(
+                f,
+                "会话 token 预算已用尽（{used} ≥ {limit}），已停止以保护预算；提高预算或开新会话后再继续"
             ),
             Self::GoalUnavailable(msg) => write!(f, "目标编排不可用：{msg}"),
             Self::TurnInFlight => write!(
@@ -729,6 +765,9 @@ pub enum KernelState {
 struct PendingApproval {
     calls: Vec<ToolInvocation>,
     index: usize,
+    /// 本次挂起是否为 doom-loop 独立闸门（护栏 #6）。
+    /// 循环闸门的「总是允许」**不得**写入 `granted`（否则等于永久关闸）。
+    loop_gate: bool,
 }
 
 /// 一步中尚未消费完的模型流（跨 `Op::Pump` 存活）。
@@ -786,6 +825,20 @@ pub struct Kernel {
     /// 模型可见历史（派生物；真相在日志）
     messages: Vec<Message>,
     steps_this_turn: usize,
+    /// 本轮已执行的工具调用数（护栏 #2：预算提醒 / 熔断）。
+    calls_this_turn: usize,
+    /// 本轮已注入的护栏提醒次数（防刷屏）。
+    guard_warnings_this_turn: usize,
+    /// 上一次工具调用签名（工具名 + 稳定序列化参数），护栏 #1 重复检测用。
+    last_call_sig: Option<String>,
+    /// 与 `last_call_sig` 相同的连续次数。
+    repeat_count: usize,
+    /// 会话级 token 预算（护栏 #9）。`None` = 未设限。
+    session_token_budget: Option<u64>,
+    /// 会话累计已用 token（跨轮，不随 `begin_turn` 清零）。
+    session_tokens_used: u64,
+    /// 接近预算的提醒是否已注入（设新预算时重置）。
+    session_budget_warned: bool,
     turn_counter: u64,
     step_counter: u64,
     /// 用户直输 shell 命令的序号（`Op::Shell`）。
@@ -860,6 +913,13 @@ impl Kernel {
             state: KernelState::Idle,
             messages: Vec::new(),
             steps_this_turn: 0,
+            calls_this_turn: 0,
+            guard_warnings_this_turn: 0,
+            last_call_sig: None,
+            repeat_count: 0,
+            session_token_budget: None,
+            session_tokens_used: 0,
+            session_budget_warned: false,
             turn_counter: 0,
             step_counter: 0,
             shell_counter: 0,
@@ -1055,7 +1115,16 @@ impl Kernel {
                 // 消息/工具调用，历史不会被污染；SSE 连接随迭代器 Drop
                 // 一起终止（openssl 子进程被 kill，不留残留）。
                 self.in_flight = None;
-                self.pending = None;
+                // 审批挂起中的剩余调用必须补占位（护栏 #4）：Assistant 已带
+                // 全部 tool_calls，只补到 index 会让后面的 id 永远悬空，
+                // 下一轮 chat-completions 请求会被 API 拒绝。
+                if let Some(pending) = self.pending.take() {
+                    self.push_cancelled_results(
+                        &pending.calls,
+                        pending.index,
+                        "用户中断，本调用未执行",
+                    );
+                }
                 self.state = KernelState::Idle;
                 // 被中断的目标子任务轮不再有 TurnComplete —— 必须同步作废
                 // 在飞标记，否则下一个普通轮的结束会被误当成目标轮的结束。
@@ -1067,6 +1136,10 @@ impl Kernel {
             }
 
             Op::ConfigureSession { patch } => {
+                // 会话预算在 merge 消费 patch 之前取出（0 = 清除，见 SessionPatch 文档）
+                if let Some(b) = patch.token_budget {
+                    self.set_session_token_budget(b);
+                }
                 // 模型切换要**先校验再改配置**：若名字不存在，报错并保持原样，
                 // 而不是把 cfg.model 改成不存在的名字（那会让会话日志说谎）。
                 if let Some(want) = patch.model.as_deref() {
@@ -1197,8 +1270,16 @@ impl Kernel {
                 // 先检查预算再推入用户消息：否则会留下一条"无法被处理"的消息，
                 // 让历史与日志都多出一条实际没发出去的输入。
                 self.check_context_budget()?;
+                // 护栏 #9：预算已用尽则拒绝开新轮（已完成的工作保留在历史里）
+                self.check_session_token_budget()?;
+                // 上一轮末可能没跨过 70% 线、但本周期望看到提醒；begin 再兜一次
+                self.maybe_warn_session_budget()?;
                 self.turn_counter += 1;
                 self.steps_this_turn = 0;
+                self.calls_this_turn = 0;
+                self.guard_warnings_this_turn = 0;
+                self.last_call_sig = None;
+                self.repeat_count = 0;
                 self.usage_in = 0;
                 self.usage_out = 0;
                 let turn_id = format!("turn-{}", self.turn_counter);
@@ -1356,15 +1437,28 @@ impl Kernel {
             return Ok(StepOutcome::Done); // 模型不再要工具 → 本轮结束
         }
         if inf.calls.len() > MAX_TOOL_CALLS_PER_STEP {
+            // Assistant 已带着全部 tool_calls 入历史 —— 必须给**每一个**补占位
+            // tool 结果（护栏 #4），否则下一轮 chat-completions 请求非法。
+            self.push_cancelled_results(
+                &inf.calls,
+                0,
+                "单步工具调用过多，本批全部未执行。请减少并行调用后重试。",
+            );
             let msg = EventMsg::Error {
                 message: format!("单步工具调用过多（{} > {}）", inf.calls.len(), MAX_TOOL_CALLS_PER_STEP),
             };
             self.emit_and_log(&msg)?;
+            self.finish_turn_if_idle()?;
             return Ok(StepOutcome::Done);
         }
         match self.execute_from(&inf.calls, 0)? {
             ExecOutcome::Done => Ok(StepOutcome::More), // 工具欠一次请求 → 下一步
             ExecOutcome::Suspended => Ok(StepOutcome::Suspended),
+            ExecOutcome::Aborted => {
+                // 熔断/中止：立刻收轮，不再驱动下一步
+                self.finish_turn_if_idle()?;
+                Ok(StepOutcome::Done)
+            }
         }
     }
 
@@ -1375,6 +1469,12 @@ impl Kernel {
     fn finish_turn_if_idle(&mut self) -> Result<(), KernelError> {
         if matches!(self.state, KernelState::Idle) {
             let usage = (self.usage_in, self.usage_out);
+            // 护栏 #9：轮末把本轮用量并入会话累计（跨轮预算的唯一记账点）
+            self.session_tokens_used = self
+                .session_tokens_used
+                .saturating_add(usage.0.saturating_add(usage.1));
+            // 并入后再看是否接近阈值：提醒必须基于**含本轮**的累计
+            self.maybe_warn_session_budget()?;
             let done = EventMsg::TurnComplete {
                 input_tokens: usage.0,
                 output_tokens: usage.1,
@@ -1395,59 +1495,360 @@ impl Kernel {
         Ok(())
     }
 
+    /// 为未执行的 tool_call 补占位结果（护栏 #4）：事件 + 模型可见历史各一条。
+    ///
+    /// 从 `from` 起（含）全部补上。原因必须写进 stderr —— 空字符串会让模型
+    /// 以为工具成功返回了空输出，从而原样重试。
+    fn push_cancelled_results(&mut self, calls: &[ToolInvocation], from: usize, reason: &str) {
+        for call in calls.iter().skip(from) {
+            let ev = EventMsg::ToolCallEnd {
+                id: call.id.clone(),
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: reason.to_string(),
+                truncated: false,
+            };
+            self.emit_and_log(&ev).ok();
+            self.messages.push(Message::ToolResult {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                output: cancelled_output(reason),
+            });
+        }
+    }
+
+    /// 护栏记账与就地提醒（#1 重复调用 / #2 预算）。
+    ///
+    /// 提醒**拼进该次工具结果的 stderr**：模型下一轮请求必然带上它
+    /// （tool 消息是历史的一部分），且不会另造一条与工具无关的 System 消息。
+    fn guard_after_call(&mut self, call: &ToolInvocation, output: &mut ToolOutput) {
+        self.calls_this_turn += 1;
+
+        // #1 连续相同调用：签名 = 工具名 + 参数稳定序列化（与 #6 doom-loop 同源）
+        let sig = call_signature(call);
+        if self.last_call_sig.as_deref() == Some(sig.as_str()) {
+            self.repeat_count += 1;
+        } else {
+            self.last_call_sig = Some(sig);
+            self.repeat_count = 1;
+        }
+        if self.repeat_count == REPEATED_CALL_WARN_AT
+            && self.guard_warnings_this_turn < MAX_GUARD_WARNINGS_PER_TURN
+        {
+            self.guard_warnings_this_turn += 1;
+            push_guard_note(
+                output,
+                &format!(
+                    "你已连续 {REPEATED_CALL_WARN_AT} 次发起完全相同的工具调用。\
+请：(1) 用已有结果推进任务；(2) 若卡住，说明阻塞点；(3) 必要时向用户求助。不要再原样重复。"
+                ),
+            );
+        }
+
+        // #2 单轮预算提醒（低于熔断，留一档自我纠正；只提醒一次）
+        if self.calls_this_turn == TOOL_CALL_BUDGET_WARN_PER_TURN
+            && self.guard_warnings_this_turn < MAX_GUARD_WARNINGS_PER_TURN
+        {
+            self.guard_warnings_this_turn += 1;
+            push_guard_note(
+                output,
+                &format!(
+                    "本轮已执行 {TOOL_CALL_BUDGET_WARN_PER_TURN} 次工具调用，接近上限（{TOOL_CALL_FUSE_PER_TURN}）。\
+请尽快用已有结果收尾、说明结论或向用户求助。"
+                ),
+            );
+        }
+    }
+
     /// 执行一步产生的工具调用（从 `start` 起；审批恢复后从断点继续）。
     fn execute_from(&mut self, calls: &[ToolInvocation], start: usize) -> Result<ExecOutcome, KernelError> {
-        for index in start..calls.len() {
-            let call = calls[index].clone();
-            let kind = self.classify(&call);
-            // 会话级放行优先于门禁：用户对这类调用说过"总是允许"。
-            // **沙箱硬边界仍是硬边界** —— 只读档下写入会被 gate 拒，
-            // 但这里要先看门禁，不能因为说过"总是允许"就越过沙箱拒绝。
+        // 护栏 #2 熔断：本轮调用数到顶就停，不再接受新调用
+        if self.calls_this_turn >= TOOL_CALL_FUSE_PER_TURN {
+            self.push_cancelled_results(
+                calls,
+                start,
+                "本轮工具调用已达上限，本调用未执行。请基于已有结果收尾。",
+            );
+            let msg = EventMsg::Error {
+                message: format!(
+                    "本轮工具调用已达上限（{TOOL_CALL_FUSE_PER_TURN} 次），已停止以免失控。\
+已完成的工作都在上面；继续的话再发一条消息接着做。"
+                ),
+            };
+            self.emit_and_log(&msg)?;
+            return Ok(ExecOutcome::Aborted);
+        }
+
+        // 护栏 #8：只读且已放行的连续调用可并行（上限 MAX_TOOL_CONCURRENCY）；
+        // 写 / 审批 / 拒绝一律串行。并行只加速**执行**，事件仍按原序回写（T2 确定性）。
+        let mut index = start;
+        while index < calls.len() {
+            let mut streak: Vec<usize> = Vec::new();
+            let mut i = index;
+            while i < calls.len() {
+                if self.is_parallel_readonly(&calls[i]) {
+                    streak.push(i);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            if streak.len() >= 2 {
+                for chunk in streak.chunks(MAX_TOOL_CONCURRENCY) {
+                    self.execute_readonly_parallel(chunk, calls)?;
+                }
+                index = i;
+                continue;
+            }
+            // 不构成并行段：单条只读或任何非只读 → 串行处理 index
+            self.execute_one_serial(&calls, index)?;
+            if matches!(self.state, KernelState::AwaitingApproval { .. }) {
+                return Ok(ExecOutcome::Suspended);
+            }
+            index += 1;
+        }
+        Ok(ExecOutcome::Done)
+    }
+
+    /// 本调用是否可进只读并行段：语义类别 Read，且闸门最终为 Allow（非 Ask/Deny）。
+    /// **即将触发 doom-loop 闸门的调用不进并行段**（必须走串行 Ask）。
+    fn is_parallel_readonly(&self, call: &ToolInvocation) -> bool {
+        if self.would_trigger_loop_gate(call) {
+            return false;
+        }
+        let kind = self.classify(call);
+        if kind != CallKind::Read {
+            return false;
+        }
+        let decision = gate(kind, self.resolution());
+        let decision = match decision {
+            GateDecision::Ask { .. } if self.granted.contains(&kind) => GateDecision::Allow,
+            other => other,
+        };
+        matches!(decision, GateDecision::Allow)
+    }
+
+    /// 下一次执行该调用是否会触发 doom-loop 闸门（护栏 #6）。
+    /// 判据与 #1 同源：签名与上次相同，且累计次数将达到 `DOOM_LOOP_GATE_AT`。
+    fn would_trigger_loop_gate(&self, call: &ToolInvocation) -> bool {
+        let sig = call_signature(call);
+        self.last_call_sig.as_deref() == Some(sig.as_str())
+            && self.repeat_count + 1 >= DOOM_LOOP_GATE_AT
+    }
+
+    /// 串行处理单个调用（Deny / Ask / 写 Allow / 单条只读）。
+    /// 从 `execute_from` 原 for 循环体抽出来，避免并行/串行两份 match 漂移。
+    fn execute_one_serial(
+        &mut self,
+        calls: &[ToolInvocation],
+        index: usize,
+    ) -> Result<(), KernelError> {
+        let call = calls[index].clone();
+        let kind = self.classify(&call);
+        // 护栏 #6：doom-loop 闸门**永远不参与自动批准** ——
+        // 必须在 gate()/granted 之前拦截：FullAccess 的 Never 策略
+        // 与「总是允许」类别记忆都不能把它变成 Allow。
+        let is_loop = self.would_trigger_loop_gate(&call);
+        let decision = if is_loop {
+            GateDecision::Ask {
+                detail: format!(
+                    "循环检测：已连续 {} 次相同调用（阈值 {}），该闸门不参与自动批准",
+                    self.repeat_count + 1,
+                    DOOM_LOOP_GATE_AT
+                ),
+            }
+        } else {
             let decision = gate(kind, self.resolution());
-            let decision = match decision {
+            match decision {
                 GateDecision::Ask { .. } if self.granted.contains(&kind) => GateDecision::Allow,
                 other => other,
-            };
-            match decision {
-                GateDecision::Allow => self.execute_one(&call)?,
-                GateDecision::Deny { reason } => {
-                    let ev = EventMsg::ToolCallEnd { id: call.id.clone(), exit_code: -1, stdout: String::new(), stderr: String::new(), truncated: false };
-                    self.emit_and_log(&ev)?;
-                    self.messages.push(Message::ToolResult {
-                        id: call.id,
-                        name: call.name,
-                        output: denied_output(&reason),
-                    });
-                }
-                GateDecision::Ask { detail } => {
-                    // 审批前先给**改动的具体内容**：只说"写入类调用需确认"，
-                    // 用户是在盲批 —— 不知道改哪个文件、改了什么。
-                    // 预览由工具提供（只有它知道参数怎么变成改动），内核只转发。
-                    // detail 同时带上具体动作（工具名 + 首个字符串参数）——
-                    // 它是审批通知/无头日志的内容源，桌面通知曾只有通用文案,
-                    // 用户看到"需要审批"却不知道是什么在等他。
-                    let detail = format!("{detail}:{} {}", call.name, call_arg_summary(&call.arguments));
-                    if let Some(tool) = self.tools.get(&call.name) {
-                        if let Some((path, diff)) = tool.preview(&call.arguments, &self.cwd) {
-                            let ev = EventMsg::PatchProposed { path, diff };
-                            self.emit_and_log(&ev)?;
-                        }
+            }
+        };
+        match decision {
+            GateDecision::Allow => self.execute_one(&call),
+            GateDecision::Deny { reason } => {
+                let ev = EventMsg::ToolCallEnd {
+                    id: call.id.clone(),
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    truncated: false,
+                };
+                self.emit_and_log(&ev)?;
+                self.messages.push(Message::ToolResult {
+                    id: call.id,
+                    name: call.name,
+                    output: denied_output(&reason),
+                });
+                Ok(())
+            }
+            GateDecision::Ask { detail } => {
+                let detail =
+                    format!("{detail}:{} {}", call.name, call_arg_summary(&call.arguments));
+                if let Some(tool) = self.tools.get(&call.name) {
+                    if let Some((path, diff)) = tool.preview(&call.arguments, &self.cwd) {
+                        let ev = EventMsg::PatchProposed { path, diff };
+                        self.emit_and_log(&ev)?;
                     }
-                    // 确定性 id：由 (turn, step, index) 派生，不用随机/时钟
-                    let id = format!("approval-{}-{}-{}", self.turn_counter, self.step_counter, index);
-                    let ev = EventMsg::ApprovalRequest {
-                        id: id.clone(),
-                        detail,
-                        kind: call_kind_name(kind).to_string(),
-                    };
+                }
+                let id = format!(
+                    "approval-{}-{}-{}",
+                    self.turn_counter, self.step_counter, index
+                );
+                // 循环闸门的 kind 固定为 "loop" —— 宿主可与 read/write 卡片区分，
+                // 且「总是允许」范围不会被错误映射到类别 granted。
+                let kind_name = if is_loop { "loop" } else { call_kind_name(kind) };
+                let ev = EventMsg::ApprovalRequest {
+                    id: id.clone(),
+                    detail,
+                    kind: kind_name.to_string(),
+                };
+                self.emit_and_log(&ev)?;
+                self.pending = Some(PendingApproval {
+                    calls: calls.to_vec(),
+                    index,
+                    loop_gate: is_loop,
+                });
+                self.state = KernelState::AwaitingApproval { id };
+                Ok(())
+            }
+        }
+    }
+
+    /// 并行执行一段只读放行调用（每段 ≤ `MAX_TOOL_CONCURRENCY`），**按原序**回写。
+    ///
+    /// 执行可以乱序完成，但事件与 tool 结果必须按 `chunk` 里的下标顺序落地 ——
+    /// 否则同一 Op 序列会得到不同 Event 序列，破坏 T2 回放确定性。
+    fn execute_readonly_parallel(
+        &mut self,
+        chunk: &[usize],
+        calls: &[ToolInvocation],
+    ) -> Result<(), KernelError> {
+        // 1. 执行前取 preview（&self；执行后文件已变，取不到）
+        let previews: Vec<Option<(String, String)>> = chunk
+            .iter()
+            .map(|&idx| {
+                self.tools
+                    .get(&calls[idx].name)
+                    .and_then(|t| t.preview(&calls[idx].arguments, &self.cwd))
+            })
+            .collect();
+
+        // 2. 无 &mut 跑工具（只搬 Sync 件；Kernel 整体非 Sync，不能整借）
+        let outputs: Vec<ToolOutput> = {
+            let sandbox = self.sandbox.as_ref();
+            let cwd = self.cwd.as_path();
+            let mode = self.resolution().sandbox;
+            let max = self.max_output_bytes;
+            let tools = &self.tools;
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|&idx| {
+                        let call = &calls[idx];
+                        let tool = tools.get(&call.name);
+                        scope.spawn(move || run_tool_standalone(
+                            tool.as_deref(),
+                            call,
+                            sandbox,
+                            mode,
+                            cwd,
+                            max,
+                        ))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("只读并行线程不得 panic"))
+                    .collect()
+            })
+        };
+
+        // 3. 按原序回写状态与事件
+        for (k, &idx) in chunk.iter().enumerate() {
+            self.apply_tool_result(&calls[idx], previews[k].clone(), outputs[k].clone())?;
+        }
+        Ok(())
+    }
+
+    /// 只跑工具、不碰内核状态（护栏 #8 并行执行腿）。
+    fn run_tool(&self, call: &ToolInvocation) -> ToolOutput {
+        match self.tools.get(&call.name) {
+            Some(tool) => {
+                let ctx = ToolCtx {
+                    sandbox: self.sandbox.as_ref(),
+                    mode: self.resolution().sandbox,
+                    cwd: &self.cwd,
+                    max_output_bytes: self.max_output_bytes,
+                };
+                tool.execute(&call.arguments, &ctx)
+            }
+            None => ToolOutput {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: format!("未知工具：{}", call.name),
+                truncated: false,
+            },
+        }
+    }
+
+    /// 把一次工具结果写回内核状态（护栏记账、事件、历史）。
+    /// `change_before` 必须是**执行前**取到的 preview。
+    fn apply_tool_result(
+        &mut self,
+        call: &ToolInvocation,
+        change_before: Option<(String, String)>,
+        mut output: ToolOutput,
+    ) -> Result<(), KernelError> {
+        if self.goal_turn_in_flight {
+            let kind = self.classify(call);
+            self.goal_turn_call_kinds.insert(call.id.clone(), kind);
+        }
+        // 护栏 #1/#2：提醒拼进本次结果 stderr
+        self.guard_after_call(call, &mut output);
+        if let Some(tool) = self.tools.get(&call.name) {
+            for ev in tool.report(&call.arguments) {
+                self.emit_and_log(&ev)?;
+            }
+        }
+        if output.exit_code == 0 {
+            if let Some((path, diff)) = change_before {
+                let additions =
+                    diff.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count();
+                let deletions =
+                    diff.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
+                if additions > 0 || deletions > 0 {
+                    let e = self.file_changes.entry(path).or_insert((0, 0));
+                    e.0 += additions;
+                    e.1 += deletions;
+                    let files: Vec<FileChange> = self
+                        .file_changes
+                        .iter()
+                        .map(|(p, (a, d))| FileChange {
+                            path: p.clone(),
+                            additions: *a,
+                            deletions: *d,
+                        })
+                        .collect();
+                    let ev = EventMsg::FilesChanged { files };
                     self.emit_and_log(&ev)?;
-                    self.pending = Some(PendingApproval { calls: calls.to_vec(), index });
-                    self.state = KernelState::AwaitingApproval { id };
-                    return Ok(ExecOutcome::Suspended);
                 }
             }
         }
-        Ok(ExecOutcome::Done)
+        let ev = EventMsg::ToolCallEnd {
+            id: call.id.clone(),
+            exit_code: output.exit_code,
+            stdout: output.stdout.clone(),
+            stderr: output.stderr.clone(),
+            truncated: output.truncated,
+        };
+        self.emit_and_log(&ev)?;
+        self.messages.push(Message::ToolResult {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            output,
+        });
+        Ok(())
     }
 
     /// 恢复后继续同一步剩余调用；跑完则进入下一步。
@@ -1476,11 +1877,17 @@ impl Kernel {
         match decision {
             Decision::Allow => self.execute_one(&call)?,
             Decision::AllowAlways => {
-                // 记住**类别**：之后同类调用不再问。只记这一条命令的话
-                // 用户下次仍会被问 —— 那就等于没实现。
-                let kind = self.classify(&call);
-                self.granted.insert(kind);
-                self.execute_one(&call)?;
+                // 护栏 #6：循环闸门的「总是允许」**只放行这一次**，
+                // 不得写入 granted —— 否则等于永久关掉循环检测。
+                if pending.loop_gate {
+                    self.execute_one(&call)?;
+                } else {
+                    // 记住**类别**：之后同类调用不再问。只记这一条命令的话
+                    // 用户下次仍会被问 —— 那就等于没实现。
+                    let kind = self.classify(&call);
+                    self.granted.insert(kind);
+                    self.execute_one(&call)?;
+                }
             }
             Decision::Deny => {
                 // 拒绝理由进 stderr（工具结果的组成部分，模型可见即已落日志）
@@ -1501,6 +1908,15 @@ impl Kernel {
                     name: call.name,
                     output: denied_output(&deny_text),
                 });
+                // 护栏 #7：用户点「拒绝」= 停止这条路径，**不是**换下一个调用继续跑。
+                // 同批剩余调用补占位（护栏 #4），本轮不再驱动模型。
+                self.push_cancelled_results(
+                    &pending.calls,
+                    pending.index + 1,
+                    "用户拒绝了前序调用，本批剩余调用未执行",
+                );
+                // 拒绝即停：立刻收轮（TurnComplete），不给模型再绕一圈的机会。
+                return self.finish_turn_if_idle();
             }
         }
         if drive {
@@ -1512,6 +1928,7 @@ impl Kernel {
                 match self.execute_from(&pending.calls, pending.index + 1)? {
                     ExecOutcome::Done => {}
                     ExecOutcome::Suspended => return Ok(()),
+                    ExecOutcome::Aborted => return self.finish_turn_if_idle(),
                 }
             }
         }
@@ -1523,6 +1940,7 @@ impl Kernel {
             match self.execute_from(calls, start)? {
                 ExecOutcome::Done => {}
                 ExecOutcome::Suspended => return Ok(()),
+                ExecOutcome::Aborted => return self.finish_turn_if_idle(),
             }
         }
         self.drive_steps()
@@ -1633,6 +2051,7 @@ impl Kernel {
             }
         }
         let n = rebuilt.len();
+        ensure_tool_call_pairing(&mut rebuilt);
         self.messages = rebuilt;
         n
     }
@@ -1749,6 +2168,58 @@ impl Kernel {
         self.models.current_context_limit()
     }
 
+    /// 设置 / 清除会话 token 预算。`0` = 清除（不限）。
+    pub fn set_session_token_budget(&mut self, budget: u64) {
+        self.session_token_budget = if budget == 0 { None } else { Some(budget) };
+        self.session_budget_warned = false;
+    }
+
+    /// 当前会话预算（`None` = 未设限）与已用量。
+    pub fn session_token_budget(&self) -> (Option<u64>, u64) {
+        (self.session_token_budget, self.session_tokens_used)
+    }
+
+    fn session_budget_exceeded(&self) -> bool {
+        match self.session_token_budget {
+            Some(limit) => self.session_tokens_used >= limit,
+            None => false,
+        }
+    }
+
+    fn check_session_token_budget(&self) -> Result<(), KernelError> {
+        if self.session_budget_exceeded() {
+            return Err(KernelError::SessionTokenBudgetExceeded {
+                used: self.session_tokens_used,
+                limit: self.session_token_budget.unwrap_or(0),
+            });
+        }
+        Ok(())
+    }
+
+    /// 接近预算时注入一次提醒（护栏 #9）：模型侧 System + 用户侧 Error 事件。
+    ///
+    /// 只提醒一次（`session_budget_warned`）；设新预算时重置。
+    fn maybe_warn_session_budget(&mut self) -> Result<(), KernelError> {
+        let Some(limit) = self.session_token_budget else { return Ok(()) };
+        if self.session_budget_warned {
+            return Ok(());
+        }
+        let threshold = limit.saturating_mul(SESSION_BUDGET_WARN_PERCENT) / 100;
+        if self.session_tokens_used < threshold {
+            return Ok(());
+        }
+        self.session_budget_warned = true;
+        let msg = format!(
+            "[guard] 会话 token 预算已用 {}/{}（≥{}%）。请尽快收尾并给出已完成部分的小结；\
+超限后将优雅停止，提高预算或开新会话才能继续。",
+            self.session_tokens_used, limit, SESSION_BUDGET_WARN_PERCENT
+        );
+        // 模型可见（进历史）+ 用户可见（事件）
+        self.messages.push(Message::System(msg.clone()));
+        self.emit_and_log(&EventMsg::Error { message: msg })?;
+        Ok(())
+    }
+
     /// 上下文预算检查。超限即报错，绝不静默丢弃。
     fn check_context_budget(&self) -> Result<(), KernelError> {
         let n = self.messages.len();
@@ -1854,12 +2325,6 @@ impl Kernel {
 
     /// 真正执行一个调用：经沙箱、落日志、进历史。
     fn execute_one(&mut self, call: &ToolInvocation) -> Result<(), KernelError> {
-        // 目标轮内记录调用类别（审查记账用；execute_one 是唯一执行点，
-        // 审批拒绝的调用也经过这里 —— 被拒的只读探测同样不算失败）
-        if self.goal_turn_in_flight {
-            let kind = self.classify(call);
-            self.goal_turn_call_kinds.insert(call.id.clone(), kind);
-        }
         // 改动预览必须在**执行前**取。执行后文件内容已等于目标，
         // `preview` 会返回 None（"没有改动"），统计就永远为空 ——
         // 这个顺序错误只会在真实工具上暴露：假工具的 preview 是无条件返回的。
@@ -1867,78 +2332,8 @@ impl Kernel {
             .tools
             .get(&call.name)
             .and_then(|t| t.preview(&call.arguments, &self.cwd));
-
-        let output = match self.tools.get(&call.name) {
-            Some(tool) => {
-                let ctx = ToolCtx {
-                    sandbox: self.sandbox.as_ref(),
-                    mode: self.resolution().sandbox,
-                    cwd: &self.cwd,
-                    max_output_bytes: self.max_output_bytes,
-                };
-                tool.execute(&call.arguments, &ctx)
-            }
-            None => ToolOutput {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: format!("未知工具：{}", call.name),
-                truncated: false,
-            },
-        };
-        // 工具声明的"运行后公告"（如任务清单更新）先于结束事件发出 ——
-        // 顺序对宿主有意义：先看到清单变化，再看到调用结束。
-        if let Some(tool) = self.tools.get(&call.name) {
-            for ev in tool.report(&call.arguments) {
-                self.emit_and_log(&ev)?;
-            }
-        }
-
-        // 文件改动统计：用**执行前**取到的预览（见上方 change_before）
-        if output.exit_code == 0 {
-            if let Some((path, diff)) = change_before {
-                let additions = diff
-                    .lines()
-                    .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
-                    .count();
-                let deletions = diff
-                    .lines()
-                    .filter(|l| l.starts_with('-') && !l.starts_with("---"))
-                    .count();
-                if additions > 0 || deletions > 0 {
-                    let e = self.file_changes.entry(path).or_insert((0, 0));
-                    e.0 += additions;
-                    e.1 += deletions;
-                    let files: Vec<FileChange> = self
-                        .file_changes
-                        .iter()
-                        .map(|(p, (a, d))| FileChange {
-                            path: p.clone(),
-                            additions: *a,
-                            deletions: *d,
-                        })
-                        .collect();
-                    let ev = EventMsg::FilesChanged { files };
-                    self.emit_and_log(&ev)?;
-                }
-            }
-        }
-
-        let ev = EventMsg::ToolCallEnd {
-            id: call.id.clone(),
-            exit_code: output.exit_code,
-            // 输出必须进事件流：用户要看的是"这条命令打印了什么"，
-            // 不是一个孤零零的退出码。内核已按上限截断。
-            stdout: output.stdout.clone(),
-            stderr: output.stderr.clone(),
-            truncated: output.truncated,
-        };
-        self.emit_and_log(&ev)?;
-        self.messages.push(Message::ToolResult {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            output,
-        });
-        Ok(())
+        let output = self.run_tool(call);
+        self.apply_tool_result(call, change_before, output)
     }
 
     fn emit_and_log(&mut self, ev: &EventMsg) -> Result<(), KernelError> {
@@ -2023,7 +2418,13 @@ impl Kernel {
     }
 }
 
-enum ExecOutcome { Done, Suspended }
+enum ExecOutcome {
+    Done,
+    Suspended,
+    /// 用户已拒绝 / 预算熔断：本批剩余调用不再执行，本轮也到此为止
+    /// （护栏 #7 `continue_loop_on_deny` 默认 false —— 拒绝按钮必须真能停）。
+    Aborted,
+}
 
 /// 单步推进的结果。与 `ExecOutcome` 分开：一个是"这一步的工具执行完了吗"，
 /// 一个是"整轮推进到哪了"。
@@ -2031,6 +2432,81 @@ enum StepOutcome { More, Suspended, Done }
 
 fn denied_output(reason: &str) -> ToolOutput {
     ToolOutput { exit_code: -1, stdout: String::new(), stderr: reason.into(), truncated: false }
+}
+
+/// 未执行的 tool_call 占位结果（护栏 #4）。
+///
+/// **内容必须非空且写清原因**：chat-completions 方言要求 assistant 的每个
+/// `tool_call` 后都有对应 `role:"tool"` 消息；空占位会让模型以为工具返回了空结果。
+fn cancelled_output(reason: &str) -> ToolOutput {
+    denied_output(reason)
+}
+
+/// 在独立线程里跑一个工具（护栏 #8 并行执行腿）。
+///
+/// **不碰 `Kernel`** —— 它非 `Sync`（内含在飞流）。只传 Sync 件：
+/// `Arc` 工具、沙箱引用、模式、cwd、上限。
+fn run_tool_standalone(
+    tool: Option<&dyn Tool>,
+    call: &ToolInvocation,
+    sandbox: &dyn SandboxBackend,
+    mode: SandboxMode,
+    cwd: &std::path::Path,
+    max_output_bytes: usize,
+) -> ToolOutput {
+    match tool {
+        Some(tool) => {
+            let ctx = ToolCtx { sandbox, mode, cwd, max_output_bytes };
+            tool.execute(&call.arguments, &ctx)
+        }
+        None => ToolOutput {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: format!("未知工具：{}", call.name),
+            truncated: false,
+        },
+    }
+}
+
+/// 把护栏提醒拼进工具结果的 stderr（模型可见的那一路）。
+fn push_guard_note(output: &mut ToolOutput, note: &str) {
+    if !output.stderr.is_empty() {
+        output.stderr.push('\n');
+    }
+    output.stderr.push_str("[guard] ");
+    output.stderr.push_str(note);
+}
+
+/// 为历史上悬空的 tool_call 补占位 tool 结果（护栏 #4 的回放侧）。
+///
+/// 调用方已重建完消息；这里只补「assistant 声明了 tool_call、却没有任何
+/// tool 结果」的缺口。不补的话，切换会话后的下一轮请求对真实 provider 非法
+/// （OpenAI 要求 tool_call 与 tool 消息成对）。
+fn ensure_tool_call_pairing(rebuilt: &mut Vec<Message>) {
+    let answered: std::collections::BTreeSet<String> = rebuilt
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut missing: Vec<ToolInvocation> = Vec::new();
+    for m in rebuilt.iter() {
+        if let Message::Assistant { tool_calls, .. } = m {
+            for c in tool_calls {
+                if !answered.contains(&c.id) {
+                    missing.push(c.clone());
+                }
+            }
+        }
+    }
+    for c in missing {
+        rebuilt.push(Message::ToolResult {
+            id: c.id,
+            name: c.name,
+            output: cancelled_output("[cancelled] 未执行：中断或超限，历史中无工具结果"),
+        });
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════

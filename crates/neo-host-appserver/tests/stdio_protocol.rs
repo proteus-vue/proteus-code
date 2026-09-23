@@ -112,7 +112,7 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 27, "initialize + 17 Op + 9 control");
+    assert_eq!(methods.len(), 28, "initialize + 17 Op + 10 control");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
     // 宿主能力（SPI 的既有数据，不是这条协议新造的）
@@ -434,6 +434,7 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 ThreadCmd::History { .. } => ThreadResult::Value(json!({"items": []})),
                 ThreadCmd::Export { .. } => ThreadResult::Value(json!({"content": "# ok"})),
                 ThreadCmd::Tools => ThreadResult::Value(json!({"tools": [{"name":"bash"}]})),
+                ThreadCmd::Models => ThreadResult::Value(json!({"models": [{"name":"mock"}], "current": "mock"})),
                 ThreadCmd::GitInfo { .. } => ThreadResult::Value(json!({"in_repo": false})),
             }),
         },
@@ -606,6 +607,7 @@ fn tools_list_git_info_and_thread_export() {
         json!({"jsonrpc":"2.0","id":3,"method":"git/info","params":{}}),
         json!({"jsonrpc":"2.0","id":4,"method":"thread/export","params":{"format":"markdown"}}),
         json!({"jsonrpc":"2.0","id":5,"method":"thread/export","params":{"format":"yaml"}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"models/list","params":{}}),
     ];
     let text = input.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
     let sink = SharedBuf::default();
@@ -633,6 +635,13 @@ fn tools_list_git_info_and_thread_export() {
                         ThreadResult::Value(json!({"format": fmt, "content": "# 会话\n"}))
                     }
                 }
+                ThreadCmd::Models => ThreadResult::Value(json!({
+                    "models": [
+                        {"name":"glm-4.6","description":"智谱","context_limit":128000,"production":true,"current":true},
+                        {"name":"mock","description":"桩","context_limit":0,"production":false,"current":false},
+                    ],
+                    "current": "glm-4.6"
+                })),
                 _ => ThreadResult::Value(json!({})),
             }),
         },
@@ -659,6 +668,8 @@ fn tools_list_git_info_and_thread_export() {
     assert_eq!(res(3)["result"]["origin_url"], "https://example.com/r.git");
     assert_eq!(res(4)["result"]["format"], "markdown");
     assert!(res(4)["result"]["content"].as_str().unwrap().contains("会话"));
+    assert_eq!(res(6)["result"]["current"], "glm-4.6");
+    assert_eq!(res(6)["result"]["models"].as_array().unwrap().len(), 2);
 
     let err = lines
         .iter()

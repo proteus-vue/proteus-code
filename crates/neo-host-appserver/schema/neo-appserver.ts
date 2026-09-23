@@ -36,6 +36,7 @@ export const METHODS = [
   "thread/history",
   "thread/export",
   "tools/list",
+  "models/list",
   "git/info",
 ] as const;
 export type MethodName = (typeof METHODS)[number];
@@ -62,7 +63,7 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "command/exec": ["command"],
   "approval/respond": ["id", "decision", "reason"],
   "approval/respondStep": ["id", "decision", "reason"],
-  "session/configure": ["exec_mode", "sandbox_mode", "approval_policy", "model"],
+  "session/configure": ["exec_mode", "sandbox_mode", "approval_policy", "model", "token_budget"],
   "session/compact": [],
   "session/fork": [],
   "session/rewind": ["turns"],
@@ -80,6 +81,7 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "thread/history": ["id"],
   "thread/export": ["id", "format"],
   "tools/list": [],
+  "models/list": [],
   "git/info": ["cwd"],
 };
 
@@ -191,7 +193,14 @@ export type RpcRequest = { jsonrpc: string,
 id: unknown, method: string, params: unknown, };
 export type RpcResponse = { jsonrpc: string, id: unknown, result: unknown, };
 export type SandboxMode = "read_only" | "workspace_write" | "danger_full_access";
-export type SessionPatch = { exec_mode: ExecMode | null, sandbox_mode: SandboxMode | null, approval_policy: ApprovalPolicy | null, model: string | null, };
+export type SessionPatch = { exec_mode: ExecMode | null, sandbox_mode: SandboxMode | null, approval_policy: ApprovalPolicy | null, model: string | null, 
+/**
+ * 会话级 token 预算（护栏 #9）。`Some(0)` = 清除预算（不限）。
+ *
+ * 缺省 `None` = **不改**现有预算（与其它字段同语义）。
+ * 要"不限"必须显式传 `0`，不能靠缺省——否则桌面端漏传会静默抹掉用户设过的预算。
+ */
+token_budget: number | null, };
 export type TextParams = { text: string, };
 export type ThreadSummary = { id: string, 
 /**

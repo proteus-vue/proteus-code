@@ -476,12 +476,13 @@ mod tests {
     #[test]
     fn method_docs_cover_all_ops() {
         let docs = method_docs();
-        // initialize + 17 个 Op + 5 个 thread
-        assert_eq!(docs.len(), 27, "方法表应为 initialize + 17 Op + 9 control");
+        // initialize + 17 个 Op + 10 个 control
+        assert_eq!(docs.len(), 28, "方法表应为 initialize + 17 Op + 10 control");
         assert!(docs[0].handshake_only);
         assert_eq!(docs[0].name, "initialize");
         assert!(docs.iter().any(|d| d.name == "thread/resume"));
         assert!(docs.iter().any(|d| d.name == "tools/list"));
+        assert!(docs.iter().any(|d| d.name == "models/list"));
         assert!(docs.iter().any(|d| d.name == "git/info"));
     }
 

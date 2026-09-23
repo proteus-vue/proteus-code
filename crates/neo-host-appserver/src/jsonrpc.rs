@@ -127,6 +127,8 @@ pub enum ThreadCmd {
     Export { id: Option<String>, format: Option<String> },
     /// `tools/list`：工具目录（name / description / parameters）
     Tools,
+    /// `models/list`：可选模型目录（桌面设置页的模型 picker 用）
+    Models,
     /// `git/info`：工作区 git 元数据（branch / sha / origin_url）—— 零子进程
     GitInfo { cwd: Option<String> },
 }
@@ -167,6 +169,7 @@ pub const THREAD_METHODS: &[&str] = &[
     "thread/history",
     "thread/export",
     "tools/list",
+    "models/list",
     "git/info",
 ];
 
@@ -209,14 +212,20 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         | "goal/advance" | "goal/clear" | "shutdown" => &[],
         "command/exec" => &["command"],
         "approval/respond" | "approval/respondStep" => &["id", "decision", "reason"],
-        "session/configure" => &["exec_mode", "sandbox_mode", "approval_policy", "model"],
+        "session/configure" => &[
+            "exec_mode",
+            "sandbox_mode",
+            "approval_policy",
+            "model",
+            "token_budget",
+        ],
         "session/rewind" => &["turns"],
         "goal/set" => &["goal"],
         "goal/pause" | "goal/resume" => &["goal_id"],
         "thread/get" | "thread/resume" | "thread/delete" => &["id"],
         "thread/history" => &["id"],
         "thread/export" => &["id", "format"],
-        "thread/list" | "thread/create" | "tools/list" => &[],
+        "thread/list" | "thread/create" | "tools/list" | "models/list" => &[],
         "git/info" => &["cwd"],
         _ => return None,
     })
@@ -348,6 +357,7 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             Action::Thread(ThreadCmd::Export { id: p.id, format: p.format })
         }
         "tools/list" => Action::Thread(ThreadCmd::Tools),
+        "models/list" => Action::Thread(ThreadCmd::Models),
         "git/info" => {
             let p: GitInfoParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::GitInfo { cwd: p.cwd })
@@ -538,8 +548,8 @@ mod tests {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(27),
-            "initialize + 17 Op + 5 thread"
+            Some(28),
+            "initialize + 17 Op + 10 control"
         );
 
         // 版本不匹配必须拒绝，且把双方版本放进 data（机器可读）

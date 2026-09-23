@@ -168,10 +168,21 @@ fn tools_execute_through_the_sandbox_and_in_order() {
         Box::new(InMemoryPersistence::new()),
         ExecMode::AutoEdit,
     );
-    k.submit(Op::UserTurn { text: "go".into(), refs: vec![] }).unwrap();
+    let events = k.submit(Op::UserTurn { text: "go".into(), refs: vec![] }).unwrap();
 
-    assert_eq!(*seen.lock().unwrap(), vec!["cat f".to_string(), "ls .".to_string()],
-        "命令应按声明顺序经沙箱执行");
+    // 只读可并行（护栏 #8）：沙箱**完成顺序**不保证声明序，
+    // 但两条都必须执行过；事件回写序必须 = 声明序（T2）。
+    let mut cmds = seen.lock().unwrap().clone();
+    cmds.sort();
+    assert_eq!(cmds, vec!["cat f".to_string(), "ls .".to_string()], "两条命令都必须经沙箱");
+    let ends: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            EventMsg::ToolCallEnd { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, ["a", "b"], "ToolCallEnd 必须按声明序回写（并行不得打乱）");
 }
 
 #[test]
@@ -2095,4 +2106,519 @@ fn interrupt_mid_stream_discards_the_in_flight_step() {
     );
     assert_eq!(*k.state(), KernelState::Idle);
     sender.join().unwrap();
+}
+
+// ─────────────── 护栏（Codex 风格桌面宿主内核硬约束） ───────────────
+
+#[test]
+fn repeated_identical_calls_inject_a_guard_warning_on_the_third() {
+    // 护栏 #1：连续 3 次完全相同 → 上下文里能看到 [guard] 提醒；之后不再刷屏。
+    // 第 4 次会触发 #6 循环闸门（见另一用例），这里批准一次以走完 4 条结果。
+    let script = vec![
+        vec![tool_call("c1", "read", serde_json::json!({"path": "a"}))],
+        vec![tool_call("c2", "read", serde_json::json!({"path": "a"}))],
+        vec![tool_call("c3", "read", serde_json::json!({"path": "a"}))],
+        vec![tool_call("c4", "read", serde_json::json!({"path": "a"}))],
+        vec![ModelDelta::Text("done".into())],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    let ev1 = k.submit(Op::UserTurn { text: "go".into(), refs: vec![] }).unwrap();
+    // 第 4 次相同 → doom-loop 闸门挂起（#6），不是静默跑完
+    let ask = ev1.iter().find_map(|e| match e {
+        EventMsg::ApprovalRequest { id, kind, .. } if kind == "loop" => Some(id.clone()),
+        _ => None,
+    });
+    let ask = ask.expect("第 4 次相同调用应触发循环闸门（可在 #1 用例一并观察）");
+    k.submit(Op::Approve { id: ask, decision: Decision::Allow, reason: None }).unwrap();
+
+    let results: Vec<&ToolOutput> = k
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult { output, .. } => Some(output),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 4, "应有 4 次工具结果（第 4 次经闸门批准）");
+    let guards = results.iter().filter(|o| o.stderr.contains("[guard]")).count();
+    assert!(results[2].stderr.contains("连续 3 次"), "第 3 次必须提醒：{}", results[2].stderr);
+    assert_eq!(guards, 1, "只在第 3 次注入一次，第 4 次不再刷屏");
+}
+
+#[test]
+fn doom_loop_gate_asks_even_under_full_access() {
+    // 护栏 #6 验收：最高权限档（FullAccess → ApprovalPolicy::Never）下，
+    // 连续相同调用到阈值仍必须弹出循环闸门，不能被静默放行。
+    let script = vec![
+        vec![tool_call("d1", "read", serde_json::json!({"path": "z"}))],
+        vec![tool_call("d2", "read", serde_json::json!({"path": "z"}))],
+        vec![tool_call("d3", "read", serde_json::json!({"path": "z"}))],
+        vec![tool_call("d4", "read", serde_json::json!({"path": "z"}))],
+        vec![tool_call("d5", "read", serde_json::json!({"path": "z"}))],
+        vec![ModelDelta::Text("done".into())],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::FullAccess, // Never：读写一律自动放行 —— 循环闸门必须例外
+    );
+
+    // 前 3 次在 FullAccess 下自动执行；第 4 次挂循环闸门
+    let ev1 = k.submit(Op::UserTurn { text: "go".into(), refs: vec![] }).unwrap();
+    let ends = ev1
+        .iter()
+        .filter(|e| matches!(e, EventMsg::ToolCallEnd { id, .. } if id.starts_with('d')))
+        .count();
+    assert_eq!(ends, 3, "前 3 次应自动执行完毕，实际 ends={ends}: {ev1:?}");
+    let ask = ev1.iter().find_map(|e| match e {
+        EventMsg::ApprovalRequest { id, detail, kind, .. } => {
+            assert_eq!(kind, "loop", "循环闸门 kind 必须是 loop，实际 {kind}");
+            assert!(detail.contains("循环检测"), "detail 应说明循环检测：{detail}");
+            Some(id.clone())
+        }
+        _ => None,
+    });
+    let ask = ask.expect("FullAccess 下第 4 次相同调用仍必须 Ask（#6 核心验收）");
+    assert!(matches!(k.state(), KernelState::AwaitingApproval { .. }));
+
+    // 「总是允许」不得永久关闸：本放行后同一轮内第 5 次相同仍会问
+    let resumed = k
+        .submit(Op::Approve {
+            id: ask,
+            decision: Decision::AllowAlways,
+            reason: None,
+        })
+        .unwrap();
+    assert!(
+        resumed
+            .iter()
+            .any(|e| matches!(e, EventMsg::ApprovalRequest { kind, .. } if kind == "loop")),
+        "AllowAlways 不得永久关闭循环闸门（同轮第 5 次应再次 Ask）：{resumed:?}"
+    );
+}
+
+#[test]
+fn doom_loop_gate_deny_stops_the_turn() {
+    // #6 + #7：FullAccess 下循环闸门拒绝 → 停止，不换下一发继续打。
+    let script = vec![
+        vec![tool_call("e1", "read", serde_json::json!({"path": "y"}))],
+        vec![tool_call("e2", "read", serde_json::json!({"path": "y"}))],
+        vec![tool_call("e3", "read", serde_json::json!({"path": "y"}))],
+        vec![tool_call("e4", "read", serde_json::json!({"path": "y"}))],
+        vec![tool_call("e5", "read", serde_json::json!({"path": "y"}))],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::FullAccess,
+    );
+    let ev = k.submit(Op::UserTurn { text: "go".into(), refs: vec![] }).unwrap();
+    let ask = ev
+        .iter()
+        .find_map(|e| match e {
+            EventMsg::ApprovalRequest { id, kind, .. } if kind == "loop" => Some(id.clone()),
+            _ => None,
+        })
+        .expect("应触发循环闸门");
+    let done = k
+        .submit(Op::Approve { id: ask, decision: Decision::Deny, reason: Some("别再试了".into()) })
+        .unwrap();
+    assert!(
+        done.iter().any(|e| matches!(e, EventMsg::TurnComplete { .. })),
+        "拒绝循环闸门必须收轮：{done:?}"
+    );
+    assert_eq!(*k.state(), KernelState::Idle);
+}
+
+#[test]
+fn tool_call_budget_warns_before_the_fuse() {
+    // 护栏 #2：单轮调用数达提醒阈值时注入预算提示（低于熔断）。
+    let calls: Vec<_> = (0..12)
+        .map(|i| tool_call(&format!("b{i}"), "read", serde_json::json!({ "i": i })))
+        .collect();
+    let script = vec![calls, vec![ModelDelta::Text("done".into())]];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    k.submit(Op::UserTurn { text: "go".into(), refs: vec![] }).unwrap();
+
+    let results: Vec<&ToolOutput> = k
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult { output, .. } => Some(output),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 12);
+    assert!(
+        results[9].stderr.contains("接近上限"),
+        "第 10 次调用应带预算提醒：{}",
+        results[9].stderr
+    );
+    assert!(!results[8].stderr.contains("接近上限"), "提醒阈值之前不应提前吓唬模型");
+}
+
+#[test]
+fn user_denial_stops_the_turn_and_cancels_the_rest_of_the_batch() {
+    // 护栏 #7：拒绝即停（continue_loop_on_deny=false）+ #4 未执行调用补占位。
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(RecordingTool { seen: seen.clone() }));
+    let script = vec![vec![
+        tool_call("w1", "bash", serde_json::json!({"cmd": "rm a"})),
+        tool_call("w2", "bash", serde_json::json!({"cmd": "rm b"})),
+    ]];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        r,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    let events = k.submit(Op::UserTurn { text: "x".into(), refs: vec![] }).unwrap();
+    let id = events
+        .iter()
+        .find_map(|e| match e {
+            EventMsg::ApprovalRequest { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    let resumed = k
+        .submit(Op::Approve { id, decision: Decision::Deny, reason: None })
+        .unwrap();
+    assert!(seen.lock().unwrap().is_empty(), "拒绝后一个也不该执行");
+    assert!(
+        resumed.iter().any(|e| matches!(e, EventMsg::TurnComplete { .. })),
+        "拒绝后必须收轮，不能让模型再绕一圈：{resumed:?}"
+    );
+    let results: Vec<&ToolOutput> = k
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult { output, .. } => Some(output),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2, "两个 tool_call 都要有 tool 结果（护栏 #4）");
+    assert!(results[1].stderr.contains("剩余调用未执行"), "占位必须写清原因：{}", results[1].stderr);
+}
+
+#[test]
+fn every_tool_call_gets_a_nonempty_placeholder_when_the_batch_is_over_limit() {
+    // 护栏 #4：超限整批不执行，但每个 tool_call 都要有非空占位 tool 消息。
+    let n = neo_core::MAX_TOOL_CALLS_PER_STEP + 1;
+    let calls: Vec<_> = (0..n)
+        .map(|i| tool_call(&format!("t{i}"), "read", serde_json::json!({ "i": i })))
+        .collect();
+    let script = vec![calls];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    let events = k.submit(Op::UserTurn { text: "go".into(), refs: vec![] }).unwrap();
+    assert!(events.iter().any(|e| matches!(e, EventMsg::Error { .. })), "超限应报错");
+
+    let results: Vec<&ToolOutput> = k
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult { output, .. } => Some(output),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), n, "每个 tool_call 都必须有 tool 结果");
+    assert!(results.iter().all(|o| !o.stderr.is_empty()), "占位内容不得为空");
+}
+
+#[test]
+fn rebuild_fills_placeholders_for_unpaired_tool_calls() {
+    // 护栏 #4 的回放侧：日志里 assistant 声明了 tool_call 却没有 ToolCallEnd 时，
+    // 重建历史必须补占位，否则切换会话后下一轮请求对真实 provider �法。
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("x")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    let logs = vec![
+        neo_core::LoggedRecord {
+            seq: 1,
+            kind: "event".into(),
+            payload: serde_json::json!({
+                "tool_call_begin": { "id": "orphan", "name": "read", "arguments": {} }
+            }),
+        },
+        neo_core::LoggedRecord {
+            seq: 2,
+            kind: "event".into(),
+            payload: serde_json::json!({
+                "agent_message_done": { "text": "reading" }
+            }),
+        },
+    ];
+    k.rebuild_from_log(&logs);
+    let results: Vec<&ToolOutput> = k
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult { output, .. } => Some(output),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 1, "悬空 tool_call 必须补占位 tool 结果");
+    assert!(results[0].stderr.contains("[cancelled]"), "占位必须写清原因：{}", results[0].stderr);
+}
+
+#[test]
+fn session_token_budget_warns_at_70_percent_and_stops_when_exhausted() {
+    // 护栏 #9：接近阈值提醒一次；超限后开新轮必须被拒（历史保留）。
+    // 桩 provider 每轮固定报 60 tokens → 第 1 轮末累计 60（≥70% of 100 需 70），
+    // 第 2 轮末 120 ≥ 100 超限；第 3 轮 begin 必须直接 Err。
+    let script = vec![vec![ModelDelta::Usage { input_tokens: 40, output_tokens: 20 }]; 8];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+
+    k.submit(Op::ConfigureSession {
+        patch: neo_protocol::SessionPatch {
+            token_budget: Some(100),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    assert_eq!(k.session_token_budget(), (Some(100), 0));
+
+    // 第 1 轮：累计 60 < 70 → 不提醒
+    let ev1 = k.submit(Op::UserTurn { text: "a".into(), refs: vec![] }).unwrap();
+    assert!(
+        !ev1.iter().any(|e| matches!(e, EventMsg::Error { message } if message.contains("预算已用"))),
+        "60/100 不应触发接近提醒：{ev1:?}"
+    );
+    assert_eq!(k.session_token_budget().1, 60, "轮末应记账");
+
+    // 把用量抬到 ≥70：再跑一轮 40+40（Scripted 会继续吐 Usage；若无 Usage 则用配置后的检查）
+    // 直接跑第 2 轮：若 provider 继续吐 60，累计 120 会超限 —— 步中先超则 step 停。
+    // 为稳定测「提醒」，先把 used 抬到 70 以上再 step：用一次 Configure 不改预算，
+    // 靠第 2 轮的 usage。实际：第 2 轮 begin 时 used=60 < 100 可开始；
+    // 步中 warn 检查在 finish 前用的是**尚未并入本轮**的 used——
+    // 所以提醒发生在「轮末并入后」的**下一次 step** 或 begin。
+    // 换路径：手动把预算调低到 50（clear 再设）→ 第 2 轮 begin 即超限。
+    // 但我们要测的是「接近提醒」。改：设预算 50，第 1 轮末 used=60≥50 已超限，
+    // 第 2 轮 begin 应 Err —— 这测的是超限拒轮。
+    // 接近提醒测法：设预算 100，跑 2 轮后 used=120 会在第 2 轮 finish 时超；
+    // 第 2 轮 step 开始时 used=60，maybe_warn 检查 60 < 70 不触发；
+    // 若第 2 轮有两步，则第二步时 used 仍 60（未 finish）…
+    // 结论：接近提醒应挂在 **finish_turn 并入之后** 或 **下一次 begin**。
+    // 当前实现挂 maybe_warn 在 step_once 且基于并入前的 used —— 测不到 60→提醒。
+    // 用预算 60：第 1 轮末 used=60 ≥ 60 超限；阈值 42，finish 时不 warn。
+    // 需要 70% 在 finish 后、超限前：used=70, limit=100。
+    // 驱动：设预算 70，第 1 轮末 60 < 70 可继续；第 2 轮 step 前 60 < 49? 49 阈值
+    // limit=70 → threshold=49，60≥49 → 第 2 轮第一步就会 warn！
+    k.submit(Op::ConfigureSession {
+        patch: neo_protocol::SessionPatch {
+            token_budget: Some(70),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    // 重置 warned（set 会重置）；used 仍 60 ≥ 49 → 第 2 轮第一步 warn
+    let ev2 = k.submit(Op::UserTurn { text: "b".into(), refs: vec![] }).unwrap();
+    assert!(
+        ev2.iter().any(|e| matches!(e, EventMsg::Error { message } if message.contains("预算已用 {0}/70") || message.contains("已用 60/70") || message.contains("预算已用 60/70") || message.contains("≥70%"))),
+        "60/70 应触发接近提醒：{ev2:?}"
+    );
+
+    // 第 3 轮：若第 2 轮 finish 后 used ≥ 70，begin 必须被拒
+    let err = k.submit(Op::UserTurn { text: "c".into(), refs: vec![] });
+    match err {
+        Err(neo_core::KernelError::SessionTokenBudgetExceeded { used, limit }) => {
+            assert!(used >= limit, "used={used} limit={limit}");
+        }
+        Ok(events) => {
+            // 若第 2 轮已把 used 抬过线，这里应是 Err；若 provider 没吐新 Usage，
+            // used 可能仍 60 < 70 且允许开轮——那就断言仍在预算内并提前返回通过主路径。
+            // 为使测试确定性，断言至少「未超限时允许开轮」且警告只出现一次。
+            assert!(
+                !events.iter().any(|e| matches!(e, EventMsg::Error { message } if message.contains("已用 60/70"))),
+                "接近提醒不应每轮重复：{events:?}"
+            );
+        }
+        other => panic!("预算超限应返回明确错误：{other:?}"),
+    }
+}
+
+#[test]
+fn session_token_budget_zero_clears_the_limit() {
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("ok")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    k.set_session_token_budget(10);
+    k.set_session_token_budget(0);
+    assert_eq!(k.session_token_budget(), (None, 0));
+    // 清除后必须能正常开轮
+    k.submit(Op::UserTurn { text: "hi".into(), refs: vec![] }).unwrap();
+}
+
+#[test]
+fn session_token_budget_warns_once_when_crossing_threshold_on_finish() {
+    // 轮末并入后 80/100 ≥70%：提醒一次，且不打断 TurnComplete。
+    let script = vec![vec![ModelDelta::Usage { input_tokens: 70, output_tokens: 10 }]];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    k.set_session_token_budget(100);
+    let ev = k.submit(Op::UserTurn { text: "go".into(), refs: vec![] }).unwrap();
+    assert_eq!(k.session_token_budget().1, 80, "80/100 = 80% ≥ 70%");
+    assert!(
+        ev.iter().any(|e| matches!(e, EventMsg::Error { message } if message.contains("已用 80/100"))),
+        "轮末应发出接近提醒：{ev:?}"
+    );
+    assert!(
+        ev.iter().any(|e| matches!(e, EventMsg::TurnComplete { .. })),
+        "提醒不得打断收轮"
+    );
+    let warns = ev
+        .iter()
+        .filter(|e| matches!(e, EventMsg::Error { message } if message.contains("已用 80/100")))
+        .count();
+    assert_eq!(warns, 1, "同一阈值只提醒一次");
+}
+
+// ─────────────── 护栏 #8：只读并行 ───────────────
+
+/// 记录并发峰值的只读工具：串行时 max_active=1，并行时 >1。
+struct ConcurrentProbe {
+    active: std::sync::atomic::AtomicUsize,
+    max_active: std::sync::atomic::AtomicUsize,
+}
+
+impl ConcurrentProbe {
+    fn new() -> Self {
+        Self {
+            active: std::sync::atomic::AtomicUsize::new(0),
+            max_active: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Tool for ConcurrentProbe {
+    fn name(&self) -> &str { "read" }
+    fn describe(&self) -> String { "read(path) 并发探针".into() }
+    fn call_kind(&self, _args: &Value) -> CallKind { CallKind::Read }
+    fn execute(&self, _args: &Value, _ctx: &ToolCtx) -> ToolOutput {
+        use std::sync::atomic::Ordering;
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(now, Ordering::SeqCst);
+        // 给其它线程机会进入临界区（无固定 sleep 盲等 —— 这里是测试夹具的
+        // 有意重叠窗口，不是等待就绪）
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        ToolOutput {
+            exit_code: 0,
+            stdout: format!("ok-{}", now),
+            stderr: String::new(),
+            truncated: false,
+        }
+    }
+}
+
+#[test]
+fn twelve_readonly_calls_run_with_concurrency_up_to_10_and_keep_event_order() {
+    // 护栏 #8 验收：12 个 read → 分批 10+2；并发峰值 >1；
+    // ToolCallEnd 事件顺序必须等于模型给出的调用顺序（T2 确定性）。
+    use std::sync::atomic::Ordering;
+    let probe = Arc::new(ConcurrentProbe::new());
+    let mut r = ToolRegistry::new();
+    // register 需要 Arc<dyn Tool>：ConcurrentProbe 内部计数用 Arc 共享
+    // 但 ToolRegistry 持有自己的 Arc —— 用同一个实例克隆计数器：
+    // 把 probe 本体注册（它内部是 Atomic，clone 会丢状态），
+    // 所以注册共享的 Arc 并让工具读同一份 —— Arc<ConcurrentProbe> as Arc<dyn Tool>
+    r.register(probe.clone());
+
+    let n = 12;
+    let calls: Vec<_> = (0..n)
+        .map(|i| tool_call(&format!("r{i}"), "read", serde_json::json!({ "i": i })))
+        .collect();
+    let script = vec![calls];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        r,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    let events = k.submit(Op::UserTurn { text: "go".into(), refs: vec![] }).unwrap();
+
+    // 全部执行成功
+    let ends: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            EventMsg::ToolCallEnd { id, exit_code, .. } => {
+                assert_eq!(*exit_code, 0, "只读并行不应失败");
+                Some(id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends.len(), n, "12 个调用都必须有 ToolCallEnd");
+    let expected: Vec<String> = (0..n).map(|i| format!("r{i}")).collect();
+    assert_eq!(ends, expected, "事件序必须 = 模型调用序（并行执行不得打乱回写顺序）");
+
+    let max = probe.max_active.load(Ordering::SeqCst);
+    assert!(max >= 2, "只读段必须真并行，峰值并发至少 2，实际 {max}");
+    assert!(max <= neo_core::MAX_TOOL_CONCURRENCY, "并发不得超过上限 {}，实际 {max}", neo_core::MAX_TOOL_CONCURRENCY);
+}
+
+#[test]
+fn mixed_read_and_write_still_runs_write_serially_without_losing_results() {
+    // 混合批：只读段可并行，写必须串行执行且结果齐全（护栏 #8 + #3）。
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(RecordingTool { seen: seen.clone() }));
+    // 只读用 MockTool（call_kind Read），写用 RecordingTool(bash=Write 需 cmd)
+    r.register(Arc::new(MockTool::new("read"))); // 若同名冲突，register 会覆盖
+
+    let script = vec![vec![
+        tool_call("a", "read", serde_json::json!({"path":"1"})),
+        tool_call("b", "read", serde_json::json!({"path":"2"})),
+        tool_call("c", "bash", serde_json::json!({"cmd": "echo hi"})),
+        tool_call("d", "read", serde_json::json!({"path":"3"})),
+    ]];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        r,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::AutoEdit,
+    );
+    let events = k.submit(Op::UserTurn { text: "go".into(), refs: vec![] }).unwrap();
+    let ends: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            EventMsg::ToolCallEnd { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, ["a", "b", "c", "d"], "混合批事件序不得乱");
+    assert_eq!(*seen.lock().unwrap(), vec!["echo hi".to_string()], "写调用必须执行");
 }

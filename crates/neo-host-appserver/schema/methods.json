@@ -62,7 +62,8 @@
       "exec_mode",
       "sandbox_mode",
       "approval_policy",
-      "model"
+      "model",
+      "token_budget"
     ],
     "handshake_only": false
   },
@@ -167,6 +168,11 @@
   },
   {
     "name": "tools/list",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "models/list",
     "params": [],
     "handshake_only": false
   },

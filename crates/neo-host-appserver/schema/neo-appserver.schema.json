@@ -580,7 +580,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "需要用户审批。\n\n`kind` 是内核判定的**调用类别**（read / write / network / interactive），\n不是工具名 —— \"总是允许\"将放行的范围由它定义。它必须由内核单一事实源\n给出：宿主若按工具名自行推断，bash 这类\"按命令内容分类\"的工具就会\n显示成与内核实际放行范围不一致的类别（显示\"只读\"、实际放行\"写入\"）。",
+          "description": "需要用户审批。\n\n`kind` 是内核判定的**调用类别**（read / write / network / interactive /\n**loop**），不是工具名 —— \"总是允许\"将放行的范围由它定义。\n`loop` = doom-loop 循环检测闸门（护栏 #6）：**不参与类别 granted**，\n单次放行不得被映射成「总是允许 read/write」。\n宿主若按工具名自行推断，bash 这类\"按命令内容分类\"的工具就会\n显示成与内核实际放行范围不一致的类别（显示\"只读\"、实际放行\"写入\"）。",
           "properties": {
             "approval_request": {
               "properties": {
@@ -1804,6 +1804,16 @@
                   "type": "null"
                 }
               ]
+            },
+            "token_budget": {
+              "default": null,
+              "description": "会话级 token 预算（护栏 #9）。`Some(0)` = 清除预算（不限）。\n\n缺省 `None` = **不改**现有预算（与其它字段同语义）。\n要\"不限\"必须显式传 `0`，不能靠缺省——否则桌面端漏传会静默抹掉用户设过的预算。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "type": "object"
@@ -2309,6 +2319,16 @@
               "type": "null"
             }
           ]
+        },
+        "token_budget": {
+          "default": null,
+          "description": "会话级 token 预算（护栏 #9）。`Some(0)` = 清除预算（不限）。\n\n缺省 `None` = **不改**现有预算（与其它字段同语义）。\n要\"不限\"必须显式传 `0`，不能靠缺省——否则桌面端漏传会静默抹掉用户设过的预算。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "title": "SessionPatch",
@@ -2498,6 +2518,7 @@
     "thread/history",
     "thread/export",
     "tools/list",
+    "models/list",
     "git/info"
   ],
   "x-notification": {
