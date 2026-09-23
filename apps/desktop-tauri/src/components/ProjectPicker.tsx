@@ -47,7 +47,10 @@ export function ProjectPicker({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open, onClose]);
 
-  if (!open || !anchor) return null;
+  if (!open) return null;
+  const left = anchor?.left ?? 24;
+  const top = anchor?.top ?? window.innerHeight - 200;
+
 
   const filtered = recents.filter(
     (w) =>
@@ -73,9 +76,9 @@ export function ProjectPicker({
       aria-label="选择工作区"
       style={{
         position: "fixed",
-        left: Math.max(12, anchor.left),
+        left: Math.max(12, left),
         // 钉在芯片上方：bottom = 视口高 - 芯片 top + 8
-        bottom: Math.max(12, window.innerHeight - anchor.top + 8),
+        bottom: Math.max(12, window.innerHeight - top + 8),
         top: "auto",
         right: "auto",
       }}

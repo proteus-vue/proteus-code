@@ -5555,3 +5555,18 @@ button.ctx-chip:hover {
 .center .stream {
   overflow: auto;
 }
+
+/* ═══════ IA-26 根因：.composer pointer-events:none 导致芯片点不到 ═══════ */
+.composer .ctx-chips,
+.composer .ctx-anchor,
+.composer .ctx-chip,
+.composer .suggest-row,
+.composer .suggest-chip,
+.proj-picker {
+  pointer-events: auto !important;
+}
+
+/* 保证 fixed 菜单不被关在 pointer-events 里 */
+.proj-picker {
+  z-index: 9999 !important;
+}
