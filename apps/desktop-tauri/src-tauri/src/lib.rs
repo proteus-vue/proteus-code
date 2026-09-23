@@ -549,6 +549,27 @@ async fn pick_folder() -> Result<String, String> {
     .map_err(|e| format!("任务失败：{e}"))?
 }
 
+/// 抓取网页 HTML（curl），供浏览器点选前把跨域页变成可注入的 srcdoc。
+#[tauri::command]
+async fn fetch_url(url: String) -> Result<String, String> {
+    let u = url.trim().to_string();
+    if !(u.starts_with("https://") || u.starts_with("http://")) {
+        return Err("仅允许 http/https".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = std::process::Command::new("curl")
+            .args(["-sL", "--max-time", "20", "--compressed", "-A", "NEO-Desktop/0.1", &u])
+            .output()
+            .map_err(|e| format!("curl 失败：{e}"))?;
+        if !out.status.success() {
+            return Err(format!("HTTP 失败：{}", out.status));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    })
+    .await
+    .map_err(|e| format!("任务失败：{e}"))?
+}
+
 /// 用系统默认浏览器打开 URL（仅 http/https/file）。
 #[tauri::command]
 async fn open_url(url: String) -> Result<(), String> {
@@ -590,7 +611,8 @@ pub fn run() {
             list_repo_wiki,
             no_project_dir,
             pick_folder,
-            open_url
+            open_url,
+            fetch_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

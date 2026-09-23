@@ -5779,3 +5779,35 @@ button.ctx-chip:hover {
 .btab .btab-close svg {
   display: block;
 }
+
+/* IA-32 点选元素 */
+.br-btn.br-pick.active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent) !important;
+  color: var(--accent) !important;
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line)) !important;
+}
+
+.br-pick-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  font-size: var(--text-ui-sm);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-sidebar));
+  border-bottom: 1px solid var(--line);
+}
+
+.br-pick-bar kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-ui-xs);
+  background: var(--surface-panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.br-pick-bar .ghost-btn {
+  margin-left: auto;
+}

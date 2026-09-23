@@ -2203,6 +2203,29 @@ export default function App() {
               <BrowserPane
                 filePreview={filePreview}
                 workspaceRoot={workspaceRoot || undefined}
+                onPickElement={(el) => {
+                  const block = [
+                    `【网页元素】 ${el.url}`,
+                    `selector: \`${el.selector}\``,
+                    el.text ? `
+${el.text}` : "",
+                    el.html ? `
+\`\`\`html
+${el.html}
+\`\`\`` : "",
+                  ]
+                    .filter(Boolean)
+                    .join("\n");
+                  setInput((v) => (v ? `${v.trimEnd()}\n\n${block}` : block));
+                  requestAnimationFrame(() => {
+                    inputRef.current?.focus();
+                    inputRef.current?.setSelectionRange(
+                      inputRef.current.value.length,
+                      inputRef.current.value.length,
+                    );
+                  });
+                  append({ type: "status", message: `已加入网页元素 ${el.selector}` });
+                }}
               />
             )}
 

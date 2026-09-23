@@ -47,6 +47,11 @@ export async function openUrl(url: string): Promise<void> {
   return invoke("open_url", { url });
 }
 
+/** 抓取 http(s) 页面 HTML（点选前把跨域页变成 srcdoc） */
+export async function fetchUrl(url: string): Promise<string> {
+  return invoke<string>("fetch_url", { url });
+}
+
 export async function listThreads(): Promise<ThreadSummary[]> {
   const r = await rpc<{ threads?: ThreadSummary[] }>("thread/list");
   return r.threads ?? [];

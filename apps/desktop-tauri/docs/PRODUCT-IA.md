@@ -101,7 +101,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | --- | --- | --- | --- |
 | 审查 | RpReview | 改动文件 + Diff | `files_changed` / `patch_proposed` |
 | 终端 | RpTerminal | `$` 命令台 | `command/exec`（非 PTY） |
-| 浏览器 | RpBrowser | 地址栏 + 页面预览 + Wiki（系统打开外链） | fs/wiki · open_url |
+| 浏览器 | RpBrowser | 地址栏 + 预览 + **点选元素入对话** + Wiki | fs/wiki · open_url · fetch_url |
 | 文件 | RpFiles | 树 + 预览 + @引用 | `list_workspace` |
 | 侧边聊天 | RpChat | 会话摘要 + 审批 | 同线事件 |
 | 模拟器 | RpSimulator | 占位/连接态 | `session/configure` |
@@ -252,6 +252,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-29 | 修：点 + 整窗灰屏（鼠标移出才恢复） | P1 | ✅ 去全屏 fixed backdrop · 外点/Esc 关 |
 | IA-30 | 浏览器标签：地址栏 + 预览 + Wiki | P1 | ✅ URL 栏 · iframe/srcdoc · 系统打开 · Wiki |
 | IA-31 | 标签关闭钮悬浮态 | P1 | ✅ 悬停才显示 · 浅灰 pill · 禁止重色块 |
+| IA-32 | 浏览器选取网页元素加入对话 | P1 | ✅ 点选注入 Composer · 跨域先抓取为 srcdoc |
 
 ---
 
