@@ -62,7 +62,6 @@ import {
   deleteThread,
   listTools,
   renameThread,
-  threadHistory,
   type ToolInfo,
 } from "./lib/rpc";
 import {
@@ -170,7 +169,6 @@ export default function App() {
   const [goal, setGoal] = useState<GoalSnapshot | null>(null);
   const [goalInput, setGoalInput] = useState("");
   const [thinkingSearch, setThinkingSearch] = useState("");
-  const [threadQuery, setThreadQuery] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(
@@ -178,10 +176,6 @@ export default function App() {
       (localStorage.getItem("neo-theme") as "light" | "dark" | null) ??
       "light",
   );
-  /** threadId → history 纯文本摘要（内容级搜索缓存，只增不刷） */
-  const [contentHits, setContentHits] = useState<Map<string, string>>(new Map());
-  /** 正在拉 history 的 id，避免同 id 并发重复请求 */
-  const contentInflight = useRef<Set<string>>(new Set());
   const [termLog, setTermLog] = useState<
     {
       id?: string;
@@ -867,48 +861,6 @@ export default function App() {
     return () => document.removeEventListener("mousedown", onDoc);
   }, [addMenuOpen]);
 
-  // 内容级会话搜索：查询 ≥2 字时懒拉 thread/history（并行、只拉缺失的）
-  useEffect(() => {
-    const q = threadQuery.trim();
-    if (q.length < 2) return;
-    const need = threads
-      .map((t) => t.id)
-      .filter((id) => !contentHits.has(id) && !contentInflight.current.has(id));
-    if (need.length === 0) return;
-    for (const id of need) contentInflight.current.add(id);
-    let cancelled = false;
-    void (async () => {
-      try {
-        const results = await Promise.all(
-          need.map(async (id) => {
-            try {
-              const h = await threadHistory(id);
-              const parts = (h.items ?? []).flatMap((fact) => {
-                const rec = fact as Record<string, unknown>;
-                if (typeof rec.user_said === "string") return [rec.user_said];
-                if (typeof rec.assistant_said === "string") return [rec.assistant_said];
-                if (typeof rec.failed === "string") return [rec.failed];
-                return [];
-              });
-              return [id, parts.join("\n")] as const;
-            } catch {
-              return [id, ""] as const;
-            }
-          }),
-        );
-        // 即使查询已变也写入缓存：history 与查询词无关，写入后无需为旧词重拉
-        setContentHits((prev) => {
-          const next = new Map(prev);
-          for (const [id, text] of results) next.set(id, text);
-          return next;
-        });
-      } finally {
-        for (const id of need) contentInflight.current.delete(id);
-        void cancelled;
-      }
-    })();
-  }, [threadQuery, threads, contentHits]);
-
   const onDeleteSession = useCallback(
     async (id: string) => {
       try {
@@ -1283,9 +1235,6 @@ export default function App() {
         onResume={(id) => void onResume(id)}
         onRename={(id, title) => void onRenameSession(id, title)}
         onDelete={(id) => void onDeleteSession(id)}
-        query={threadQuery}
-        onQuery={setThreadQuery}
-        contentHits={contentHits}
         projectLabel={projectLabel}
         workspaceRoot={workspaceRoot}
         filesFoot={files.length > 0 ? `改动 +${totalAdd} −${totalDel} · ${files.length} 文件` : undefined}

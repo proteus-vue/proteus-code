@@ -16,9 +16,6 @@ export function Sidebar({
   onResume,
   onRename,
   onDelete,
-  query,
-  onQuery,
-  contentHits,
   projectLabel,
   workspaceRoot,
   filesFoot,
@@ -35,10 +32,6 @@ export function Sidebar({
   onResume: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
-  query: string;
-  onQuery: (q: string) => void;
-  /** 内容级搜索命中：threadId → 摘要片段（来自 thread/history） */
-  contentHits?: Map<string, string>;
   projectLabel: string;
   workspaceRoot: string;
   filesFoot?: string;
@@ -67,15 +60,8 @@ export function Sidebar({
     );
   }
 
-  const q = query.trim().toLowerCase();
-  const filtered = threads.filter((t) => {
-    if (!q) return true;
-    if ((t.title ?? "").toLowerCase().includes(q) || t.id.toLowerCase().includes(q)) {
-      return true;
-    }
-    const hit = contentHits?.get(t.id);
-    return Boolean(hit && hit.toLowerCase().includes(q));
-  });
+  /** IA-18：无侧栏搜索框 —— 列表始终全量；全局检索走 ⌘K */
+  const filtered = threads;
 
   const commitRename = (id: string) => {
     const t = draft.trim();
@@ -102,23 +88,6 @@ export function Sidebar({
         </button>
       </div>
 
-      <div className="sidebar-search">
-        <span className="search-lead" aria-hidden>
-          <Icon name="search" size={14} />
-        </span>
-        <input
-          value={query}
-          placeholder="搜索会话…"
-          onChange={(e) => onQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              onCommand();
-            }
-          }}
-        />
-      </div>
-
       <div className="sidebar-section">
         <span className="proj-label" title={workspaceRoot}>
           <Icon name="chevron-down" size={11} className="proj-caret" />
@@ -126,6 +95,7 @@ export function Sidebar({
         </span>
       </div>
 
+      {/* 无常驻搜索框（IA-18）：全局检索走 ⌘K；列表展示全部会话 */}
       <ul className="sidebar-list">
         {threads.length === 0 && (
           <li>
@@ -139,10 +109,6 @@ export function Sidebar({
         )}
         {filtered.map((t) => {
           const rel = formatRelative(t.updated_ms);
-          const hit = contentHits?.get(t.id);
-          const showHit = Boolean(
-            q && hit && !(t.title ?? "").toLowerCase().includes(q) && !t.id.toLowerCase().includes(q),
-          );
           if (editingId === t.id) {
             return (
               <li key={t.id}>
@@ -172,22 +138,16 @@ export function Sidebar({
                   setDraft(t.title || t.id);
                   setEditingId(t.id);
                 }}
-                /* 极简列表：详情进原生提示，不占第二行 */
-                title={
-                  [
-                    t.title || t.id,
-                    rel ? `更新 ${rel}` : "",
-                    t.records != null && t.records > 0 ? `${t.records} 条` : "",
-                    t.state ?? "",
-                    showHit && hit ? hit.slice(0, 80) : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")
-                }
+                title={[
+                  t.title || t.id,
+                  rel ? `更新 ${rel}` : "",
+                  t.records != null && t.records > 0 ? `${t.records} 条` : "",
+                  t.state ?? "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
               >
-                <span className="title">
-                  {t.title || t.id}
-                </span>
+                <span className="title">{t.title || t.id}</span>
                 {rel && <span className="rel">{rel}</span>}
               </button>
               <span className="row-actions">

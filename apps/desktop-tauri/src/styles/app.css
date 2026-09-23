@@ -4664,3 +4664,97 @@ button.rail-btn {
 .sidebar .row-actions .confirm-label {
   display: none;
 }
+
+/* ═══════ IA-18 无侧栏搜索框 + 柔化悬停 ═══════ */
+
+.sidebar .sidebar-search {
+  display: none !important;
+}
+
+/* 悬停：更轻的灰，避免和选中抢层级 */
+.sidebar .sidebar-list li button:hover {
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+}
+
+/* 选中略深于悬停 */
+.sidebar .sidebar-list li button.active {
+  background: color-mix(in srgb, var(--text-primary) 9%, transparent);
+}
+
+.sidebar .sidebar-list li button.active:hover {
+  background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+}
+
+/* 图标：不要白底圆块，只变深色 */
+.sidebar .row-actions .row-icon:hover,
+.sidebar .sidebar-list .row-actions .row-icon:hover,
+.sidebar .row-actions .row-icon:hover {
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.sidebar .row-actions .row-icon.armed,
+.sidebar .row-actions .row-icon.armed:hover {
+  background: transparent;
+  color: var(--danger);
+}
+
+/* ═══════ IA-18：去侧栏搜索框 · 柔化列表悬停 ═══════ */
+
+.sidebar .sidebar-search {
+  display: none !important;
+}
+
+/* 悬停：极轻灰，不要和「选中」抢层级；图标不垫白底 */
+.sidebar .sidebar-list li button:hover,
+.sidebar .sidebar-list li.row-wrap > button:hover {
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+}
+
+.sidebar .sidebar-list li button.active {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.sidebar .sidebar-list li button.active:hover {
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+}
+
+/* 图标：透明底，仅变深色；禁止 surface-panel 白块 */
+.sidebar .row-actions .row-icon,
+.sidebar .sidebar-list .row-actions .row-icon,
+.sidebar .row-actions .row-icon:hover,
+.sidebar .sidebar-list .row-actions button,
+.sidebar .row-actions .row-icon:hover {
+  background: transparent;
+}
+
+.sidebar .row-actions .row-icon:hover,
+.sidebar .sidebar-list .row-actions button:hover {
+  background: transparent;
+  color: var(--text-primary);
+  opacity: 1;
+}
+
+.sidebar .row-actions .row-icon {
+  color: var(--text-tertiary);
+}
+
+/* 与行悬停同时出现时不叠第二层色块 */
+.sidebar .row-actions {
+  background: none !important;
+  padding-left: 0 !important;
+  backdrop-filter: none;
+}
+
+/* 时间与标题在悬停时不过分抢 */
+.sidebar .sidebar-list .rel {
+  opacity: 0.85;
+}
+
+.sidebar .sidebar-list li:hover .rel {
+  opacity: 0;
+}
+
+.sidebar .sidebar-list li:hover .row-actions {
+  opacity: 1;
+}
