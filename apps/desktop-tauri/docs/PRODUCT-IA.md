@@ -103,7 +103,8 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | 侧边聊天 | RpChat | 会话摘要 + 审批 | 同线事件 |
 | 模拟器 | RpSimulator | 占位/连接态 | `session/configure` |
 | Goal | 规格 D7 | 目标进度 | `goal/*` |
-| 子智能体 | RpSubagents | `tools/list` 过滤 `agent_*` · 主对话调用 |
+| 子智能体 | RpSubagents | `tools/list` 过滤 `agent_*` · 主对话调用 | — |
+| Automations | RpAutomation | 壳侧 localStorage 排程 + 到点 `turn/start` | — |
 
 **明确不做**：右侧常驻 7 图标 VS Code 活动栏；GOAL/连接卡片罗汉。
 
@@ -195,7 +196,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | P0 | 三区骨架、对接 app-server、事件流、审批、会话 | ✅ |
 | P1 | 浏览器标签坞、文件树、Wiki、@、编辑重发、密度 | ✅ 主体 |
 | P1 余量 | 会话内容搜索/改名/删除、⌘, 设置 | ✅ 主体；图片附件 ⬜ |
-| P2 | 真 PTY、图片附件、Automations | ⬜ · 斜杠/拖拽/命令台回显/子代理标签已做 |
+| P2 | 真 PTY、图片附件 | ⬜ · 斜杠/拖拽/命令台/子代理/Automations 已做 |
 | P3+ | 插件市场、Worktree、分享（默认关） | ⬜ |
 
 **回归**：`npm run build` + 本文 §9 表勾选 + 内核护栏测试仍绿。
@@ -219,7 +220,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-11 | 分栏拖拽 persist | P2 | ✅ 侧栏/右栏 pointer 拖拽 + localStorage |
 | IA-12 | 会话内容搜索、重命名/删除 | P1 | ✅ history 内容搜 · rename · delete |
 | IA-13 | 设置页 ⌘, | P1 | ✅ 外观/模型/模式/快捷键 |
-| IA-14 | 子智能体 / Automations 标签 | P2–3 | ✅ 子代理标签 `agent_*`；Automations ⬜ |
+| IA-14 | 子智能体 / Automations 标签 | P2–3 | ✅ 子代理 `agent_*` · Automations 壳侧排程 |
 
 ---
 

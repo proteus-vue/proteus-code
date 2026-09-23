@@ -4027,3 +4027,106 @@ html, body, #root {
   margin-bottom: 8px;
   line-height: 1.45;
 }
+
+/* IA-14 Automations */
+.auto-form {
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.auto-form input,
+.auto-form textarea,
+.auto-form select {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font-size: var(--text-ui);
+  font-family: inherit;
+  width: 100%;
+}
+
+.auto-form textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+
+.auto-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.auto-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-ui-sm);
+  color: var(--text-secondary);
+}
+
+.auto-row label select {
+  width: auto;
+}
+
+.auto-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 12px 12px;
+}
+
+.auto-list li {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--surface-panel);
+}
+
+.auto-title {
+  font-weight: 600;
+  font-size: var(--text-ui);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.auto-title .badge {
+  font-size: var(--text-ui-xs);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.auto-prompt {
+  font-size: var(--text-ui-sm);
+  color: var(--text-secondary);
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.auto-meta {
+  font-size: var(--text-ui-xs);
+  color: var(--text-tertiary);
+  margin-top: 6px;
+}
+
+.auto-err {
+  font-size: var(--text-ui-xs);
+  color: var(--danger, #c00);
+  margin-top: 4px;
+}
+
+.auto-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}

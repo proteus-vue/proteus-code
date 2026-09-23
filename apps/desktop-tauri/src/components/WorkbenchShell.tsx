@@ -8,7 +8,8 @@ export type WorkbenchId =
   | "chat"
   | "sim"
   | "goal"
-  | "subagents";
+  | "subagents"
+  | "automations";
 
 export const WB_LABELS: Record<WorkbenchId, string> = {
   review: "审查",
@@ -19,6 +20,7 @@ export const WB_LABELS: Record<WorkbenchId, string> = {
   sim: "模拟器",
   goal: "Goal",
   subagents: "子智能体",
+  automations: "Automations",
 };
 
 export const WB_MENU: { id: WorkbenchId; key: string; icon: string }[] = [
@@ -30,6 +32,7 @@ export const WB_MENU: { id: WorkbenchId; key: string; icon: string }[] = [
   { id: "sim", key: "", icon: "▣" },
   { id: "goal", key: "", icon: "◎" },
   { id: "subagents", key: "", icon: "⧉" },
+  { id: "automations", key: "", icon: "⏲" },
 ];
 
 /** 浏览器式标签条 + 内容槽（PRODUCT-IA §2.3） */

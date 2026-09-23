@@ -63,6 +63,13 @@ import {
   threadHistory,
   type ToolInfo,
 } from "./lib/rpc";
+import {
+  dueNow,
+  loadAutomations,
+  nextDue,
+  saveAutomations,
+  type Automation,
+} from "./lib/automations";
 import "./styles/tokens.css";
 import "./styles/app.css";
 import "./styles/layout.css";
@@ -187,6 +194,13 @@ export default function App() {
   const [termInput, setTermInput] = useState("");
   /** IA-14：tools/list 里的 agent_* 子代理 */
   const [agentTools, setAgentTools] = useState<ToolInfo[]>([]);
+  /** IA-14 Automations：壳侧排程（localStorage） */
+  const [autos, setAutos] = useState<Automation[]>(() => loadAutomations());
+  const [autoTitle, setAutoTitle] = useState("");
+  const [autoPrompt, setAutoPrompt] = useState("");
+  const [autoEvery, setAutoEvery] = useState(60);
+  /** 正在跑的 automation id，防重入 */
+  const autoRunning = useRef(false);
   const [diffModal, setDiffModal] = useState<{ path: string; diff: string } | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -211,6 +225,11 @@ export default function App() {
 
   const busy = status === "busy";
   const blocked = busy || !!approval;
+  /** 调度器读最新 status/busy，避免闭包过期 */
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
   const append = useCallback((item: UiItem) => {
     setItems((prev) => [...prev, item]);
@@ -729,6 +748,74 @@ export default function App() {
   useEffect(() => {
     slashRunnerRef.current = runSlashLine;
   }, [runSlashLine]);
+
+  /** IA-14：跑一条 automation（手动或到点） */
+  const runAutomation = useCallback(
+    async (id: string) => {
+      if (autoRunning.current) return;
+      const a = autos.find((x) => x.id === id);
+      if (!a || !a.prompt.trim()) return;
+      if (statusRef.current !== "ready" && statusRef.current !== "busy") return;
+      if (busyRef.current) return;
+      autoRunning.current = true;
+      const now = Date.now();
+      try {
+        // 走主对话：结构与用户手输一致（模型可见、可审计）
+        await startTurn(
+          `[Automations · ${a.title || a.id}] ${a.prompt.trim()}`,
+        );
+        setAutos((list) => {
+          const next = list.map((x) =>
+            x.id === id
+              ? {
+                  ...x,
+                  lastRunMs: now,
+                  nextRunMs: x.everyMin > 0 ? now + x.everyMin * 60_000 : 0,
+                  lastError: undefined,
+                }
+              : x,
+          );
+          saveAutomations(next);
+          return next;
+        });
+        append({ type: "status", message: `Automations 触发：${a.title || id}` });
+      } catch (e) {
+        setAutos((list) => {
+          const next = list.map((x) =>
+            x.id === id
+              ? { ...x, lastRunMs: now, lastError: String(e) }
+              : x,
+          );
+          saveAutomations(next);
+          return next;
+        });
+        append({ type: "error", message: `Automations 失败：${String(e)}` });
+      } finally {
+        autoRunning.current = false;
+      }
+    },
+    [append, autos],
+  );
+
+  // 到点扫描：30s 一次（无固定 sleep；条件在 dueNow + status gate）
+  useEffect(() => {
+    const tick = () => {
+      if (statusRef.current !== "ready" || busyRef.current) return;
+      const due = dueNow(autos);
+      if (due[0]) void runAutomation(due[0].id);
+    };
+    const t0 = window.setTimeout(tick, 2000);
+    const iv = window.setInterval(tick, 30_000);
+    return () => {
+      window.clearTimeout(t0);
+      window.clearInterval(iv);
+    };
+  }, [autos, runAutomation]);
+
+  const persistAutos = useCallback((list: Automation[]) => {
+    setAutos(list);
+    saveAutomations(list);
+  }, []);
 
   const runTerminal = useCallback(
     async (cmd: string) => {
@@ -1681,6 +1768,154 @@ export default function App() {
                         </button>
                       </li>
                     ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {panelTab === "automations" && (
+              <div className="wb-section">
+                <div className="wb-sub">Automations · 排程提示</div>
+                <p className="muted pad">
+                  仅本机 · 桌面存活时触发 · 到点在空闲时 <code>turn/start</code>（非 OS cron）。
+                </p>
+                <div className="auto-form">
+                  <input
+                    value={autoTitle}
+                    placeholder="标题，如 每日站会摘要"
+                    onChange={(e) => setAutoTitle(e.target.value)}
+                  />
+                  <textarea
+                    value={autoPrompt}
+                    placeholder="交给模型的提示词…"
+                    rows={3}
+                    onChange={(e) => setAutoPrompt(e.target.value)}
+                  />
+                  <div className="auto-row">
+                    <label>
+                      每隔
+                      <select
+                        value={autoEvery}
+                        onChange={(e) => setAutoEvery(Number(e.target.value))}
+                      >
+                        <option value={0}>不自动（仅手动）</option>
+                        <option value={5}>5 分钟</option>
+                        <option value={15}>15 分钟</option>
+                        <option value={30}>30 分钟</option>
+                        <option value={60}>60 分钟</option>
+                        <option value={180}>3 小时</option>
+                        <option value={720}>12 小时</option>
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={!autoPrompt.trim()}
+                      onClick={() => {
+                        const title = autoTitle.trim() || "未命名任务";
+                        const prompt = autoPrompt.trim();
+                        if (!prompt) return;
+                        const a: Automation = {
+                          id: `a-${Date.now().toString(36)}`,
+                          title,
+                          prompt,
+                          everyMin: autoEvery,
+                          enabled: true,
+                          nextRunMs:
+                            autoEvery > 0 ? Date.now() : 0,
+                        };
+                        persistAutos([a, ...autos]);
+                        setAutoTitle("");
+                        setAutoPrompt("");
+                      }}
+                    >
+                      新建
+                    </button>
+                  </div>
+                </div>
+                {autos.length === 0 ? (
+                  <p className="muted pad">尚无排程任务。</p>
+                ) : (
+                  <ul className="auto-list">
+                    {autos.map((a) => {
+                      const nd = a.enabled ? nextDue(a) : 0;
+                      const when =
+                        a.everyMin <= 0
+                          ? "仅手动"
+                          : nd
+                            ? `下次 ${new Date(nd).toLocaleTimeString()}`
+                            : "就绪";
+                      return (
+                        <li key={a.id}>
+                          <div className="auto-title">
+                            {a.title}
+                            {!a.enabled && <span className="badge">暂停</span>}
+                          </div>
+                          <div className="auto-prompt">{a.prompt}</div>
+                          <div className="auto-meta">
+                            {a.everyMin > 0 ? `每 ${a.everyMin} 分 · ` : ""}
+                            {when}
+                            {a.lastRunMs
+                              ? ` · 上次 ${new Date(a.lastRunMs).toLocaleString()}`
+                              : ""}
+                          </div>
+                          {a.lastError && (
+                            <div className="auto-err">{a.lastError}</div>
+                          )}
+                          <div className="auto-actions">
+                            <button
+                              type="button"
+                              className="ghost-btn"
+                              disabled={busy}
+                              onClick={() => void runAutomation(a.id)}
+                            >
+                              立即运行
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost-btn"
+                              onClick={() =>
+                                persistAutos(
+                                  autos.map((x) =>
+                                    x.id === a.id
+                                      ? {
+                                          ...x,
+                                          enabled: !x.enabled,
+                                          nextRunMs: !x.enabled
+                                            ? Date.now() +
+                                              (x.everyMin > 0
+                                                ? x.everyMin * 60_000
+                                                : 0)
+                                            : x.nextRunMs,
+                                        }
+                                      : x,
+                                  ),
+                                )
+                              }
+                            >
+                              {a.enabled ? "暂停" : "启用"}
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost-btn danger"
+                              onClick={() => {
+                                if (
+                                  window.confirm(
+                                    `删除排程「${a.title}」？`,
+                                  )
+                                ) {
+                                  persistAutos(
+                                    autos.filter((x) => x.id !== a.id),
+                                  );
+                                }
+                              }}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </div>
