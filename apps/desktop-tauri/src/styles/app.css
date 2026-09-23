@@ -4374,3 +4374,161 @@ button.rail-btn {
 .row-actions .confirm-label {
   letter-spacing: 0.02em;
 }
+
+/* ═══════ IA-16 侧栏视觉重做 ═══════ */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 顶栏：一行四元素，等高、不挤 */
+.sidebar .rail-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: calc(env(titlebar-area-height, 0px) + 10px) 10px 8px;
+  flex-shrink: 0;
+}
+
+.sidebar .rail-head .icon-btn {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  color: var(--text-secondary);
+}
+
+.sidebar .rail-head .icon-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+/* 主按钮撑满中间，不压扁图标 */
+.sidebar .btn-new.compact {
+  flex: 1;
+  min-width: 0;
+  justify-content: center;
+  height: 34px;
+  border-radius: 10px;
+  padding: 0 12px;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* 搜索：紧挨顶栏，矮一点，不抢戏 */
+.sidebar .sidebar-search {
+  margin: 0 12px 8px;
+  flex-shrink: 0;
+}
+
+.sidebar .sidebar-search input {
+  height: 34px;
+  border-radius: 10px;
+  font-size: var(--text-ui-sm);
+  background: var(--surface-panel);
+}
+
+.sidebar .sidebar-search input::placeholder {
+  color: var(--text-tertiary);
+}
+
+/* 项目名：弱化小标签，去掉大写黑体压迫感 */
+.sidebar .sidebar-section {
+  padding: 2px 14px 6px;
+  flex-shrink: 0;
+}
+
+.sidebar .proj-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+  font-size: var(--text-ui-xs);
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--text-tertiary);
+  max-width: 100%;
+}
+
+.sidebar .proj-label .proj-caret {
+  color: var(--text-tertiary);
+  opacity: 0.7;
+}
+
+/* 列表：少卡片感，行更透气 */
+.sidebar .sidebar-list {
+  padding: 2px 8px 8px;
+  gap: 2px;
+}
+
+.sidebar .sidebar-list li button {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  margin-bottom: 0;
+}
+
+.sidebar .sidebar-list li button.active {
+  background: var(--surface-panel);
+  border-color: var(--line);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.sidebar .sidebar-list .meta {
+  padding-left: 14px;
+}
+
+.sidebar .sidebar-list .rel {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 行操作：小圆钮，确认不换行、不用原生 title */
+.sidebar .row-actions {
+  top: 50%;
+  transform: translateY(-50%);
+  right: 8px;
+  gap: 4px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--surface-sidebar) 12%,
+    var(--surface-sidebar)
+  );
+  padding-left: 16px;
+}
+
+.sidebar .row-actions button {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar .row-actions button.armed {
+  width: auto;
+  min-width: 52px;
+  padding: 0 8px;
+  gap: 4px;
+  flex-direction: row;
+}
+
+.sidebar .row-actions .confirm-label {
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+/* 隐藏双列工具残留（结构已删，保险） */
+.sidebar .sidebar-tools {
+  display: none !important;
+}
+
+.sidebar-foot {
+  padding: 8px 14px 10px;
+  font-size: var(--text-ui-xs);
+}

@@ -85,6 +85,7 @@ export function Sidebar({
 
   return (
     <aside className="sidebar">
+      {/* 顶栏一行：折叠 · 主按钮 · 主题 · 设置（无第二行工具） */}
       <div className="rail-head">
         <button type="button" className="icon-btn" onClick={onToggle} title="折叠侧栏 ⌘B" aria-label="折叠侧栏">
           <Icon name="chevron-left" size={16} />
@@ -94,38 +95,37 @@ export function Sidebar({
           新建任务
         </button>
         <button type="button" className="icon-btn" onClick={onTheme} title="切换主题" aria-label="切换主题">
-          <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
+          <Icon name={theme === "dark" ? "sun" : "moon"} size={15} />
         </button>
         <button type="button" className="icon-btn" onClick={onSettings} title="设置 ⌘," aria-label="设置">
-          <Icon name="settings" size={16} />
+          <Icon name="settings" size={15} />
         </button>
       </div>
-      <div className="sidebar-tools">
-        <button type="button" className="tool-btn" onClick={onCommand} title="⌘K">
-          <Icon name="search" size={16} />
-          <span>搜索</span>
-        </button>
-        <button type="button" className="tool-btn" onClick={onNew} title="⌘N">
-          <Icon name="plus" size={16} />
-          <span>新建</span>
-        </button>
-      </div>
-      <div className="sidebar-section">
-        <span className="proj-label" title={workspaceRoot}>
-          <Icon name="chevron-down" size={12} className="proj-caret" />
-          {projectLabel}
-        </span>
-      </div>
+
       <div className="sidebar-search">
         <span className="search-lead" aria-hidden>
           <Icon name="search" size={14} />
         </span>
         <input
           value={query}
-          placeholder="搜索标题或内容…"
+          placeholder="搜索会话…"
           onChange={(e) => onQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              onCommand();
+            }
+          }}
         />
       </div>
+
+      <div className="sidebar-section">
+        <span className="proj-label" title={workspaceRoot}>
+          <Icon name="chevron-down" size={11} className="proj-caret" />
+          {projectLabel}
+        </span>
+      </div>
+
       <ul className="sidebar-list">
         {threads.length === 0 && (
           <li>
@@ -212,14 +212,10 @@ export function Sidebar({
                 <button
                   type="button"
                   className={confirmDelId === t.id ? "danger armed" : ""}
-                  title={
-                    confirmDelId === t.id
-                      ? "再次点击确认删除"
-                      : t.id === activeId
-                        ? "删除（将自动切到其它会话）"
-                        : "删除会话"
+                  /* 不用 title：原生 tooltip 在 Tauri 里又丑又挡列表 */
+                  aria-label={
+                    confirmDelId === t.id ? "再次点击确认删除" : "删除会话"
                   }
-                  aria-label={confirmDelId === t.id ? "确认删除" : "删除会话"}
                   onClick={(e) => {
                     e.stopPropagation();
                     setEditingId(null);
@@ -231,10 +227,11 @@ export function Sidebar({
                     onDelete(t.id);
                   }}
                 >
-                  {confirmDelId === t.id ? (
-                    <span className="confirm-label">确认</span>
-                  ) : (
-                    <Icon name="trash" size={13} />
+                  <Icon name="trash" size={13} />
+                  {confirmDelId === t.id && (
+                    <span className="confirm-label" aria-hidden>
+                      确认
+                    </span>
                   )}
                 </button>
               </span>
