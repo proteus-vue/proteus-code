@@ -248,6 +248,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-25 | 修：点芯片无弹层 / 固定「选择项目」 | P1 | ✅ fixed 定位 · 芯片「选择项目/目录名」· 外点不抢关 |
 | IA-26 | 根因：composer pointer-events:none 吃掉点击 | P1 | ✅ 芯片/菜单 pointer-events:auto |
 | IA-27 | 打开文件夹（系统对话框）替代手输路径 | P1 | ✅ osascript choose folder · 无手输 |
+| IA-28 | 修：悬停近黑 + 点选文件夹黑屏 | P1 | ✅ surface-hover · pick_folder 脱主线程 |
 
 ---
 

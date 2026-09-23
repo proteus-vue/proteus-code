@@ -38,7 +38,8 @@ button {
 
 button:hover:not(:disabled) {
   border-color: var(--line-strong);
-  background: #2a2a2a;
+  /* 浅色下不要 #2a2a2a（近黑）——用令牌，避免 color-mix 失效时回退 */
+  background: var(--surface-hover);
 }
 
 button:active:not(:disabled) {
@@ -5027,7 +5028,7 @@ button.ctx-chip {
 }
 
 button.ctx-chip:hover {
-  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  background: var(--surface-hover);
 }
 
 .composer .ctx-chip.muted {
@@ -5350,7 +5351,7 @@ button.ctx-chip:hover {
 
 .proj-picker-list button:hover,
 .proj-picker-list button.active {
-  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  background: var(--surface-hover);
 }
 
 .proj-picker-list .pname {
@@ -5385,7 +5386,7 @@ button.ctx-chip:hover {
 }
 
 .proj-picker-actions .act:hover {
-  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  background: var(--surface-hover);
 }
 
 .proj-picker-actions .act .end {
@@ -5569,4 +5570,14 @@ button.ctx-chip:hover {
 /* 保证 fixed 菜单不被关在 pointer-events 里 */
 .proj-picker {
   z-index: 9999 !important;
+}
+
+
+/* IA-28：菜单悬停禁止近黑（color-mix 失效会落到全局 #2a2a2a） */
+.proj-picker-list button:hover,
+.proj-picker-list button.active,
+.proj-picker-actions .act:hover,
+button.ctx-chip:hover {
+  background: var(--surface-hover) !important;
+  color: var(--text-primary);
 }
