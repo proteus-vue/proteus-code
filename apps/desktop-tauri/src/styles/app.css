@@ -5893,3 +5893,42 @@ button.ctx-chip:hover {
   top: auto !important;
   bottom: calc(100% + 8px) !important;
 }
+
+/* ═══════ IA-40 新增标签菜单：标题贴图标靠左 · 紧凑 ═══════ */
+.btab-menu li button {
+  justify-content: flex-start !important;
+  gap: 8px !important;
+  padding: 6px 10px !important;
+  font-size: 14px !important;
+}
+
+.btab-menu .menu-icon {
+  flex-shrink: 0;
+  width: auto;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text-secondary);
+  display: inline-flex;
+}
+
+.btab-menu .menu-label {
+  flex: 1 !important;
+  text-align: left !important;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btab-menu kbd {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* 更紧凑的菜单壳 */
+.btab-menu {
+  min-width: 200px;
+  max-width: min(240px, calc(100vw - 24px));
+  padding: 6px;
+  border-radius: 12px;
+}
