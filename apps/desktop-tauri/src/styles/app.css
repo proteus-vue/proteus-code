@@ -5728,3 +5728,54 @@ button.ctx-chip:hover {
   height: 100%;
   overflow: hidden;
 }
+
+/* ═══════ IA-31 标签 × 悬浮态（对齐浏览器标签）═══════ */
+
+.btab {
+  position: relative;
+}
+
+/* 未激活标签：平时不显示 ×，悬停标签再出现 */
+.btab:not(.active) .btab-close {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.btab:not(.active):hover .btab-close,
+.btab:not(.active):focus-within .btab-close {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.btab .btab-close {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  margin-right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent !important;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  opacity: 1;
+}
+
+/* 悬停：浅灰小圆角，禁止近黑/重色块 */
+.btab .btab-close:hover,
+.btab .btab-close:focus-visible {
+  background: var(--surface-hover) !important;
+  color: var(--text-primary) !important;
+  border-color: transparent !important;
+}
+
+.btab .btab-close:active {
+  background: color-mix(in srgb, var(--text-primary) 10%, var(--surface-hover)) !important;
+}
+
+/* 图标略小，避免大 × 撑出色块 */
+.btab .btab-close svg {
+  display: block;
+}

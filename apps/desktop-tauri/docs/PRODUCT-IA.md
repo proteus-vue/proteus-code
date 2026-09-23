@@ -251,6 +251,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-28 | 修：悬停近黑 + 点选文件夹黑屏 | P1 | ✅ surface-hover · pick_folder 脱主线程 |
 | IA-29 | 修：点 + 整窗灰屏（鼠标移出才恢复） | P1 | ✅ 去全屏 fixed backdrop · 外点/Esc 关 |
 | IA-30 | 浏览器标签：地址栏 + 预览 + Wiki | P1 | ✅ URL 栏 · iframe/srcdoc · 系统打开 · Wiki |
+| IA-31 | 标签关闭钮悬浮态 | P1 | ✅ 悬停才显示 · 浅灰 pill · 禁止重色块 |
 
 ---
 
