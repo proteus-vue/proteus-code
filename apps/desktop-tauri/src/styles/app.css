@@ -4532,3 +4532,135 @@ button.rail-btn {
   padding: 8px 14px 10px;
   font-size: var(--text-ui-xs);
 }
+
+/* ═══════ IA-17 会话列表极简（Codex/MiMo）═══════
+   未选中 = 纯文字 · 选中 = 灰底 · 悬停 = 右侧纯图标 */
+
+.sidebar .sidebar-list {
+  padding: 4px 6px 8px;
+}
+
+.sidebar .sidebar-list li.row-wrap {
+  position: relative;
+}
+
+/* 单行：标题 + 可选时间；无边框无阴影无副行 */
+.sidebar .sidebar-list li button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  margin: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+
+.sidebar .sidebar-list li button:hover {
+  background: var(--surface-hover);
+}
+
+/* 选中：仅浅灰底 */
+.sidebar .sidebar-list li button.active {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  border: none;
+  box-shadow: none;
+  color: var(--text-primary);
+}
+
+.sidebar .sidebar-list .title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-ui);
+  font-weight: 400;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+}
+
+.sidebar .sidebar-list .rel {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: var(--text-ui-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 隐藏极简模式不需要的装饰 */
+.sidebar .sidebar-list .meta,
+.sidebar .sidebar-list .delta,
+.sidebar .sidebar-list .row1 .dot,
+.sidebar .sidebar-list .row1 {
+  /* row1 不再使用；保险隐藏旧节点 */
+}
+
+.sidebar .sidebar-list .meta,
+.sidebar .sidebar-list .delta {
+  display: none !important;
+}
+
+.sidebar .sidebar-list .dot {
+  display: none !important;
+}
+
+/* 悬停：右侧仅两个图标，无渐变无文字确认 */
+.sidebar .sidebar-list li.row-wrap > button {
+  padding-right: 64px;
+}
+
+.sidebar .row-actions,
+.sidebar .sidebar-list .row-actions {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  gap: 2px;
+  align-items: center;
+  background: none;
+  padding-left: 12px;
+}
+
+.sidebar .sidebar-list li.row-wrap:hover .row-actions,
+.sidebar .sidebar-list li.row-wrap:focus-within .row-actions {
+  display: inline-flex;
+}
+
+.sidebar .row-actions .row-icon,
+.sidebar .sidebar-list .row-actions button {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.sidebar .row-actions .row-icon:hover,
+.sidebar .sidebar-list .row-actions button:hover {
+  background: var(--surface-panel);
+  color: var(--text-primary);
+}
+
+/* 二次删除：仅图标变红，无「确认」文案 */
+.sidebar .row-actions .row-icon.armed {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+/* 旧 armed 确认文案隐藏 */
+.sidebar .row-actions button.armed .confirm-label,
+.sidebar .row-actions .confirm-label {
+  display: none;
+}

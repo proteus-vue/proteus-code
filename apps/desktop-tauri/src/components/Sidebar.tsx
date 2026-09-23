@@ -130,11 +130,7 @@ export function Sidebar({
         {threads.length === 0 && (
           <li>
             <button type="button" className="active">
-              <span className="row1">
-                <span className="dot st-idle" />
-                当前任务
-              </span>
-              <span className="meta">尚未落盘</span>
+              <span className="title">当前任务</span>
             </button>
           </li>
         )}
@@ -176,29 +172,28 @@ export function Sidebar({
                   setDraft(t.title || t.id);
                   setEditingId(t.id);
                 }}
+                /* 极简列表：详情进原生提示，不占第二行 */
+                title={
+                  [
+                    t.title || t.id,
+                    rel ? `更新 ${rel}` : "",
+                    t.records != null && t.records > 0 ? `${t.records} 条` : "",
+                    t.state ?? "",
+                    showHit && hit ? hit.slice(0, 80) : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                }
               >
-                <span className="row1">
-                  <span className={`dot st-${t.state ?? "empty"}`} />
-                  <span className={`title ${t.has_title === false ? "faded" : ""}`}>
-                    {t.title || t.id}
-                  </span>
-                  {t.additions != null && t.deletions != null && t.additions + t.deletions > 0 && (
-                    <span className="delta">
-                      +{t.additions} −{t.deletions}
-                    </span>
-                  )}
-                  {rel && <span className="rel">{rel}</span>}
+                <span className="title">
+                  {t.title || t.id}
                 </span>
-                <span className="meta">
-                  {t.state ?? "empty"}
-                  {t.records != null && t.records > 0 && ` · ${t.records} 条`}
-                  {showHit && hit ? ` · ${hit.slice(0, 48)}` : ""}
-                </span>
+                {rel && <span className="rel">{rel}</span>}
               </button>
               <span className="row-actions">
                 <button
                   type="button"
-                  title="重命名"
+                  className="row-icon"
                   aria-label="重命名"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -207,15 +202,12 @@ export function Sidebar({
                     setEditingId(t.id);
                   }}
                 >
-                  <Icon name="edit" size={13} />
+                  <Icon name="edit" size={14} />
                 </button>
                 <button
                   type="button"
-                  className={confirmDelId === t.id ? "danger armed" : ""}
-                  /* 不用 title：原生 tooltip 在 Tauri 里又丑又挡列表 */
-                  aria-label={
-                    confirmDelId === t.id ? "再次点击确认删除" : "删除会话"
-                  }
+                  className={`row-icon ${confirmDelId === t.id ? "armed" : ""}`}
+                  aria-label={confirmDelId === t.id ? "再次点击删除" : "删除会话"}
                   onClick={(e) => {
                     e.stopPropagation();
                     setEditingId(null);
@@ -227,12 +219,7 @@ export function Sidebar({
                     onDelete(t.id);
                   }}
                 >
-                  <Icon name="trash" size={13} />
-                  {confirmDelId === t.id && (
-                    <span className="confirm-label" aria-hidden>
-                      确认
-                    </span>
-                  )}
+                  <Icon name="trash" size={14} />
                 </button>
               </span>
             </li>
