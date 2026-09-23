@@ -216,7 +216,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-8 | Composer @/模式/模型 | P0 | ✅ |
 | IA-9 | 真 PTY / xterm | P2 | ⬜ 命令台 |
 | IA-10 | 图片附件、斜杠命令 | P2 | ⬜ |
-| IA-11 | 分栏拖拽 persist | P2 | ⬜ |
+| IA-11 | 分栏拖拽 persist | P2 | ✅ 侧栏/右栏 pointer 拖拽 + localStorage |
 | IA-12 | 会话内容搜索、重命名/删除 | P1 | ✅ history 内容搜 · rename · delete |
 | IA-13 | 设置页 ⌘, | P1 | ✅ 外观/模型/模式/快捷键 |
 | IA-14 | 子智能体 / Automations 标签 | P2–3 | ⬜ |

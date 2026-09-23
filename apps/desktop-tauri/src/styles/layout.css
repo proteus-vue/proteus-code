@@ -17,6 +17,9 @@ body,
   width: 100%;
   overflow: hidden;
   grid-template-areas: none !important;
+  /* IA-11：运行时可写覆盖（拖拽后由内联 style 写入） */
+  --sidebar-w: var(--sidebar-width);
+  --panel-w: min(380px, 36vw);
 }
 
 .sidebar,
@@ -29,8 +32,8 @@ body,
 }
 
 .sidebar {
-  width: var(--sidebar-width);
-  flex: 0 0 var(--sidebar-width);
+  width: var(--sidebar-w);
+  flex: 0 0 var(--sidebar-w);
   display: flex;
   flex-direction: column;
 }
@@ -84,14 +87,52 @@ body,
 }
 
 .panel.workbench {
-  flex: 0 0 min(380px, 36vw);
-  width: min(380px, 36vw);
+  flex: 0 0 var(--panel-w);
+  width: var(--panel-w);
+  min-width: var(--panel-min-width);
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: visible !important;
   border-left: 1px solid var(--line);
   background: var(--surface-sidebar);
+}
+
+/* IA-11 分栏拖拽把手 */
+.v-split {
+  flex: 0 0 5px;
+  width: 5px;
+  margin: 0 -2px;
+  height: 100%;
+  min-height: 0;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 15;
+  touch-action: none;
+}
+
+.v-split::after {
+  content: "";
+  position: absolute;
+  inset: 0 1px;
+  background: transparent;
+  transition: background 80ms linear;
+}
+
+.v-split:hover::after,
+.v-split:active::after {
+  background: color-mix(in srgb, var(--accent, #111) 45%, transparent);
+}
+
+body.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.is-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .panel.workbench .wb-body {

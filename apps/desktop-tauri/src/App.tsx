@@ -67,6 +67,7 @@ import "./styles/layout.css";
 
 type Status = "boot" | "ready" | "busy" | "error";
 type WB = WorkbenchId;
+type SplitEdge = "sidebar" | "panel";
 
 const EXEC_MODES: { id: ExecMode; label: string }[] = [
   { id: "plan", label: "Plan" },
@@ -75,6 +76,24 @@ const EXEC_MODES: { id: ExecMode; label: string }[] = [
   { id: "auto_edit", label: "自动编辑" },
   { id: "full_access", label: "完全访问" },
 ];
+
+/** IA-11 分栏范围（PRODUCT-IA §2：sidebar 256–275 默认；panel ≥320） */
+const SIDEBAR_MIN = 200;
+const SIDEBAR_MAX = 420;
+const SIDEBAR_DEFAULT = 264;
+const PANEL_MIN = 320;
+const PANEL_MAX = 720;
+const PANEL_DEFAULT = 380;
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, n));
+}
+
+function readStoredPx(key: string, fallback: number, min: number, max: number): number {
+  const raw = Number(localStorage.getItem(key));
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  return clamp(Math.round(raw), min, max);
+}
 
 export default function App() {
   const [status, setStatus] = useState<Status>("boot");
@@ -95,6 +114,13 @@ export default function App() {
   const [execMode, setExecMode] = useState<ExecMode>("default");
   const [panelOpen, setPanelOpen] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  /** IA-11 分栏宽度（localStorage 持久化） */
+  const [sidebarW, setSidebarW] = useState(() =>
+    readStoredPx("neo-sidebar-w", SIDEBAR_DEFAULT, SIDEBAR_MIN, SIDEBAR_MAX),
+  );
+  const [panelW, setPanelW] = useState(() =>
+    readStoredPx("neo-panel-w", PANEL_DEFAULT, PANEL_MIN, PANEL_MAX),
+  );
   /** 浏览器式标签：已打开的右栏页（可多开，× 关闭） */
   const [openTabs, setOpenTabs] = useState<WB[]>(["review"]);
   const [panelTab, setPanelTab] = useState<WB>("review");
@@ -879,9 +905,55 @@ export default function App() {
     inputRef.current?.focus();
   };
 
+  /** IA-11：拖分栏；pointer capture 在 window，松手写入 localStorage */
+  const beginSplitDrag = useCallback(
+    (edge: SplitEdge, clientX: number) => {
+      const startX = clientX;
+      const startW = edge === "sidebar" ? sidebarW : panelW;
+      const min = edge === "sidebar" ? SIDEBAR_MIN : PANEL_MIN;
+      const max = edge === "sidebar" ? SIDEBAR_MAX : PANEL_MAX;
+      const apply = (w: number) => {
+        const next = clamp(Math.round(w), min, max);
+        if (edge === "sidebar") setSidebarW(next);
+        else setPanelW(next);
+      };
+      const onMove = (e: PointerEvent) => {
+        const dx = e.clientX - startX;
+        // 侧栏拖右变宽；右栏拖左变宽
+        apply(edge === "sidebar" ? startW + dx : startW - dx);
+      };
+      const onUp = (e: PointerEvent) => {
+        const dx = e.clientX - startX;
+        const w = clamp(Math.round(edge === "sidebar" ? startW + dx : startW - dx), min, max);
+        if (edge === "sidebar") {
+          setSidebarW(w);
+          localStorage.setItem("neo-sidebar-w", String(w));
+        } else {
+          setPanelW(w);
+          localStorage.setItem("neo-panel-w", String(w));
+        }
+        document.body.classList.remove("is-resizing");
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+      document.body.classList.add("is-resizing");
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    },
+    [panelW, sidebarW],
+  );
+
   return (
     <div
       className={`app${panelOpen ? " with-panel" : ""}${sidebarOpen ? "" : " no-sidebar"}`}
+      style={
+        {
+          "--sidebar-w": `${sidebarW}px`,
+          "--panel-w": `${panelW}px`,
+        } as React.CSSProperties
+      }
     >
       <CommandPalette
         open={paletteOpen}
@@ -930,6 +1002,19 @@ export default function App() {
         workspaceRoot={workspaceRoot}
         filesFoot={files.length > 0 ? `改动 +${totalAdd} −${totalDel} · ${files.length} 文件` : undefined}
       />
+      {sidebarOpen && (
+        <div
+          className="v-split"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整侧栏宽度"
+          title="拖动调整侧栏宽度"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            beginSplitDrag("sidebar", e.clientX);
+          }}
+        />
+      )}
 
       <div className="center">
       <main className="stream" ref={streamRef}>
@@ -1248,14 +1333,26 @@ export default function App() {
       </div>
       {/* 右侧：浏览器式标签页（× 关闭 · + 下拉开新），不是全部 tab 挤一行 */}
       {panelOpen && openTabs.length > 0 && (
-        <WorkbenchShell
-          openTabs={openTabs}
-          active={panelTab}
-          onActive={setPanelTab}
-          onCloseTab={(id) => closeWorkbenchTab(id)}
-          onOpen={(id) => openWorkbench(id)}
-          onClosePanel={() => setPanelOpen(false)}
-        >
+        <>
+          <div
+            className="v-split"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整右栏宽度"
+            title="拖动调整右栏宽度"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              beginSplitDrag("panel", e.clientX);
+            }}
+          />
+          <WorkbenchShell
+            openTabs={openTabs}
+            active={panelTab}
+            onActive={setPanelTab}
+            onCloseTab={(id) => closeWorkbenchTab(id)}
+            onOpen={(id) => openWorkbench(id)}
+            onClosePanel={() => setPanelOpen(false)}
+          >
             {panelTab === "review" && (
               <div className="wb-section">
                 <div className="wb-sub">改动文件</div>
@@ -1495,7 +1592,8 @@ export default function App() {
                 </p>
               </div>
             )}
-        </WorkbenchShell>
+          </WorkbenchShell>
+        </>
       )}
     </div>
   );
