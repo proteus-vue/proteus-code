@@ -1,0 +1,91 @@
+/*
+ * 设计令牌基线 —— Tailwind v4 @theme 语法
+ *
+ * 数值来源：本机 Codex / Xiaomi MiMo / ZCode 三款桌面端解包后的 CSS 实测值，
+ * 经综合权衡后给出的推荐基线。仅包含数值，不含任何第三方原始定义。
+ *
+ * 用法（Tailwind v4）：
+ *   @import "tailwindcss";
+ *   @theme { ...本文件内容... }
+ *   或直接在 :root 下引用这些变量。
+ */
+
+:root {
+  /* ---------- 间距与圆角 ---------- */
+  --spacing: 0.25rem;          /* 三家一致：Tailwind v4 默认 */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-card: 12px;         /* 卡片/面板统一圆角 */
+
+  /* 全局圆角缩放：改这一个值即可整体收紧/放松圆角 */
+  --corner-radius-scale: 1;
+  --card-radius: calc(var(--radius-card) * var(--corner-radius-scale));
+
+  /* ---------- 布局尺寸 ---------- */
+  --sidebar-width: 256px;
+  --sidebar-width-collapsed: 62px;
+  --toolbar-height: 46px;
+  --content-max-width: 40rem;  /* ≈640px，消息流最大宽度 */
+  --panel-min-width: 320px;
+
+  /* ---------- 字号 ---------- */
+  --text-ui: 14px;             /* UI 正文 */
+  --text-ui-sm: 12px;
+  --text-ui-xs: 11px;
+  --text-chat: 16px;           /* 对话正文：比 UI 大，关键 */
+  --text-code: 13px;           /* 代码 / diff / 终端 */
+
+  /* ---------- 字体 ---------- */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "PingFang SC",
+               "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas,
+               "PingFang SC", monospace;
+
+  /* ---------- 暗色主题（默认） ---------- */
+  --surface-app: #141414;      /* 应用底：不要纯黑 */
+  --surface-panel: #1c1c1c;    /* 面板 / 卡片 */
+  --surface-sidebar: #171717;
+  --surface-elevated: #242424; /* 弹层 / 悬浮 */
+
+  --text-primary: #f2f2f2;
+  --text-secondary: #a1a1a1;
+  --text-tertiary: #6b6b6b;
+
+  --line: #2a2a2a;             /* 分隔线 */
+  --line-strong: #3a3a3a;
+
+  --accent: #ff6a2b;           /* 换成你自己的品牌色，全站只留这一处高饱和 */
+  --accent-foreground: #ffffff;
+
+  --diff-add: #3fb950;
+  --diff-del: #e5484d;
+
+  /* ---------- 动效 ---------- */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --ease-out: cubic-bezier(0.2, 0.7, 0.3, 1);
+
+  /* ---------- 层级 ---------- */
+  --z-panel: 10;
+  --z-overlay: 100;
+  --z-modal: 1000;
+}
+
+/* ---------- 亮色主题 ---------- */
+:root[data-theme="light"] {
+  --surface-app: #fcfcfc;
+  --surface-panel: #ffffff;
+  --surface-sidebar: #f7f7f7;
+  --surface-elevated: #ffffff;
+
+  --text-primary: #18181b;
+  --text-secondary: #606060;
+  --text-tertiary: #909090;
+
+  --line: #ececec;
+  --line-strong: #dcdcdc;
+
+  --diff-add: #1a7f37;
+  --diff-del: #c92a2a;
+}

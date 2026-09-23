@@ -1,5 +1,9 @@
 [workspace]
 resolver = "2"
+# Tauri 桌面复刻版（apps/desktop-tauri）是**独立 Cargo workspace**：
+# 它只通过 stdio JSON-RPC 消费 `neo app-server`，不依赖内核 crate，
+# 故不进 L0–L5 成员表（避免把 GUI 壳绑进架构守卫）。
+exclude = ["apps/desktop-tauri"]
 members = [
   "crates/neo-protocol",
   # 宿主中立的文本语义（语义色调 / 显示宽度 / Markdown / 词法高亮）。

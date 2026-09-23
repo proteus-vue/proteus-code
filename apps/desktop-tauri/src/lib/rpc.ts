@@ -1,0 +1,142 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  ApprovalState,
+  Decision,
+  InitializeResult,
+  ModelsResult,
+  ThreadSummary,
+  WireEvent,
+} from "./protocol";
+
+export async function startServer(opts?: {
+  bin?: string;
+  provider?: string;
+  workspace?: string;
+}): Promise<InitializeResult> {
+  return invoke<InitializeResult>("start_app_server", {
+    bin: opts?.bin ?? null,
+    provider: opts?.provider ?? "mock",
+    workspace: opts?.workspace ?? null,
+  });
+}
+
+export function rpc<T = unknown>(
+  method: string,
+  params?: Record<string, unknown>,
+): Promise<T> {
+  return invoke<T>("rpc_call", { method, params: params ?? {} });
+}
+
+export function stopServer(): Promise<void> {
+  return invoke("stop_app_server");
+}
+
+export async function listThreads(): Promise<ThreadSummary[]> {
+  const r = await rpc<{ threads?: ThreadSummary[] }>("thread/list");
+  return r.threads ?? [];
+}
+
+export async function createThread(): Promise<string> {
+  const r = await rpc<{ id?: string }>("thread/create");
+  return r.id ?? "";
+}
+
+export async function resumeThread(id: string): Promise<unknown> {
+  return rpc("thread/resume", { id });
+}
+
+export async function startTurn(text: string): Promise<unknown> {
+  return rpc("turn/start", { text });
+}
+
+export async function interruptTurn(): Promise<unknown> {
+  return rpc("turn/interrupt");
+}
+
+export async function respondApproval(
+  id: string,
+  decision: Decision,
+  reason?: string | null,
+): Promise<unknown> {
+  return rpc("approval/respond", {
+    id,
+    decision,
+    reason: reason ?? null,
+  });
+}
+
+export async function listModels(): Promise<ModelsResult> {
+  return rpc<ModelsResult>("models/list");
+}
+
+export type ExecMode = "plan" | "confirm_before" | "default" | "auto_edit" | "full_access";
+
+/** 会话配置（SessionPatch 子集）；字段名 = 线协议 snake_case。 */
+export async function configureSession(patch: {
+  exec_mode?: ExecMode;
+  model?: string;
+  token_budget?: number;
+}): Promise<unknown> {
+  return rpc("session/configure", patch);
+}
+
+export async function gitInfo(): Promise<Record<string, unknown>> {
+  return rpc("git/info", {});
+}
+
+export async function goalSet(goal: string): Promise<unknown> {
+  return rpc("goal/set", { goal });
+}
+export async function goalPause(goalId: string): Promise<unknown> {
+  return rpc("goal/pause", { goal_id: goalId });
+}
+export async function goalResume(goalId: string): Promise<unknown> {
+  return rpc("goal/resume", { goal_id: goalId });
+}
+export async function goalClear(): Promise<unknown> {
+  return rpc("goal/clear", {});
+}
+export async function goalAdvance(): Promise<unknown> {
+  return rpc("goal/advance", {});
+}
+export async function compactSession(): Promise<unknown> {
+  return rpc("session/compact", {});
+}
+export async function commandExec(command: string): Promise<unknown> {
+  return rpc("command/exec", { command });
+}
+
+export async function history(id?: string): Promise<{
+  items?: unknown[];
+}> {
+  return rpc("thread/history", id ? { id } : {});
+}
+
+export function onEvent(cb: (e: WireEvent) => void): Promise<UnlistenFn> {
+  return listen<WireEvent>("neo-event", (ev) => cb(ev.payload));
+}
+
+export function onStderr(cb: (line: string) => void): Promise<UnlistenFn> {
+  return listen<string>("neo-stderr", (ev) => cb(ev.payload));
+}
+
+export function onExit(cb: () => void): Promise<UnlistenFn> {
+  return listen("neo-exit", () => cb());
+}
+
+/** 把 app-server event 通知拆成 { seq, kind, payload } */
+export function unpackEvent(e: WireEvent): {
+  seq?: number;
+  kind: string;
+  payload: Record<string, unknown>;
+} {
+  const p = e.params ?? {};
+  return {
+    seq: p.seq,
+    kind: p.kind ?? "",
+    payload: p.payload ?? {},
+  };
+}
+
+export type { ApprovalState };

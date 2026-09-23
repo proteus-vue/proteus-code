@@ -1,0 +1,28 @@
+[package]
+name = "neo-desktop-tauri"
+version = "0.1.0"
+description = "Codex/ZCode/MiMo style desktop host for NEO app-server"
+authors = ["proteus-vue"]
+edition = "2021"
+
+[workspace]
+members = []
+
+[lib]
+name = "desktop_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
