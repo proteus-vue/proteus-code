@@ -1,6 +1,6 @@
 /**
- * Composer 上方项目选择器（ZCode 同构）—— 不是侧栏菜单。
- * 最近项目 / 打开路径 / 不在项目中工作。
+ * Composer 上方项目选择器（ZCode 同构）。
+ * 用 fixed 定位，避开 .center overflow:hidden 裁切。
  */
 import { useEffect, useId, useRef, useState } from "react";
 import { Icon } from "./Icon";
@@ -15,6 +15,8 @@ export function ProjectPicker({
   recents,
   onSwitch,
   onNoProject,
+  /** 触发芯片的视口坐标（fixed 定位） */
+  anchor,
 }: {
   open: boolean;
   onClose: () => void;
@@ -24,6 +26,7 @@ export function ProjectPicker({
   recents: RecentWorkspace[];
   onSwitch: (path: string) => void;
   onNoProject: () => void;
+  anchor: { left: number; top: number } | null;
 }) {
   const id = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -35,13 +38,16 @@ export function ProjectPicker({
     setQ("");
     setAddPath("");
     const onDoc = (e: globalThis.MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) onClose();
+      const t = e.target as HTMLElement;
+      // 触发芯片在 .ctx-anchor 内 —— mousedown 不能先关，否则点一下就没了
+      if (t.closest(".ctx-anchor")) return;
+      if (!rootRef.current?.contains(t)) onClose();
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open, onClose]);
 
-  if (!open) return null;
+  if (!open || !anchor) return null;
 
   const filtered = recents.filter(
     (w) =>
@@ -57,6 +63,7 @@ export function ProjectPicker({
     onSwitch(clean);
   };
 
+  // 芯片上方弹出：top = anchor.top - 菜单估高 - 8（用 bottom 钉在芯片上）
   return (
     <div
       ref={rootRef}
@@ -64,6 +71,15 @@ export function ProjectPicker({
       className="proj-picker"
       role="dialog"
       aria-label="选择工作区"
+      style={{
+        position: "fixed",
+        left: Math.max(12, anchor.left),
+        // 钉在芯片上方：bottom = 视口高 - 芯片 top + 8
+        bottom: Math.max(12, window.innerHeight - anchor.top + 8),
+        top: "auto",
+        right: "auto",
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
     >
       <div className="proj-picker-search">
         <Icon name="search" size={14} />
@@ -71,7 +87,7 @@ export function ProjectPicker({
           value={q}
           placeholder="搜索工作区"
           onChange={(e) => setQ(e.target.value)}
-          autoFocus
+          // 不 autoFocus：避免抢焦点导致立刻触发 blur/关闭链路
         />
       </div>
 
@@ -129,9 +145,7 @@ export function ProjectPicker({
         >
           <Icon name="close" size={15} />
           不在项目中工作
-          {projectMode === "none" && (
-            <Icon name="check" size={15} className="end" />
-          )}
+          {projectMode === "none" && <Icon name="check" size={15} className="end" />}
         </button>
       </div>
 

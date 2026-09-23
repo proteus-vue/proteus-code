@@ -5513,3 +5513,45 @@ button.ctx-chip:hover {
 .timeline-head .tl-icon svg {
   vertical-align: -2px;
 }
+
+/* IA-25：选择项目芯片 + fixed 菜单（不被 center overflow 裁） */
+.proj-picker {
+  position: fixed !important;
+  left: auto;
+  right: auto;
+  top: auto;
+  bottom: auto;
+  z-index: 9999 !important;
+  max-height: min(420px, 50vh);
+  width: min(380px, calc(100vw - 32px));
+}
+
+.composer .ctx-chip {
+  gap: 6px;
+}
+
+.composer .ctx-chip .chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.composer .ctx-chip .chip-x:hover {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+}
+
+/* 打开菜单时中心区域不裁切 fixed 子层（兜底） */
+.center {
+  overflow: visible;
+}
+
+.center .stream {
+  overflow: auto;
+}

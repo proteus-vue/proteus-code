@@ -222,6 +222,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** IA-24：Composer 芯片上的项目下拉（ZCode） */
   const [projPickerOpen, setProjPickerOpen] = useState(false);
+  const [projAnchor, setProjAnchor] = useState<{ left: number; top: number } | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">(
     () =>
       (localStorage.getItem("neo-theme") as "light" | "dark" | null) ??
@@ -1271,12 +1272,16 @@ export default function App() {
     }
   }, [append, approval, busy, lastUserText]);
 
+  const hasProject = projectMode === "workspace" && Boolean(workspaceRoot);
+  /** 侧栏标题：none → 不在项目中；有项目 → 目录名 */
   const projectLabel = useMemo(() => {
     if (projectMode === "none") return "不在项目中工作";
     if (!workspaceRoot) return "选择项目";
     const parts = workspaceRoot.replace(/\/+$/, "").split("/");
     return parts[parts.length - 1] || workspaceRoot;
   }, [projectMode, workspaceRoot]);
+  /** Composer 芯片（ZCode）：有项目显示目录名，否则永远是「选择项目」 */
+  const chipLabel = hasProject ? projectLabel : "选择项目";
 
   const methods = useMemo(() => init?.methods ?? [], [init]);
   const grouped = useMemo(() => groupTools(items), [items]);
@@ -1621,23 +1626,48 @@ export default function App() {
       </main>
 
       <footer className={`composer ${isNewTask ? "mode-new" : "mode-chat"}`}>
-        {/* IA-24：项目/分支芯片 —— 下拉挂在芯片上方（ZCode），不靠侧栏 */}
+        {/* IA-24/25：ZCode 芯片 —— 选择项目 / 目录名 · 点击弹上方菜单 */}
         <div className="ctx-chips" aria-label="工作区上下文">
           <div className="ctx-anchor">
             <button
               type="button"
-              className={`ctx-chip ${projectMode === "none" ? "warn" : ""}`}
+              className="ctx-chip"
               aria-haspopup="dialog"
               aria-expanded={projPickerOpen}
-              title={
-                projectMode === "none"
-                  ? "不在项目中工作 — 点击选择项目"
-                  : workspaceRoot || "选择项目"
-              }
-              onClick={() => setProjPickerOpen((v) => !v)}
+              title={hasProject ? workspaceRoot : "选择工作区"}
+              onMouseDown={(e) => {
+                // 防止 document mousedown 先关菜单
+                e.stopPropagation();
+              }}
+              onClick={(e) => {
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                setProjAnchor({ left: r.left, top: r.top });
+                setProjPickerOpen((v) => !v);
+              }}
             >
-              <Icon name="files" size={12} />
-              {projectMode === "none" ? "不在项目中工作" : projectLabel}
+              {hasProject ? (
+                <span
+                  className="chip-x"
+                  role="button"
+                  tabIndex={0}
+                  aria-label="改为不在项目中工作"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void switchNoProject();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.stopPropagation();
+                      void switchNoProject();
+                    }
+                  }}
+                >
+                  <Icon name="close" size={12} />
+                </span>
+              ) : (
+                <Icon name="files" size={12} />
+              )}
+              {chipLabel}
               <Icon name="chevron-down" size={11} />
             </button>
             <ProjectPicker
@@ -1649,22 +1679,14 @@ export default function App() {
               recents={recentWs}
               onSwitch={(p) => void switchWorkspace(p)}
               onNoProject={() => void switchNoProject()}
+              anchor={projAnchor}
             />
           </div>
-          {projectMode === "workspace" && (
+          {hasProject && (
             <span className="ctx-chip muted" title="当前分支">
               <Icon name="goal" size={12} />
               {branch && branch !== "—" ? branch : "—"}
             </span>
-          )}
-          {isNewTask && projectMode === "none" && (
-            <button
-              type="button"
-              className="ctx-chip primary"
-              onClick={() => setProjPickerOpen(true)}
-            >
-              选择项目…
-            </button>
           )}
         </div>
         <div className="composer-card">
