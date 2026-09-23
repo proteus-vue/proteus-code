@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { ExecMode } from "../lib/rpc";
+import { Icon } from "./Icon";
+import { Select } from "./Select";
 
 const EXEC_MODES: { id: ExecMode; label: string }[] = [
   { id: "plan", label: "Plan" },
@@ -80,8 +82,9 @@ export function SettingsModal({
             className="icon-btn"
             onClick={onClose}
             title="关闭 Esc / ⌘,"
+            aria-label="关闭设置"
           >
-            ×
+            <Icon name="close" size={16} />
           </button>
         </header>
 
@@ -113,30 +116,25 @@ export function SettingsModal({
             <h3>会话</h3>
             <div className="settings-row">
               <span>模型</span>
-              <select
+              <Select
                 value={model}
-                onChange={(e) => onModel(e.target.value)}
-              >
-                {(models.length ? models : [{ name: model }]).map((m) => (
-                  <option key={m.name} value={m.name}>
-                    {m.name}
-                    {m.description ? ` — ${m.description}` : ""}
-                  </option>
-                ))}
-              </select>
+                ariaLabel="模型"
+                options={(models.length ? models : [{ name: model }]).map((m) => ({
+                  value: m.name,
+                  label: m.name,
+                  hint: m.description,
+                }))}
+                onChange={onModel}
+              />
             </div>
             <div className="settings-row">
               <span>执行模式</span>
-              <select
+              <Select
                 value={execMode}
-                onChange={(e) => onMode(e.target.value as ExecMode)}
-              >
-                {EXEC_MODES.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
+                ariaLabel="执行模式"
+                options={EXEC_MODES.map((m) => ({ value: m.id, label: m.label }))}
+                onChange={(v) => onMode(v as ExecMode)}
+              />
             </div>
             <div className="settings-row">
               <span>工作区</span>

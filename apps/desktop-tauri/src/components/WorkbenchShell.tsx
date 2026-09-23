@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Icon, type IconName } from "./Icon";
 
 export type WorkbenchId =
   | "review"
@@ -23,16 +24,28 @@ export const WB_LABELS: Record<WorkbenchId, string> = {
   automations: "Automations",
 };
 
-export const WB_MENU: { id: WorkbenchId; key: string; icon: string }[] = [
-  { id: "review", key: "⇧⌘G", icon: "▦" },
-  { id: "terminal", key: "⌘`", icon: ">_" },
-  { id: "browser", key: "⌘T", icon: "◎" },
-  { id: "files", key: "⌘P", icon: "▤" },
-  { id: "chat", key: "⌥⌘S", icon: "💬" },
-  { id: "sim", key: "", icon: "▣" },
-  { id: "goal", key: "", icon: "◎" },
-  { id: "subagents", key: "", icon: "⧉" },
-  { id: "automations", key: "", icon: "⏲" },
+export const WB_ICON: Record<WorkbenchId, IconName> = {
+  review: "review",
+  terminal: "terminal",
+  files: "files",
+  browser: "browser",
+  chat: "chat",
+  sim: "sim",
+  goal: "goal",
+  subagents: "subagents",
+  automations: "automations",
+};
+
+export const WB_MENU: { id: WorkbenchId; key: string }[] = [
+  { id: "review", key: "⇧⌘G" },
+  { id: "terminal", key: "⌘`" },
+  { id: "browser", key: "⌘T" },
+  { id: "files", key: "⌘P" },
+  { id: "chat", key: "⌥⌘S" },
+  { id: "sim", key: "" },
+  { id: "goal", key: "" },
+  { id: "subagents", key: "" },
+  { id: "automations", key: "" },
 ];
 
 /** 浏览器式标签条 + 内容槽（PRODUCT-IA §2.3） */
@@ -66,15 +79,17 @@ export function WorkbenchShell({
             aria-selected={active === id}
           >
             <button type="button" className="btab-label" onClick={() => onActive(id)}>
+              <Icon name={WB_ICON[id]} size={14} className="btab-ico" />
               {WB_LABELS[id]}
             </button>
             <button
               type="button"
               className="btab-close"
               title="关闭标签"
+              aria-label={`关闭 ${WB_LABELS[id]}`}
               onClick={() => onCloseTab(id)}
             >
-              ×
+              <Icon name="close" size={12} />
             </button>
           </div>
         ))}
@@ -83,13 +98,14 @@ export function WorkbenchShell({
             type="button"
             className={`btab-plus ${menu ? "active" : ""}`}
             title="打开标签页"
+            aria-label="打开标签页"
             aria-expanded={menu}
             onClick={(e) => {
               e.stopPropagation();
               setMenu((v) => !v);
             }}
           >
-            +
+            <Icon name="plus" size={14} />
           </button>
           {menu && (
             <ul className="btab-menu" role="menu" onClick={(e) => e.stopPropagation()}>
@@ -103,7 +119,7 @@ export function WorkbenchShell({
                     }}
                   >
                     <span className="menu-icon" aria-hidden>
-                      {m.icon}
+                      <Icon name={WB_ICON[m.id]} size={15} />
                     </span>
                     <span className="menu-label">{WB_LABELS[m.id]}</span>
                     {m.key && <kbd>{m.key}</kbd>}
@@ -119,9 +135,10 @@ export function WorkbenchShell({
           type="button"
           className="btab-panel-close"
           title="收起面板 ⌘J"
+          aria-label="收起面板"
           onClick={onClosePanel}
         >
-          ×
+          <Icon name="chevron-right" size={14} />
         </button>
       </div>
       <div className="wb-body">{children}</div>

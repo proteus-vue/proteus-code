@@ -56,6 +56,8 @@ import { listWorkspace } from "./components/FileTree";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsModal } from "./components/SettingsModal";
 import { WorkbenchShell, type WorkbenchId } from "./components/WorkbenchShell";
+import { Icon } from "./components/Icon";
+import { Select } from "./components/Select";
 import {
   deleteThread,
   listTools,
@@ -1602,19 +1604,18 @@ export default function App() {
               {approval ? "等待审批" : busy ? "生成中 · Esc 中断" : "Enter 发送"}
               {lastSummary ? ` · 上轮 +${lastSummary.in}/−${lastSummary.out}` : ""}
             </span>
-            <select
+            <Select
               className="model-inline"
               value={model}
               disabled={busy}
-              onChange={(e) => void onModelChange(e.target.value)}
               title="模型"
-            >
-              {(modelsList.length ? modelsList : [{ name: model }]).map((m) => (
-                <option key={m.name} value={m.name}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
+              ariaLabel="模型"
+              options={(modelsList.length ? modelsList : [{ name: model }]).map((m) => ({
+                value: m.name,
+                label: m.name,
+              }))}
+              onChange={(v) => void onModelChange(v)}
+            />
             <button
               type="button"
               className="send-circle"
@@ -1622,7 +1623,7 @@ export default function App() {
               disabled={blocked || !input.trim()}
               aria-label="发送"
             >
-              {busy ? "■" : "↑"}
+              <Icon name={busy ? "stop" : "send"} size={16} />
             </button>
             {busy && (
               <button type="button" className="ghost-btn" onClick={() => void stop()}>
@@ -1794,18 +1795,20 @@ export default function App() {
                   <div className="auto-row">
                     <label>
                       每隔
-                      <select
-                        value={autoEvery}
-                        onChange={(e) => setAutoEvery(Number(e.target.value))}
-                      >
-                        <option value={0}>不自动（仅手动）</option>
-                        <option value={5}>5 分钟</option>
-                        <option value={15}>15 分钟</option>
-                        <option value={30}>30 分钟</option>
-                        <option value={60}>60 分钟</option>
-                        <option value={180}>3 小时</option>
-                        <option value={720}>12 小时</option>
-                      </select>
+                      <Select
+                        value={String(autoEvery)}
+                        ariaLabel="间隔"
+                        options={[
+                          { value: "0", label: "不自动（仅手动）" },
+                          { value: "5", label: "5 分钟" },
+                          { value: "15", label: "15 分钟" },
+                          { value: "30", label: "30 分钟" },
+                          { value: "60", label: "60 分钟" },
+                          { value: "180", label: "3 小时" },
+                          { value: "720", label: "12 小时" },
+                        ]}
+                        onChange={(v) => setAutoEvery(Number(v))}
+                      />
                     </label>
                     <button
                       type="button"

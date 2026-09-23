@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Icon } from "./Icon";
 
 export type FileTreeResult = {
   root: string;
@@ -146,7 +147,9 @@ export function FileTree({
               style={{ paddingLeft: 8 + depth * 12 }}
               onClick={() => toggle(key)}
             >
-              <span className="tree-twist">{isOpen ? "▾" : "▸"}</span>
+              <span className="tree-twist">
+                <Icon name={isOpen ? "chevron-down" : "chevron-right"} size={12} />
+              </span>
               <span className="tree-dir">{n.name}</span>
             </button>
             {isOpen && n.children && render(n.children, depth + 1)}

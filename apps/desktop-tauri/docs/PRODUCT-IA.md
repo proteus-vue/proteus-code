@@ -177,15 +177,25 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 
 ---
 
-## 7. 视觉硬规则（规格 03.7）
+## 7. 视觉硬规则（规格 03.7 + 本仓设计系统）
 
 1. 暗底不用 `#000`（`#0a0a0a`–`#181818`）
 2. 对话 **16px** / UI **14px**
 3. **仅一处高饱和**强调色（`#ff6a2b`）
 4. 代码区 VS Code Dark+ 思路，不自创一套
 5. 圆角一个 scale 变量
+6. **图标**：自绘线性 SVG（`src/components/Icon.tsx`），24 viewBox / 1.75 stroke / round cap；**禁止** emoji 字符、系统符号（☰⚙▦…）当图标；**不拷贝**三家图标文件
+7. **控件**：选择器/下拉用自绘 `Select`（或 button+menu），**禁止**裸原生 `<select>` 出现在产品 UI；输入/按钮走同一 border/radius/height 令牌
 
 默认**浅色**（你截图的竞品主态）；`data-theme=dark` 可切。
+
+### 7.1 控件尺寸（自绘 Select / Icon 按钮）
+
+| token | 值 |
+| --- | --- |
+| 控件高 | 32px（紧凑 28px） |
+| 图标按钮 | 28×28 · 线宽 1.75 |
+| 下拉菜单 | 与 palette 同 elevated 面 + shadow-pop |
 
 ---
 
@@ -221,6 +231,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-12 | 会话内容搜索、重命名/删除 | P1 | ✅ history 内容搜 · rename · delete |
 | IA-13 | 设置页 ⌘, | P1 | ✅ 外观/模型/模式/快捷键 |
 | IA-14 | 子智能体 / Automations 标签 | P2–3 | ✅ 子代理 `agent_*` · Automations 壳侧排程 |
+| IA-15 | 图标布局重做 + 自绘图标集 + 去原生控件 | P1 | ✅ Icon.tsx · Select.tsx · 全量替换 |
 
 ---
 

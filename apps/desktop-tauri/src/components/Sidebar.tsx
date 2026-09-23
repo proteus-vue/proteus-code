@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { formatRelative } from "../lib/time";
 import type { ThreadSummary } from "../lib/protocol";
+import { Icon } from "./Icon";
 
 export function Sidebar({
   open,
@@ -48,17 +49,17 @@ export function Sidebar({
   if (!open) {
     return (
       <nav className="rail left-rail" aria-label="侧栏折叠">
-        <button type="button" className="rail-btn" onClick={onToggle} title="展开侧栏 ⌘B">
-          ☰
+        <button type="button" className="rail-btn" onClick={onToggle} title="展开侧栏 ⌘B" aria-label="展开侧栏">
+          <Icon name="menu" size={18} />
         </button>
-        <button type="button" className="rail-btn" onClick={onNew} title="新建任务 ⌘N">
-          ＋
+        <button type="button" className="rail-btn" onClick={onNew} title="新建任务 ⌘N" aria-label="新建任务">
+          <Icon name="plus" size={18} />
         </button>
-        <button type="button" className="rail-btn" onClick={onCommand} title="命令 ⌘K">
-          ⌕
+        <button type="button" className="rail-btn" onClick={onCommand} title="命令 ⌘K" aria-label="搜索命令">
+          <Icon name="search" size={18} />
         </button>
-        <button type="button" className="rail-btn" onClick={onSettings} title="设置 ⌘,">
-          ⚙
+        <button type="button" className="rail-btn" onClick={onSettings} title="设置 ⌘," aria-label="设置">
+          <Icon name="settings" size={18} />
         </button>
       </nav>
     );
@@ -70,7 +71,6 @@ export function Sidebar({
     if ((t.title ?? "").toLowerCase().includes(q) || t.id.toLowerCase().includes(q)) {
       return true;
     }
-    // 内容命中（thread/history 懒加载）
     const hit = contentHits?.get(t.id);
     return Boolean(hit && hit.toLowerCase().includes(q));
   });
@@ -84,35 +84,40 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div className="rail-head">
-        <button type="button" className="icon-btn" onClick={onToggle} title="折叠侧栏 ⌘B">
-          ◀
+        <button type="button" className="icon-btn" onClick={onToggle} title="折叠侧栏 ⌘B" aria-label="折叠侧栏">
+          <Icon name="chevron-left" size={16} />
         </button>
         <button type="button" className="btn-new compact" onClick={onNew} title="⌘N">
-          ＋ 新建任务
+          <Icon name="plus" size={14} />
+          新建任务
         </button>
-        <button type="button" className="icon-btn" onClick={onTheme} title="切换主题">
-          {theme === "dark" ? "☀" : "☾"}
+        <button type="button" className="icon-btn" onClick={onTheme} title="切换主题" aria-label="切换主题">
+          <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
         </button>
-        <button type="button" className="icon-btn" onClick={onSettings} title="设置 ⌘,">
-          ⚙
+        <button type="button" className="icon-btn" onClick={onSettings} title="设置 ⌘," aria-label="设置">
+          <Icon name="settings" size={16} />
         </button>
       </div>
       <div className="sidebar-tools">
         <button type="button" className="tool-btn" onClick={onCommand} title="⌘K">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+          <Icon name="search" size={16} />
           <span>搜索</span>
         </button>
         <button type="button" className="tool-btn" onClick={onNew} title="⌘N">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          <Icon name="plus" size={16} />
           <span>新建</span>
         </button>
       </div>
       <div className="sidebar-section">
         <span className="proj-label" title={workspaceRoot}>
-          ▸ {projectLabel}
+          <Icon name="chevron-down" size={12} className="proj-caret" />
+          {projectLabel}
         </span>
       </div>
       <div className="sidebar-search">
+        <span className="search-lead" aria-hidden>
+          <Icon name="search" size={14} />
+        </span>
         <input
           value={query}
           placeholder="搜索标题或内容…"
@@ -192,17 +197,19 @@ export function Sidebar({
                 <button
                   type="button"
                   title="重命名"
+                  aria-label="重命名"
                   onClick={(e) => {
                     e.stopPropagation();
                     setDraft(t.title || t.id);
                     setEditingId(t.id);
                   }}
                 >
-                  ✎
+                  <Icon name="edit" size={13} />
                 </button>
                 <button
                   type="button"
                   title="删除会话"
+                  aria-label="删除会话"
                   onClick={(e) => {
                     e.stopPropagation();
                     if (t.id === activeId) {
@@ -214,7 +221,7 @@ export function Sidebar({
                     }
                   }}
                 >
-                  ×
+                  <Icon name="trash" size={13} />
                 </button>
               </span>
             </li>

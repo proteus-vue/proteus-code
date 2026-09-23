@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Icon } from "./Icon";
 
 /** D3：思考轨迹可折叠 + 搜索。默认折叠（规格：思考默认收起）。 */
 export function ThinkingBlock({
@@ -24,7 +25,10 @@ export function ThinkingBlock({
         className="thinking-head"
         onClick={() => setOpen((v) => !v)}
       >
-        <span>{show ? "▾" : "▸"} 思考中…</span>
+        <span className="twist-lead">
+          <Icon name={show ? "chevron-down" : "chevron-right"} size={12} />
+        </span>{" "}
+        思考中…
         <span className="meta">{chars} 字</span>
         {hit && <span className="meta hit-tag">命中</span>}
       </button>
@@ -96,7 +100,9 @@ export function ToolGroup({ tools }: { tools: ToolItem[] }) {
         </span>
         <span className="tl-meta">
           {ok}/{tools.length} 成功
-          <span className="twist">{open ? "▾" : "▸"}</span>
+          <span className="twist">
+            <Icon name={open ? "chevron-down" : "chevron-right"} size={12} />
+          </span>
         </span>
       </button>
       {open && (

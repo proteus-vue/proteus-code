@@ -1,4 +1,5 @@
 import type { GoalSnapshot } from "../lib/protocol";
+import { Icon } from "./Icon";
 
 /** 右侧进度浮层（对标截图 2「进程 5/6」）：有 Goal 时挂在流区右上。 */
 export function ProgressFloat({
@@ -25,8 +26,8 @@ export function ProgressFloat({
           </span>
         </div>
         <div className="pf-actions">
-          <button type="button" className="icon-btn" onClick={onCollapse} title="收起">
-            ×
+          <button type="button" className="icon-btn" onClick={onCollapse} title="收起" aria-label="收起进度">
+            <Icon name="close" size={14} />
           </button>
         </div>
       </header>

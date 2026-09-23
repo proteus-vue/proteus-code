@@ -4130,3 +4130,222 @@ html, body, #root {
   gap: 6px;
   margin-top: 8px;
 }
+
+/* ═══════ IA-15 设计系统：Icon + 自绘 Select ═══════ */
+
+.icon {
+  display: inline-block;
+  flex-shrink: 0;
+  vertical-align: -0.125em;
+}
+
+button.icon-btn,
+button.rail-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ui-select {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+
+.ui-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 32px;
+  min-width: 120px;
+  max-width: 100%;
+  padding: 0 10px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font-size: var(--text-ui);
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+}
+
+.ui-select-trigger:hover:not(:disabled),
+.ui-select.open .ui-select-trigger {
+  border-color: var(--line-strong);
+  background: var(--surface-elevated);
+}
+
+.ui-select-trigger:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.ui-select-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ui-select-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+}
+
+.ui-select-caret {
+  color: var(--text-tertiary);
+}
+
+.ui-select-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  min-width: 160px;
+  max-width: min(280px, 90vw);
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--surface-elevated);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-pop);
+  z-index: var(--z-overlay);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.ui-select-menu li button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  padding: 8px 10px;
+  border-radius: calc(var(--radius-md) - 1px);
+  font-size: var(--text-ui);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.ui-select-menu li button.active,
+.ui-select-menu li button:hover {
+  background: var(--surface-muted);
+}
+
+.ui-select-menu li button span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ui-select-menu li button .hint {
+  color: var(--text-tertiary);
+  font-size: var(--text-ui-xs);
+}
+
+.ui-select-menu li.empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: var(--text-ui-sm);
+}
+
+/* 工具条按钮统一：图标居中 */
+.tool-btn,
+.rail-btn {
+  gap: 6px;
+}
+
+/* IA-15 收尾：Select 与侧栏/树图标对齐 */
+.settings-row .ui-select,
+.model-inline .ui-select-trigger {
+  min-width: 160px;
+}
+
+.settings-row .ui-select {
+  min-width: 160px;
+  max-width: 260px;
+}
+
+.model-inline {
+  min-width: 140px;
+}
+
+.model-inline .ui-select-trigger {
+  min-width: 140px;
+  height: 30px;
+}
+
+.proj-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.proj-label .proj-caret {
+  color: var(--text-tertiary);
+}
+
+.sidebar-search {
+  position: relative;
+}
+
+.sidebar-search .search-lead {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-tertiary);
+  pointer-events: none;
+  display: flex;
+}
+
+.sidebar-search input {
+  padding-left: 30px;
+}
+
+.btn-new.compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btab-ico {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.btab.active .btab-ico {
+  opacity: 1;
+}
+
+.menu-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-secondary);
+}
+
+.auto-row label {
+  gap: 8px;
+}
+
+.auto-row .ui-select {
+  min-width: 150px;
+}
+
+.auto-row .ui-select-trigger {
+  height: 30px;
+}
