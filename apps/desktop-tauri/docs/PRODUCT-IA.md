@@ -231,7 +231,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-12 | 会话内容搜索、重命名/删除 | P1 | ✅ history 内容搜 · rename · delete |
 | IA-13 | 设置页 ⌘, | P1 | ✅ 外观/模型/模式/快捷键 |
 | IA-14 | 子智能体 / Automations 标签 | P2–3 | ✅ 子代理 `agent_*` · Automations 壳侧排程 |
-| IA-15 | 图标布局重做 + 自绘图标集 + 去原生控件 | P1 | ✅ Icon.tsx · Select.tsx · 全量替换 |
+| IA-15 | 图标布局重做 + 自绘图标集 + 去原生控件 | P1 | ✅ Icon · Select（含贴底向上翻） |
 
 ---
 

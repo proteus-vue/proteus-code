@@ -1,8 +1,9 @@
 /**
  * 自绘下拉选择器（PRODUCT-IA §7.7）—— 禁止产品 UI 使用原生 <select>。
  * 与 palette 同 elevated 面；键盘 ↑↓/Enter/Esc。
+ * 底部空间不足时向上翻（Composer 模型选择器贴底）。
  */
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "./Icon";
 
 export type SelectOption = {
@@ -10,6 +11,10 @@ export type SelectOption = {
   label: string;
   hint?: string;
 };
+
+/** 菜单理想高度估算（与 CSS max-height 对齐，不必先渲染再翻） */
+const MENU_MAX_H = 240;
+const MENU_PAD = 8;
 
 export function Select({
   value,
@@ -30,6 +35,7 @@ export function Select({
 }) {
   const id = useId();
   const [open, setOpen] = useState(false);
+  const [dropup, setDropup] = useState(false);
   const [idx, setIdx] = useState(() =>
     Math.max(0, options.findIndex((o) => o.value === value)),
   );
@@ -48,6 +54,25 @@ export function Select({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
+  // 打开后：按剩余空间决定向上/向下；菜单渲染后再复核一次高度
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const el = rootRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const want = Math.min(MENU_MAX_H, options.length * 36 + MENU_PAD);
+      const below = window.innerHeight - r.bottom;
+      const above = r.top;
+      // 下方不够且上方更宽裕 → 向上
+      setDropup(below < want + 8 && above > below);
+    };
+    place();
+    // 首帧菜单可能已影响布局，再放一次
+    const raf = requestAnimationFrame(place);
+    return () => cancelAnimationFrame(raf);
+  }, [open, options.length]);
+
   useEffect(() => {
     if (open) {
       const el = listRef.current?.querySelector<HTMLElement>('[data-active="1"]');
@@ -62,10 +87,16 @@ export function Select({
     setOpen(false);
   };
 
+  const openMenu = () => {
+    if (disabled) return;
+    setIdx(Math.max(0, options.findIndex((o) => o.value === value)));
+    setOpen((v) => !v);
+  };
+
   return (
     <div
       ref={rootRef}
-      className={`ui-select ${className ?? ""} ${open ? "open" : ""} ${disabled ? "disabled" : ""}`}
+      className={`ui-select ${className ?? ""} ${open ? "open" : ""} ${dropup && open ? "dropup" : ""} ${disabled ? "disabled" : ""}`}
       title={title}
     >
       <button
@@ -76,17 +107,13 @@ export function Select({
         aria-expanded={open}
         aria-label={ariaLabel}
         aria-controls={id}
-        onClick={() => {
-          if (disabled) return;
-          setIdx(Math.max(0, options.findIndex((o) => o.value === value)));
-          setOpen((v) => !v);
-        }}
+        onClick={openMenu}
         onKeyDown={(e) => {
           if (disabled) return;
           if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Enter" || e.key === " ") {
             e.preventDefault();
             if (!open) {
-              setOpen(true);
+              openMenu();
               return;
             }
             if (e.key === "Enter" || e.key === " ") {
@@ -95,10 +122,7 @@ export function Select({
               return;
             }
             const d = e.key === "ArrowDown" ? 1 : -1;
-            setIdx((i) => {
-              const n = Math.min(options.length - 1, Math.max(0, i + d));
-              return n;
-            });
+            setIdx((i) => Math.min(options.length - 1, Math.max(0, i + d)));
           } else if (e.key === "Escape" && open) {
             e.preventDefault();
             setOpen(false);
@@ -106,7 +130,11 @@ export function Select({
         }}
       >
         <span className="ui-select-label">{current?.label ?? "—"}</span>
-        <Icon name="chevron-down" size={14} className="ui-select-caret" />
+        <Icon
+          name="chevron-down"
+          size={14}
+          className={`ui-select-caret ${dropup && open ? "flip" : ""}`}
+        />
       </button>
       {open && (
         <ul id={id} className="ui-select-menu" role="listbox" ref={listRef}>

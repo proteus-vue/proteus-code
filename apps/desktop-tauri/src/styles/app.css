@@ -4349,3 +4349,13 @@ button.rail-btn {
 .auto-row .ui-select-trigger {
   height: 30px;
 }
+
+/* 底部空间不足时向上弹（Composer 模型选择器） */
+.ui-select.dropup .ui-select-menu {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
+.ui-select.dropup .ui-select-caret.flip {
+  transform: rotate(180deg);
+}
