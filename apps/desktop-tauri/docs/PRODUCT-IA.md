@@ -80,7 +80,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | --- | --- |
 | 对话流从顶到输入区 | branch / model / mode / 已连接 / 重连 **顶栏芯片条** |
 | **新建任务态**（无消息）：居中 Hero「接下来交给我吧」· Composer 上方 **项目/分支 chips**（仅此态）· Composer **下方建议任务条** | 与对话态完全同一输入区观感 |
-| **任务开始选项目**：`projectMode = workspace \| none`；**入口 = Composer 上方项目芯片下拉**（ZCode：最近项目 / 打开路径 / **不在项目中工作**），不塞侧栏当唯一入口；none 用 `~/.neo/no-project`；**真重启 app-server 换目录** | 只画 chips 不换 workspace · 主入口放侧栏 |
+| **任务开始选项目**：`projectMode = workspace \| none`；**入口 = Composer 上方项目芯片下拉**（ZCode：最近项目 / 打开文件夹 / **不在项目中工作**），不塞侧栏当唯一入口；none 用 `~/.neo/no-project`；**真重启 app-server 换目录** | 只画 chips 不换 workspace · 主入口放侧栏 |
 | **对话态**：底部紧凑 Composer；生成中占位「继续输入以排队后续修改」 | 第二套全局工具栏 |
 | Composer 内：模式 chip · 模型 · 发送 · @ / ⌘K | 打印 28 个 RPC 方法 |
 
@@ -247,6 +247,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-24 | 项目下拉挂在 Composer 芯片（非侧栏） | P1 | ✅ ZCode 同构：芯片上方菜单 · 不在项目中工作在菜单内 |
 | IA-25 | 修：点芯片无弹层 / 固定「选择项目」 | P1 | ✅ fixed 定位 · 芯片「选择项目/目录名」· 外点不抢关 |
 | IA-26 | 根因：composer pointer-events:none 吃掉点击 | P1 | ✅ 芯片/菜单 pointer-events:auto |
+| IA-27 | 打开文件夹（系统对话框）替代手输路径 | P1 | ✅ osascript choose folder · 无手输 |
 
 ---
 

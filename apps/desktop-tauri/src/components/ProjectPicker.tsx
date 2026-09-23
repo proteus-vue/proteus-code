@@ -5,6 +5,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Icon } from "./Icon";
 import type { RecentWorkspace } from "../lib/workspaces";
+import { pickFolder } from "../lib/rpc";
 
 export function ProjectPicker({
   open,
@@ -31,12 +32,10 @@ export function ProjectPicker({
   const id = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const [q, setQ] = useState("");
-  const [addPath, setAddPath] = useState("");
 
   useEffect(() => {
     if (!open) return;
     setQ("");
-    setAddPath("");
     const onDoc = (e: globalThis.MouseEvent) => {
       const t = e.target as HTMLElement;
       // 触发芯片在 .ctx-anchor 内 —— mousedown 不能先关，否则点一下就没了
@@ -131,12 +130,21 @@ export function ProjectPicker({
           type="button"
           className="act"
           onClick={() => {
-            const el = document.getElementById("proj-open-path") as HTMLInputElement | null;
-            el?.focus();
+            void (async () => {
+              try {
+                const dir = await pickFolder();
+                onClose();
+                onSwitch(dir);
+              } catch (e) {
+                const msg = String(e);
+                if (msg.includes("已取消") || msg.includes("cancel")) return;
+                window.alert(msg || "打开文件夹失败");
+              }
+            })();
           }}
         >
-          <Icon name="plus" size={15} />
-          打开路径
+          <Icon name="files" size={15} />
+          打开文件夹
         </button>
         <button
           type="button"
@@ -149,26 +157,6 @@ export function ProjectPicker({
           <Icon name="close" size={15} />
           不在项目中工作
           {projectMode === "none" && <Icon name="check" size={15} className="end" />}
-        </button>
-      </div>
-
-      <div className="proj-picker-add">
-        <input
-          id="proj-open-path"
-          value={addPath}
-          placeholder="工作区绝对路径…"
-          onChange={(e) => setAddPath(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") pickPath(addPath);
-          }}
-        />
-        <button
-          type="button"
-          className="primary"
-          disabled={!addPath.trim()}
-          onClick={() => pickPath(addPath)}
-        >
-          打开
         </button>
       </div>
 

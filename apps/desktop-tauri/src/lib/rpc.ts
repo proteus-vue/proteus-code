@@ -37,6 +37,11 @@ export async function noProjectDir(): Promise<string> {
   return invoke<string>("no_project_dir");
 }
 
+/** 系统「打开文件夹」对话框；取消 reject "已取消" */
+export async function pickFolder(): Promise<string> {
+  return invoke<string>("pick_folder");
+}
+
 export async function listThreads(): Promise<ThreadSummary[]> {
   const r = await rpc<{ threads?: ThreadSummary[] }>("thread/list");
   return r.threads ?? [];

@@ -515,6 +515,36 @@ fn no_project_dir() -> Result<String, String> {
     Ok(p.to_string_lossy().into_owned())
 }
 
+/// 系统「打开文件夹」对话框（macOS choose folder）。取消返回 Err 取消消息。
+/// 不用 rfd（本机曾离线装不上）；osascript 走系统对话框，零新依赖。
+#[tauri::command]
+fn pick_folder() -> Result<String, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("当前平台暂用路径输入；macOS 请用打开文件夹".into());
+    }
+    let out = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            r#"POSIX path of (choose folder with prompt "选择工作区文件夹")"#,
+        ])
+        .output()
+        .map_err(|e| format!("启动系统对话框失败：{e}"))?;
+    if !out.status.success() {
+        // 用户取消时 osascript 非 0 且 stderr 可能含 user canceled
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.to_lowercase().contains("cancel") || out.status.code() == Some(1) {
+            return Err("已取消".into());
+        }
+        return Err(format!("打开文件夹失败：{err}"));
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().trim_end_matches('\n').to_string();
+    if path.is_empty() {
+        return Err("已取消".into());
+    }
+    // POSIX path 以 / 结尾
+    Ok(path.trim_end_matches('/').to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let map = Arc::new(RpcMap::default());
@@ -527,7 +557,8 @@ pub fn run() {
             list_workspace,
             read_workspace_file,
             list_repo_wiki,
-            no_project_dir
+            no_project_dir,
+            pick_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
