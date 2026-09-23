@@ -154,12 +154,7 @@ body.is-resizing * {
 }
 
 /* 菜单外点关闭遮罩 */
+/* IA-29：禁止全屏 fixed backdrop —— Overlay 标题栏下会整窗灰屏不重绘 */
 .menu-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: calc(var(--z-modal) - 1);
-  background: transparent;
-  border: none;
-  padding: 0;
-  cursor: default;
+  display: none !important;
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Icon, type IconName } from "./Icon";
 
 export type WorkbenchId =
@@ -68,6 +68,29 @@ export function WorkbenchShell({
 }) {
   const [menu, setMenu] = useState(false);
 
+  // IA-29：不用全屏 fixed backdrop（Overlay 标题栏 + 固定遮罩 → macOS 整窗灰屏）
+  // 点菜单外关闭；Esc 关闭
+  useEffect(() => {
+    if (!menu) return;
+    const onDoc = (e: globalThis.MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.closest(".btab-add") || t.closest(".btab-menu")) return;
+      setMenu(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+      if (!menu) {
+        document.querySelector(".browser-tabs")?.classList.remove("btab-menu-open");
+      }
+    };
+  }, [menu]);
+
   return (
     <aside className="panel workbench">
       <div className="browser-tabs" role="tablist">
@@ -102,7 +125,22 @@ export function WorkbenchShell({
             aria-expanded={menu}
             onClick={(e) => {
               e.stopPropagation();
-              setMenu((v) => !v);
+              setMenu((v) => {
+                const next = !v;
+                if (next) {
+                  // 强制一次布局读写，打脏 Overlay 合成层（防点开后整窗不刷新）
+                  requestAnimationFrame(() => {
+                    const tabs = document.querySelector(".browser-tabs");
+                    if (tabs instanceof HTMLElement) {
+                      void tabs.offsetHeight;
+                      tabs.classList.add("btab-menu-open");
+                    }
+                  });
+                } else {
+                  document.querySelector(".browser-tabs")?.classList.remove("btab-menu-open");
+                }
+                return next;
+              });
             }}
           >
             <Icon name="plus" size={14} />
@@ -142,14 +180,6 @@ export function WorkbenchShell({
         </button>
       </div>
       <div className="wb-body">{children}</div>
-      {menu && (
-        <button
-          type="button"
-          className="menu-backdrop"
-          aria-label="关闭菜单"
-          onClick={() => setMenu(false)}
-        />
-      )}
     </aside>
   );
 }

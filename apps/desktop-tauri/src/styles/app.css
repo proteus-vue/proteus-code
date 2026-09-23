@@ -5581,3 +5581,14 @@ button.ctx-chip:hover {
   background: var(--surface-hover) !important;
   color: var(--text-primary);
 }
+
+/* ═══════ IA-29 点 + 整窗灰屏：去掉全屏 fixed backdrop 的残留规则 ═══════ */
+.menu-backdrop {
+  display: none !important;
+}
+
+/* 打开标签菜单时避免 Overlay 标题栏合成层不刷新（鼠标移出才画） */
+.browser-tabs.btab-menu-open {
+  /* 仅为触发重绘的隔离层，无视觉 */
+  isolation: isolate;
+}
