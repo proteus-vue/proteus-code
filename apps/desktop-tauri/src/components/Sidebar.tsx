@@ -45,6 +45,8 @@ export function Sidebar({
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  /** 二次点击确认删除 —— 不用 window.confirm（Tauri 里不可靠） */
+  const [confirmDelId, setConfirmDelId] = useState<string | null>(null);
 
   if (!open) {
     return (
@@ -200,6 +202,7 @@ export function Sidebar({
                   aria-label="重命名"
                   onClick={(e) => {
                     e.stopPropagation();
+                    setConfirmDelId(null);
                     setDraft(t.title || t.id);
                     setEditingId(t.id);
                   }}
@@ -208,20 +211,31 @@ export function Sidebar({
                 </button>
                 <button
                   type="button"
-                  title="删除会话"
-                  aria-label="删除会话"
+                  className={confirmDelId === t.id ? "danger armed" : ""}
+                  title={
+                    confirmDelId === t.id
+                      ? "再次点击确认删除"
+                      : t.id === activeId
+                        ? "删除（将自动切到其它会话）"
+                        : "删除会话"
+                  }
+                  aria-label={confirmDelId === t.id ? "确认删除" : "删除会话"}
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (t.id === activeId) {
-                      window.alert("不能删除当前会话 — 先切换到别的会话再删。");
+                    setEditingId(null);
+                    if (confirmDelId !== t.id) {
+                      setConfirmDelId(t.id);
                       return;
                     }
-                    if (window.confirm(`删除会话「${t.title || t.id}」？此操作不可撤销。`)) {
-                      onDelete(t.id);
-                    }
+                    setConfirmDelId(null);
+                    onDelete(t.id);
                   }}
                 >
-                  <Icon name="trash" size={13} />
+                  {confirmDelId === t.id ? (
+                    <span className="confirm-label">确认</span>
+                  ) : (
+                    <Icon name="trash" size={13} />
+                  )}
                 </button>
               </span>
             </li>

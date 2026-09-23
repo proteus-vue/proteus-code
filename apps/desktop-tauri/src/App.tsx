@@ -912,15 +912,47 @@ export default function App() {
   const onDeleteSession = useCallback(
     async (id: string) => {
       try {
-        await deleteThread(id);
+        let removed = false;
+        try {
+          removed = await deleteThread(id);
+        } catch (e) {
+          const msg = String(e);
+          // 内核拒删当前会话：先切走（或新建）再删一次
+          if (!msg.includes("不能删除当前")) throw e;
+          const list = await listThreads().catch(() => threads);
+          const other = list.find((t) => t.id !== id);
+          if (other) {
+            await resumeThread(other.id);
+            setActiveThread(other.id);
+            setItems([]);
+            setApproval(null);
+          } else {
+            const nid = await createThread();
+            setActiveThread(nid);
+            setItems([]);
+          }
+          removed = await deleteThread(id);
+        }
         if (activeThread === id) setActiveThread(null);
-        await refreshThreads();
-        append({ type: "status", message: `已删除会话 ${id}` });
+        // 直接拉列表，避免 refresh 静默吞错导致「删了还在」
+        try {
+          setThreads(await listThreads());
+        } catch {
+          await refreshThreads();
+        }
+        if (removed) {
+          append({ type: "status", message: `已删除会话 ${id}` });
+        } else {
+          append({ type: "status", message: `会话已不存在：${id}` });
+        }
       } catch (e) {
-        append({ type: "error", message: String(e) });
+        const msg = String(e);
+        append({ type: "error", message: `删除失败：${msg}` });
+        // 侧栏可见的硬反馈（不用 window.alert）
+        setStatusMsg(`删除失败：${msg}`);
       }
     },
-    [activeThread, append, refreshThreads],
+    [activeThread, append, refreshThreads, threads],
   );
 
   const onRenameSession = useCallback(

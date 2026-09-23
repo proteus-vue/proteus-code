@@ -4359,3 +4359,18 @@ button.rail-btn {
 .ui-select.dropup .ui-select-caret.flip {
   transform: rotate(180deg);
 }
+
+/* 删除二次确认（替代 window.confirm） */
+.row-actions button.armed,
+.row-actions button.danger.armed {
+  background: color-mix(in srgb, var(--danger) 14%, var(--surface-panel));
+  color: var(--danger);
+  min-width: auto;
+  padding: 0 6px;
+  font-size: var(--text-ui-xs);
+  font-weight: 600;
+}
+
+.row-actions .confirm-label {
+  letter-spacing: 0.02em;
+}
