@@ -60,12 +60,69 @@ function ensurePickChrome(doc: Document) {
     const st = doc.createElement("style");
     st.id = HL_STYLE_ID;
     st.textContent = `
-      .neo-hl { outline: 2px solid #3b82f6 !important; outline-offset: 2px !important; }
+      .neo-hl {
+        outline: 2px solid #3b82f6 !important;
+        outline-offset: 1px !important;
+      }
       #${BANNER_ID} {
-        position: fixed; left: 12px; bottom: 48px; z-index: 2147483647;
-        background: #1f2937; color: #f9fafb; font: 12px/1.45 ui-monospace, monospace;
-        padding: 8px 10px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
-        max-width: min(420px, 90vw); pointer-events: none; white-space: pre-wrap;
+        position: fixed;
+        z-index: 2147483647;
+        display: inline-flex;
+        flex-direction: column;
+        gap: 2px;
+        max-width: min(280px, 70vw);
+        background: #3a4150;
+        color: #e5e7eb;
+        border-radius: 8px;
+        padding: 6px 10px;
+        box-shadow: 0 6px 20px rgba(0,0,0,.35);
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        font-size: 12px;
+        line-height: 1.35;
+        pointer-events: none;
+      }
+      #${BANNER_ID} .neo-line1 {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      #${BANNER_ID} .neo-tag {
+        font-weight: 650;
+        font-size: 13px;
+        color: #fff;
+        letter-spacing: -0.01em;
+      }
+      #${BANNER_ID} .neo-size {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        color: #d1d5db;
+        font-variant-numeric: tabular-nums;
+      }
+      #${BANNER_ID} .neo-line2 {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        color: #9ca3af;
+        font-size: 11px;
+      }
+      #${BANNER_ID} .neo-k {
+        color: #6b7280;
+        font-weight: 500;
+      }
+      #${BANNER_ID} .neo-v {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #e5e7eb;
+        max-width: 140px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${BANNER_ID} .neo-hint {
+        color: #6b7280;
+        font-size: 10px;
+        margin-top: 1px;
       }
     `;
     (doc.head || doc.documentElement).appendChild(st);
@@ -109,31 +166,40 @@ function attachPicker(
   ensurePickChrome(doc);
 
   const onMove = (ev: MouseEvent) => {
-    const t = ev.target as Element | null;
-    if (!t || t.nodeType !== 1) return;
+    const el = ev.target as Element | null;
+    if (!el || el.nodeType !== 1) return;
     clearHover(doc);
-    t.classList.add("neo-hl");
-    const meta = describeEl(t);
+    el.classList.add("neo-hl");
+    const meta = describeEl(el);
     let banner = doc.getElementById(BANNER_ID);
     if (!banner) {
       banner = doc.createElement("div");
       banner.id = BANNER_ID;
       doc.body.appendChild(banner);
     }
-    const tag = t.tagName.toLowerCase();
-    banner.textContent = [
-      tag,
-      `${meta.w}×${meta.h}`,
-      meta.color ? `Color ${meta.color}` : "",
-      meta.font ? `Font ${meta.font}` : "",
-      "点击加入对话 · Esc 取消",
-    ]
-      .filter(Boolean)
-      .join("\n");
-    // 靠近光标
-    banner.style.left = `${Math.min(ev.clientX + 14, (doc.defaultView?.innerWidth ?? 800) - 200)}px`;
-    banner.style.top = `${Math.min(ev.clientY + 14, (doc.defaultView?.innerHeight ?? 600) - 80)}px`;
+    const tag = el.tagName.toLowerCase();
+    banner.innerHTML =
+      `<div class="neo-line1">` +
+      `<span class="neo-tag"></span>` +
+      `<span class="neo-size"></span>` +
+      `</div>` +
+      `<div class="neo-line2">` +
+      `<span><span class="neo-k">Color</span> <span class="neo-v neo-color"></span></span>` +
+      `<span><span class="neo-k">Font</span> <span class="neo-v neo-font"></span></span>` +
+      `</div>` +
+      `<div class="neo-hint">点击加入对话 · Esc</div>`;
+    (banner.querySelector(".neo-tag") as HTMLElement).textContent = tag;
+    (banner.querySelector(".neo-size") as HTMLElement).textContent = `${meta.w}×${meta.h}`;
+    (banner.querySelector(".neo-color") as HTMLElement).textContent = meta.color || "—";
+    (banner.querySelector(".neo-font") as HTMLElement).textContent = (meta.font || "—").slice(0, 28);
+    // 贴光标右下，不居中大卡
+    const vw = doc.defaultView?.innerWidth ?? 800;
+    const vh = doc.defaultView?.innerHeight ?? 600;
+    banner.style.left = `${Math.min(ev.clientX + 12, vw - 200)}px`;
+    banner.style.top = `${Math.min(ev.clientY + 14, vh - 72)}px`;
+    banner.style.right = "auto";
     banner.style.bottom = "auto";
+    banner.style.width = "max-content";
   };
 
   const onClick = (ev: MouseEvent) => {
