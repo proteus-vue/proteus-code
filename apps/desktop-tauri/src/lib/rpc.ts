@@ -42,6 +42,11 @@ export async function pickFolder(): Promise<string> {
   return invoke<string>("pick_folder");
 }
 
+/** 系统默认浏览器打开 http(s)/file */
+export async function openUrl(url: string): Promise<void> {
+  return invoke("open_url", { url });
+}
+
 export async function listThreads(): Promise<ThreadSummary[]> {
   const r = await rpc<{ threads?: ThreadSummary[] }>("thread/list");
   return r.threads ?? [];

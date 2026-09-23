@@ -5592,3 +5592,139 @@ button.ctx-chip:hover {
   /* 仅为触发重绘的隔离层，无视觉 */
   isolation: isolate;
 }
+
+/* ═══════ IA-30 浏览器工作台 ═══════ */
+.browser-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  gap: 0;
+  padding: 0 !important;
+}
+
+.br-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.br-nav {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.br-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.br-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.br-btn:disabled {
+  opacity: 0.35;
+}
+
+.br-url {
+  flex: 1;
+  min-width: 120px;
+}
+
+.br-url input {
+  width: 100%;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 12px;
+  font-size: var(--text-ui-sm);
+  background: var(--surface-muted);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.br-url input:focus {
+  border-color: var(--line-strong);
+  background: var(--surface-panel);
+}
+
+.br-seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-panel);
+}
+
+.br-seg button {
+  border: none;
+  background: transparent;
+  padding: 5px 10px;
+  font-size: var(--text-ui-xs);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.br-seg button.active {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.br-err {
+  padding: 6px 12px;
+  font-size: var(--text-ui-sm);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.br-frame {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-panel);
+}
+
+.br-iframe {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: none;
+  background: #fff;
+}
+
+.br-hint {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: var(--text-ui-xs);
+  color: var(--text-tertiary);
+  border-top: 1px solid var(--line);
+}
+
+.br-wiki {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.wb-section.browser-pane {
+  height: 100%;
+  overflow: hidden;
+}

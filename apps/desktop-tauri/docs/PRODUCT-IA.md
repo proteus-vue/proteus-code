@@ -101,7 +101,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | --- | --- | --- | --- |
 | 审查 | RpReview | 改动文件 + Diff | `files_changed` / `patch_proposed` |
 | 终端 | RpTerminal | `$` 命令台 | `command/exec`（非 PTY） |
-| 浏览器 | RpBrowser | 本地预览 + Wiki | fs/wiki |
+| 浏览器 | RpBrowser | 地址栏 + 页面预览 + Wiki（系统打开外链） | fs/wiki · open_url |
 | 文件 | RpFiles | 树 + 预览 + @引用 | `list_workspace` |
 | 侧边聊天 | RpChat | 会话摘要 + 审批 | 同线事件 |
 | 模拟器 | RpSimulator | 占位/连接态 | `session/configure` |
@@ -250,6 +250,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-27 | 打开文件夹（系统对话框）替代手输路径 | P1 | ✅ osascript choose folder · 无手输 |
 | IA-28 | 修：悬停近黑 + 点选文件夹黑屏 | P1 | ✅ surface-hover · pick_folder 脱主线程 |
 | IA-29 | 修：点 + 整窗灰屏（鼠标移出才恢复） | P1 | ✅ 去全屏 fixed backdrop · 外点/Esc 关 |
+| IA-30 | 浏览器标签：地址栏 + 预览 + Wiki | P1 | ✅ URL 栏 · iframe/srcdoc · 系统打开 · Wiki |
 
 ---
 

@@ -20,7 +20,7 @@ import {
   readWorkspaceFile,
   type FilePreview,
 } from "./components/FileTree";
-import { RepoWiki } from "./components/RepoWiki";
+import { BrowserPane } from "./components/BrowserPane";
 import {
   ThinkingBlock,
   ToolGroup,
@@ -2200,23 +2200,10 @@ export default function App() {
             )}
 
             {panelTab === "browser" && (
-              <div className="wb-section">
-                <div className="wb-sub">本地预览</div>
-                {filePreview ? (
-                  <>
-                    <div className="panel-path">{filePreview.path}</div>
-                    {filePreview.binary ? (
-                      <p className="muted pad">二进制 — 不当作文本预览</p>
-                    ) : (
-                      <pre className="preview-body">{filePreview.content ?? ""}</pre>
-                    )}
-                  </>
-                ) : (
-                  <p className="muted pad">在「文件」中选择文件后，此处可预览内容（浏览器工作台）。</p>
-                )}
-                <div className="wb-sub">Repo Wiki</div>
-                <RepoWiki root={workspaceRoot || undefined} />
-              </div>
+              <BrowserPane
+                filePreview={filePreview}
+                workspaceRoot={workspaceRoot || undefined}
+              />
             )}
 
             {panelTab === "chat" && (

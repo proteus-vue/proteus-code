@@ -549,6 +549,33 @@ async fn pick_folder() -> Result<String, String> {
     .map_err(|e| format!("任务失败：{e}"))?
 }
 
+/// 用系统默认浏览器打开 URL（仅 http/https/file）。
+#[tauri::command]
+async fn open_url(url: String) -> Result<(), String> {
+    let u = url.trim().to_string();
+    let ok = u.starts_with("https://")
+        || u.starts_with("http://")
+        || u.starts_with("file:///")
+        || (u.starts_with('/') && !u.contains(".."));
+    if !ok {
+        return Err("仅允许 http/https/file 路径".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        let mut cmd = std::process::Command::new("open");
+        #[cfg(not(target_os = "macos"))]
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(&u);
+        let out = cmd.status().map_err(|e| format!("打开失败：{e}"))?;
+        if !out.success() {
+            return Err("系统打开命令失败".into());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("任务失败：{e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let map = Arc::new(RpcMap::default());
@@ -562,7 +589,8 @@ pub fn run() {
             read_workspace_file,
             list_repo_wiki,
             no_project_dir,
-            pick_folder
+            pick_folder,
+            open_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
