@@ -61,6 +61,7 @@ import { Select } from "./components/Select";
 import {
   deleteThread,
   listTools,
+  noProjectDir,
   renameThread,
   type ToolInfo,
 } from "./lib/rpc";
@@ -151,6 +152,14 @@ export default function App() {
   >([]);
   const [branch, setBranch] = useState<string>("—");
   const [workspaceRoot, setWorkspaceRoot] = useState<string>("");
+  /** IA-22：workspace=绑项目；none=不在项目中工作（~/.neo/no-project） */
+  const [projectMode, setProjectMode] = useState<"workspace" | "none">(() => {
+    const m = localStorage.getItem("neo-ia-project-mode");
+    if (m === "none" || m === "workspace") return m;
+    return localStorage.getItem("neo-ia-workspace") || import.meta.env.VITE_NEO_WORKSPACE
+      ? "workspace"
+      : "none";
+  });
   /** IA-20 最近工作区 + 切换中（忽略 onExit 误报） */
   const [recentWs, setRecentWs] = useState<RecentWorkspace[]>(() =>
     loadRecentWorkspaces(),
@@ -495,88 +504,135 @@ export default function App() {
   const refreshThreadsRef = useRef(refreshThreads);
   refreshThreadsRef.current = refreshThreads;
 
-  const boot = useCallback(async (workspaceOverride?: string) => {
-    setStatus("boot");
-    setStatusMsg("正在连接 app-server…");
-    try {
-      const ws =
-        (workspaceOverride ?? localStorage.getItem("neo-ia-workspace"))?.trim() ||
-        import.meta.env.VITE_NEO_WORKSPACE ||
-        "";
-      const info = await startServer({
-        provider: "mock",
-        workspace: ws || undefined,
-      });
-      if (ws) {
-        localStorage.setItem("neo-ia-workspace", ws);
-        setRecentWs(touchWorkspace(ws));
-      }
-      setInit(info);
-      const m = await listModels().catch(() => null);
-      if (m?.current) setModel(m.current);
-      if (m?.models?.length) {
-        setModelsList(
-          m.models.map((x) => ({
-            name: x.name,
-            description: x.description,
-            production: x.production,
-          })),
-        );
-      }
-      void listTools()
-        .then((r) =>
-          setAgentTools(
-            (r.tools ?? []).filter((t) => t.name.startsWith("agent_")),
-          ),
-        )
-        .catch(() => setAgentTools([]));
-      const g = await gitInfo().catch(() => null);
-      if (g && typeof g.branch === "string") setBranch(g.branch);
-      if (g && typeof g.root === "string") {
-        setWorkspaceRoot(g.root);
-        void listWorkspace(g.root)
-          .then((r) =>
-            setFileEntries(r.entries.filter((e) => !e.endsWith("/"))),
-          )
-          .catch(() => setFileEntries([]));
-      } else if (ws) {
-        setWorkspaceRoot(ws);
-      }
-      await refreshThreads();
-      setStatus("ready");
-      setStatusMsg(ws ? `已连接 · ${ws.split("/").filter(Boolean).pop() ?? ws}` : "已连接 · mock provider");
-    } catch (e) {
-      setStatus("error");
-      setStatusMsg(String(e));
-    }
-  }, [refreshThreads]);
+  const boot = useCallback(
+    async (override?: { workspace?: string; mode?: "workspace" | "none" }) => {
+      setStatus("boot");
+      setStatusMsg("正在连接 app-server…");
+      try {
+        let mode: "workspace" | "none" =
+          override?.mode ??
+          ((localStorage.getItem("neo-ia-project-mode") as "workspace" | "none" | null) ??
+            "none");
+        let ws =
+          (override?.workspace ?? localStorage.getItem("neo-ia-workspace"))?.trim() ||
+          import.meta.env.VITE_NEO_WORKSPACE?.trim() ||
+          "";
+        if (mode === "workspace" && !ws) {
+          // 没选过项目 → 落到「不在项目中」，禁止拿进程 cwd 冒充项目
+          mode = "none";
+        }
+        if (mode === "none") {
+          ws = (await noProjectDir()).trim();
+        }
 
-  /** IA-20：切换项目 = 换 workspace 重启 app-server（会话库整组随目录） */
+        const info = await startServer({
+          provider: "mock",
+          workspace: ws || undefined,
+        });
+        localStorage.setItem("neo-ia-project-mode", mode);
+        if (mode === "workspace" && ws) {
+          localStorage.setItem("neo-ia-workspace", ws);
+          setRecentWs(touchWorkspace(ws));
+        }
+        setProjectMode(mode);
+        setInit(info);
+        const m = await listModels().catch(() => null);
+        if (m?.current) setModel(m.current);
+        if (m?.models?.length) {
+          setModelsList(
+            m.models.map((x) => ({
+              name: x.name,
+              description: x.description,
+              production: x.production,
+            })),
+          );
+        }
+        void listTools()
+          .then((r) =>
+            setAgentTools(
+              (r.tools ?? []).filter((t) => t.name.startsWith("agent_")),
+            ),
+          )
+          .catch(() => setAgentTools([]));
+        const g = await gitInfo().catch(() => null);
+        if (g && typeof g.branch === "string" && g.branch) setBranch(g.branch);
+        else setBranch("—");
+        // 实际传给 app-server 的目录（none = no-project）
+        const root =
+          mode === "workspace"
+            ? (typeof g?.root === "string" && g.root ? g.root : ws)
+            : ws;
+        setWorkspaceRoot(root);
+        if (root) {
+          void listWorkspace(root)
+            .then((r) =>
+              setFileEntries(r.entries.filter((e) => !e.endsWith("/"))),
+            )
+            .catch(() => setFileEntries([]));
+        }
+        await refreshThreads();
+        setStatus("ready");
+        setStatusMsg(
+          mode === "none"
+            ? "已连接 · 不在项目中工作"
+            : `已连接 · ${ws.split("/").filter(Boolean).pop() ?? ws}`,
+        );
+      } catch (e) {
+        setStatus("error");
+        setStatusMsg(String(e));
+      }
+    },
+    [refreshThreads],
+  );
+
+  const resetSessionUi = useCallback(() => {
+    setItems([]);
+    setApproval(null);
+    setFiles([]);
+    setLastPatch(null);
+    setActiveThread(null);
+    setThreads([]);
+    setWorkspaceRoot("");
+    setBranch("—");
+    setFileEntries([]);
+    setFilePreview(null);
+    setInput("");
+  }, []);
+
+  /** 真切换到某个项目目录 */
   const switchWorkspace = useCallback(
     async (path: string) => {
       const clean = path.replace(/\/+$/, "");
-      if (!clean || clean === workspaceRoot.replace(/\/+$/, "")) return;
+      if (!clean) return;
+      if (projectMode === "workspace" && clean === workspaceRoot.replace(/\/+$/, "")) {
+        return;
+      }
       switchingWs.current = true;
       setStatus("boot");
-      setStatusMsg("切换工作区…");
+      setStatusMsg(`切换到 ${clean.split("/").filter(Boolean).pop() ?? clean}…`);
       try {
-        setItems([]);
-        setApproval(null);
-        setFiles([]);
-        setLastPatch(null);
-        setActiveThread(null);
-        setThreads([]);
-        setWorkspaceRoot("");
-        setBranch("—");
-        setFileEntries([]);
-        setFilePreview(null);
-        await boot(clean);
+        resetSessionUi();
+        await boot({ workspace: clean, mode: "workspace" });
       } finally {
         switchingWs.current = false;
       }
     },
-    [boot, workspaceRoot],
+    [boot, projectMode, resetSessionUi, workspaceRoot],
   );
+
+  /** 不在项目中工作：切到 ~/.neo/no-project */
+  const switchNoProject = useCallback(async () => {
+    if (projectMode === "none") return;
+    switchingWs.current = true;
+    setStatus("boot");
+    setStatusMsg("切换到不在项目中工作…");
+    try {
+      resetSessionUi();
+      await boot({ mode: "none" });
+    } finally {
+      switchingWs.current = false;
+    }
+  }, [boot, projectMode, resetSessionUi]);
 
   useEffect(() => {
     const unsubs: Array<() => void> = [];
@@ -1177,10 +1233,11 @@ export default function App() {
   }, [append, approval, busy, lastUserText]);
 
   const projectLabel = useMemo(() => {
-    if (!workspaceRoot) return "当前项目";
+    if (projectMode === "none") return "不在项目中工作";
+    if (!workspaceRoot) return "选择项目";
     const parts = workspaceRoot.replace(/\/+$/, "").split("/");
     return parts[parts.length - 1] || workspaceRoot;
-  }, [workspaceRoot]);
+  }, [projectMode, workspaceRoot]);
 
   const methods = useMemo(() => init?.methods ?? [], [init]);
   const grouped = useMemo(() => groupTools(items), [items]);
@@ -1288,9 +1345,11 @@ export default function App() {
         onRename={(id, title) => void onRenameSession(id, title)}
         onDelete={(id) => void onDeleteSession(id)}
         projectLabel={projectLabel}
-        workspaceRoot={workspaceRoot}
+        workspaceRoot={projectMode === "none" ? "" : workspaceRoot}
+        projectMode={projectMode}
         recentWorkspaces={recentWs}
         onSwitchWorkspace={(p) => void switchWorkspace(p)}
+        onNoProject={() => void switchNoProject()}
         filesFoot={files.length > 0 ? `改动 +${totalAdd} −${totalDel} · ${files.length} 文件` : undefined}
       />
       {sidebarOpen && (
@@ -1506,24 +1565,37 @@ export default function App() {
       </main>
 
       <footer className={`composer ${isNewTask ? "mode-new" : "mode-chat"}`}>
-        {/* 仅新建任务态：项目/分支上下文条（对齐 ZCode；对话态不重复顶栏芯片） */}
-        {isNewTask && (
-          <div className="ctx-chips" aria-label="工作区上下文">
-            <button
-              type="button"
-              className="ctx-chip"
-              title={workspaceRoot || "当前工作区"}
-              onClick={() => setSidebarOpen(true)}
-            >
-              <Icon name="files" size={12} />
-              {projectLabel}
-            </button>
+        {/* IA-22：项目/分支芯片常显（可点开侧栏换项目；不止空态） */}
+        <div className="ctx-chips" aria-label="工作区上下文">
+          <button
+            type="button"
+            className={`ctx-chip ${projectMode === "none" ? "warn" : ""}`}
+            title={
+              projectMode === "none"
+                ? "不在项目中工作 — 点击选择项目"
+                : workspaceRoot || "选择项目"
+            }
+            onClick={() => setSidebarOpen(true)}
+          >
+            <Icon name="files" size={12} />
+            {projectMode === "none" ? "不在项目中工作" : projectLabel}
+          </button>
+          {projectMode === "workspace" && (
             <span className="ctx-chip muted" title="当前分支">
               <Icon name="goal" size={12} />
               {branch && branch !== "—" ? branch : "—"}
             </span>
-          </div>
-        )}
+          )}
+          {isNewTask && projectMode === "none" && (
+            <button
+              type="button"
+              className="ctx-chip primary"
+              onClick={() => setSidebarOpen(true)}
+            >
+              选择项目…
+            </button>
+          )}
+        </div>
         <div className="composer-card">
           <div className="at-wrap">
             <textarea

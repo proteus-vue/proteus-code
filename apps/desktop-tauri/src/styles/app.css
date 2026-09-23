@@ -5072,3 +5072,19 @@ button.ctx-chip:hover {
 .composer.mode-new {
   padding-top: 4px;
 }
+
+/* IA-22：不在项目中 / 选择项目 芯片 */
+.composer .ctx-chip.warn {
+  color: var(--warning, #d97706);
+  background: color-mix(in srgb, var(--warning, #d97706) 12%, transparent);
+}
+
+.composer .ctx-chip.primary {
+  background: var(--text-primary);
+  color: var(--surface-app);
+  font-weight: 600;
+}
+
+.composer .ctx-chip.primary:hover {
+  opacity: 0.9;
+}

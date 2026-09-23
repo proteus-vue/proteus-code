@@ -501,6 +501,20 @@ fn collect_md(
     }
 }
 
+/// 「不在项目中工作」的固定工作区：`~/.neo/no-project`（会话库在此，不绑仓库）。
+/// 不用进程 cwd —— 打包后 cwd 是 App 目录，会话会落错地方。
+#[tauri::command]
+fn no_project_dir() -> Result<String, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "无法确定用户主目录")?;
+    let p = std::path::PathBuf::from(home)
+        .join(".neo")
+        .join("no-project");
+    std::fs::create_dir_all(&p).map_err(|e| format!("创建 {p:?}：{e}"))?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let map = Arc::new(RpcMap::default());
@@ -512,7 +526,8 @@ pub fn run() {
             stop_app_server,
             list_workspace,
             read_workspace_file,
-            list_repo_wiki
+            list_repo_wiki,
+            no_project_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

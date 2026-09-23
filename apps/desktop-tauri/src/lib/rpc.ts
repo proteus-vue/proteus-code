@@ -32,6 +32,11 @@ export function stopServer(): Promise<void> {
   return invoke("stop_app_server");
 }
 
+/** 「不在项目中工作」固定目录 `~/.neo/no-project` */
+export async function noProjectDir(): Promise<string> {
+  return invoke<string>("no_project_dir");
+}
+
 export async function listThreads(): Promise<ThreadSummary[]> {
   const r = await rpc<{ threads?: ThreadSummary[] }>("thread/list");
   return r.threads ?? [];

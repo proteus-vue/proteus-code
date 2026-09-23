@@ -19,8 +19,10 @@ export function Sidebar({
   onDelete,
   projectLabel,
   workspaceRoot,
+  projectMode,
   recentWorkspaces,
   onSwitchWorkspace,
+  onNoProject,
   filesFoot,
 }: {
   open: boolean;
@@ -37,9 +39,11 @@ export function Sidebar({
   onDelete: (id: string) => void;
   projectLabel: string;
   workspaceRoot: string;
+  projectMode?: "workspace" | "none";
   /** IA-20 最近工作区 */
   recentWorkspaces?: RecentWorkspace[];
   onSwitchWorkspace?: (path: string) => void;
+  onNoProject?: () => void;
   filesFoot?: string;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -143,11 +147,26 @@ export function Sidebar({
         {projOpen && (
           <div className="proj-menu" role="menu">
             <div className="proj-menu-list">
+              <button
+                type="button"
+                role="menuitem"
+                className={projectMode === "none" ? "active" : ""}
+                onClick={() => {
+                  setProjOpen(false);
+                  onNoProject?.();
+                }}
+              >
+                <Icon name="close" size={14} />
+                <span className="pname">不在项目中工作</span>
+                {projectMode === "none" && <Icon name="check" size={14} />}
+              </button>
               {recents.length === 0 && (
                 <div className="proj-empty">暂无最近项目 · 下方粘贴路径添加</div>
               )}
               {recents.map((w) => {
-                const cur = workspaceRoot.replace(/\/+$/, "") === w.path;
+                const cur =
+                  projectMode === "workspace" &&
+                  workspaceRoot.replace(/\/+$/, "") === w.path;
                 return (
                   <button
                     key={w.path}
