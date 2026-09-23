@@ -16,9 +16,9 @@
 //!
 //! # 标题从哪来
 //!
-//! 从日志里**第一条用户消息**取前若干字符。不额外维护标题文件：
-//! 那会引入第二个真相源（改文件名不改标题、或反之）。
-//! 取不到就退回 ID —— 诚实显示"不知道叫什么"，而不是编一个。
+//! 默认从日志里**第一条用户消息**取前若干字符。用户改名时追加一条
+//! `kind=op` / `payload.set_title` 记录（仍写在同一 JSONL，不另开标题文件）：
+//! 列举时自定义标题覆盖自动标题。取不到就退回 ID —— 诚实显示"不知道叫什么"。
 
 use std::path::{Path, PathBuf};
 
@@ -100,9 +100,11 @@ impl SessionStore {
             let meta = e.metadata().ok();
             let bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
             let sum = read_summary(&path).unwrap_or_default();
+            let auto = if sum.title.is_empty() { id.to_string() } else { sum.title };
+            let title = sum.custom_title.unwrap_or(auto);
             out.push(SessionMeta {
                 id: id.to_string(),
-                title: if sum.title.is_empty() { id.to_string() } else { sum.title },
+                title,
                 records: sum.records,
                 bytes,
                 path,
@@ -158,6 +160,45 @@ impl SessionStore {
         Ok(true)
     }
 
+    /// 用户改名：向会话 JSONL **追加**一条 `op/set_title`（append-only，
+    /// 不改写既有字节）。列举时该标题覆盖首条用户消息派生的自动标题。
+    ///
+    /// 文件尚未创建（新建会话还没写过任何 op）时**创建**日志并写入该条 ——
+    /// `thread/create` 是惰性建文件的，否则刚建完的会话无法改名。
+    /// 真正不存在的 id 由调用方先 `exists` / 对照当前会话再调本方法。
+    ///
+    /// 不维护旁路标题文件 —— 否则出现第二个真相源（删文件/改 id 时标题漂移）。
+    pub fn set_title(&self, id: &str, title: &str) -> std::io::Result<bool> {
+        use std::io::Write;
+        let path = self.path_for(id);
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "标题不能为空",
+            ));
+        }
+        if !path.exists() {
+            // 惰性 create 的会话：允许建文件（调用方已保证 id 合法）
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+        }
+        let title: String = title.chars().take(48).collect();
+        let seq = tail_max_seq(&path).unwrap_or(0) + 1;
+        let line = serde_json::json!({
+            "v": 1u32,
+            "ts": "1970-01-01T00:00:00Z",
+            "seq": seq,
+            "kind": "op",
+            "payload": {"set_title": {"title": title}},
+        });
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        writeln!(f, "{line}")?;
+        f.flush()?;
+        Ok(true)
+    }
+
     /// 会话是否存在。
     pub fn exists(&self, id: &str) -> bool {
         self.path_for(id).exists()
@@ -202,10 +243,31 @@ pub fn sanitize_id(id: &str) -> String {
 #[derive(Default)]
 struct Summary {
     title: String,
+    /// 用户 `set_title` 自定义标题（优先于首条用户消息）
+    custom_title: Option<String>,
     records: usize,
     /// 最后一个 `files_changed` 的合计（覆盖语义，见 `SessionMeta::changes`）
     changes: Option<(usize, usize)>,
     state: SessionState,
+}
+
+/// 文件里已出现的最大 seq（追加改名用；与 JsonlWriter 尾读同义）。
+fn tail_max_seq(path: &Path) -> Option<u64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let mut last = None;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(s) = v.get("seq").and_then(|s| s.as_u64()) {
+            last = Some(s);
+        }
+    }
+    last
 }
 
 fn read_summary(path: &Path) -> Option<Summary> {
@@ -226,13 +288,28 @@ fn read_summary(path: &Path) -> Option<Summary> {
         let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
         let Some(p) = v.get("payload") else { continue };
 
-        // 标题：第一条带非空文本的 user_turn
-        if out.title.is_empty() && kind == "op" {
-            if let Some(t) = p.get("user_turn").and_then(|u| u.get("text")).and_then(|t| t.as_str())
+        if kind == "op" {
+            // 自定义标题：后写覆盖先写（用户可多次改名）
+            if let Some(t) = p
+                .get("set_title")
+                .and_then(|s| s.get("title"))
+                .and_then(|t| t.as_str())
             {
                 let t = t.trim();
                 if !t.is_empty() {
-                    out.title = t.chars().take(48).collect();
+                    out.custom_title = Some(t.chars().take(48).collect());
+                }
+                continue;
+            }
+            // 自动标题：第一条带非空文本的 user_turn
+            if out.title.is_empty() {
+                if let Some(t) =
+                    p.get("user_turn").and_then(|u| u.get("text")).and_then(|t| t.as_str())
+                {
+                    let t = t.trim();
+                    if !t.is_empty() {
+                        out.title = t.chars().take(48).collect();
+                    }
                 }
             }
             continue;
@@ -515,6 +592,27 @@ mod tests {
         let s = SessionStore::open(&d);
         let id = s.new_id();
         assert_eq!(sanitize_id(&id), id, "new_id 产出的应当是安全文件名");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn set_title_overrides_auto_title_without_rewriting_history() {
+        let d = tmpdir("rename");
+        let s = SessionStore::open(&d);
+        write_session(&s, "s-1", "自动标题来自首条消息", 1);
+        let before = std::fs::read_to_string(s.path_for("s-1")).unwrap();
+        assert!(s.set_title("s-1", "  手工改名  ").unwrap());
+        let after = std::fs::read_to_string(s.path_for("s-1")).unwrap();
+        assert!(after.starts_with(&before), "append-only：既有字节不得改写");
+        let m = s.list().into_iter().find(|m| m.id == "s-1").unwrap();
+        assert_eq!(m.title, "手工改名");
+        assert!(m.has_title());
+        // 空标题拒绝
+        assert!(s.set_title("s-1", "   ").is_err());
+        // 惰性 create：尚无文件时 set_title 仍应建出日志（当前会话场景）
+        assert!(s.set_title("s-fresh", "刚创建").unwrap());
+        let m2 = s.list().into_iter().find(|m| m.id == "s-fresh").unwrap();
+        assert_eq!(m2.title, "刚创建");
         let _ = std::fs::remove_dir_all(&d);
     }
 

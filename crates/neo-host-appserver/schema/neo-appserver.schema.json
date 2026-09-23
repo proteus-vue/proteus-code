@@ -2515,6 +2515,7 @@
     "thread/resume",
     "thread/create",
     "thread/delete",
+    "thread/rename",
     "thread/history",
     "thread/export",
     "tools/list",

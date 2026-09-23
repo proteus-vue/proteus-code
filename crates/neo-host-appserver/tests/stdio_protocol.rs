@@ -112,9 +112,10 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 28, "initialize + 17 Op + 10 control");
+    assert_eq!(methods.len(), 29, "initialize + 17 Op + 11 control");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
+    assert!(methods.iter().any(|m| m == "thread/rename"), "改名必须在线上可达");
     // 宿主能力（SPI 的既有数据，不是这条协议新造的）
     assert_eq!(r["result"]["host"]["id"], "app-server");
     assert_eq!(r["result"]["host"]["capabilities"]["interactive_prompt"], true);
@@ -431,6 +432,9 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 },
                 ThreadCmd::Create => ThreadResult::Value(json!({"id": "t-new"})),
                 ThreadCmd::Delete { id } => ThreadResult::Value(json!({"removed": id == "t-1"})),
+                ThreadCmd::Rename { id, title } => {
+                    ThreadResult::Value(json!({"id": id, "title": title}))
+                }
                 ThreadCmd::History { .. } => ThreadResult::Value(json!({"items": []})),
                 ThreadCmd::Export { .. } => ThreadResult::Value(json!({"content": "# ok"})),
                 ThreadCmd::Tools => ThreadResult::Value(json!({"tools": [{"name":"bash"}]})),

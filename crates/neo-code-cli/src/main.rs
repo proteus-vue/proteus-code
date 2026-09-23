@@ -685,6 +685,29 @@ fn thread_cmd(
                 Err(e) => ThreadResult::Error(e.to_string()),
             }
         }
+        ThreadCmd::Rename { id, title } => {
+            // create 是惰性建文件：刚 create 的当前会话可能还没 JSONL。
+            // 非当前且文件不存在 → 明确报不存在（不能凭 rename 凭空造会话）。
+            let is_current = id == kernel.session_id();
+            if !store.exists(&id) && !is_current {
+                return ThreadResult::Error(format!("会话 {id} 不存在"));
+            }
+            match store.set_title(&id, &title) {
+                Ok(_) => {
+                    // 回读摘要：新建文件后 list 应能看见
+                    let m = store.list().into_iter().find(|m| m.id == id);
+                    match m {
+                        Some(m) => ThreadResult::Value(serde_json::json!({
+                            "id": m.id,
+                            "title": m.title,
+                            "has_title": m.has_title(),
+                        })),
+                        None => ThreadResult::Error(format!("会话 {id} 不存在")),
+                    }
+                }
+                Err(e) => ThreadResult::Error(e.to_string()),
+            }
+        }
         ThreadCmd::Tools => {
             let tools: Vec<serde_json::Value> = kernel
                 .tool_schemas()

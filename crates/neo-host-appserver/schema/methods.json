@@ -152,6 +152,14 @@
     "handshake_only": false
   },
   {
+    "name": "thread/rename",
+    "params": [
+      "id",
+      "title"
+    ],
+    "handshake_only": false
+  },
+  {
     "name": "thread/history",
     "params": [
       "id"

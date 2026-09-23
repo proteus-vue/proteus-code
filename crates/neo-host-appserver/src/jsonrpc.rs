@@ -120,6 +120,8 @@ pub enum ThreadCmd {
     Create,
     /// `thread/delete`：删除（不允许删当前会话）
     Delete { id: String },
+    /// `thread/rename`：用户改名（同一 JSONL 追加 `op/set_title`）
+    Rename { id: String, title: String },
     /// `thread/history`：历史投影（`facts_of` 的结果，与 T6 同源）。
     /// `id` 缺省 = 当前会话；给定 id 则只读投影，**不切换**。
     History { id: Option<String> },
@@ -159,13 +161,14 @@ pub const OP_METHODS: &[&str] = &[
 
 /// 会话库控制方法（`ThreadCmd`）。**不是 Op 映射**，故不进 [`OP_METHODS`]。
 ///
-/// 形态对齐 Codex app-server 的 `thread/*`：桌面左侧会话库靠它列举/切换。
+/// 形态对齐 Codex app-server 的 `thread/*`：桌面左侧会话库靠它列举/切换/改名/删除。
 pub const THREAD_METHODS: &[&str] = &[
     "thread/list",
     "thread/get",
     "thread/resume",
     "thread/create",
     "thread/delete",
+    "thread/rename",
     "thread/history",
     "thread/export",
     "tools/list",
@@ -173,7 +176,7 @@ pub const THREAD_METHODS: &[&str] = &[
     "git/info",
 ];
 
-/// 全部方法名（握手用）：`initialize` + 17 个 Op + 5 个 thread。
+/// 全部方法名（握手用）：`initialize` + 17 个 Op + 11 个 control。
 pub fn method_table() -> Vec<&'static str> {
     let mut v = vec!["initialize"];
     v.extend_from_slice(OP_METHODS);
@@ -223,6 +226,7 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "goal/set" => &["goal"],
         "goal/pause" | "goal/resume" => &["goal_id"],
         "thread/get" | "thread/resume" | "thread/delete" => &["id"],
+        "thread/rename" => &["id", "title"],
         "thread/history" => &["id"],
         "thread/export" => &["id", "format"],
         "thread/list" | "thread/create" | "tools/list" | "models/list" => &[],
@@ -348,6 +352,10 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             let p: IdParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::Delete { id: p.id })
         }
+        "thread/rename" => {
+            let p: RenameParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::Rename { id: p.id, title: p.title })
+        }
         "thread/history" => {
             let p: HistoryParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::History { id: p.id })
@@ -416,6 +424,13 @@ struct GoalIdParams {
 #[derive(Debug, Deserialize)]
 struct IdParams {
     id: String,
+}
+
+/// `thread/rename` 参数。
+#[derive(Debug, Deserialize)]
+struct RenameParams {
+    id: String,
+    title: String,
 }
 
 /// `thread/history` 参数：`id` 可省（= 当前会话）。
@@ -548,8 +563,8 @@ mod tests {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(28),
-            "initialize + 17 Op + 10 control"
+            Some(29),
+            "initialize + 17 Op + 11 control"
         );
 
         // 版本不匹配必须拒绝，且把双方版本放进 data（机器可读）
