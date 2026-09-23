@@ -141,6 +141,35 @@ function matchSlash(q: string) {
   );
 }
 
+
+/** unified diff 行数统计（排除元数据行） */
+function formatWorkDur(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m <= 0) return `${r} 秒`;
+  return `${m} 分 ${r} 秒`;
+}
+
+function diffStats(diff: string): { a: number; d: number } {
+  let a = 0;
+  let d = 0;
+  for (const line of diff.split(/\r?\n/)) {
+    if (
+      line.startsWith("+++") ||
+      line.startsWith("---") ||
+      line.startsWith("diff ") ||
+      line.startsWith("index ") ||
+      line.startsWith("@@")
+    ) {
+      continue;
+    }
+    if (line.startsWith("+")) a++;
+    else if (line.startsWith("-")) d++;
+  }
+  return { a, d };
+}
+
 export default function App() {
   const [status, setStatus] = useState<Status>("boot");
   const [statusMsg, setStatusMsg] = useState("正在连接 app-server…");
@@ -229,6 +258,13 @@ export default function App() {
   /** IA-10：整行 `/query` 时的斜杠候选下标 */
   const [slashIdx, setSlashIdx] = useState(0);
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  const [workTick, setWorkTick] = useState(0);
+  useEffect(() => {
+    if (status !== "busy" || !turnStartedAt) return;
+    const iv = window.setInterval(() => setWorkTick((n) => n + 1), 1000);
+    return () => window.clearInterval(iv);
+  }, [status, turnStartedAt]);
+  void workTick;
   const [lastSummary, setLastSummary] = useState<{
     in: number;
     out: number;
@@ -1423,6 +1459,12 @@ export default function App() {
             </div>
           )}
 
+          {busy && turnStartedAt && (
+            <div className="working-line" aria-live="polite">
+              工作中 {formatWorkDur(Date.now() - turnStartedAt)}
+            </div>
+          )}
+
           {grouped.map((g, i) => {
             if (g.kind === "tools") return <ToolGroup key={`t${i}`} tools={g.tools} />;
             const it = g.item;
@@ -1481,25 +1523,25 @@ export default function App() {
                     {it.message}
                   </div>
                 );
-              case "patch":
+              case "patch": {
+                const st = diffStats(it.diff);
                 return (
-                  <div
+                  <button
                     key={i}
-                    className="tool-card patch-card"
-                    onDoubleClick={() =>
-                      setDiffModal({ path: it.path, diff: it.diff })
-                    }
-                    title="双击全屏查看"
+                    type="button"
+                    className="edit-line"
+                    onClick={() => setDiffModal({ path: it.path, diff: it.diff })}
+                    title="打开 Diff 全屏"
                   >
-                    <header
-                      onClick={() => setDiffModal({ path: it.path, diff: it.diff })}
-                    >
-                      <span className="name">⌁ {it.path}</span>
-                      <span className="st">全屏</span>
-                    </header>
-                    <DiffView diff={it.diff} />
-                  </div>
+                    <span className="ed-verb">编辑</span>
+                    <span className="ed-path">{it.path}</span>
+                    <span className="ed-stat">
+                      <span className="add">+{st.a}</span>{" "}
+                      <span className="del">−{st.d}</span>
+                    </span>
+                  </button>
                 );
+              }
               case "turn":
                 return null;
               case "summary":
@@ -1509,14 +1551,25 @@ export default function App() {
                     <span className="dim"> · +{it.input_tokens}/−{it.output_tokens} tok</span>
                   </div>
                 );
-              case "files":
+              case "files": {
+                if (!it.files.length) return null;
+                const fa = it.files.reduce((s, f) => s + f.additions, 0);
+                const fd = it.files.reduce((s, f) => s + f.deletions, 0);
+                const first = it.files[0];
                 return (
-                  <div key={i} className="summary-bar files">
-                    {it.files.length} 文件改动 · +
-                    {it.files.reduce((s, f) => s + f.additions, 0)} −
-                    {it.files.reduce((s, f) => s + f.deletions, 0)}
+                  <div key={i} className="edit-line static" title={it.files.map((f) => f.path).join("\n")}>
+                    <span className="ed-verb">编辑</span>
+                    <span className="ed-path">
+                      {first.path}
+                      {it.files.length > 1 ? ` 等 ${it.files.length} 文件` : ""}
+                    </span>
+                    <span className="ed-stat">
+                      <span className="add">+{fa}</span>{" "}
+                      <span className="del">−{fd}</span>
+                    </span>
                   </div>
                 );
+              }
               case "status":
                 return (
                   <div key={i} className="bubble reasoning">

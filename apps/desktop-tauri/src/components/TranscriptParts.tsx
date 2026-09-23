@@ -51,6 +51,59 @@ export type ToolItem = {
   approvalKind?: string;
 };
 
+/** ZCode 式工具行：查阅 · N 搜索, M 文件 · 编辑 · 运行 … */
+function summarizeTools(tools: ToolItem[]): string {
+  let searches = 0;
+  let files = 0;
+  let runs = 0;
+  let edits = 0;
+  let todos = 0;
+  let asks = 0;
+  for (const t of tools) {
+    if (t.name === "apply_patch") {
+      edits++;
+      continue;
+    }
+    if (t.name === "todowrite") {
+      todos++;
+      continue;
+    }
+    if (t.name === "request_user_input") {
+      asks++;
+      continue;
+    }
+    if (t.name === "bash") {
+      const cmd =
+        typeof t.args === "object" && t.args
+          ? String((t.args as Record<string, unknown>).cmd ?? "")
+          : "";
+      if (/\b(rg|grep|find|fd|ag)\b/.test(cmd)) searches++;
+      else if (/\b(cat|head|tail|ls|wc|stat)\b/.test(cmd)) files++;
+      else runs++;
+      continue;
+    }
+    runs++;
+  }
+  const parts: string[] = [];
+  if (searches || files) {
+    const bits: string[] = [];
+    if (searches) bits.push(`${searches} 搜索`);
+    if (files) bits.push(`${files} 文件`);
+    parts.push(`查阅 · ${bits.join(", ")}`);
+  }
+  if (edits) parts.push(`编辑 · ${edits}`);
+  if (runs) parts.push(`运行 · ${runs}`);
+  if (todos) parts.push(`清单 · ${todos}`);
+  if (asks) parts.push(`问询 · ${asks}`);
+  if (!parts.length) parts.push(`已执行 ${tools.length} 步`);
+  if (failCount(tools) > 0) parts.push(`${failCount(tools)} 失败`);
+  return parts.join(" · ");
+}
+
+function failCount(tools: ToolItem[]): number {
+  return tools.filter((t) => t.status === "fail").length;
+}
+
 function argSummary(args: unknown): string {
   if (args == null) return "";
   if (typeof args === "string") return args.slice(0, 80);
@@ -71,7 +124,6 @@ function argSummary(args: unknown): string {
 /** D4：同轮连续工具 → 一条「已运行 N 条命令」时间线（MiMo 密度）。 */
 export function ToolGroup({ tools }: { tools: ToolItem[] }) {
   const [open, setOpen] = useState(false);
-  const ok = tools.filter((t) => t.status === "ok").length;
   const fail = tools.filter((t) => t.status === "fail").length;
   const running = tools.some((t) => t.status === "running" || t.status === "approval");
   const allDone = !running;
@@ -89,17 +141,14 @@ export function ToolGroup({ tools }: { tools: ToolItem[] }) {
         aria-expanded={open}
       >
         <span className={`tl-icon ${running ? "spin" : fail ? "fail" : "ok"}`}>
-          {running ? "◌" : fail ? "●" : "✓"}
+          <Icon name="search" size={14} />
         </span>
         <span className="tl-label">
           {allDone
-            ? fail
-              ? `已运行 ${tools.length} 条命令 · ${fail} 失败`
-              : `已运行 ${tools.length} 条命令`
-            : `运行中 · ${tools.length} 步…`}
+            ? summarizeTools(tools)
+            : `运行中 · ${summarizeTools(tools)}`}
         </span>
         <span className="tl-meta">
-          {ok}/{tools.length} 成功
           <span className="twist">
             <Icon name={open ? "chevron-down" : "chevron-right"} size={12} />
           </span>
@@ -172,7 +221,17 @@ export function ToolCard({
           <span className={`tl-icon ${item.status === "running" ? "spin" : st || "ok"}`}>
             {item.status === "running" ? "◌" : item.status === "ok" ? "✓" : item.status === "approval" ? "◐" : "✗"}
           </span>
-          <span className="tl-label">{item.name}</span>
+          <span className="tl-label">
+            {item.name === "bash"
+              ? summarizeTools([item])
+              : item.name === "apply_patch"
+                ? `编辑 · ${argSummary(item.args).slice(0, 60)}`
+                : item.name === "todowrite"
+                  ? "清单"
+                  : item.name === "request_user_input"
+                    ? "问询"
+                    : item.name}
+          </span>
           <span className="tl-meta">
             {summary && <span className="tl-sum">{summary}</span>}
             <span className={`st ${st}`}>{label}</span>

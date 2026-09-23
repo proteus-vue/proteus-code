@@ -5440,3 +5440,76 @@ button.ctx-chip:hover {
 
 /* 打开路径 act 先关菜单再 focus —— 菜单已关，直接显示 add 区为单独按钮也可；
    简化：打开路径 = 保持菜单，聚焦 add input（改为不关闭） */
+
+/* IA-23 续：编辑行 / 工作中 —— 贴 ZCode 截图 */
+.edit-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 6px 0;
+  font-size: var(--text-ui-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 0;
+}
+
+.edit-line.static {
+  cursor: default;
+}
+
+.edit-line:hover {
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.edit-line .ed-verb {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.edit-line .ed-path {
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.edit-line .ed-stat .add {
+  color: var(--diff-add);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.edit-line .ed-stat .del {
+  color: var(--diff-del);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.working-line {
+  font-size: var(--text-ui-sm);
+  color: var(--text-tertiary);
+  padding: 8px 0 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 工具行与截图对齐：左缩进 + 搜索图标色 */
+.timeline-head {
+  padding-left: 0 !important;
+}
+
+.timeline-head .tl-icon {
+  color: var(--text-tertiary);
+}
+
+.timeline-head .tl-icon svg {
+  vertical-align: -2px;
+}
