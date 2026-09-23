@@ -55,6 +55,7 @@ import {
 import { listWorkspace } from "./components/FileTree";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsModal } from "./components/SettingsModal";
+import { ProjectPicker } from "./components/ProjectPicker";
 import { WorkbenchShell, type WorkbenchId } from "./components/WorkbenchShell";
 import { Icon } from "./components/Icon";
 import { Select } from "./components/Select";
@@ -190,6 +191,8 @@ export default function App() {
   const [thinkingSearch, setThinkingSearch] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** IA-24：Composer 芯片上的项目下拉（ZCode） */
+  const [projPickerOpen, setProjPickerOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(
     () =>
       (localStorage.getItem("neo-theme") as "light" | "dark" | null) ??
@@ -1565,21 +1568,36 @@ export default function App() {
       </main>
 
       <footer className={`composer ${isNewTask ? "mode-new" : "mode-chat"}`}>
-        {/* IA-22：项目/分支芯片常显（可点开侧栏换项目；不止空态） */}
+        {/* IA-24：项目/分支芯片 —— 下拉挂在芯片上方（ZCode），不靠侧栏 */}
         <div className="ctx-chips" aria-label="工作区上下文">
-          <button
-            type="button"
-            className={`ctx-chip ${projectMode === "none" ? "warn" : ""}`}
-            title={
-              projectMode === "none"
-                ? "不在项目中工作 — 点击选择项目"
-                : workspaceRoot || "选择项目"
-            }
-            onClick={() => setSidebarOpen(true)}
-          >
-            <Icon name="files" size={12} />
-            {projectMode === "none" ? "不在项目中工作" : projectLabel}
-          </button>
+          <div className="ctx-anchor">
+            <button
+              type="button"
+              className={`ctx-chip ${projectMode === "none" ? "warn" : ""}`}
+              aria-haspopup="dialog"
+              aria-expanded={projPickerOpen}
+              title={
+                projectMode === "none"
+                  ? "不在项目中工作 — 点击选择项目"
+                  : workspaceRoot || "选择项目"
+              }
+              onClick={() => setProjPickerOpen((v) => !v)}
+            >
+              <Icon name="files" size={12} />
+              {projectMode === "none" ? "不在项目中工作" : projectLabel}
+              <Icon name="chevron-down" size={11} />
+            </button>
+            <ProjectPicker
+              open={projPickerOpen}
+              onClose={() => setProjPickerOpen(false)}
+              projectMode={projectMode}
+              projectLabel={projectLabel}
+              workspaceRoot={workspaceRoot}
+              recents={recentWs}
+              onSwitch={(p) => void switchWorkspace(p)}
+              onNoProject={() => void switchNoProject()}
+            />
+          </div>
           {projectMode === "workspace" && (
             <span className="ctx-chip muted" title="当前分支">
               <Icon name="goal" size={12} />
@@ -1590,7 +1608,7 @@ export default function App() {
             <button
               type="button"
               className="ctx-chip primary"
-              onClick={() => setSidebarOpen(true)}
+              onClick={() => setProjPickerOpen(true)}
             >
               选择项目…
             </button>

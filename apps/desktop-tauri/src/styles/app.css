@@ -5278,3 +5278,165 @@ button.ctx-chip:hover {
   font-size: var(--text-ui-sm);
   color: var(--text-tertiary);
 }
+
+/* ═══════ IA-24 Composer 项目下拉（ZCode）═══════ */
+
+.composer .ctx-chips {
+  position: relative;
+}
+
+.ctx-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+/* 芯片上方弹出（ZCode：菜单在输入框上沿之上） */
+.proj-picker {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: min(360px, calc(100vw - 48px));
+  background: var(--surface-elevated);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow-pop);
+  z-index: var(--z-overlay);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: min(420px, 55vh);
+}
+
+.proj-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-tertiary);
+}
+
+.proj-picker-search input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: var(--text-ui);
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.proj-picker-list {
+  overflow: auto;
+  padding: 6px;
+  flex: 1;
+  min-height: 0;
+}
+
+.proj-picker-list button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 9px 10px;
+  border-radius: 8px;
+  font-size: var(--text-ui);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.proj-picker-list button:hover,
+.proj-picker-list button.active {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+}
+
+.proj-picker-list .pname {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proj-picker-actions {
+  border-top: 1px solid var(--line);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.proj-picker-actions .act {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 9px 10px;
+  border-radius: 8px;
+  font-size: var(--text-ui);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.proj-picker-actions .act:hover {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+}
+
+.proj-picker-actions .act .end {
+  margin-left: auto;
+}
+
+.proj-picker-add {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+}
+
+.proj-picker-add input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 8px;
+  font-size: var(--text-ui-sm);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+}
+
+.proj-picker-add .primary {
+  height: 30px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--text-primary);
+  color: var(--surface-app);
+  font-size: var(--text-ui-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.proj-picker-add .primary:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.proj-picker-foot {
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  font-size: var(--text-ui-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 打开路径 act 先关菜单再 focus —— 菜单已关，直接显示 add 区为单独按钮也可；
+   简化：打开路径 = 保持菜单，聚焦 add input（改为不关闭） */
