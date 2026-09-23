@@ -615,6 +615,12 @@ fn thread_cmd(
 
     fn summary(m: neo_session_store::SessionMeta) -> serde_json::Value {
         let (additions, deletions) = m.changes.unwrap_or((0, 0));
+        let updated_ms = std::fs::metadata(&m.path)
+            .and_then(|md| md.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         serde_json::json!({
             "id": m.id,
             "title": m.title,
@@ -624,6 +630,7 @@ fn thread_cmd(
             "additions": additions,
             "deletions": deletions,
             "has_changes": m.changes.is_some(),
+            "updated_ms": updated_ms,
             "state": match m.state {
                 neo_session::SessionState::Idle => "idle",
                 neo_session::SessionState::Failed => "failed",

@@ -10,9 +10,11 @@ import type {
   WireEvent,
 } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
+import { formatRelative } from "./lib/time";
 import { CommandPalette, type CommandItem } from "./components/CommandPalette";
 import { DiffView } from "./components/DiffView";
 import { DiffModal } from "./components/DiffModal";
+import { ProgressFloat } from "./components/ProgressFloat";
 import {
   FileTree,
   formatFileRef,
@@ -31,6 +33,7 @@ import {
   configureSession,
   createThread,
   type ExecMode,
+  forkThread,
   gitInfo,
   goalClear,
   goalPause,
@@ -44,11 +47,13 @@ import {
   onStderr,
   respondApproval,
   resumeThread,
+  rewindTurns,
   startServer,
   startTurn,
   stopServer,
   unpackEvent,
 } from "./lib/rpc";
+import { listWorkspace } from "./components/FileTree";
 import "./styles/tokens.css";
 import "./styles/app.css";
 
@@ -94,6 +99,10 @@ export default function App() {
   const [diffModal, setDiffModal] = useState<{ path: string; diff: string } | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [floatCollapsed, setFloatCollapsed] = useState(false);
+  const [fileEntries, setFileEntries] = useState<string[]>([]);
+  const [atQuery, setAtQuery] = useState<{ prefix: string; q: string } | null>(null);
+  const [atIdx, setAtIdx] = useState(0);
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [lastSummary, setLastSummary] = useState<{
     in: number;
@@ -249,6 +258,20 @@ export default function App() {
         case "model_switched":
           setModel(String(payload.model ?? model));
           break;
+        case "rewound":
+          setApproval(null);
+          setLastPatch(null);
+          setItems((prev) => {
+            let lastUser = -1;
+            for (let i = prev.length - 1; i >= 0; i--) {
+              if (prev[i].type === "user") {
+                lastUser = i;
+                break;
+              }
+            }
+            return lastUser >= 0 ? prev.slice(0, lastUser) : prev;
+          });
+          break;
         case "error":
           append({ type: "error", message: String(payload.message ?? "error") });
           break;
@@ -344,7 +367,14 @@ export default function App() {
       }
       const g = await gitInfo().catch(() => null);
       if (g && typeof g.branch === "string") setBranch(g.branch);
-      if (g && typeof g.root === "string") setWorkspaceRoot(g.root);
+      if (g && typeof g.root === "string") {
+        setWorkspaceRoot(g.root);
+        void listWorkspace(g.root)
+          .then((r) =>
+            setFileEntries(r.entries.filter((e) => !e.endsWith("/"))),
+          )
+          .catch(() => setFileEntries([]));
+      }
       await refreshThreads();
       setStatus("ready");
       setStatusMsg("已连接 · mock provider");
@@ -488,9 +518,58 @@ export default function App() {
     void onModeChange(EXEC_MODES[(i + 1) % EXEC_MODES.length].id);
   }, [execMode, onModeChange]);
 
+  const onFork = useCallback(async () => {
+    if (busy) return;
+    try {
+      await forkThread();
+      append({ type: "status", message: "已分叉当前会话（session/fork）" });
+      await refreshThreads();
+    } catch (e) {
+      append({ type: "error", message: String(e) });
+    }
+  }, [append, busy, refreshThreads]);
+
+  const atMatches = useMemo(() => {
+    if (!atQuery) return [];
+    const q = atQuery.q.toLowerCase();
+    return fileEntries
+      .filter((p) => p.toLowerCase().includes(q))
+      .slice(0, 8);
+  }, [atQuery, fileEntries]);
+
+  const applyAtPick = useCallback(
+    (path: string) => {
+      if (!atQuery) return;
+      const ref = formatFileRef(path);
+      const before = atQuery.prefix;
+      const after = input.slice(before.length);
+      // 替换 @… 片段为完整 ref（去掉残缺查询）
+      const replaced = `${before}${ref}${after.replace(/^@[\w./-]*/, "")}`;
+      setInput(replaced);
+      setAtQuery(null);
+      setAtIdx(0);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [atQuery, input],
+  );
+
+  const onInputChange = (value: string) => {
+    setInput(value);
+    // 检测光标前的 @ 查询（简化：文末）
+    const m = /(?:^|\s)@([\w./-]*)$/.exec(value);
+    if (m && fileEntries.length) {
+      const idx = value.lastIndexOf("@" + m[1]);
+      setAtQuery({ prefix: value.slice(0, idx), q: m[1] });
+      setAtIdx(0);
+    } else {
+      setAtQuery(null);
+    }
+  };
+
   const commands: CommandItem[] = useMemo(
     () => [
       { id: "new", label: "新建会话", hint: "⌘N", run: onNewThread },
+      { id: "fork", label: "分叉当前会话", hint: "session/fork", run: onFork },
       { id: "stop", label: "中断当前生成", hint: "Esc", run: stop },
       {
         id: "panel",
@@ -566,7 +645,7 @@ export default function App() {
         run: () => onModelChange(m.name),
       })),
     ],
-    [append, cycleMode, modelsList, onModeChange, onModelChange, onNewThread, stop],
+    [append, cycleMode, modelsList, onFork, onModeChange, onModelChange, onNewThread, stop],
   );
 
   useEffect(() => {
@@ -601,8 +680,45 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [approval, busy, cycleMode, onNewThread, paletteOpen, stop]);
 
+  const [theme, setTheme] = useState<"light" | "dark">(
+    () =>
+      (localStorage.getItem("neo-theme") as "light" | "dark" | null) ??
+      "light",
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("neo-theme", theme);
+  }, [theme]);
+
   const totalAdd = files.reduce((s, f) => s + f.additions, 0);
   const totalDel = files.reduce((s, f) => s + f.deletions, 0);
+
+  const lastUserText = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it.type === "user") return it.text;
+    }
+    return null;
+  }, [items]);
+
+  const onEditLastUser = useCallback(async () => {
+    if (lastUserText == null || busy || approval) return;
+    try {
+      await rewindTurns(1);
+      // rewound 事件会截断本地 items；再把原文放回输入框
+      setInput(lastUserText);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } catch (e) {
+      append({ type: "error", message: String(e) });
+    }
+  }, [append, approval, busy, lastUserText]);
+
+  const projectLabel = useMemo(() => {
+    if (!workspaceRoot) return "当前项目";
+    const parts = workspaceRoot.replace(/\/+$/, "").split("/");
+    return parts[parts.length - 1] || workspaceRoot;
+  }, [workspaceRoot]);
 
   const methods = useMemo(() => init?.methods ?? [], [init]);
   const grouped = useMemo(() => groupTools(items), [items]);
@@ -650,18 +766,34 @@ export default function App() {
               onClick={() => void onNewThread()}
               title="⌘N"
             >
-              <span>+</span> New Task
+              <span aria-hidden>＋</span> 新建任务
             </button>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => setPaletteOpen(true)}
-              title="⌘K 搜索"
-            >
-              ⌕
-            </button>
+            <div className="sidebar-tools">
+              <button
+                type="button"
+                className="tool-btn"
+                onClick={() => setPaletteOpen(true)}
+                title="⌘K 命令"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+                <span>搜索</span>
+              </button>
+              <button
+                type="button"
+                className="tool-btn"
+                onClick={() => void onNewThread()}
+                title="⌘N"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                <span>新建</span>
+              </button>
+            </div>
           </div>
-          <div className="sidebar-section">会话</div>
+          <div className="sidebar-section">
+            <span className="proj-label" title={workspaceRoot}>
+              ▸ {projectLabel}
+            </span>
+          </div>
           <div className="sidebar-search">
             <input
               value={threadQuery}
@@ -690,7 +822,9 @@ export default function App() {
                   t.id.toLowerCase().includes(s)
                 );
               })
-              .map((t) => (
+              .map((t) => {
+                const rel = formatRelative(t.updated_ms);
+                return (
               <li key={t.id}>
                 <button
                   type="button"
@@ -711,6 +845,7 @@ export default function App() {
                           +{t.additions} −{t.deletions}
                         </span>
                       )}
+                    {rel && <span className="rel">{rel}</span>}
                   </span>
                   <span className="meta">
                     {t.state ?? "empty"}
@@ -718,7 +853,8 @@ export default function App() {
                   </span>
                 </button>
               </li>
-            ))}
+                );
+              })}
           </ul>
           {files.length > 0 && (
             <div className="sidebar-foot">
@@ -767,8 +903,16 @@ export default function App() {
         <span
           className={`status ${status === "error" ? "err" : status === "ready" || status === "busy" ? "ok" : ""}`}
         >
-          {statusMsg}
+          {status === "error" ? statusMsg : status === "busy" ? "生成中" : "已连接"}
         </span>
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+          title="切换主题"
+        >
+          {theme === "light" ? "☾" : "☀"}
+        </button>
         <button type="button" className="icon-btn" onClick={() => setPaletteOpen(true)} title="⌘K">
           ⌘K
         </button>
@@ -786,6 +930,24 @@ export default function App() {
       </header>
 
       <main className="stream" ref={streamRef}>
+        {goal && !floatCollapsed && (
+          <ProgressFloat
+            goal={goal}
+            busy={busy}
+            onCollapse={() => setFloatCollapsed(true)}
+          />
+        )}
+        {goal && floatCollapsed && (
+          <button
+            type="button"
+            className="progress-reopen"
+            onClick={() => setFloatCollapsed(false)}
+            title="显示进度"
+          >
+            进程 {goal.subtasks.filter((s) => s.phase === "done").length}/
+            {goal.subtasks.length || "?"}
+          </button>
+        )}
         <div className="stream-inner">
           {items.length === 0 && !approval && (
             <div className="hero">
@@ -834,14 +996,39 @@ export default function App() {
               case "user":
                 return (
                   <div key={i} className="msg user">
-                    <div className="msg-role">你</div>
+                    <div className="msg-role">
+                      <span>你</span>
+                      {it.text === lastUserText && !busy && !approval && (
+                        <button
+                          type="button"
+                          className="ghost-btn edit-btn"
+                          onClick={() => void onEditLastUser()}
+                          title="编辑并重发（回退一轮）"
+                        >
+                          编辑
+                        </button>
+                      )}
+                    </div>
                     <div className="bubble user">{it.text}</div>
                   </div>
                 );
               case "assistant":
                 return (
                   <div key={i} className="msg assistant">
-                    <div className="msg-role">NEO</div>
+                    <div className="msg-role">
+                      <span>NEO</span>
+                      <button
+                        type="button"
+                        className="ghost-btn edit-btn"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(it.text);
+                          append({ type: "status", message: "已复制回复" });
+                        }}
+                        title="复制"
+                      >
+                        复制
+                      </button>
+                    </div>
                     <div className="bubble assistant">{renderMarkdown(it.text)}</div>
                   </div>
                 );
@@ -1191,58 +1378,110 @@ export default function App() {
 
       <footer className="composer">
         <div className="composer-card">
-          <textarea
-            ref={inputRef}
-            value={input}
-            placeholder={
-              approval
-                ? "待审批 — 输入已锁定"
-                : "描述任务，或从上方示例开始…"
-            }
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void send();
+          <div className="at-wrap">
+            <textarea
+              ref={inputRef}
+              value={input}
+              placeholder={
+                approval
+                  ? "待审批 — 输入已锁定"
+                  : "描述任务，输入 @ 引用文件，或 ⌘K 命令…"
               }
-              if (e.key === "Escape" && !approval) {
-                e.preventDefault();
-                if (busy) void stop();
-              }
-            }}
-            disabled={Boolean(approval) || (status !== "ready" && status !== "busy")}
-            rows={3}
-          />
-          <div className="composer-bar">
-            <label className="mode-label">
-              <select
-                value={execMode}
-                disabled={busy}
-                onChange={(e) => void onModeChange(e.target.value as ExecMode)}
-                title="执行模式"
-              >
-                {EXEC_MODES.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
+              onChange={(e) => onInputChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (atQuery && atMatches.length) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setAtIdx((i) => Math.min(i + 1, atMatches.length - 1));
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setAtIdx((i) => Math.max(i - 1, 0));
+                    return;
+                  }
+                  if (e.key === "Enter" || e.key === "Tab") {
+                    e.preventDefault();
+                    applyAtPick(atMatches[atIdx]);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setAtQuery(null);
+                    return;
+                  }
+                }
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void send();
+                }
+                if (e.key === "Escape" && !approval) {
+                  e.preventDefault();
+                  if (busy) void stop();
+                }
+              }}
+              disabled={Boolean(approval) || (status !== "ready" && status !== "busy")}
+              rows={3}
+            />
+            {atQuery && atMatches.length > 0 && (
+              <ul className="at-menu" role="listbox">
+                {atMatches.map((p, i) => (
+                  <li key={p}>
+                    <button
+                      type="button"
+                      className={i === atIdx ? "active" : ""}
+                      onMouseEnter={() => setAtIdx(i)}
+                      onClick={() => applyAtPick(p)}
+                    >
+                      {p}
+                    </button>
+                  </li>
                 ))}
-              </select>
-            </label>
-            <span className="hint">
-              {approval ? "等待审批…" : busy ? "生成中 · Esc 中断" : "Enter 发送"}
-              {lastSummary ? ` · 上轮 +${lastSummary.in}/−${lastSummary.out}` : ""}
-            </span>
-            <button type="button" className="ghost-btn" onClick={() => void stop()} disabled={!busy}>
-              停止
-            </button>
+              </ul>
+            )}
+          </div>
+          <div className="composer-bar">
             <button
               type="button"
-              className="primary send"
+              className="mode-chip"
+              disabled={busy}
+              onClick={cycleMode}
+              title="⇧Tab 切换模式"
+            >
+              <span className="mode-dot" aria-hidden />
+              {EXEC_MODES.find((m) => m.id === execMode)?.label ?? execMode}
+            </button>
+            <span className="hint">
+              {approval ? "等待审批" : busy ? "生成中 · Esc 中断" : "Enter 发送"}
+              {lastSummary ? ` · 上轮 +${lastSummary.in}/−${lastSummary.out}` : ""}
+            </span>
+            <select
+              className="model-inline"
+              value={model}
+              disabled={busy}
+              onChange={(e) => void onModelChange(e.target.value)}
+              title="模型"
+            >
+              {(modelsList.length ? modelsList : [{ name: model }]).map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="send-circle"
               onClick={() => void send()}
               disabled={blocked || !input.trim()}
+              aria-label="发送"
             >
-              发送
+              {busy ? "■" : "↑"}
             </button>
+            {busy && (
+              <button type="button" className="ghost-btn" onClick={() => void stop()}>
+                停止
+              </button>
+            )}
           </div>
         </div>
       </footer>

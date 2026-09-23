@@ -22,11 +22,11 @@ export type ThreadSummary = {
   title?: string | null;
   has_title?: boolean;
   state?: string;
-  /** SessionInfo.wire：changes = [add, del] | null；records / bytes 可选 */
-  changes?: [number, number] | null;
+  /** 文件 mtime（毫秒，Unix epoch）—— 列表已按最近修改排序 */
+  updated_ms?: number;
   records?: number;
   bytes?: number;
-  /** 宽松：部分装配仍写 additions/deletions */
+  changes?: [number, number] | null;
   additions?: number;
   deletions?: number;
 };

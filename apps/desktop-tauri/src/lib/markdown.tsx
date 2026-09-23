@@ -100,6 +100,46 @@ export function renderMarkdown(src: string): ReactNode[] {
       );
       continue;
     }
+    // GFM 表格：`| a | b |` + 分隔行
+    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+      const parseRow = (row: string) =>
+        row
+          .trim()
+          .replace(/^\|/, "")
+          .replace(/\|$/, "")
+          .split("|")
+          .map((c) => c.trim());
+      const header = parseRow(line);
+      i += 2; // skip separator
+      const rows: string[][] = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+        rows.push(parseRow(lines[i]));
+        i++;
+      }
+      out.push(
+        <div key={key++} className="md-table-wrap">
+          <table className="md-table">
+            <thead>
+              <tr>
+                {header.map((h, hi) => (
+                  <th key={hi}>{inline(h)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, ri) => (
+                <tr key={ri}>
+                  {header.map((_, ci) => (
+                    <td key={ci}>{inline(r[ci] ?? "")}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
     if (line.trim() === "") {
       i++;
       continue;
@@ -111,7 +151,10 @@ export function renderMarkdown(src: string): ReactNode[] {
       !lines[i].startsWith("```") &&
       !/^(#{1,6})\s+/.test(lines[i]) &&
       !/^\s*[-*]\s+/.test(lines[i]) &&
-      !/^\s*>\s?/.test(lines[i])
+      !/^\s*>\s?/.test(lines[i]) &&
+      !(/^\s*\|.*\|\s*$/.test(lines[i]) &&
+        i + 1 < lines.length &&
+        /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1]))
     ) {
       para.push(lines[i]);
       i++;

@@ -54,6 +54,16 @@ export async function interruptTurn(): Promise<unknown> {
   return rpc("turn/interrupt");
 }
 
+/** 分叉当前会话（协议 `session/fork`）。 */
+export async function forkThread(): Promise<unknown> {
+  return rpc("session/fork", {});
+}
+
+/** 回退最近 N 个用户轮（编辑历史 / 对话回退）。 */
+export async function rewindTurns(turns: number): Promise<unknown> {
+  return rpc("session/rewind", { turns });
+}
+
 export async function respondApproval(
   id: string,
   decision: Decision,
@@ -70,7 +80,12 @@ export async function listModels(): Promise<ModelsResult> {
   return rpc<ModelsResult>("models/list");
 }
 
-export type ExecMode = "plan" | "confirm_before" | "default" | "auto_edit" | "full_access";
+export type ExecMode =
+  | "plan"
+  | "confirm_before"
+  | "default"
+  | "auto_edit"
+  | "full_access";
 
 /** 会话配置（SessionPatch 子集）；字段名 = 线协议 snake_case。 */
 export async function configureSession(patch: {
@@ -105,12 +120,6 @@ export async function compactSession(): Promise<unknown> {
 }
 export async function commandExec(command: string): Promise<unknown> {
   return rpc("command/exec", { command });
-}
-
-export async function history(id?: string): Promise<{
-  items?: unknown[];
-}> {
-  return rpc("thread/history", id ? { id } : {});
 }
 
 export function onEvent(cb: (e: WireEvent) => void): Promise<UnlistenFn> {
