@@ -6274,6 +6274,94 @@ Web 宿主 `kind` 撞键修复、`--listen unix://`、或回到产品层（签�
 
 ---
 
+## 会话接续点（最近：2026-09-22 · 护栏 #6 doom-loop 闸门 · 十条收官）
+
+桌面 `05` 护栏 **10/10 收口**（#3 本就没有；#10 既有 Compact）。
+
+| 事 | 说明 |
+|---|---|
+| `DOOM_LOOP_GATE_AT = 4` | 第 3 次已有上下文提醒（#1）；**第 4 次起必须问人** |
+| 独立通道 | `ApprovalRequest.kind = "loop"`；在 `gate()`/`granted` **之前**拦截 |
+| FullAccess 例外 | `ExecMode::FullAccess → ApprovalPolicy::Never` 下读写全放行，**循环闸门仍 Ask** |
+| AllowAlways 不关闸 | `PendingApproval.loop_gate`：只放行本次，**不写入 `granted`** |
+| 拒绝即停 | 复用 #7：Deny → 占位剩余 + `TurnComplete` |
+| 不进并行段 | `is_parallel_readonly` 对将触发闸门的调用返回 false（必须串行 Ask） |
+
+**验证**：core **77+6**、`check_protocol_schema` 逐字节、`check_protocol` 6/6、架构守卫。
+
+**十条护栏全部完成。** 下一步候选：① 桌面客户端协议消费验证；② 时长预算；③ 发版 / commit。
+
+---
+
+## 会话接续点（最近：2026-09-22 · 护栏 #8 只读并行）
+
+接上一条：补桌面 `05` 第 8 条 —— **只读白名单并行 + 上限 10**。
+
+| 事 | 说明 |
+|---|---|
+| `MAX_TOOL_CONCURRENCY = 10` | 对齐 ZCode；12 个 read → 10+2 分批 |
+| 进段条件 | 连续 `CallKind::Read` 且闸门最终 `Allow`；写 / Ask / Deny **永不进并行段** |
+| 执行与回写拆分 | `run_tool_standalone`（无 `&mut`、不借 `Kernel`）→ 按**原下标序** `apply_tool_result` |
+| 为何不借 `&Kernel` | 内核含在飞流（`Send` 非 `Sync`），`scope.spawn` 整借会编译失败 —— 只搬 Arc 工具 + 沙箱引用等 Sync 件 |
+| T2 确定性 | 并行只加速执行；`ToolCallEnd` / tool 结果必须按模型调用序落地（12 用例钉住） |
+
+**顺带改断言**：`tools_execute_through_the_sandbox_and_in_order` 原先要求沙箱**完成序**=声明序 —— 并行下这是错的契约。改为「两条都执行 + 事件序=声明序」。
+
+**#8 已完成。** 护栏仅剩 **#6**（doom-loop 闸门，需先有循环检测设计）。
+
+**验证**：core 75+6、架构守卫、`check_protocol` 6/6。
+
+---
+
+## 会话接续点（最近：2026-09-22 · 护栏 #9 会话 token 预算）
+
+接上一条：补桌面 P2 的**预算刹车**（`05` 第 9 条）。
+
+| 事 | 说明 |
+|---|---|
+| `SessionPatch.token_budget` | 线上可设；**缺省 `None` = 不改**，`Some(0)` = 清除 —— 桌面漏传不能静默抹掉预算 |
+| 记账点唯一 | `finish_turn_if_idle` 轮末把 `usage_in+usage_out` 并入 `session_tokens_used`（跨轮） |
+| ≥70% 提醒一次 | `SESSION_BUDGET_WARN_PERCENT`；模型侧 `Message::System` + 用户侧 `EventMsg::Error`；设新预算重置 |
+| 超限拒开新轮 | `KernelError::SessionTokenBudgetExceeded`；历史保留（优雅停 ≠ 清会话） |
+| app-server | `session/configure` 合法键增加 `token_budget`；schema 已重生成 |
+
+**刻意不做**：时长预算（`time_budget_secs`）—— 需要时钟注入才可确定性回放，等有真需求再加。
+**#8 只读并行仍未做**：`execute_one(&mut self)` 挡路，要先拆「跑工具（无 &mut）+ 回写状态」。
+
+**验证**：core 73+6、app-server 17+2（unix 串行）、`check_protocol_schema` 逐字节、`check_protocol` 6/6。
+
+---
+
+## 会话接续点（最近：2026-09-22 · 内核护栏补齐 / models/list）
+
+目标（用户拍板）：**无缝接入 Codex 复刻版桌面软件宿主** —— 对照
+`codex-style-agent-desktop-spec/05-Agent内核护栏规范.md` 十条硬约束补齐内核后端。
+（该规格在 `/Volumes/data1/work/WorkBuddy/2026-09-22-10-34-07/`，本地已有，未再远程拉。）
+
+本轮落地（护栏 #1/#2/#4/#7 + 桌面设置页 `models/list`）：
+
+| # | 事 | 证据 |
+|---|---|---|
+| 1 | **#4 未执行 tool_call 必须补非空占位**：超限整批 / 拒绝后剩余 / 中断挂起中 / 回放悬空 | `push_cancelled_results` + `ensure_tool_call_pairing`；4 条测试 |
+| 2 | **#1 连续 3 次相同调用注入 [guard] 提醒**（只一次，不刷屏） | `guard_after_call` + `repeated_identical_calls_inject_a_guard_warning_on_the_third` |
+| 3 | **#2 单轮预算提醒（10）低于熔断（32）**，提醒拼进 tool 结果 stderr | `TOOL_CALL_BUDGET_WARN_PER_TURN` / `TOOL_CALL_FUSE_PER_TURN` |
+| 4 | **#7 用户拒绝即停**：剩余调用占位 + 立刻 `TurnComplete`（`continue_loop_on_deny=false`） | `user_denial_stops_the_turn_and_cancels_the_rest_of_the_batch` |
+| 5 | **`models/list`**：桌面设置页模型 picker 的目录（含 `current` 标记） | app-server 控制面第 10 个方法；schema 已重生成 |
+
+**刻意未做（连同理由）**：
+- **#8 只读并行**：当前严格串行（写安全）。并行是行为变更，要单独一轮 + 并发测试。
+- ~~**#9 会话级 token 预算**~~ **已完成（见上一接续点）**。
+- **#3 失败级联**：本就没有（工具失败只标记自己，继续同批）——已用注释钉住意图。
+- **#6 循环闸门不被 FullAccess 静默批准**：尚无 doom-loop 闸门；有的那天必须走独立通道，不进 `granted`。
+
+**验证**：`neo-core` 70+6、`neo-host-appserver` 17+2（unix 串行）、CLI 真二进制 e2e 1、
+`check_protocol.py` 6/6、`check_protocol_schema.py` 逐字节比对、`check_architecture.py` 全绿。
+
+**下一步候选**：① #8 只读并行 + 并发上限；② ~~#9 会话预算~~ **已完成**；③ 拿真实桌面客户端接一次
+`models/list` + `thread/*`（协议消费验证）；④ #6 循环闸门设计。
+
+---
+
 ## 会话接续点（最近：2026-09-22 · unix 多客户端 + 两笔修复）
 
 上一条接续点列的三个候选，本轮做掉两个半：
