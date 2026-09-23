@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Icon, type IconName } from "./Icon";
 
 export type WorkbenchId =
@@ -67,6 +67,9 @@ export function WorkbenchShell({
   children: React.ReactNode;
 }) {
   const [menu, setMenu] = useState(false);
+  const [menuUp, setMenuUp] = useState(false);
+  const addRef = useRef<HTMLDivElement>(null);
+  void addRef;
 
   // IA-29：不用全屏 fixed backdrop（Overlay 标题栏 + 固定遮罩 → macOS 整窗灰屏）
   // 点菜单外关闭；Esc 关闭
@@ -116,7 +119,7 @@ export function WorkbenchShell({
             </button>
           </div>
         ))}
-        <div className={`btab-add ${menu ? "open" : ""}`}>
+        <div ref={addRef} className={`btab-add ${menu ? "open" : ""} ${menuUp ? "menu-up" : ""}`}>
           <button
             type="button"
             className={`btab-plus ${menu ? "active" : ""}`}
@@ -125,10 +128,16 @@ export function WorkbenchShell({
             aria-expanded={menu}
             onClick={(e) => {
               e.stopPropagation();
+              const btn = e.currentTarget as HTMLElement;
+              const rect = btn.getBoundingClientRect();
+              // 菜单估高：约 9 项 * 44 + padding
+              const estH = Math.min(420, window.innerHeight * 0.55);
+              const spaceBelow = window.innerHeight - rect.bottom - 16;
+              const spaceAbove = rect.top - 16;
+              setMenuUp(spaceBelow < estH && spaceAbove > spaceBelow);
               setMenu((v) => {
                 const next = !v;
                 if (next) {
-                  // 强制一次布局读写，打脏 Overlay 合成层（防点开后整窗不刷新）
                   requestAnimationFrame(() => {
                     const tabs = document.querySelector(".browser-tabs");
                     if (tabs instanceof HTMLElement) {

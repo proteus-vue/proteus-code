@@ -5870,3 +5870,26 @@ button.ctx-chip:hover {
   border-radius: 999px;
   padding: 4px 8px;
 }
+
+/* ═══════ IA-37 点 + 菜单不超出视口 ═══════
+   + 在右栏靠右：菜单必须向左展开（right 锚定），禁止 left 向右溢出 */
+.btab-add {
+  position: relative;
+}
+
+.btab-menu {
+  left: auto !important;
+  right: 0 !important;
+  top: calc(100% + 8px) !important;
+  width: max-content;
+  min-width: 240px;
+  max-width: min(280px, calc(100vw - 24px));
+  max-height: min(70vh, calc(100vh - 72px));
+  overflow: auto;
+}
+
+/* 空间不够时向上翻 */
+.btab-add.menu-up .btab-menu {
+  top: auto !important;
+  bottom: calc(100% + 8px) !important;
+}
