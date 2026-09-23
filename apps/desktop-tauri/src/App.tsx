@@ -71,6 +71,11 @@ import {
   saveAutomations,
   type Automation,
 } from "./lib/automations";
+import {
+  loadRecentWorkspaces,
+  touchWorkspace,
+  type RecentWorkspace,
+} from "./lib/workspaces";
 import "./styles/tokens.css";
 import "./styles/app.css";
 import "./styles/layout.css";
@@ -146,6 +151,11 @@ export default function App() {
   >([]);
   const [branch, setBranch] = useState<string>("—");
   const [workspaceRoot, setWorkspaceRoot] = useState<string>("");
+  /** IA-20 最近工作区 + 切换中（忽略 onExit 误报） */
+  const [recentWs, setRecentWs] = useState<RecentWorkspace[]>(() =>
+    loadRecentWorkspaces(),
+  );
+  const switchingWs = useRef(false);
   const [items, setItems] = useState<UiItem[]>([]);
   const [approval, setApproval] = useState<ApprovalState | null>(null);
   const [input, setInput] = useState("");
@@ -485,14 +495,22 @@ export default function App() {
   const refreshThreadsRef = useRef(refreshThreads);
   refreshThreadsRef.current = refreshThreads;
 
-  const boot = useCallback(async () => {
+  const boot = useCallback(async (workspaceOverride?: string) => {
     setStatus("boot");
     setStatusMsg("正在连接 app-server…");
     try {
+      const ws =
+        (workspaceOverride ?? localStorage.getItem("neo-ia-workspace"))?.trim() ||
+        import.meta.env.VITE_NEO_WORKSPACE ||
+        "";
       const info = await startServer({
         provider: "mock",
-        workspace: import.meta.env.VITE_NEO_WORKSPACE || undefined,
+        workspace: ws || undefined,
       });
+      if (ws) {
+        localStorage.setItem("neo-ia-workspace", ws);
+        setRecentWs(touchWorkspace(ws));
+      }
       setInit(info);
       const m = await listModels().catch(() => null);
       if (m?.current) setModel(m.current);
@@ -505,7 +523,6 @@ export default function App() {
           })),
         );
       }
-      // IA-14：子代理目录（装配期加载；列表随 tools/list）
       void listTools()
         .then((r) =>
           setAgentTools(
@@ -522,15 +539,44 @@ export default function App() {
             setFileEntries(r.entries.filter((e) => !e.endsWith("/"))),
           )
           .catch(() => setFileEntries([]));
+      } else if (ws) {
+        setWorkspaceRoot(ws);
       }
       await refreshThreads();
       setStatus("ready");
-      setStatusMsg("已连接 · mock provider");
+      setStatusMsg(ws ? `已连接 · ${ws.split("/").filter(Boolean).pop() ?? ws}` : "已连接 · mock provider");
     } catch (e) {
       setStatus("error");
       setStatusMsg(String(e));
     }
   }, [refreshThreads]);
+
+  /** IA-20：切换项目 = 换 workspace 重启 app-server（会话库整组随目录） */
+  const switchWorkspace = useCallback(
+    async (path: string) => {
+      const clean = path.replace(/\/+$/, "");
+      if (!clean || clean === workspaceRoot.replace(/\/+$/, "")) return;
+      switchingWs.current = true;
+      setStatus("boot");
+      setStatusMsg("切换工作区…");
+      try {
+        setItems([]);
+        setApproval(null);
+        setFiles([]);
+        setLastPatch(null);
+        setActiveThread(null);
+        setThreads([]);
+        setWorkspaceRoot("");
+        setBranch("—");
+        setFileEntries([]);
+        setFilePreview(null);
+        await boot(clean);
+      } finally {
+        switchingWs.current = false;
+      }
+    },
+    [boot, workspaceRoot],
+  );
 
   useEffect(() => {
     const unsubs: Array<() => void> = [];
@@ -541,6 +587,8 @@ export default function App() {
           setStderrLines((ls) => [...ls.slice(-40), line]),
         ),
         await onExit(() => {
+          // 切换 workspace 时 start_app_server 会先杀旧进程 —— 不当作崩溃
+          if (switchingWs.current) return;
           setStatus("error");
           setStatusMsg("app-server 进程已退出");
         }),
@@ -1237,6 +1285,8 @@ export default function App() {
         onDelete={(id) => void onDeleteSession(id)}
         projectLabel={projectLabel}
         workspaceRoot={workspaceRoot}
+        recentWorkspaces={recentWs}
+        onSwitchWorkspace={(p) => void switchWorkspace(p)}
         filesFoot={files.length > 0 ? `改动 +${totalAdd} −${totalDel} · ${files.length} 文件` : undefined}
       />
       {sidebarOpen && (

@@ -1,6 +1,7 @@
-import { useState, type MouseEvent } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 import { formatRelative } from "../lib/time";
 import type { ThreadSummary } from "../lib/protocol";
+import type { RecentWorkspace } from "../lib/workspaces";
 import { Icon } from "./Icon";
 
 export function Sidebar({
@@ -18,6 +19,8 @@ export function Sidebar({
   onDelete,
   projectLabel,
   workspaceRoot,
+  recentWorkspaces,
+  onSwitchWorkspace,
   filesFoot,
 }: {
   open: boolean;
@@ -34,12 +37,29 @@ export function Sidebar({
   onDelete: (id: string) => void;
   projectLabel: string;
   workspaceRoot: string;
+  /** IA-20 最近工作区 */
+  recentWorkspaces?: RecentWorkspace[];
+  onSwitchWorkspace?: (path: string) => void;
   filesFoot?: string;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   /** 二次点击确认删除 —— 不用 window.confirm（Tauri 里不可靠） */
   const [confirmDelId, setConfirmDelId] = useState<string | null>(null);
+  /** IA-20 项目切换菜单 */
+  const [projOpen, setProjOpen] = useState(false);
+  const [addPath, setAddPath] = useState("");
+  const recents = recentWorkspaces ?? [];
+
+  useEffect(() => {
+    if (!projOpen) return;
+    const onDoc = (ev: globalThis.MouseEvent) => {
+      const t = ev.target as HTMLElement;
+      if (!t.closest(".proj-switch")) setProjOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [projOpen]);
 
   /** IA-19：标题溢出时悬停横向滚出全文 */
   const onRowEnter = (e: MouseEvent<HTMLButtonElement>) => {
@@ -47,7 +67,6 @@ export function Sidebar({
     const inner = box?.querySelector<HTMLElement>(".title-text");
     if (!box || !inner) return;
     box.classList.remove("marquee");
-    // 强制 reflow 后再量，避免连续 hover 用到旧值
     void inner.offsetWidth;
     const overflow = inner.scrollWidth - box.clientWidth;
     if (overflow <= 4) return;
@@ -80,7 +99,6 @@ export function Sidebar({
     );
   }
 
-  /** IA-18：无侧栏搜索框 —— 列表始终全量；全局检索走 ⌘K */
   const filtered = threads;
 
   const commitRename = (id: string) => {
@@ -91,7 +109,7 @@ export function Sidebar({
 
   return (
     <aside className="sidebar">
-      {/* 顶栏一行：折叠 · 主按钮 · 主题 · 设置（无第二行工具） */}
+      {/* 顶栏一行：折叠 · 主按钮 · 主题 · 设置 */}
       <div className="rail-head">
         <button type="button" className="icon-btn" onClick={onToggle} title="折叠侧栏 ⌘B" aria-label="折叠侧栏">
           <Icon name="chevron-left" size={16} />
@@ -108,14 +126,96 @@ export function Sidebar({
         </button>
       </div>
 
-      <div className="sidebar-section">
-        <span className="proj-label" title={workspaceRoot}>
+      {/* IA-20 项目切换 */}
+      <div className="sidebar-section proj-switch">
+        <button
+          type="button"
+          className="proj-label proj-trigger"
+          title={workspaceRoot || projectLabel}
+          aria-expanded={projOpen}
+          aria-haspopup="menu"
+          onClick={() => setProjOpen((v) => !v)}
+        >
+          <Icon name="files" size={13} className="proj-caret" />
+          <span className="proj-name">{projectLabel}</span>
           <Icon name="chevron-down" size={11} className="proj-caret" />
-          {projectLabel}
-        </span>
+        </button>
+        {projOpen && (
+          <div className="proj-menu" role="menu">
+            <div className="proj-menu-list">
+              {recents.length === 0 && (
+                <div className="proj-empty">暂无最近项目 · 下方粘贴路径添加</div>
+              )}
+              {recents.map((w) => {
+                const cur = workspaceRoot.replace(/\/+$/, "") === w.path;
+                return (
+                  <button
+                    key={w.path}
+                    type="button"
+                    role="menuitem"
+                    className={cur ? "active" : ""}
+                    title={w.path}
+                    onClick={() => {
+                      setProjOpen(false);
+                      if (!cur) onSwitchWorkspace?.(w.path);
+                    }}
+                  >
+                    <Icon name="files" size={14} />
+                    <span className="pname">{w.name}</span>
+                    {cur && <Icon name="check" size={14} />}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="proj-menu-add">
+              <input
+                value={addPath}
+                placeholder="粘贴工作区绝对路径…"
+                onChange={(e) => setAddPath(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const p = addPath.trim();
+                    if (!p) return;
+                    setAddPath("");
+                    setProjOpen(false);
+                    onSwitchWorkspace?.(p);
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="primary"
+                disabled={!addPath.trim()}
+                onClick={() => {
+                  const p = addPath.trim();
+                  if (!p) return;
+                  setAddPath("");
+                  setProjOpen(false);
+                  onSwitchWorkspace?.(p);
+                }}
+              >
+                打开
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* 无常驻搜索框（IA-18）：全局检索走 ⌘K；列表展示全部会话 */}
+      {/* IA-20 会话分区标题 —— 让「会话管理」可见 */}
+      <div className="sidebar-section list-head">
+        <span className="list-label">会话</span>
+        <span className="list-count">{filtered.length}</span>
+        <button
+          type="button"
+          className="list-new"
+          title="新建会话 ⌘N"
+          aria-label="新建会话"
+          onClick={onNew}
+        >
+          <Icon name="plus" size={13} />
+        </button>
+      </div>
+
       <ul className="sidebar-list">
         {threads.length === 0 && (
           <li>

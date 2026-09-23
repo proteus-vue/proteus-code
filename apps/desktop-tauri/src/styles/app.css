@@ -4810,3 +4810,177 @@ button.rail-btn {
     animation: none;
   }
 }
+
+/* ═══════ IA-20 项目切换 + 会话分区 ═══════ */
+
+.sidebar .proj-switch {
+  position: relative;
+  padding: 4px 10px 6px;
+}
+
+.sidebar .proj-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-ui);
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sidebar .proj-trigger:hover,
+.sidebar .proj-trigger[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+}
+
+.sidebar .proj-trigger .proj-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar .proj-trigger .proj-caret {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.sidebar .proj-menu {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: calc(100% + 2px);
+  z-index: var(--z-overlay);
+  background: var(--surface-elevated);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  padding: 6px;
+  max-height: min(360px, 50vh);
+  overflow: auto;
+}
+
+.sidebar .proj-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar .proj-menu-list button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 8px 8px;
+  border-radius: 8px;
+  font-size: var(--text-ui);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar .proj-menu-list button:hover,
+.sidebar .proj-menu-list button.active {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+}
+
+.sidebar .proj-menu-list .pname {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar .proj-empty {
+  padding: 12px 8px;
+  color: var(--text-tertiary);
+  font-size: var(--text-ui-sm);
+}
+
+.sidebar .proj-menu-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.sidebar .proj-menu-add input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 8px;
+  font-size: var(--text-ui-sm);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+}
+
+.sidebar .proj-menu-add .primary {
+  height: 30px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--text-primary);
+  color: var(--surface-app);
+  font-size: var(--text-ui-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar .proj-menu-add .primary:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 会话分区头 */
+.sidebar .list-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px 4px;
+}
+
+.sidebar .list-label {
+  font-size: var(--text-ui-xs);
+  font-weight: 550;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+}
+
+.sidebar .list-count {
+  font-size: var(--text-ui-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar .list-new {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.sidebar .list-new:hover {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-primary);
+}
