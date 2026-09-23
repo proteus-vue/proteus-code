@@ -663,11 +663,13 @@ export default function App() {
       const id = await createThread();
       setActiveThread(id);
       setItems([]);
+      setInput("");
       setApproval(null);
       setLastPatch(null);
       setGoal(null);
       setFiles([]);
       await refreshThreads();
+      requestAnimationFrame(() => inputRef.current?.focus());
     } catch (e) {
       append({ type: "error", message: String(e) });
     }
@@ -1182,6 +1184,8 @@ export default function App() {
 
   const methods = useMemo(() => init?.methods ?? [], [init]);
   const grouped = useMemo(() => groupTools(items), [items]);
+  /** IA-21：新建任务态 = 无消息且无审批（与对话底栏分观感） */
+  const isNewTask = items.length === 0 && !approval;
   const samplePrompts = [
     "用一句话介绍这个仓库",
     "总结当前分支相对 main 的改动",
@@ -1324,22 +1328,15 @@ export default function App() {
           </button>
         )}
         <div className="stream-inner">
-          {items.length === 0 && !approval && (
+          {isNewTask && (
             <div className="hero">
               <div className="hero-mark" aria-hidden>
                 NEO
               </div>
-              <h1>准备就绪</h1>
+              <h1>接下来交给我吧</h1>
               <p className="hero-sub">
                 对接自家 app-server · 本地优先 · 不外传代码
               </p>
-              <div className="hero-actions">
-                {samplePrompts.map((s) => (
-                  <button key={s} type="button" className="hero-card" onClick={() => onSample(s)}>
-                    {s}
-                  </button>
-                ))}
-              </div>
               <div className="hero-keys">
                 <kbd>⌘K</kbd> 命令 · <kbd>⌘N</kbd> 新任务 · <kbd>/</kbd> 斜杠 ·{" "}
                 <kbd>Esc</kbd> 中断 · <kbd>⇧Tab</kbd> 模式
@@ -1508,7 +1505,25 @@ export default function App() {
         </div>
       </main>
 
-      <footer className="composer">
+      <footer className={`composer ${isNewTask ? "mode-new" : "mode-chat"}`}>
+        {/* 仅新建任务态：项目/分支上下文条（对齐 ZCode；对话态不重复顶栏芯片） */}
+        {isNewTask && (
+          <div className="ctx-chips" aria-label="工作区上下文">
+            <button
+              type="button"
+              className="ctx-chip"
+              title={workspaceRoot || "当前工作区"}
+              onClick={() => setSidebarOpen(true)}
+            >
+              <Icon name="files" size={12} />
+              {projectLabel}
+            </button>
+            <span className="ctx-chip muted" title="当前分支">
+              <Icon name="goal" size={12} />
+              {branch && branch !== "—" ? branch : "—"}
+            </span>
+          </div>
+        )}
         <div className="composer-card">
           <div className="at-wrap">
             <textarea
@@ -1517,7 +1532,11 @@ export default function App() {
               placeholder={
                 approval
                   ? "待审批 — 输入已锁定"
-                  : "描述任务，输入 @ 引用文件、/ 命令，或 ⌘K…"
+                  : isNewTask
+                    ? "描述要做的任务，用 @ 引用文件、/ 命令，或 ⌘K…"
+                    : busy
+                      ? "继续输入以排队后续修改"
+                      : "继续输入…"
               }
               onChange={(e) => onInputChange(e.target.value)}
               onKeyDown={(e) => {
@@ -1663,6 +1682,22 @@ export default function App() {
             )}
           </div>
         </div>
+        {/* 仅新建任务态：建议条在输入**下方**（ZCode 同构；对话态不重复） */}
+        {isNewTask && (
+          <div className="suggest-row" role="list">
+            {samplePrompts.map((s) => (
+              <button
+                key={s}
+                type="button"
+                className="suggest-chip"
+                role="listitem"
+                onClick={() => onSample(s)}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
       </footer>
       </div>
       {/* 右侧：浏览器式标签页（× 关闭 · + 下拉开新），不是全部 tab 挤一行 */}

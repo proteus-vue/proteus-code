@@ -4984,3 +4984,91 @@ button.rail-btn {
   background: color-mix(in srgb, var(--text-primary) 6%, transparent);
   color: var(--text-primary);
 }
+
+/* ═══════ IA-21 新建任务态 vs 对话 Composer ═══════ */
+
+/* 新建任务：Hero 更居中，建议与上下文条属于 footer */
+.center .stream:has(.hero) .stream-inner {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: min(420px, 55vh);
+  padding-bottom: 8px;
+}
+
+.hero h1 {
+  font-size: clamp(24px, 3.2vw, 32px);
+}
+
+/* 上下文 chips：仅 mode-new，在输入框上方 */
+.composer .ctx-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 4px 8px;
+}
+
+.composer .ctx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: var(--surface-muted, var(--surface-hover));
+  color: var(--text-primary);
+  font-size: var(--text-ui-sm);
+  cursor: default;
+}
+
+button.ctx-chip {
+  cursor: pointer;
+}
+
+button.ctx-chip:hover {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.composer .ctx-chip.muted {
+  color: var(--text-secondary);
+}
+
+/* 建议条：输入下方，横向 chips */
+.composer .suggest-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding-bottom: 4px;
+}
+
+.suggest-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  font-size: var(--text-ui-sm);
+  cursor: pointer;
+}
+
+.suggest-chip:hover {
+  border-color: var(--line-strong);
+  color: var(--text-primary);
+  background: var(--surface-elevated);
+}
+
+/* 对话态：占位更短、卡片略收敛 */
+.composer.mode-chat .composer-card textarea {
+  min-height: 52px;
+}
+
+.composer.mode-new {
+  padding-top: 4px;
+}
