@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type MouseEvent } from "react";
 import { formatRelative } from "../lib/time";
 import type { ThreadSummary } from "../lib/protocol";
 import { Icon } from "./Icon";
@@ -40,6 +40,26 @@ export function Sidebar({
   const [draft, setDraft] = useState("");
   /** 二次点击确认删除 —— 不用 window.confirm（Tauri 里不可靠） */
   const [confirmDelId, setConfirmDelId] = useState<string | null>(null);
+
+  /** IA-19：标题溢出时悬停横向滚出全文 */
+  const onRowEnter = (e: MouseEvent<HTMLButtonElement>) => {
+    const box = e.currentTarget.querySelector<HTMLElement>(".title");
+    const inner = box?.querySelector<HTMLElement>(".title-text");
+    if (!box || !inner) return;
+    box.classList.remove("marquee");
+    // 强制 reflow 后再量，避免连续 hover 用到旧值
+    void inner.offsetWidth;
+    const overflow = inner.scrollWidth - box.clientWidth;
+    if (overflow <= 4) return;
+    const dur = Math.min(14, Math.max(3, overflow / 48));
+    box.style.setProperty("--mx", `-${overflow}px`);
+    box.style.setProperty("--md", `${dur}s`);
+    box.classList.add("marquee");
+  };
+
+  const onRowLeave = (e: MouseEvent<HTMLButtonElement>) => {
+    e.currentTarget.querySelector<HTMLElement>(".title")?.classList.remove("marquee");
+  };
 
   if (!open) {
     return (
@@ -138,6 +158,8 @@ export function Sidebar({
                   setDraft(t.title || t.id);
                   setEditingId(t.id);
                 }}
+                onMouseEnter={onRowEnter}
+                onMouseLeave={onRowLeave}
                 title={[
                   t.title || t.id,
                   rel ? `更新 ${rel}` : "",
@@ -147,7 +169,9 @@ export function Sidebar({
                   .filter(Boolean)
                   .join(" · ")}
               >
-                <span className="title">{t.title || t.id}</span>
+                <span className="title">
+                  <span className="title-text">{t.title || t.id}</span>
+                </span>
                 {rel && <span className="rel">{rel}</span>}
               </button>
               <span className="row-actions">

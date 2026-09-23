@@ -4758,3 +4758,55 @@ button.rail-btn {
 .sidebar .sidebar-list li:hover .row-actions {
   opacity: 1;
 }
+
+/* ═══════ IA-19 标题过长 · 悬停自动横滚 ═══════ */
+
+.sidebar .sidebar-list .title {
+  overflow: hidden;
+  min-width: 0;
+  /* 未悬停/无溢出时仍 ellipsis */
+  display: block;
+}
+
+.sidebar .sidebar-list .title-text {
+  display: block;
+  white-space: nowrap;
+  width: max-content;
+  max-width: none;
+  will-change: transform;
+}
+
+/* 未开启 marquee：仍用省略号裁切 */
+.sidebar .sidebar-list .title:not(.marquee) .title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  width: auto;
+  display: block;
+}
+
+/* 溢出且悬停进入后：来回滚 */
+.sidebar .sidebar-list .title.marquee .title-text {
+  overflow: visible;
+  text-overflow: clip;
+  max-width: none;
+  width: max-content;
+  animation: side-title-marquee var(--md, 6s) linear infinite alternate;
+  animation-play-state: running;
+}
+
+@keyframes side-title-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(var(--mx, -80px));
+  }
+}
+
+/* 减少动效偏好：不滚，保持省略号 */
+@media (prefers-reduced-motion: reduce) {
+  .sidebar .sidebar-list .title.marquee .title-text {
+    animation: none;
+  }
+}
