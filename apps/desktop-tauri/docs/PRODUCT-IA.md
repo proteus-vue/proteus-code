@@ -188,7 +188,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 3. **仅一处高饱和**强调色（`#ff6a2b`）
 4. 代码区 VS Code Dark+ 思路，不自创一套
 5. 圆角一个 scale 变量
-6. **图标**：自绘 SVG（`src/components/Icon.tsx`），24 viewBox · **单色实心** fill=currentColor + evenodd 挖孔（IA-55/56）；**禁止**第二色/白描边/多色点/emoji/系统符号；**不拷贝**三家图标文件
+6. **图标**：自绘 SVG 两套（IA-57）—— **空心 stroke** 导航/工具 chrome；**实心 fill** 语义标签（files/package/tab 类）+ @ 文件文档形；单色 currentColor；**禁止** emoji/系统符号；**不拷贝**三家图标文件
 7. **控件**：选择器/下拉用自绘 `Select`（或 button+menu），**禁止**裸原生 `<select>` 出现在产品 UI；输入/按钮走同一 border/radius/height 令牌
 
 默认**浅色**（你截图的竞品主态）；`data-theme=dark` 可切。
@@ -276,6 +276,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-53 | 桌面接入：协议 fs/* 文件树 · PTY 终端 · 附件/MCP 重读 · 外部 Agent 迁移 | P1 | ✅ fs/readDirectory\|readFile\|getMetadata（失败退 Tauri）· pty 启动/write/terminate · thread/attachment/list · config/mcpServer/reload · externalAgent detect\|import |
 | IA-54 | @ 文件引用：图标 + 路径着色（无芯片） | P1 | ✅ 镜像层红文件图标 + accent 路径色 · textarea 透明字 + 光标 · 至路径字符止 · 菜单选中后空格分隔 |
 | IA-56 | 图标库统一单色实心（对齐文件图标） | P1 | ✅ 全集 fill=currentColor + evenodd 挖孔 · 去 fillOpacity/白描边/多色点 · @ 引用同步 |
+| IA-57 | 图标两套：导航空心 + 语义实心 | P1 | ✅ HOLLOW stroke（menu/plus/search/…）· SOLID fill（files/package/tab 类）· 同名 API 不变 |
 
 
 ---

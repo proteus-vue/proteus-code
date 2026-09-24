@@ -1,7 +1,9 @@
 /**
- * 自绘图标集（PRODUCT-IA §7.6 · IA-55/IA-56）。
- * 单色实心：fill=currentColor · evenodd 挖孔 · 无第二色、无白描边。
- * 对齐 @ 文件引用文档图标形态。禁止 emoji；不拷贝竞品。
+ * 自绘图标集（PRODUCT-IA §7.6 · IA-57）。
+ * 两套（对齐 Codex/ZCode 导航观感）：
+ * - 空心 stroke：导航/工具 chrome（menu/plus/search/…）
+ * - 实心 fill：语义/标签（files/package/tab 类 + @ 文件同款文档形）
+ * 单色 currentColor；禁止 emoji；不拷贝竞品。
  */
 import type { CSSProperties, ReactElement } from "react";
 
@@ -34,102 +36,113 @@ export type IconName =
   | "archive"
   | "package";
 
-const PATHS: Record<IconName, ReactElement> = {
-  menu: (
-    <path
-      fill="currentColor"
-      d="M4 6.5h16v2.25H4V6.5Zm0 4.375h16v2.25H4v-2.25Zm0 4.375h16V17.5H4v-2.25Z"
-    />
-  ),
-  plus: (
-    <path
-      fill="currentColor"
-      d="M10.75 3.5h2.5v7.25H20.5v2.5h-7.25V20.5h-2.5v-7.25H3.5v-2.5h7.25V3.5Z"
-    />
-  ),
+/** 导航/工具 chrome → 空心 stroke */
+const HOLLOW: ReadonlySet<IconName> = new Set([
+  "menu",
+  "plus",
+  "search",
+  "settings",
+  "chevron-left",
+  "chevron-right",
+  "chevron-down",
+  "sun",
+  "moon",
+  "close",
+  "edit",
+  "trash",
+  "check",
+  "send",
+  "stop",
+  "archive",
+]);
+
+/** 空心：stroke 路径（无 fill） */
+const HOLLOW_PATHS: Record<IconName, ReactElement> = {
+  menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+  plus: <path d="M12 5v14M5 12h14" />,
   search: (
-    <path
-      fill="currentColor"
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M10.75 3.5a7.25 7.25 0 1 0 4.52 12.93l3.65 3.65a1.25 1.25 0 0 0 1.77-1.77l-3.65-3.65A7.25 7.25 0 0 0 10.75 3.5Zm0 2.5a4.75 4.75 0 1 1 0 9.5 4.75 4.75 0 0 1 0-9.5Z"
-    />
+    <>
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="m16.2 16.2 4 4" />
+    </>
   ),
   settings: (
-    <path
-      fill="currentColor"
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M12 2.75 13.4 5l2.7-.45 1.15 2.5 2.6.95-.45 2.7L21 12l-1.55 1.3.45 2.7-2.6.95-1.15 2.5-2.7-.45L12 21.25l-1.4-2.25-2.7.45-1.15-2.5-2.6-.95.45-2.7L3 12l1.55-1.3-.45-2.7 2.6-.95L7.85 4.55l2.7.45L12 2.75Zm0 6.5a2.75 2.75 0 1 0 0 5.5 2.75 2.75 0 0 0 0-5.5Z"
-    />
+    <>
+      <circle cx="12" cy="12" r="3.1" />
+      <path d="M12 3.2l1.1 1.9 2.2-.35.95 2 2.1.75-.35 2.2 1.6 1.55-1.6 1.55.35 2.2-2.1.75-.95 2-2.2-.35L12 20.8l-1.1-1.9-2.2.35-.95-2-2.1-.75.35-2.2L4.4 12l1.6-1.55-.35-2.2 2.1-.75.95-2 2.2.35L12 3.2z" />
+    </>
   ),
-  "chevron-left": (
-    <path
-      fill="currentColor"
-      d="M14.9 5.1 8 12l6.9 6.9 1.8-1.8L11.6 12l5.1-5.1-1.8-1.8Z"
-    />
-  ),
-  "chevron-right": (
-    <path
-      fill="currentColor"
-      d="M9.1 5.1 16 12l-6.9 6.9-1.8-1.8L12.4 12l-5.1-5.1 1.8-1.8Z"
-    />
-  ),
-  "chevron-down": (
-    <path
-      fill="currentColor"
-      d="M5.1 9.1 12 16l6.9-6.9-1.8-1.8L12 12.4l-5.1-5.1-1.8 1.8Z"
-    />
-  ),
+  "chevron-left": <path d="M14.5 6.5 9 12l5.5 5.5" />,
+  "chevron-right": <path d="M9.5 6.5 15 12l-5.5 5.5" />,
+  "chevron-down": <path d="M6.5 9.5 12 15l5.5-5.5" />,
   sun: (
-    <path
-      fill="currentColor"
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M12 7.25a4.75 4.75 0 1 0 0 9.5 4.75 4.75 0 0 0 0-9.5Zm-1.1-7.5h2.2v3.4h-2.2V-.25Zm0 17.6h2.2v3.4h-2.2v-3.4ZM.25 10.9h3.4v2.2H.25v-2.2Zm17.6 0h3.4v2.2h-3.4v-2.2ZM4.05 5.4l1.55-1.55 2.4 2.4-1.55 1.55-2.4-2.4Zm12 12 1.55-1.55 2.4 2.4-1.55 1.55-2.4-2.4ZM19.95 5.4l-1.55-1.55-2.4 2.4 1.55 1.55 2.4-2.4ZM5.6 17.4l-1.55-1.55-2.4 2.4L3.2 19.8l2.4-2.4Z"
-    />
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.05 5.05l1.4 1.4M17.55 17.55l1.4 1.4M18.95 5.05l-1.4 1.4M6.45 17.55l-1.4 1.4" />
+    </>
   ),
-  moon: (
-    <path
-      fill="currentColor"
-      d="M16.4 14.6A7.1 7.1 0 0 1 9.4 3.9a7.6 7.6 0 1 0 7 10.7Z"
-    />
-  ),
-  close: (
-    <path
-      fill="currentColor"
-      d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6 6.4 5Z"
-    />
-  ),
+  moon: <path d="M15.8 14.2A6.6 6.6 0 0 1 9.2 4.4 7.1 7.1 0 1 0 15.8 14.2Z" />,
+  close: <path d="M7 7l10 10M17 7 7 17" />,
   edit: (
-    <path
-      fill="currentColor"
-      d="M4.2 16.55 14.05 6.7l3.55 3.55L7.75 20.1H4.2v-3.55Zm10.05-9.85 1.55-1.55 3.55 3.55-1.55 1.55-3.55-3.55Z"
-    />
+    <>
+      <path d="M4.5 16.6 14.1 7l3.4 3.4-9.6 9.6H4.5v-3.4Z" />
+      <path d="m13 8.1 3.4 3.4" />
+    </>
   ),
   trash: (
-    <path
-      fill="currentColor"
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M9.25 4.5h5.5v1.75H17V8H7V6.25h2.25V4.5ZM5.75 8h12.5l-.85 11.5a1.75 1.75 0 0 1-1.75 1.6H8.35a1.75 1.75 0 0 1-1.75-1.6L5.75 8Zm3.5 2.75v6.5h1.5v-6.5H9.25Zm4 0v6.5h1.5v-6.5h-1.5Z"
-    />
+    <>
+      <path d="M5.5 7.5h13M10 7.5V5.75h4V7.5M8 7.5l.7 11.25h6.6L16 7.5" />
+      <path d="M10.4 11v5.5M13.6 11v5.5" />
+    </>
   ),
-  check: (
-    <path
-      fill="currentColor"
-      d="M9.4 16.6 4.8 12l1.7-1.7 2.9 2.9 7.1-7.1L18.2 7.8 9.4 16.6Z"
-    />
+  check: <path d="m6 12.5 4 4L18 7.5" />,
+  send: <path d="M12 19V5M6.5 11.5 12 5.5l5.5 6" />,
+  stop: <rect x="7" y="7" width="10" height="10" rx="1.5" />,
+  archive: (
+    <>
+      <path d="M4.5 5.5h15v3.5h-15zM5.75 9.5h12.5v9.75H5.75z" />
+      <path d="M10 13.25h4" />
+    </>
   ),
-  send: (
-    <path
-      fill="currentColor"
-      d="M12 3.2 3.8 20.2l8.2-3.8 8.2 3.8L12 3.2Zm0 3.35 5.35 11.15L12 15.55 6.65 17.7 12 6.55Z"
-    />
+  // 占位：实心集不进此表，类型完整需要键 —— 下面 SOLID 提供
+  review: <path d="M5 6h14v12H5z" />,
+  terminal: <path d="M4 6h16v12H4zM8 10l2.5 2L8 14M13 14h3" />,
+  browser: <path d="M4 6h16v12H4zM4 10h16" />,
+  files: <path d="M7 4h7l4 4v12H7z" />,
+  chat: <path d="M5 7h11v7H9l-3 2.5V14H5z" />,
+  sim: <path d="M8.5 4h7v16h-7z" />,
+  goal: (
+    <>
+      <circle cx="12" cy="12" r="7.5" />
+      <circle cx="12" cy="12" r="3.5" />
+    </>
   ),
-  stop: (
-    <rect x="6.25" y="6.25" width="11.5" height="11.5" rx="2.25" fill="currentColor" />
+  subagents: (
+    <>
+      <rect x="3.5" y="6" width="7" height="5.5" rx="1" />
+      <rect x="13.5" y="6" width="7" height="5.5" rx="1" />
+      <rect x="8.5" y="13" width="7" height="5.5" rx="1" />
+    </>
   ),
+  automations: (
+    <>
+      <circle cx="12" cy="13" r="6.5" />
+      <path d="M12 10v3.5l2.5 1.5M10 3.5h4M12 3.5V6.5" />
+    </>
+  ),
+  palette: (
+    <>
+      <path d="M12 4.5a7.5 7.5 0 1 0 0 15h1.2a1.8 1.8 0 0 0 1.3-3.1l-.4-.4a1.5 1.5 0 0 1 1.1-2.5H17A3.5 3.5 0 0 0 20.5 10 7.5 7.5 0 0 0 12 4.5Z" />
+      <circle cx="9" cy="10" r="1" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="8" r="1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="10" r="1" fill="currentColor" stroke="none" />
+    </>
+  ),
+  package: <path d="M12 3.5 4.5 7.5v9L12 20.5l7.5-4v-9L12 3.5ZM4.5 7.5 12 11.5l7.5-4M12 11.5v9" />,
+};
+
+/** 实心：fill 路径（语义/标签 + 文件文档同款） */
+const SOLID_PATHS: Record<IconName, ReactElement> = {
   review: (
     <path
       fill="currentColor"
@@ -206,20 +219,29 @@ const PATHS: Record<IconName, ReactElement> = {
       d="M12 3.25a8.75 8.75 0 0 0 0 17.5h1.55c1.1 0 2-.9 2-2 0-.55-.22-1.05-.58-1.42-.35-.36-.57-.85-.57-1.4 0-1.1.9-2 2-2h1.9A4.35 4.35 0 0 0 22.75 11 8.75 8.75 0 0 0 12 3.25Zm-3.2 7.4a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9Zm3.3-2.3a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9Zm3.4 1.15a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9Zm-2.7 4.55a1.3 1.3 0 1 1 0 2.6 1.3 1.3 0 0 1 0-2.6Z"
     />
   ),
-  archive: (
-    <path
-      fill="currentColor"
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M4.5 3.75h15A1.5 1.5 0 0 1 21 5.25v3A1.5 1.5 0 0 1 19.5 9.75h-15A1.5 1.5 0 0 1 3 8.25v-3A1.5 1.5 0 0 1 4.5 3.75Zm1.25 6h12.5v9A1.5 1.5 0 0 1 16.75 20.25h-9.5A1.5 1.5 0 0 1 5.75 18.75v-9Zm4.25 3.1h4v1.5h-4v-1.5Z"
-    />
-  ),
   package: (
     <path
       fill="currentColor"
       d="M12 2.1 3.2 6.85v10.3L12 21.9l8.8-4.35V6.85L12 2.1Zm0 2.55 6.15 3.25L12 11.1 5.85 7.9 12 4.65ZM5.25 9.55l5.9 3.15v6.55l-5.9-2.95V9.55Zm7.6 9.7V12.7l5.9-3.15v6.3l-5.9 2.95Z"
     />
   ),
+  // 空心集键（类型完整；渲染时不会用到）
+  menu: <path d="M4 7h16" />,
+  plus: <path d="M12 5v14" />,
+  search: <circle cx="11" cy="11" r="6" />,
+  settings: <circle cx="12" cy="12" r="3" />,
+  "chevron-left": <path d="M14 6 8 12l6 6" />,
+  "chevron-right": <path d="M10 6l6 6-6 6" />,
+  "chevron-down": <path d="M6 9l6 6 6-6" />,
+  sun: <circle cx="12" cy="12" r="4" />,
+  moon: <path d="M16 14A6.5 6.5 0 0 1 9 4a7 7 0 1 0 7 10Z" />,
+  close: <path d="M7 7l10 10M17 7 7 17" />,
+  edit: <path d="M5 17 15 7l3 3-10 10H5v-3Z" />,
+  trash: <path d="M6 8h12l-1 11H7L6 8Zm3-2h6v2H9V6Z" />,
+  check: <path d="m6 12 4 4 8-8" />,
+  send: <path d="M12 19V5M6 12l6-6 6 6" />,
+  stop: <rect x="7" y="7" width="10" height="10" rx="1" />,
+  archive: <path d="M5 6h14v3H5zm1 4h12v9H6z" />,
 };
 
 export function Icon({
@@ -227,7 +249,7 @@ export function Icon({
   size = 16,
   className,
   style,
-  strokeWidth = 2,
+  strokeWidth = 1.85,
 }: {
   name: IconName;
   size?: number;
@@ -235,6 +257,8 @@ export function Icon({
   style?: CSSProperties;
   strokeWidth?: number;
 }) {
+  const hollow = HOLLOW.has(name);
+  const paths = hollow ? HOLLOW_PATHS[name] : SOLID_PATHS[name];
   return (
     <svg
       className={className ? `icon ${className}` : "icon"}
@@ -243,14 +267,14 @@ export function Icon({
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={strokeWidth}
+      strokeWidth={hollow ? strokeWidth : 0}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden
       focusable="false"
       style={style}
     >
-      {PATHS[name]}
+      {paths}
     </svg>
   );
 }
