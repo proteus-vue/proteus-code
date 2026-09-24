@@ -449,14 +449,32 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 ThreadCmd::Models => ThreadResult::Value(json!({"models": [{"name":"mock"}], "current": "mock"})),
                 ThreadCmd::GitInfo { .. } => ThreadResult::Value(json!({"in_repo": false})),
                 ThreadCmd::GoalGet => ThreadResult::Value(json!({"goal": null})),
-                ThreadCmd::ExecWrite { session_id, .. } => ThreadResult::Error(format!(
-                    "会话 {session_id} 已结束（非 PTY）"
-                )),
-                ThreadCmd::ExecResize { session_id, .. } => ThreadResult::Error(format!(
-                    "会话 {session_id} 不支持 resize（PTY 未接入）"
-                )),
+                ThreadCmd::ExecStart { command, cols, rows } => ThreadResult::Resumed {
+                    result: json!({
+                        "session_id": "exec-1",
+                        "running": true,
+                        "output": "",
+                        "exit_code": null,
+                        "truncated": false,
+                        "mode": "pty",
+                        "command": command,
+                        "cols": cols,
+                        "rows": rows,
+                    }),
+                    history: vec![],
+                },
+                ThreadCmd::ExecWrite { session_id, data } => ThreadResult::Value(json!({
+                    "session_id": session_id,
+                    "output": data,
+                    "running": true,
+                    "exit_code": null,
+                    "truncated": false,
+                })),
+                ThreadCmd::ExecResize { session_id, cols, rows } => ThreadResult::Value(
+                    json!({"session_id": session_id, "cols": cols, "rows": rows, "resized": true}),
+                ),
                 ThreadCmd::ExecTerminate { session_id } => ThreadResult::Value(
-                    json!({"session_id": session_id, "terminated": true}),
+                    json!({"session_id": session_id, "terminated": true, "running": false}),
                 ),
             }),
         },

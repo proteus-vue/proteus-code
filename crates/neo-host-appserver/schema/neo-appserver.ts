@@ -68,7 +68,7 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "turn/begin": ["text"],
   "turn/pump": [],
   "turn/interrupt": [],
-  "command/exec": ["command"],
+  "command/exec": ["command", "session", "cols", "rows"],
   "approval/respond": ["id", "decision", "reason"],
   "approval/respondStep": ["id", "decision", "reason"],
   "user_input/respond": ["id", "response"],
@@ -104,7 +104,11 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
 export type ApprovalParams = { id: string, decision: Decision, reason: string | null, };
 export type ApprovalPolicy = "untrusted" | "on_request" | "on_failure" | "never";
 export type ClientInfoWire = { name: string, version: string | null, };
-export type CommandParams = { command: string, };
+export type CommandParams = { command: string, 
+/**
+ * true = 启动持活 PTY 会话；缺省 = 一次性 Shell。
+ */
+session: boolean | null, cols: number | null, rows: number | null, };
 export type ContextRef = { kind: RefKind, target: string, 
 /**
  * 行范围（1 基，闭区间）。`None` = 整个文件。

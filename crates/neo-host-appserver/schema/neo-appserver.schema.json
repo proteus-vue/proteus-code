@@ -70,8 +70,33 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`command/exec` 参数。",
       "properties": {
+        "cols": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "command": {
           "type": "string"
+        },
+        "rows": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "session": {
+          "description": "true = 启动持活 PTY 会话；缺省 = 一次性 Shell。",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "required": [

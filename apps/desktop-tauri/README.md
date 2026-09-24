@@ -51,7 +51,7 @@ npm run tauri dev
 | D5 | diff 渲染 | ✅ 行着色 · 并排/统一 · 全屏 |
 | D6 | 轮摘要（token + 耗时） | ✅ |
 | D7 | 右侧 Goal 面板 | ✅ |
-| D8 | 命令台（不经模型） | ⚠️ ⌘K → `command/exec`；真 PTY ⬜ |
+| D8 | 命令台（不经模型） | ✅ 一次性 `command/exec`；`session:true` 持活 PTY + write/resize/terminate（内核侧） |
 | D9 | 命令中心 ⌘K | ✅ |
 | D10 | 审批阻塞 composer + 三档 + 风险常驻 | ✅ |
 | D11 | 执行模式切换 | ✅ 下拉 + ⇧Tab + 面板 |

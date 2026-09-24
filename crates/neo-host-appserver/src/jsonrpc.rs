@@ -135,9 +135,11 @@ pub enum ThreadCmd {
     GitInfo { cwd: Option<String> },
     /// `thread/goal/get`：当前目标完整快照（Codex 同名只读查询）
     GoalGet,
+    /// `command/exec` + `session:true`：启动持活 PTY 会话（Codex unified_exec）
+    ExecStart { command: String, cols: u16, rows: u16 },
     /// `command/exec/write`：向会话写 stdin（对齐 Codex unified_exec）
     ExecWrite { session_id: String, data: String },
-    /// `command/exec/resize`：调整会话终端尺寸（PTY 就绪前如实报不支持）
+    /// `command/exec/resize`：调整会话终端尺寸（PTY）
     ExecResize { session_id: String, cols: u16, rows: u16 },
     /// `command/exec/terminate`：结束会话
     ExecTerminate { session_id: String },
@@ -237,7 +239,7 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "turn/start" | "turn/begin" => &["text"],
         "turn/pump" | "turn/interrupt" | "session/compact" | "session/fork"
         | "goal/advance" | "goal/clear" | "thread/goal/clear" | "thread/goal/get" | "shutdown" => &[],
-        "command/exec" => &["command"],
+        "command/exec" => &["command", "session", "cols", "rows"],
         "approval/respond" | "approval/respondStep" => &["id", "decision", "reason"],
         "user_input/respond" => &["id", "response"],
         "session/configure" => &[
@@ -332,7 +334,15 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
         "turn/interrupt" => Action::Submit(Op::Interrupt),
         "command/exec" => {
             let p: CommandParams = from_params(method, params)?;
-            Action::Submit(Op::Shell { command: p.command })
+            if p.session.unwrap_or(false) {
+                Action::Thread(ThreadCmd::ExecStart {
+                    command: p.command,
+                    cols: p.cols.unwrap_or(80),
+                    rows: p.rows.unwrap_or(24),
+                })
+            } else {
+                Action::Submit(Op::Shell { command: p.command })
+            }
         }
         // 两个审批方法只差变体名，字段完全一致 → 共用一个解析函数
         "approval/respond" => {
@@ -454,6 +464,13 @@ struct TextParams {
 #[derive(Debug, Deserialize)]
 struct CommandParams {
     command: String,
+    /// true = 启动持活 PTY 会话（返回 session_id）；缺省 = 一次性 Op::Shell。
+    #[serde(default)]
+    session: Option<bool>,
+    #[serde(default)]
+    cols: Option<u16>,
+    #[serde(default)]
+    rows: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -633,7 +650,23 @@ mod tests {
     }
 
     #[test]
-    fn initialize_negotiates_protocol_version() {
+    
+    #[test]
+    fn session_true_maps_to_exec_start_and_default_maps_to_shell() {
+        match dispatch("command/exec", &json!({"command": "bash", "session": true})).unwrap() {
+            Action::Thread(ThreadCmd::ExecStart { command, cols, rows }) => {
+                assert_eq!(command, "bash");
+                assert_eq!((cols, rows), (80, 24));
+            }
+            other => panic!("session:true 应产出 ExecStart：{other:?}"),
+        }
+        assert_eq!(
+            dispatch("command/exec", &json!({"command": "ls"})).unwrap(),
+            Action::Submit(Op::Shell { command: "ls".into() }),
+        );
+    }
+
+fn initialize_negotiates_protocol_version() {
         let ok = initialize_result(&InitializeParams {
             protocol_version: Some(PROTOCOL_VERSION),
             client: Some(ClientInfo { name: "vscode-neo".into(), version: Some("0.2".into()) }),

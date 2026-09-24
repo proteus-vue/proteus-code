@@ -109,6 +109,13 @@ pub struct TextParams {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
 pub struct CommandParams {
     pub command: String,
+    /// true = 启动持活 PTY 会话；缺省 = 一次性 Shell。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
 }
 
 /// 审批应答参数（`approval/respond` / `approval/respondStep`）。

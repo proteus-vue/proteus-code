@@ -380,6 +380,8 @@ fn cmd_appserver(args: &[String]) -> i32 {
 
     // 内核独占线程：Op 推进状态机；thread/* 操作会话库（切换要动同一个 Kernel）。
     // stdio 与 unix 两条传输共用这一个处理器 —— 差别只在"谁在连"，业务装配零重复。
+    // PTY 会话表与内核同线程持有（Codex command/exec session 模式）。
+    let mut sessions = neo_sandbox_local::SessionManager::default();
     let handle = move |job| match job {
         neo_host_appserver::Job::Op(op) => {
             let events = kernel
@@ -388,7 +390,8 @@ fn cmd_appserver(args: &[String]) -> i32 {
             neo_host_appserver::JobOut::Events(events)
         }
         neo_host_appserver::Job::Thread { cmd, .. } => {
-            neo_host_appserver::JobOut::Thread(thread_cmd(&mut kernel, &store, cmd))
+            let res = thread_cmd(&mut kernel, &store, &mut sessions, cmd);
+            neo_host_appserver::JobOut::Thread(res)
         }
     };
     let result = match &listen {
@@ -609,6 +612,7 @@ fn facts_to_markdown(id: &str, items: &[neo_protocol::Fact]) -> String {
 fn thread_cmd(
     kernel: &mut neo_core::Kernel,
     store: &neo_session_store::SessionStore,
+    sessions: &mut neo_sandbox_local::SessionManager,
     cmd: neo_host_appserver::ThreadCmd,
 ) -> neo_host_appserver::ThreadResult {
     use neo_host_appserver::{ThreadCmd, ThreadResult};
@@ -805,17 +809,65 @@ fn thread_cmd(
             Some(snap) => ThreadResult::Value(serde_json::json!({ "goal": snap })),
             None => ThreadResult::Value(serde_json::json!({ "goal": null })),
         },
-        ThreadCmd::ExecWrite { session_id, .. } => ThreadResult::Error(format!(
-            "会话 {session_id} 已结束或不存在（当前非 PTY，无法 write_stdin）"
-        )),
-        ThreadCmd::ExecResize { session_id, .. } => ThreadResult::Error(format!(
-            "会话 {session_id} 不支持 resize（PTY 未接入）"
-        )),
-        ThreadCmd::ExecTerminate { session_id } => ThreadResult::Value(serde_json::json!({
-            "session_id": session_id,
-            "terminated": true,
-            "note": "非 PTY 会话本就一次性结束"
-        })),
+        ThreadCmd::ExecStart { command, cols, rows } => {
+            let mode = kernel.resolution().sandbox;
+            let cwd = kernel.cwd().to_path_buf();
+            // LocalSandbox::supports 语义：全权限 always；受限档看平台
+            let sb = neo_sandbox_local::LocalSandbox::new(&cwd);
+            let supported = neo_core::SandboxBackend::supports(&sb, mode);
+            match sessions.start(mode, &cwd, &command, cols, rows, supported) {
+                Ok(s) => {
+                    let id = s.session_id.clone();
+                    ThreadResult::Resumed {
+                        result: serde_json::json!({
+                            "session_id": s.session_id,
+                            "running": s.running,
+                            "output": s.output,
+                            "exit_code": s.exit_code,
+                            "truncated": s.truncated,
+                            "mode": "pty",
+                        }),
+                        history: vec![EventMsg::ToolCallBegin {
+                            id: id.clone(),
+                            name: "bash".into(),
+                            arguments: serde_json::json!({ "cmd": command, "session": true }),
+                        }],
+                    }
+                }
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        ThreadCmd::ExecWrite { session_id, data } => match sessions.write(&session_id, &data) {
+            Ok(s) => ThreadResult::Value(serde_json::json!({
+                "session_id": s.session_id,
+                "output": s.output,
+                "running": s.running,
+                "exit_code": s.exit_code,
+                "truncated": s.truncated,
+            })),
+            Err(e) => ThreadResult::Error(e),
+        },
+        ThreadCmd::ExecResize { session_id, cols, rows } => {
+            match sessions.resize(&session_id, cols, rows) {
+                Ok(()) => ThreadResult::Value(serde_json::json!({
+                    "session_id": session_id,
+                    "cols": cols,
+                    "rows": rows,
+                    "resized": true,
+                })),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        ThreadCmd::ExecTerminate { session_id } => match sessions.terminate(&session_id) {
+            Ok(s) => ThreadResult::Value(serde_json::json!({
+                "session_id": s.session_id,
+                "terminated": true,
+                "output": s.output,
+                "exit_code": s.exit_code,
+                "running": s.running,
+            })),
+            Err(e) => ThreadResult::Error(e),
+        },
     }
 }
 

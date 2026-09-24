@@ -17,3 +17,5 @@ description = "L3 PROVIDER：SandboxBackend 的本机实现（macOS Seatbelt 等
 [dependencies]
 neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
 neo-core = { path = "../neo-core", version = "0.1.0" }
+# 真 PTY（unix 交互会话）。跨平台接口；resize/stdin 走它。
+portable-pty = "0.9"

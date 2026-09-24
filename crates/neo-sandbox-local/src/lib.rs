@@ -30,6 +30,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+pub mod session;
+pub use session::{SessionManager, SessionSnapshot, SESSION_OUTPUT_LIMIT};
+
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct LocalSandbox {
@@ -53,6 +56,12 @@ impl LocalSandbox {
 /// **不放开 `/tmp`**（与 Codex 一致）：只放开显式声明的可写根。
 /// 放开全局临时目录等于把 "workspace-write" 退化成 "几乎任意写" ——
 /// 本实现第一版就这么写过，被真机测试当场抓出越权。
+///
+/// `session` 模块与 `execute` **共用本函数**，避免两份 profile 漂移。
+pub fn seatbelt_profile_pub(mode: SandboxMode) -> Option<String> {
+    seatbelt_profile(mode)
+}
+
 #[cfg(target_os = "macos")]
 fn seatbelt_profile(mode: SandboxMode) -> Option<String> {
     const BASE: &str = r#"
@@ -78,6 +87,11 @@ fn seatbelt_profile(mode: SandboxMode) -> Option<String> {
             "{BASE}\n; 唯一的可写根：由内核注入的 workspace 参数\n(allow file-write* (subpath (param \"WORKSPACE\")))\n"
         )),
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn seatbelt_profile(_mode: SandboxMode) -> Option<String> {
+    None
 }
 
 /// 判断 `path` 是否落在 `root` 之内（安全判定的核心，故单测覆盖）。

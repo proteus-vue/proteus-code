@@ -229,7 +229,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-6 | 侧栏图标折叠 | P1 | ✅ |
 | IA-7 | 工具/思考默认折叠 | P0 | ✅ |
 | IA-8 | Composer @/模式/模型 | P0 | ✅ |
-| IA-9 | 真 PTY / xterm | P2 | 🔄 命令台回显 stdout/stderr；真 PTY 仍 ⬜ |
+| IA-9 | 真 PTY / xterm | P2 | ✅ 内核 SessionManager（portable-pty + 沙箱包装）· `command/exec?session` + write/resize/terminate；桌面 xterm 接线 ⬜ |
 | IA-10 | 图片附件、斜杠命令 | P2 | ✅ 斜杠壳侧（11 条）；图片 ⬜ 待 L0 多模态 |
 | IA-11 | 分栏拖拽 persist | P2 | ✅ 侧栏/右栏 pointer 拖拽 + localStorage |
 | IA-12 | 会话内容搜索、重命名/删除 | P1 | ✅ history 内容搜 · rename · delete（当前会话自动切走再删） |

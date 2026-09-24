@@ -34,7 +34,10 @@
   {
     "name": "command/exec",
     "params": [
-      "command"
+      "command",
+      "session",
+      "cols",
+      "rows"
     ],
     "handshake_only": false
   },
