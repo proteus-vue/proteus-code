@@ -6098,6 +6098,7 @@ button.ctx-chip:hover {
 .composer-input-mirror {
   position: absolute;
   inset: 0;
+  overflow: visible;
   padding: 4px 4px 10px;
   margin: 0;
   border: none;
@@ -6112,8 +6113,9 @@ button.ctx-chip:hover {
   z-index: 0;
 }
 
-/* 路径：红文件图标 + 蓝文字；无底、无框、无 chip padding */
+/* 路径：红文件图标 + 蓝文字；图标绝对定位，不占正文宽度 → 光标对齐 */
 .composer-input-mirror .ref-token {
+  position: relative;
   color: var(--accent, #2563eb);
   background: none;
   border: none;
@@ -6123,11 +6125,23 @@ button.ctx-chip:hover {
 }
 
 .composer-input-mirror .ref-icon {
-  display: inline-block;
-  vertical-align: -0.15em;
-  margin-right: 3px;
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  margin-right: 4px;
   color: #e11d48;
-  flex-shrink: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+/* 行首时图标可能贴边：给 ref 前留出视觉空间仍不改正文流 */
+.composer-input-mirror .ref-token:first-child .ref-icon,
+.composer-input-mirror > span:first-child.ref-token .ref-icon {
+  right: auto;
+  left: -18px;
 }
 
 /* 正文由镜像绘制；textarea 只负责光标/输入 */
