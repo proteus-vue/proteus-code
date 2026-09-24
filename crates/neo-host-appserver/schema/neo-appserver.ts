@@ -18,6 +18,7 @@ export const METHODS = [
   "command/exec",
   "approval/respond",
   "approval/respondStep",
+  "user_input/respond",
   "session/configure",
   "session/compact",
   "session/fork",
@@ -36,9 +37,15 @@ export const METHODS = [
   "thread/rename",
   "thread/history",
   "thread/export",
+  "thread/goal/get",
   "tools/list",
   "models/list",
   "git/info",
+  "command/exec/write",
+  "command/exec/resize",
+  "command/exec/terminate",
+  "thread/goal/set",
+  "thread/goal/clear",
 ] as const;
 export type MethodName = (typeof METHODS)[number];
 
@@ -64,6 +71,7 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "command/exec": ["command"],
   "approval/respond": ["id", "decision", "reason"],
   "approval/respondStep": ["id", "decision", "reason"],
+  "user_input/respond": ["id", "response"],
   "session/configure": ["exec_mode", "sandbox_mode", "approval_policy", "model", "token_budget"],
   "session/compact": [],
   "session/fork": [],
@@ -82,9 +90,15 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "thread/rename": ["id", "title"],
   "thread/history": ["id"],
   "thread/export": ["id", "format"],
+  "thread/goal/get": [],
   "tools/list": [],
   "models/list": [],
   "git/info": ["cwd"],
+  "command/exec/write": ["session_id", "data"],
+  "command/exec/resize": ["session_id", "cols", "rows"],
+  "command/exec/terminate": ["session_id"],
+  "thread/goal/set": ["goal"],
+  "thread/goal/clear": [],
 };
 
 export type ApprovalParams = { id: string, decision: Decision, reason: string | null, };
@@ -122,9 +136,12 @@ arguments: unknown, } } | { "tool_call_end": { id: string, exit_code: number,
  * 而看不到命令打印了什么，等于无法判断这步到底做了什么。
  * 内核已按上限截断，`truncated` 如实标注。
  */
-stdout: string, stderr: string, truncated: boolean, } } | { "approval_request": { id: string, detail: string, kind: string, } } | { "patch_proposed": { path: string, diff: string, } } | { "checkpoint_saved": { checkpoint_id: string, } } | { "file_changed": { path: string, additions: number, deletions: number, } } | { "files_changed": { files: Array<FileChange>, } } | { "context_compacted": { removed_messages: number, summary: string, } } | { "rewound": { turns: number, removed_messages: number, files_kept: number, } } | { "todo_updated": { items: Array<TodoEntry>, } } | { "goal_progress": { goal_id: string, done: number, total: number, } } | { "goal_updated": { snapshot: GoalSnapshot, } } | { "goal_cleared": { goal_id: string, } } | { "error": { message: string, } } | { "turn_complete": { input_tokens: number, output_tokens: number, } } | "shutdown_complete";
+stdout: string, stderr: string, truncated: boolean, } } | { "approval_request": { id: string, detail: string, kind: string, } } | { "user_input_request": { id: string, prompt: string, } } | { "patch_proposed": { path: string, diff: string, } } | { "checkpoint_saved": { checkpoint_id: string, } } | { "file_changed": { path: string, additions: number, deletions: number, } } | { "files_changed": { files: Array<FileChange>, } } | { "context_compacted": { removed_messages: number, summary: string, } } | { "rewound": { turns: number, removed_messages: number, files_kept: number, } } | { "todo_updated": { items: Array<TodoEntry>, } } | { "goal_progress": { goal_id: string, done: number, total: number, } } | { "goal_updated": { snapshot: GoalSnapshot, } } | { "goal_cleared": { goal_id: string, } } | { "error": { message: string, } } | { "turn_complete": { input_tokens: number, output_tokens: number, } } | "shutdown_complete";
 export type EventNotification = { seq: number, kind: string, payload: unknown, };
 export type ExecMode = "plan" | "confirm_before" | "default" | "auto_edit" | "full_access";
+export type ExecResizeParams = { session_id: string, cols: number, rows: number, };
+export type ExecTerminateParams = { session_id: string, };
+export type ExecWriteParams = { session_id: string, data: string, };
 export type Fact = { "user_said": string } | { "refs_resolved": Array<string> } | { "assistant_said": string } | { "assistant_thought": string } | { "tool_finished": { name: string, exit_code: number, stdout: string, stderr: string, truncated: boolean, 
 /**
  * 调用参数原文（来自 ToolCallBegin.arguments 的 JSON 文本）。
@@ -182,7 +199,7 @@ params: Array<string>,
  * 是否在握手前可用。
  */
 handshake_only: boolean, };
-export type Op = { "user_turn": { text: string, refs: Array<ContextRef>, } } | { "begin_turn": { text: string, refs: Array<ContextRef>, } } | "pump" | { "shell": { command: string, } } | "interrupt" | { "approve": { id: string, decision: Decision, reason: string | null, } } | { "approve_step": { id: string, decision: Decision, reason: string | null, } } | { "configure_session": { patch: SessionPatch, } } | "compact" | "fork" | { "rewind": { turns: number, } } | { "goal_set": { goal: string, } } | { "goal_pause": { goal_id: string, } } | { "goal_resume": { goal_id: string, } } | "goal_advance" | "goal_clear" | "shutdown";
+export type Op = { "user_turn": { text: string, refs: Array<ContextRef>, } } | { "begin_turn": { text: string, refs: Array<ContextRef>, } } | "pump" | { "shell": { command: string, } } | "interrupt" | { "approve": { id: string, decision: Decision, reason: string | null, } } | { "approve_step": { id: string, decision: Decision, reason: string | null, } } | { "respond_user_input": { id: string, response: string, } } | { "configure_session": { patch: SessionPatch, } } | "compact" | "fork" | { "rewind": { turns: number, } } | { "goal_set": { goal: string, } } | { "goal_pause": { goal_id: string, } } | { "goal_resume": { goal_id: string, } } | "goal_advance" | "goal_clear" | "shutdown";
 export type RefKind = "file" | "session" | "command" | "skill";
 export type RewindParams = { turns: number, };
 export type RpcErrorObject = { code: number, message: string, data: unknown, };
@@ -232,3 +249,4 @@ state: string, };
 export type TodoEntry = { content: string, status: TodoStatus, };
 export type TodoStatus = "pending" | "in_progress" | "completed";
 export type ToolOutput = { exit_code: number, stdout: string, stderr: string, truncated: boolean, };
+export type UserInputParams = { id: string, response: string, };

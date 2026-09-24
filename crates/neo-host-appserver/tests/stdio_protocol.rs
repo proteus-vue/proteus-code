@@ -112,10 +112,13 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 29, "initialize + 17 Op + 11 control");
+    assert_eq!(methods.len(), 36, "initialize + 18 Op + 15 control + 2 alias");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
     assert!(methods.iter().any(|m| m == "thread/rename"), "改名必须在线上可达");
+    assert!(methods.iter().any(|m| m == "thread/goal/get"), "Codex goal 只读查询必须可达");
+    assert!(methods.iter().any(|m| m == "user_input/respond"), "问用户反向通道必须可达");
+    assert!(methods.iter().any(|m| m == "command/exec/write"), "终端 write 必须可达");
     // 宿主能力（SPI 的既有数据，不是这条协议新造的）
     assert_eq!(r["result"]["host"]["id"], "app-server");
     assert_eq!(r["result"]["host"]["capabilities"]["interactive_prompt"], true);
@@ -166,6 +169,11 @@ fn every_op_method_reaches_the_kernel_as_its_own_op() {
             "approval/respondStep",
             json!({ "id": "ap-2", "decision": "allow_always" }),
             Op::ApproveStep { id: "ap-2".into(), decision: Decision::AllowAlways, reason: None },
+        ),
+        (
+            "user_input/respond",
+            json!({ "id": "ui-1", "response": "选 A" }),
+            Op::RespondUserInput { id: "ui-1".into(), response: "选 A".into() },
         ),
         (
             "session/configure",
@@ -440,6 +448,16 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 ThreadCmd::Tools => ThreadResult::Value(json!({"tools": [{"name":"bash"}]})),
                 ThreadCmd::Models => ThreadResult::Value(json!({"models": [{"name":"mock"}], "current": "mock"})),
                 ThreadCmd::GitInfo { .. } => ThreadResult::Value(json!({"in_repo": false})),
+                ThreadCmd::GoalGet => ThreadResult::Value(json!({"goal": null})),
+                ThreadCmd::ExecWrite { session_id, .. } => ThreadResult::Error(format!(
+                    "会话 {session_id} 已结束（非 PTY）"
+                )),
+                ThreadCmd::ExecResize { session_id, .. } => ThreadResult::Error(format!(
+                    "会话 {session_id} 不支持 resize（PTY 未接入）"
+                )),
+                ThreadCmd::ExecTerminate { session_id } => ThreadResult::Value(
+                    json!({"session_id": session_id, "terminated": true}),
+                ),
             }),
         },
     )

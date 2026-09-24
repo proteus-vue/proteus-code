@@ -609,6 +609,31 @@
         },
         {
           "additionalProperties": false,
+          "description": "内核请求宿主向用户提问（`request_user_input` / Codex ServerRequest 形态）。\n\n宿主用 `Op::RespondUserInput` 以**同一 id** 回写答复。\n与 `ApprovalRequest` 分开：审批是 Allow/Deny，提问要的是自由文本。",
+          "properties": {
+            "user_input_request": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "prompt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "prompt"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "user_input_request"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "properties": {
             "patch_proposed": {
               "properties": {
@@ -953,6 +978,66 @@
       ],
       "title": "ExecMode",
       "type": "string"
+    },
+    "ExecResizeParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`command/exec/resize` 参数。",
+      "properties": {
+        "cols": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "cols",
+        "rows"
+      ],
+      "title": "ExecResizeParams",
+      "type": "object"
+    },
+    "ExecTerminateParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`command/exec/terminate` 参数。",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "ExecTerminateParams",
+      "type": "object"
+    },
+    "ExecWriteParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`command/exec/write` 参数。",
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "data"
+      ],
+      "title": "ExecWriteParams",
+      "type": "object"
     },
     "Fact": {
       "$defs": {
@@ -1977,6 +2062,31 @@
         },
         {
           "additionalProperties": false,
+          "description": "应答一次 `request_user_input` 挂起（对齐 Codex `item/tool/requestUserInput`）。\n\n`response` 是用户原话，作为该工具调用的 stdout 进入模型可见历史。",
+          "properties": {
+            "respond_user_input": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "response": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "response"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "respond_user_input"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "properties": {
             "configure_session": {
               "properties": {
@@ -2475,6 +2585,24 @@
       ],
       "title": "ToolOutput",
       "type": "object"
+    },
+    "UserInputParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`user_input/respond` 参数。",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "response": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "response"
+      ],
+      "title": "UserInputParams",
+      "type": "object"
     }
   },
   "$id": "https://proteus.local/schema/neo-appserver.schema.json",
@@ -2500,6 +2628,7 @@
     "command/exec",
     "approval/respond",
     "approval/respondStep",
+    "user_input/respond",
     "session/configure",
     "session/compact",
     "session/fork",
@@ -2518,9 +2647,15 @@
     "thread/rename",
     "thread/history",
     "thread/export",
+    "thread/goal/get",
     "tools/list",
     "models/list",
-    "git/info"
+    "git/info",
+    "command/exec/write",
+    "command/exec/resize",
+    "command/exec/terminate",
+    "thread/goal/set",
+    "thread/goal/clear"
   ],
   "x-notification": {
     "event": {
@@ -2556,6 +2691,10 @@
     "TextParams",
     "CommandParams",
     "ApprovalParams",
+    "UserInputParams",
+    "ExecWriteParams",
+    "ExecResizeParams",
+    "ExecTerminateParams",
     "RewindParams",
     "GoalParams",
     "GoalIdParams",

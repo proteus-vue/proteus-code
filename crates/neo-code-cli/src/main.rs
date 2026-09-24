@@ -801,6 +801,21 @@ fn thread_cmd(
                 "items": items,
             }))
         }
+        ThreadCmd::GoalGet => match kernel.goal_snapshot() {
+            Some(snap) => ThreadResult::Value(serde_json::json!({ "goal": snap })),
+            None => ThreadResult::Value(serde_json::json!({ "goal": null })),
+        },
+        ThreadCmd::ExecWrite { session_id, .. } => ThreadResult::Error(format!(
+            "会话 {session_id} 已结束或不存在（当前非 PTY，无法 write_stdin）"
+        )),
+        ThreadCmd::ExecResize { session_id, .. } => ThreadResult::Error(format!(
+            "会话 {session_id} 不支持 resize（PTY 未接入）"
+        )),
+        ThreadCmd::ExecTerminate { session_id } => ThreadResult::Value(serde_json::json!({
+            "session_id": session_id,
+            "terminated": true,
+            "note": "非 PTY 会话本就一次性结束"
+        })),
     }
 }
 

@@ -173,6 +173,10 @@ pub enum Op {
     /// （用户曾因此在冻结期间敲键，解冻后那些键被逐个处理，误触退出）。
     /// 逐帧宿主用这个变体，然后自己 `Pump` 逐步推进。
     ApproveStep { id: ApprovalId, decision: Decision, #[serde(default)] reason: Option<String> },
+    /// 应答一次 `request_user_input` 挂起（对齐 Codex `item/tool/requestUserInput`）。
+    ///
+    /// `response` 是用户原话，作为该工具调用的 stdout 进入模型可见历史。
+    RespondUserInput { id: ApprovalId, response: String },
     ConfigureSession { patch: SessionPatch },
     Compact,
     Fork,
@@ -462,6 +466,11 @@ pub enum EventMsg {
     /// 宿主若按工具名自行推断，bash 这类"按命令内容分类"的工具就会
     /// 显示成与内核实际放行范围不一致的类别（显示"只读"、实际放行"写入"）。
     ApprovalRequest { id: ApprovalId, detail: String, #[serde(default)] kind: String },
+    /// 内核请求宿主向用户提问（`request_user_input` / Codex ServerRequest 形态）。
+    ///
+    /// 宿主用 `Op::RespondUserInput` 以**同一 id** 回写答复。
+    /// 与 `ApprovalRequest` 分开：审批是 Allow/Deny，提问要的是自由文本。
+    UserInputRequest { id: ApprovalId, prompt: String },
     PatchProposed { path: String, diff: String },
     CheckpointSaved { checkpoint_id: String },
     /// 单个文件发生改动（**由工具上报**，内核据此累计）。
@@ -658,6 +667,11 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
             }
             EventMsg::ApprovalRequest { detail, .. } => {
                 out.push(Fact::ApprovalNeeded { detail: detail.clone() })
+            }
+            // 提问也是「需要用户介入」的事实；复用 ApprovalNeeded 避免扩 Fact 枚举
+            // 波及全部宿主 match（detail 前缀区分，history 投影仍可读）。
+            EventMsg::UserInputRequest { prompt, .. } => {
+                out.push(Fact::ApprovalNeeded { detail: format!("需要用户输入：{prompt}") })
             }
             EventMsg::UserSubmitted { text } => out.push(Fact::UserSaid(text.clone())),
             EventMsg::RefsResolved { summary, .. } => {

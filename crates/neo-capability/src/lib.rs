@@ -276,12 +276,14 @@ impl Tool for RequestUserInputTool {
     fn describe(&self) -> String { "request_user_input(prompt): 向用户提问。".into() }
     fn call_kind(&self, _args: &Value) -> CallKind { CallKind::Interactive }
     fn execute(&self, _args: &Value, _ctx: &ToolCtx) -> ToolOutput {
-        // 诚实边界：真正的交互需要宿主的 `interactive_prompt` 能力（T6 覆盖），
-        // 当前只固定分类与契约。
+        // 正常路径**不会走到这里**：内核对 Interactive 在闸门前就挂
+        // `UserInputRequest`，由宿主 `user_input/respond` 回写答复。
+        // 保留本体是因为 Tool 契约要求 execute；若被并行腿/测试直接调用，
+        // 仍如实报未接线而不是假装成功。
         ToolOutput {
             exit_code: -1,
             stdout: String::new(),
-            stderr: "request_user_input 需宿主交互能力；本原型未接线".into(),
+            stderr: "request_user_input 应经内核挂起 UserInputRequest；直接 execute 未接线".into(),
             truncated: false,
         }
     }

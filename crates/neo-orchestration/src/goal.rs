@@ -57,10 +57,10 @@ impl EngineGoalOrchestrator {
     }
 
     fn snapshot_event(&self) -> EventMsg {
-        EventMsg::GoalUpdated { snapshot: self.snapshot() }
+        EventMsg::GoalUpdated { snapshot: self.snapshot_impl() }
     }
 
-    fn snapshot(&self) -> GoalSnapshot {
+    fn snapshot_impl(&self) -> GoalSnapshot {
         let st = self.state.as_ref().expect("snapshot 仅在有状态时调用");
         let subtasks = st
             .engine
@@ -140,6 +140,11 @@ fn to_proto_phase(p: Phase) -> GoalPhase {
 impl GoalOrchestrator for EngineGoalOrchestrator {
     fn goal_id(&self) -> Option<GoalId> {
         self.state.as_ref().map(|s| s.engine.goal_id.clone())
+    }
+
+    fn snapshot(&self) -> Option<GoalSnapshot> {
+        // 有状态才调用内在 snapshot（它 panic 于 None）
+        self.state.as_ref().map(|_| self.snapshot_impl())
     }
 
     fn set_goal(&mut self, goal: &str) -> Vec<EventMsg> {
@@ -354,6 +359,11 @@ mod tests {
         EngineGoalOrchestrator::new()
     }
 
+    /// 有状态时取快照（`GoalOrchestrator::snapshot` 返回 Option）。
+    fn snap(o: &EngineGoalOrchestrator) -> GoalSnapshot {
+        o.snapshot().expect("有活动目标时应有快照")
+    }
+
     #[test]
     fn decomposes_goal_by_lines_into_subtasks() {
         let mut o = orch();
@@ -390,7 +400,7 @@ mod tests {
         o.on_turn_complete((10, 5), false, "");
         // 单子任务全部完成
         assert!(!o.has_pending_turn(), "单子任务走完四阶段应无剩余");
-        let snap = o.snapshot();
+        let snap = snap(&o);
         assert_eq!(snap.done_count(), 1);
         assert_eq!(snap.turns_remaining, 0);
     }
@@ -404,11 +414,11 @@ mod tests {
         }
         // 审查轮出错（failed = true）→ 回退 Code
         o.on_turn_complete((0, 0), true, "");
-        assert_eq!(o.snapshot().subtasks[0].phase, GoalPhase::Code, "审查失败应回退到 Code");
-        assert_eq!(o.snapshot().subtasks[0].retries, 1);
+        assert_eq!(snap(&o).subtasks[0].phase, GoalPhase::Code, "审查失败应回退到 Code");
+        assert_eq!(snap(&o).subtasks[0].retries, 1);
         // 重做：Code → Review
         o.on_turn_complete((0, 0), false, "");
-        assert_eq!(o.snapshot().subtasks[0].phase, GoalPhase::Review);
+        assert_eq!(snap(&o).subtasks[0].phase, GoalPhase::Review);
     }
 
     #[test]
@@ -422,7 +432,7 @@ mod tests {
         o.on_turn_complete((0, 0), false, ""); // Plan → Code
         o.on_turn_complete((0, 0), false, ""); // Code → Review
         o.on_turn_complete((0, 0), true, "");  // 审查失败 → retries 1 达上限
-        let snap = o.snapshot();
+        let snap = snap(&o);
         assert_eq!(snap.stopped.as_deref(), Some("max_review_retries"), "应判停并上报原因");
         assert!(!o.has_pending_turn(), "停止后不得再推进");
     }
@@ -481,11 +491,11 @@ mod tests {
         // 审查轮：无硬失败，但模型明确否定
         o.on_turn_complete((0, 0), false, "实现有越界问题，审查未通过：越界原因……");
         assert_eq!(
-            o.snapshot().subtasks[0].phase,
+            snap(&o).subtasks[0].phase,
             GoalPhase::Code,
             "显式否定必须回退重做"
         );
-        assert_eq!(o.snapshot().subtasks[0].retries, 1);
+        assert_eq!(snap(&o).subtasks[0].retries, 1);
     }
 
     #[test]
@@ -497,9 +507,9 @@ mod tests {
         o.on_turn_complete((0, 0), false, "");                       // Plan → Code
         o.on_turn_complete((0, 0), false, "");                       // Code → Review
         o.on_turn_complete((0, 0), false, "细节核对无误，审查通过。"); // 显式肯定
-        assert_eq!(o.snapshot().subtasks[0].phase, GoalPhase::Learn);
+        assert_eq!(snap(&o).subtasks[0].phase, GoalPhase::Learn);
         o.on_turn_complete((0, 0), false, "总结：完成。");            // 未表态 → 放行
-        assert_eq!(o.snapshot().subtasks[0].phase, GoalPhase::Done);
+        assert_eq!(snap(&o).subtasks[0].phase, GoalPhase::Done);
     }
 
     #[test]
@@ -508,7 +518,7 @@ mod tests {
         let mut o = orch();
         o.set_goal("做一件事");
         o.on_turn_complete((0, 0), false, "先声明：审查未通过这个词出现在这里只是引用。"); // Plan
-        assert_eq!(o.snapshot().subtasks[0].phase, GoalPhase::Code, "非审查轮的否定词应被忽略");
+        assert_eq!(snap(&o).subtasks[0].phase, GoalPhase::Code, "非审查轮的否定词应被忽略");
     }
 
     #[test]
@@ -519,7 +529,7 @@ mod tests {
         o.on_turn_complete((0, 0), false, ""); // Plan → Code
         o.on_turn_complete((0, 0), false, ""); // Code → Review
         o.on_turn_complete((0, 0), true, "审查通过"); // 但轮内有硬失败
-        assert_eq!(o.snapshot().subtasks[0].phase, GoalPhase::Code, "硬失败必须压过显式肯定");
+        assert_eq!(snap(&o).subtasks[0].phase, GoalPhase::Code, "硬失败必须压过显式肯定");
     }
 
     #[test]

@@ -138,6 +138,34 @@ pub struct GoalIdParams {
     pub goal_id: String,
 }
 
+/// `user_input/respond` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct UserInputParams {
+    pub id: String,
+    pub response: String,
+}
+
+/// `command/exec/write` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct ExecWriteParams {
+    pub session_id: String,
+    pub data: String,
+}
+
+/// `command/exec/resize` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct ExecResizeParams {
+    pub session_id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// `command/exec/terminate` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct ExecTerminateParams {
+    pub session_id: String,
+}
+
 /// 事件通知的线形状：`{"seq", "kind", "payload"}`。
 ///
 /// 载荷嵌在 `payload` 下（与 JSONL 会话日志同构），**不摊平** ——
@@ -210,6 +238,10 @@ pub const ROOT_TYPES: &[&str] = &[
     "TextParams",
     "CommandParams",
     "ApprovalParams",
+    "UserInputParams",
+    "ExecWriteParams",
+    "ExecResizeParams",
+    "ExecTerminateParams",
     "RewindParams",
     "GoalParams",
     "GoalIdParams",
@@ -256,6 +288,10 @@ pub fn json_schema_document() -> Value {
     add!(TextParams);
     add!(CommandParams);
     add!(ApprovalParams);
+    add!(UserInputParams);
+    add!(ExecWriteParams);
+    add!(ExecResizeParams);
+    add!(ExecTerminateParams);
     add!(RewindParams);
     add!(GoalParams);
     add!(GoalIdParams);
@@ -416,6 +452,10 @@ pub fn typescript_source() -> String {
     emit!(TextParams);
     emit!(CommandParams);
     emit!(ApprovalParams);
+    emit!(UserInputParams);
+    emit!(ExecWriteParams);
+    emit!(ExecResizeParams);
+    emit!(ExecTerminateParams);
     emit!(RewindParams);
     emit!(GoalParams);
     emit!(GoalIdParams);
@@ -477,7 +517,7 @@ mod tests {
     fn method_docs_cover_all_ops() {
         let docs = method_docs();
         // initialize + 17 个 Op + 10 个 control
-        assert_eq!(docs.len(), 29, "方法表应为 initialize + 17 Op + 11 control");
+        assert_eq!(docs.len(), 36, "方法表应为 initialize + 18 Op + 15 control + 2 alias");
         assert!(docs[0].handshake_only);
         assert_eq!(docs[0].name, "initialize");
         assert!(docs.iter().any(|d| d.name == "thread/resume"));
@@ -485,6 +525,9 @@ mod tests {
         assert!(docs.iter().any(|d| d.name == "tools/list"));
         assert!(docs.iter().any(|d| d.name == "models/list"));
         assert!(docs.iter().any(|d| d.name == "git/info"));
+        assert!(docs.iter().any(|d| d.name == "thread/goal/get"));
+        assert!(docs.iter().any(|d| d.name == "user_input/respond"));
+        assert!(docs.iter().any(|d| d.name == "command/exec/write"));
     }
 
     /// 写盘：`cargo test -p neo-host-appserver --features schema export_schema -- --ignored`

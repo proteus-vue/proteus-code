@@ -223,6 +223,8 @@ impl Compactor for NoCompactor {
 pub trait GoalOrchestrator: Send {
     /// 当前目标 id；无活动目标为 `None`。
     fn goal_id(&self) -> Option<String>;
+    /// 当前完整快照（`thread/goal/get` 只读查询）。无活动目标为 `None`。
+    fn snapshot(&self) -> Option<neo_protocol::GoalSnapshot>;
     /// 设定（或重定向）目标。返回要落日志的事件（快照）。
     fn set_goal(&mut self, goal: &str) -> Vec<EventMsg>;
     /// 暂停：目标保留，停止推进。
@@ -677,7 +679,7 @@ fn call_kind_name(kind: CallKind) -> &'static str {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelError {
-    /// 没有待审批的调用却收到 Approve。
+    /// 没有待审批的调用却收到 Approve / RespondUserInput。
     NoPendingApproval(ApprovalId),
     /// 持久化失败（含 append-only 被破坏）。
     Persistence(PersistenceError),
@@ -720,7 +722,7 @@ pub enum KernelError {
 impl std::fmt::Display for KernelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoPendingApproval(id) => write!(f, "无待审批调用：{id}"),
+            Self::NoPendingApproval(id) => write!(f, "无待处理的挂起（审批/用户输入）：{id}"),
             Self::Persistence(e) => write!(f, "{e}"),
             Self::Unimplemented(what) => write!(f, "该 Op 尚未实现：{what}"),
             Self::CompactUnavailable(msg) => write!(f, "{msg}"),
@@ -755,6 +757,8 @@ impl std::error::Error for KernelError {}
 pub enum KernelState {
     Idle,
     AwaitingApproval { id: ApprovalId },
+    /// `request_user_input` 挂起：等宿主 `Op::RespondUserInput`。
+    AwaitingUserInput { id: ApprovalId },
 }
 
 /// 挂起点：同一步内，第 `index` 个调用等待审批。
@@ -768,6 +772,8 @@ struct PendingApproval {
     /// 本次挂起是否为 doom-loop 独立闸门（护栏 #6）。
     /// 循环闸门的「总是允许」**不得**写入 `granted`（否则等于永久关闸）。
     loop_gate: bool,
+    /// true = 等用户自由文本（`RespondUserInput`），false = 等审批（`Approve*`）。
+    user_input: bool,
 }
 
 /// 一步中尚未消费完的模型流（跨 `Op::Pump` 存活）。
@@ -1071,6 +1077,9 @@ impl Kernel {
             // 同 `Approve`，但**不驱动**后续步骤（逐帧宿主用，配合 `Op::Pump`）。
             Op::ApproveStep { id, decision, reason } => {
                 self.resolve_approval(id, decision, reason, false)?;
+            }
+            Op::RespondUserInput { id, response } => {
+                self.resolve_user_input(id, response)?;
             }
 
             Op::Rewind { turns } => {
@@ -1602,7 +1611,10 @@ impl Kernel {
             }
             // 不构成并行段：单条只读或任何非只读 → 串行处理 index
             self.execute_one_serial(&calls, index)?;
-            if matches!(self.state, KernelState::AwaitingApproval { .. }) {
+            if matches!(
+                self.state,
+                KernelState::AwaitingApproval { .. } | KernelState::AwaitingUserInput { .. }
+            ) {
                 return Ok(ExecOutcome::Suspended);
             }
             index += 1;
@@ -1645,6 +1657,32 @@ impl Kernel {
     ) -> Result<(), KernelError> {
         let call = calls[index].clone();
         let kind = self.classify(&call);
+        // 交互类工具（request_user_input）不经审批闸门、也不进 execute：
+        // 直接挂「问用户」反向请求（Codex item/tool/requestUserInput 同形）。
+        // 放在 gate 之前：问人本身就是交互，不是写/读权限问题。
+        if kind == CallKind::Interactive {
+            let prompt = call
+                .arguments
+                .get("prompt")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("需要你的输入")
+                .to_string();
+            let id = format!(
+                "user-input-{}-{}-{}",
+                self.turn_counter, self.step_counter, index
+            );
+            let ev = EventMsg::UserInputRequest { id: id.clone(), prompt };
+            self.emit_and_log(&ev)?;
+            self.pending = Some(PendingApproval {
+                calls: calls.to_vec(),
+                index,
+                loop_gate: false,
+                user_input: true,
+            });
+            self.state = KernelState::AwaitingUserInput { id };
+            return Ok(());
+        }
         // 护栏 #6：doom-loop 闸门**永远不参与自动批准** ——
         // 必须在 gate()/granted 之前拦截：FullAccess 的 Never 策略
         // 与「总是允许」类别记忆都不能把它变成 Allow。
@@ -1708,6 +1746,7 @@ impl Kernel {
                     calls: calls.to_vec(),
                     index,
                     loop_gate: is_loop,
+                    user_input: false,
                 });
                 self.state = KernelState::AwaitingApproval { id };
                 Ok(())
@@ -1871,6 +1910,11 @@ impl Kernel {
         let Some(pending) = self.pending.take() else {
             return Err(KernelError::NoPendingApproval(id));
         };
+        if pending.user_input {
+            // 挂起的是提问，不是审批 —— 方法用错了要响亮失败
+            self.pending = Some(pending);
+            return Err(KernelError::NoPendingApproval(id));
+        }
         let call = pending.calls[pending.index].clone();
         self.state = KernelState::Idle;
 
@@ -1935,6 +1979,44 @@ impl Kernel {
         Ok(())
     }
 
+    /// 应答一次用户输入挂起：答复作为该工具调用的 stdout 写入模型可见历史。
+    ///
+    /// 与审批同构：id 单一事实源来自内核；答复原样进 `ToolCallEnd.stdout`，
+    /// 模型因此知道用户回了什么（「模型可见即已落盘」）。
+    fn resolve_user_input(&mut self, id: ApprovalId, response: String) -> Result<(), KernelError> {
+        let Some(pending) = self.pending.take() else {
+            return Err(KernelError::NoPendingApproval(id));
+        };
+        if !pending.user_input {
+            // 挂起的是审批不是提问 —— 方法用错了要响亮失败
+            self.pending = Some(pending);
+            return Err(KernelError::NoPendingApproval(id));
+        }
+        let call = pending.calls[pending.index].clone();
+        self.state = KernelState::Idle;
+        let text = response.trim().to_string();
+        let ev = EventMsg::ToolCallEnd {
+            id: call.id.clone(),
+            exit_code: 0,
+            stdout: text.clone(),
+            stderr: String::new(),
+            truncated: false,
+        };
+        self.emit_and_log(&ev)?;
+        self.messages.push(Message::ToolResult {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            output: ToolOutput {
+                exit_code: 0,
+                stdout: text,
+                stderr: String::new(),
+                truncated: false,
+            },
+        });
+        // 同步：同一步剩余调用 + 驱动后续步骤（与 Approve 的 drive=true 一致）
+        self.finish_step_from(&pending.calls, pending.index + 1)
+    }
+
     fn finish_step_from(&mut self, calls: &[ToolInvocation], start: usize) -> Result<(), KernelError> {
         if start < calls.len() {
             match self.execute_from(calls, start)? {
@@ -1989,6 +2071,11 @@ impl Kernel {
     /// 当前目标的单行状态（宿主展示用）。无活动目标为 `None`。
     pub fn goal_status(&self) -> Option<String> {
         self.goal.as_ref().and_then(|g| g.goal_id()).map(|id| format!("目标 {id} 进行中"))
+    }
+
+    /// 当前目标完整快照（app-server `thread/goal/get`）。无活动目标为 `None`。
+    pub fn goal_snapshot(&self) -> Option<neo_protocol::GoalSnapshot> {
+        self.goal.as_ref().and_then(|g| g.snapshot())
     }
 
     /// 取当前会话已落盘的日志（供重建与会话切换使用）。

@@ -57,6 +57,14 @@
     "handshake_only": false
   },
   {
+    "name": "user_input/respond",
+    "params": [
+      "id",
+      "response"
+    ],
+    "handshake_only": false
+  },
+  {
     "name": "session/configure",
     "params": [
       "exec_mode",
@@ -175,6 +183,11 @@
     "handshake_only": false
   },
   {
+    "name": "thread/goal/get",
+    "params": [],
+    "handshake_only": false
+  },
+  {
     "name": "tools/list",
     "params": [],
     "handshake_only": false
@@ -189,6 +202,42 @@
     "params": [
       "cwd"
     ],
+    "handshake_only": false
+  },
+  {
+    "name": "command/exec/write",
+    "params": [
+      "session_id",
+      "data"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "command/exec/resize",
+    "params": [
+      "session_id",
+      "cols",
+      "rows"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "command/exec/terminate",
+    "params": [
+      "session_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/goal/set",
+    "params": [
+      "goal"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/goal/clear",
+    "params": [],
     "handshake_only": false
   }
 ]

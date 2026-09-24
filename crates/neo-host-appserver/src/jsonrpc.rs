@@ -133,12 +133,23 @@ pub enum ThreadCmd {
     Models,
     /// `git/info`：工作区 git 元数据（branch / sha / origin_url）—— 零子进程
     GitInfo { cwd: Option<String> },
+    /// `thread/goal/get`：当前目标完整快照（Codex 同名只读查询）
+    GoalGet,
+    /// `command/exec/write`：向会话写 stdin（对齐 Codex unified_exec）
+    ExecWrite { session_id: String, data: String },
+    /// `command/exec/resize`：调整会话终端尺寸（PTY 就绪前如实报不支持）
+    ExecResize { session_id: String, cols: u16, rows: u16 },
+    /// `command/exec/terminate`：结束会话
+    ExecTerminate { session_id: String },
 }
 
-/// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，17 个）。
+/// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，18 个）。
 ///
 /// 这份表是**契约的一部分**：握手响应里原样返回它，客户端据此决定
 /// 自己能用哪些能力，不需要读内核源码。
+///
+/// 另有两个 **Codex 名别名**（不占 Op 槽位，在 [`ALIAS_METHODS`]）：
+/// `thread/goal/set` ≡ `goal/set`，`thread/goal/clear` ≡ `goal/clear`。
 pub const OP_METHODS: &[&str] = &[
     "turn/start",
     "turn/begin",
@@ -147,6 +158,7 @@ pub const OP_METHODS: &[&str] = &[
     "command/exec",
     "approval/respond",
     "approval/respondStep",
+    "user_input/respond",
     "session/configure",
     "session/compact",
     "session/fork",
@@ -158,6 +170,9 @@ pub const OP_METHODS: &[&str] = &[
     "goal/clear",
     "shutdown",
 ];
+
+/// Codex 方法名别名：映射到已有 `Op`，不增加 `Op` 变体数。
+pub const ALIAS_METHODS: &[&str] = &["thread/goal/set", "thread/goal/clear"];
 
 /// 会话库控制方法（`ThreadCmd`）。**不是 Op 映射**，故不进 [`OP_METHODS`]。
 ///
@@ -171,16 +186,21 @@ pub const THREAD_METHODS: &[&str] = &[
     "thread/rename",
     "thread/history",
     "thread/export",
+    "thread/goal/get",
     "tools/list",
     "models/list",
     "git/info",
+    "command/exec/write",
+    "command/exec/resize",
+    "command/exec/terminate",
 ];
 
-/// 全部方法名（握手用）：`initialize` + 17 个 Op + 11 个 control。
+/// 全部方法名（握手用）：`initialize` + 18 个 Op + 15 个 control + 2 别名 = 36。
 pub fn method_table() -> Vec<&'static str> {
     let mut v = vec!["initialize"];
     v.extend_from_slice(OP_METHODS);
     v.extend_from_slice(THREAD_METHODS);
+    v.extend_from_slice(ALIAS_METHODS);
     v
 }
 
@@ -198,6 +218,10 @@ pub fn method_param_docs() -> Vec<(&'static str, &'static [&'static str])> {
         let keys = allowed_keys(m).unwrap_or(&[]);
         v.push((m, keys));
     }
+    for m in ALIAS_METHODS {
+        let keys = allowed_keys(m).unwrap_or(&[]);
+        v.push((m, keys));
+    }
     v
 }
 
@@ -212,9 +236,10 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "initialize" => &["protocol_version", "client"],
         "turn/start" | "turn/begin" => &["text"],
         "turn/pump" | "turn/interrupt" | "session/compact" | "session/fork"
-        | "goal/advance" | "goal/clear" | "shutdown" => &[],
+        | "goal/advance" | "goal/clear" | "thread/goal/clear" | "thread/goal/get" | "shutdown" => &[],
         "command/exec" => &["command"],
         "approval/respond" | "approval/respondStep" => &["id", "decision", "reason"],
+        "user_input/respond" => &["id", "response"],
         "session/configure" => &[
             "exec_mode",
             "sandbox_mode",
@@ -223,7 +248,7 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
             "token_budget",
         ],
         "session/rewind" => &["turns"],
-        "goal/set" => &["goal"],
+        "goal/set" | "thread/goal/set" => &["goal"],
         "goal/pause" | "goal/resume" => &["goal_id"],
         "thread/get" | "thread/resume" | "thread/delete" => &["id"],
         "thread/rename" => &["id", "title"],
@@ -231,6 +256,9 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "thread/export" => &["id", "format"],
         "thread/list" | "thread/create" | "tools/list" | "models/list" => &[],
         "git/info" => &["cwd"],
+        "command/exec/write" => &["session_id", "data"],
+        "command/exec/resize" => &["session_id", "cols", "rows"],
+        "command/exec/terminate" => &["session_id"],
         _ => return None,
     })
 }
@@ -271,6 +299,7 @@ fn from_params<T: for<'de> Deserialize<'de>>(method: &str, params: &Value) -> Re
 pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
     if !OP_METHODS.contains(&method)
         && !THREAD_METHODS.contains(&method)
+        && !ALIAS_METHODS.contains(&method)
         && method != "initialize"
     {
         return Err(RpcError::new(
@@ -314,6 +343,10 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             let ApprovalFields { id, decision, reason } = approval(method, params)?;
             Action::Submit(Op::ApproveStep { id, decision, reason })
         }
+        "user_input/respond" => {
+            let p: UserInputParams = from_params(method, params)?;
+            Action::Submit(Op::RespondUserInput { id: p.id, response: p.response })
+        }
         "session/configure" => {
             let patch: SessionPatch = from_params(method, params)?;
             Action::Submit(Op::ConfigureSession { patch })
@@ -324,7 +357,7 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             let p: RewindParams = from_params(method, params)?;
             Action::Submit(Op::Rewind { turns: p.turns })
         }
-        "goal/set" => {
+        "goal/set" | "thread/goal/set" => {
             let p: GoalParams = from_params(method, params)?;
             Action::Submit(Op::GoalSet { goal: p.goal })
         }
@@ -337,7 +370,7 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             Action::Submit(Op::GoalResume { goal_id: p.goal_id })
         }
         "goal/advance" => Action::Submit(Op::GoalAdvance),
-        "goal/clear" => Action::Submit(Op::GoalClear),
+        "goal/clear" | "thread/goal/clear" => Action::Submit(Op::GoalClear),
         "thread/list" => Action::Thread(ThreadCmd::List),
         "thread/get" => {
             let p: IdParams = from_params(method, params)?;
@@ -356,6 +389,23 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             let p: RenameParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::Rename { id: p.id, title: p.title })
         }
+        "thread/goal/get" => Action::Thread(ThreadCmd::GoalGet),
+        "command/exec/write" => {
+            let p: ExecWriteParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ExecWrite { session_id: p.session_id, data: p.data })
+        }
+        "command/exec/resize" => {
+            let p: ExecResizeParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ExecResize {
+                session_id: p.session_id,
+                cols: p.cols,
+                rows: p.rows,
+            })
+        }
+        "command/exec/terminate" => {
+            let p: ExecTerminateParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ExecTerminate { session_id: p.session_id })
+        }
         "thread/history" => {
             let p: HistoryParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::History { id: p.id })
@@ -371,7 +421,7 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             Action::Thread(ThreadCmd::GitInfo { cwd: p.cwd })
         }
         "shutdown" => Action::Shutdown,
-        // 不可达：method 已在上面按 OP_METHODS 拦过。
+        // 不可达：method 已在上面按 OP/THREAD/ALIAS 拦过。
         other => return Err(RpcError::new(METHOD_NOT_FOUND, format!("不认识的方法：{other}"))),
     })
 }
@@ -480,6 +530,34 @@ fn approval(method: &str, params: &Value) -> Result<ApprovalFields, RpcError> {
     Ok(ApprovalFields { id: p.id, decision: p.decision, reason: p.reason })
 }
 
+/// `user_input/respond` 参数。
+#[derive(Debug, Deserialize)]
+struct UserInputParams {
+    id: String,
+    response: String,
+}
+
+/// `command/exec/write` 参数。
+#[derive(Debug, Deserialize)]
+struct ExecWriteParams {
+    session_id: String,
+    data: String,
+}
+
+/// `command/exec/resize` 参数。
+#[derive(Debug, Deserialize)]
+struct ExecResizeParams {
+    session_id: String,
+    cols: u16,
+    rows: u16,
+}
+
+/// `command/exec/terminate` 参数。
+#[derive(Debug, Deserialize)]
+struct ExecTerminateParams {
+    session_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,11 +567,12 @@ mod tests {
         // 17 个方法对应协议层 17 个 Op 变体。数量写死在这里是**故意的**：
         // 协议层新增 `Op` 变体时，这个断言会红，逼着来补映射 ——
         // 否则新能力只在 TUI/桌面可用，线上永远发不出去（静默缺口）。
-        assert_eq!(OP_METHODS.len(), 17, "Op 变体与方法数必须一一对应");
+        assert_eq!(OP_METHODS.len(), 18, "Op 变体与方法数必须一一对应");
         let mut sorted = OP_METHODS.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), OP_METHODS.len(), "方法名不得重复");
+        assert_eq!(ALIAS_METHODS.len(), 2, "Codex goal 别名应有 2 个");
     }
 
     #[test]
@@ -563,8 +642,8 @@ mod tests {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(29),
-            "initialize + 17 Op + 11 control"
+            Some(36),
+            "initialize + 18 Op + 15 control + 2 alias"
         );
 
         // 版本不匹配必须拒绝，且把双方版本放进 data（机器可读）

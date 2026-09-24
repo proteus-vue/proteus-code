@@ -61,26 +61,44 @@ fn drain_approvals(
     ok: &mut bool,
 ) {
     let mut guard = 0;
-    while let neo_core::KernelState::AwaitingApproval { id } = kernel.state().clone() {
+    loop {
         guard += 1;
         if guard > 64 {
             *ok = false;
-            log.push("[exec] 审批轮次过多，中止（可能是应答逻辑或内核状态机异常）".into());
+            log.push("[exec] 审批/输入轮次过多，中止（可能是应答逻辑或内核状态机异常）".into());
             break;
         }
-        if !opts.json {
-            log.push(format!("[exec] 审批 {id} → {:?}（无人值守默认策略）", opts.on_approval));
-        }
-        // Decision 是 Copy，取引用后的副本即可
-        let decision = opts.on_approval;
-        // 无人值守没有理由输入，reason = None（拒绝文案退回固定一句）
-        match kernel.submit(Op::Approve { id, decision, reason: None }) {
-            Ok(events) => render(&events, opts, log),
-            Err(e) => {
-                *ok = false;
-                log.push(format!("[exec] 审批失败：{e}"));
-                break;
+        match kernel.state().clone() {
+            neo_core::KernelState::AwaitingApproval { id } => {
+                if !opts.json {
+                    log.push(format!(
+                        "[exec] 审批 {id} → {:?}（无人值守默认策略）",
+                        opts.on_approval
+                    ));
+                }
+                let decision = opts.on_approval;
+                match kernel.submit(Op::Approve { id, decision, reason: None }) {
+                    Ok(events) => render(&events, opts, log),
+                    Err(e) => {
+                        *ok = false;
+                        log.push(format!("[exec] 审批失败：{e}"));
+                        break;
+                    }
+                }
             }
+            neo_core::KernelState::AwaitingUserInput { id } => {
+                // 无人值守没有交互能力：给固定占位答复，不空转等待
+                let response = "（无人值守：本环境无法交互，未获得用户输入）".to_string();
+                match kernel.submit(Op::RespondUserInput { id, response }) {
+                    Ok(events) => render(&events, opts, log),
+                    Err(e) => {
+                        *ok = false;
+                        log.push(format!("[exec] 用户输入应答失败：{e}"));
+                        break;
+                    }
+                }
+            }
+            neo_core::KernelState::Idle => break,
         }
     }
 }
@@ -244,6 +262,9 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
                 Some(s)
             }
             EventMsg::ApprovalRequest { detail, .. } => Some(format!("[审批] {detail}")),
+            EventMsg::UserInputRequest { prompt, .. } => {
+                Some(format!("[提问] {prompt}（等待宿主 user_input/respond）"))
+            }
             EventMsg::Error { message } => Some(format!("[错误] {message}")),
             EventMsg::TurnComplete { input_tokens, output_tokens } => Some(format!(
                 "[turn] 完成（in {input_tokens} / out {output_tokens} tokens）"

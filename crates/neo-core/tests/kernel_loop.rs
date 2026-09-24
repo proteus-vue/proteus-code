@@ -280,6 +280,78 @@ fn a_write_suspends_the_turn_and_approval_resumes_it() {
         "恢复后应完成本轮");
 }
 
+/// 反向通道：`request_user_input` 挂起 → 宿主 `RespondUserInput` 回写答复。
+#[test]
+fn request_user_input_suspends_and_respond_writes_stdout_to_history() {
+    struct InteractiveAsk;
+    impl Tool for InteractiveAsk {
+        fn name(&self) -> &str { "request_user_input" }
+        fn describe(&self) -> String { "ask(prompt)".into() }
+        fn call_kind(&self, _args: &Value) -> CallKind { CallKind::Interactive }
+        fn execute(&self, _a: &Value, _c: &ToolCtx) -> ToolOutput {
+            ToolOutput {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: "不应在挂起路径执行".into(),
+                truncated: false,
+            }
+        }
+    }
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(InteractiveAsk));
+    let script = vec![
+        vec![tool_call(
+            "ui1",
+            "request_user_input",
+            serde_json::json!({"prompt": "选 A 还是 B？"}),
+        )],
+        vec![ModelDelta::Text("ok".into())],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        r,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    let events = k.submit(Op::UserTurn { text: "问一下".into(), refs: vec![] }).unwrap();
+    let ask = events.iter().find_map(|e| match e {
+        EventMsg::UserInputRequest { id, prompt } => Some((id.clone(), prompt.clone())),
+        _ => None,
+    });
+    let (id, prompt) = ask.expect("应发出 UserInputRequest");
+    assert_eq!(prompt, "选 A 还是 B？");
+    assert!(matches!(k.state(), KernelState::AwaitingUserInput { .. }), "应挂起等输入");
+    assert!(!events.iter().any(|e| matches!(e, EventMsg::TurnComplete { .. })));
+
+    // 错误方法（审批）不得吃掉输入挂起
+    let err = k
+        .submit(Op::Approve { id: id.clone(), decision: Decision::Allow, reason: None })
+        .unwrap_err();
+    assert!(matches!(err, neo_core::KernelError::NoPendingApproval(_)), "审批应被拒：{err:?}");
+    assert!(matches!(k.state(), KernelState::AwaitingUserInput { .. }));
+
+    let resumed = k
+        .submit(Op::RespondUserInput { id, response: "选 A".into() })
+        .unwrap();
+    assert!(matches!(k.state(), KernelState::Idle));
+    let end = resumed.iter().find_map(|e| match e {
+        EventMsg::ToolCallEnd { id, exit_code, stdout, .. } if id == "ui1" => {
+            Some((*exit_code, stdout.clone()))
+        }
+        _ => None,
+    });
+    assert_eq!(end, Some((0, "选 A".to_string())), "答复应进 ToolCallEnd.stdout");
+    assert!(resumed.iter().any(|e| matches!(e, EventMsg::TurnComplete { .. })));
+    // 模型可见历史里必须有 tool result（可从日志回放）
+    let logs = k.log_records();
+    let has_result = logs.iter().any(|r| {
+        r.kind == "event"
+            && r.payload.get("tool_call_end").and_then(|v| v.get("id")).and_then(Value::as_str)
+                == Some("ui1")
+    });
+    assert!(has_result, "答复必须落日志");
+}
+
 #[test]
 fn denial_records_a_tool_result_without_executing() {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1656,6 +1728,9 @@ struct ScriptedOrchestrator {
     shared: Arc<std::sync::Mutex<GoalShared>>,
     prompts: std::collections::VecDeque<String>,
     paused: bool,
+    /// 是否有活动目标（set 后 true，clear 后 false）。
+    active: bool,
+    goal_text: String,
 }
 
 #[derive(Default)]
@@ -1667,28 +1742,43 @@ struct GoalShared {
 }
 
 impl ScriptedOrchestrator {
-    fn goal_id(&self) -> Option<String> {
-        Some("goal-1".into())
+    fn new(shared: Arc<std::sync::Mutex<GoalShared>>, prompts: std::collections::VecDeque<String>) -> Self {
+        Self { shared, prompts, paused: false, active: false, goal_text: String::new() }
     }
 }
 
 impl GoalOrchestrator for ScriptedOrchestrator {
     fn goal_id(&self) -> Option<String> {
-        self.goal_id()
+        self.active.then(|| "goal-1".into())
     }
-    fn set_goal(&mut self, _goal: &str) -> Vec<EventMsg> {
-        vec![EventMsg::GoalUpdated { snapshot: self_snapshot() }]
+    fn snapshot(&self) -> Option<GoalSnapshot> {
+        self.active.then(|| {
+            let mut s = self_snapshot();
+            if !self.goal_text.is_empty() {
+                s.goal = self.goal_text.clone();
+            }
+            s
+        })
+    }
+    fn set_goal(&mut self, goal: &str) -> Vec<EventMsg> {
+        self.active = true;
+        self.goal_text = goal.to_string();
+        let mut s = self_snapshot();
+        s.goal = goal.to_string();
+        vec![EventMsg::GoalUpdated { snapshot: s }]
     }
     fn pause(&mut self) -> Vec<EventMsg> {
         self.paused = true;
-        vec![EventMsg::GoalUpdated { snapshot: self_snapshot() }]
+        vec![EventMsg::GoalUpdated { snapshot: self.snapshot().unwrap_or_else(self_snapshot) }]
     }
     fn resume(&mut self) -> Vec<EventMsg> {
         self.paused = false;
-        vec![EventMsg::GoalUpdated { snapshot: self_snapshot() }]
+        vec![EventMsg::GoalUpdated { snapshot: self.snapshot().unwrap_or_else(self_snapshot) }]
     }
     fn clear(&mut self) -> Vec<EventMsg> {
         self.prompts.clear();
+        self.active = false;
+        self.goal_text.clear();
         vec![EventMsg::GoalCleared { goal_id: "goal-1".into() }]
     }
     fn has_pending_turn(&self) -> bool {
@@ -1707,7 +1797,9 @@ impl GoalOrchestrator for ScriptedOrchestrator {
         sh.completes += 1;
         sh.last_failed = Some(failed);
         sh.last_review_text = Some(review_text.to_string());
-        vec![EventMsg::GoalUpdated { snapshot: self_snapshot() }]
+        vec![EventMsg::GoalUpdated {
+            snapshot: self.snapshot().unwrap_or_else(self_snapshot),
+        }]
     }
     fn observe(&mut self, event: &EventMsg) {
         let kind = match event {
@@ -1744,11 +1836,10 @@ fn goal_kernel(
     prompts: &[&str],
 ) -> (neo_core::Kernel, Arc<std::sync::Mutex<GoalShared>>) {
     let shared = Arc::new(std::sync::Mutex::new(GoalShared::default()));
-    let orch = ScriptedOrchestrator {
-        shared: shared.clone(),
-        prompts: prompts.iter().map(|s| s.to_string()).collect(),
-        paused: false,
-    };
+    let orch = ScriptedOrchestrator::new(
+        shared.clone(),
+        prompts.iter().map(|s| s.to_string()).collect(),
+    );
     let k = kernel_with(
         Box::new(ScriptedModelProvider::new(script)),
         read_tool(),
@@ -1804,6 +1895,22 @@ fn goal_advance_runs_a_full_subtask_turn_and_advances_the_engine() {
     assert_eq!(sh.last_failed, Some(false), "本轮无失败，审查判据应为通过");
 }
 
+/// `thread/goal/get` 的内核侧：设定后能取到完整快照，清除后为 None。
+#[test]
+fn goal_snapshot_is_readable_after_set_and_none_after_clear() {
+    let (mut k, _shared) = goal_kernel(
+        vec![],
+        &[],
+    );
+    assert!(k.goal_snapshot().is_none(), "未设定时应为 None");
+    k.submit(Op::GoalSet { goal: "可查目标".into() }).unwrap();
+    let snap = k.goal_snapshot().expect("设定后应有快照");
+    assert_eq!(snap.goal, "可查目标");
+    assert_eq!(snap.goal_id, "goal-1");
+    k.submit(Op::GoalClear).unwrap();
+    assert!(k.goal_snapshot().is_none(), "清除后应为 None");
+}
+
 #[test]
 fn goal_review_survives_a_failed_read_probe() {
     // 审查轮里模型用只读工具核验（cat 一个不存在的路径很正常）——
@@ -1815,11 +1922,10 @@ fn goal_review_survives_a_failed_read_probe() {
         vec![ModelDelta::Text("审查通过".into())],
     ];
     let shared = Arc::new(std::sync::Mutex::new(GoalShared::default()));
-    let orch = ScriptedOrchestrator {
-        shared: shared.clone(),
-        prompts: std::collections::VecDeque::from(["审查一下".to_string()]),
-        paused: false,
-    };
+    let orch = ScriptedOrchestrator::new(
+        shared.clone(),
+        std::collections::VecDeque::from(["审查一下".to_string()]),
+    );
     let mut k = kernel_with(
         Box::new(ScriptedModelProvider::new(script)),
         r,
@@ -1847,11 +1953,10 @@ fn goal_review_still_fails_on_a_failed_write() {
         vec![ModelDelta::Text("x".into())],
     ];
     let shared = Arc::new(std::sync::Mutex::new(GoalShared::default()));
-    let orch = ScriptedOrchestrator {
-        shared: shared.clone(),
-        prompts: std::collections::VecDeque::from(["改一下".to_string()]),
-        paused: false,
-    };
+    let orch = ScriptedOrchestrator::new(
+        shared.clone(),
+        std::collections::VecDeque::from(["改一下".to_string()]),
+    );
     // FullAccess：审批 Never、文件编辑 Auto —— 写入直达执行
     // （default 档下写入会先挂审批，轮次根本跑不到记账那一步）
     let mut k = kernel_with(
@@ -1924,11 +2029,7 @@ fn replay_feeds_every_event_to_the_orchestrator() {
     // 新内核 + 新编排器，从同一份日志重建
     let (fresh_shared, orch) = {
         let shared = Arc::new(std::sync::Mutex::new(GoalShared::default()));
-        let orch = ScriptedOrchestrator {
-            shared: shared.clone(),
-            prompts: std::collections::VecDeque::new(),
-            paused: false,
-        };
+        let orch = ScriptedOrchestrator::new(shared.clone(), std::collections::VecDeque::new());
         (shared, orch)
     };
     let mut fresh = kernel_with(
