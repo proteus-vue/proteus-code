@@ -1844,10 +1844,10 @@ export default function App() {
               anchor={projAnchor}
             />
           </div>
-          {hasProject && (
-            <span className="ctx-chip muted" title="当前分支">
+          {hasProject && branch && branch !== "—" && branch.trim() !== "" && (
+            <span className="ctx-chip muted" title={`当前分支 ${branch}`}>
               <Icon name="goal" size={12} />
-              {branch && branch !== "—" ? branch : "—"}
+              {branch}
             </span>
           )}
         </div>

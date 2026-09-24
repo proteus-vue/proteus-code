@@ -158,3 +158,43 @@ body.is-resizing * {
 .menu-backdrop {
   display: none !important;
 }
+
+/* ═══ IA-51 缩放后新建任务态：chips 与卡片同轴钉底，勿飘到顶 ═══ */
+.center .stream:has(.hero) {
+  min-height: max(320px, 42vh);
+  flex: 1 1 auto;
+}
+
+.composer.mode-new {
+  flex: 0 0 auto !important;
+  margin-top: auto !important;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* chips / 卡片 / 建议条同一内容列宽（与 composer-card 的 48rem 对齐） */
+.composer.mode-new .ctx-chips,
+.composer.mode-new .composer-card,
+.composer.mode-new .suggest-row {
+  width: min(48rem, 100%);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.composer.mode-new .ctx-chips {
+  margin-top: 0;
+  margin-bottom: 8px;
+  justify-content: flex-start;
+}
+
+.composer.mode-new .suggest-row {
+  margin-top: 14px;
+  justify-content: center;
+}
+
+/* 对话态不把 chips 拉宽影响已有布局 */
+.composer.mode-chat .ctx-chips {
+  display: none;
+}
