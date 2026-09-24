@@ -591,6 +591,225 @@
     "handshake_only": false
   },
   {
+    "name": "threadSection/list",
+    "params": [
+      "cursor",
+      "limit"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "threadSection/create",
+    "params": [
+      "name",
+      "appearance"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "threadSection/update",
+    "params": [
+      "sectionId",
+      "section_id",
+      "name",
+      "appearance"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "threadSection/delete",
+    "params": [
+      "sectionId",
+      "section_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/section/move",
+    "params": [
+      "threadId",
+      "thread_id",
+      "sectionId",
+      "section_id",
+      "beforeThreadId",
+      "before_thread_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/unsubscribe",
+    "params": [
+      "threadId",
+      "thread_id",
+      "id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "config/value/write",
+    "params": [
+      "keyPath",
+      "key_path",
+      "value",
+      "mergeStrategy",
+      "merge_strategy",
+      "filePath",
+      "file_path",
+      "expectedVersion",
+      "expected_version"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "config/batchWrite",
+    "params": [
+      "edits",
+      "filePath",
+      "file_path",
+      "expectedVersion",
+      "expected_version",
+      "reloadUserConfig",
+      "reload_user_config"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "config/mcpServer/reload",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "configRequirements/read",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "skills/config/write",
+    "params": [
+      "enabled",
+      "name",
+      "path"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "skills/extraRoots/set",
+    "params": [
+      "extraRoots",
+      "extra_roots"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "experimentalFeature/list",
+    "params": [
+      "cursor",
+      "limit",
+      "threadId",
+      "thread_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "experimentalFeature/enablement/set",
+    "params": [
+      "enablement"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "app/list",
+    "params": [
+      "cursor",
+      "forceRefetch",
+      "force_refetch",
+      "limit",
+      "threadId",
+      "thread_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "app/read",
+    "params": [
+      "appIds",
+      "app_ids",
+      "includeTools",
+      "include_tools",
+      "threadId",
+      "thread_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "app/installed",
+    "params": [
+      "forceRefresh",
+      "force_refresh",
+      "threadId",
+      "thread_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "fuzzyFileSearch",
+    "params": [
+      "query",
+      "roots",
+      "cancellationToken",
+      "cancellation_token"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "windowsSandbox/readiness",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "windowsSandbox/setupStart",
+    "params": [
+      "mode",
+      "cwd"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/approveGuardianDeniedAction",
+    "params": [
+      "event",
+      "threadId",
+      "thread_id",
+      "id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "review/start",
+    "params": [
+      "target",
+      "threadId",
+      "thread_id",
+      "delivery"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "feedback/upload",
+    "params": [
+      "classification",
+      "reason",
+      "tags",
+      "includeLogs",
+      "include_logs",
+      "extraLogFiles",
+      "extra_log_files",
+      "threadId",
+      "thread_id"
+    ],
+    "handshake_only": false
+  },
+  {
     "name": "thread/goal/set",
     "params": [
       "goal"

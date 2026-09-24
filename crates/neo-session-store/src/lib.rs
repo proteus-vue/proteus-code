@@ -303,6 +303,250 @@ impl SessionStore {
     pub fn is_empty(&self) -> bool {
         self.list().is_empty()
     }
+
+    // ── 线分区（Codex `threadSection/*` + `thread/section/move`）────────
+    //
+    // 分区是**会话库的组织层**，不是对话真相：单独 sidecar JSON，
+    // 不进 `.jsonl` append-only 流（分区重排会频繁改写，不该污染会话日志）。
+
+    fn sections_path(&self) -> PathBuf {
+        self.root.join(".sections.json")
+    }
+
+    fn load_sections_doc(&self) -> serde_json::Value {
+        let Ok(raw) = std::fs::read_to_string(self.sections_path()) else {
+            return serde_json::json!({ "sections": [], "threads": {} });
+        };
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({ "sections": [], "threads": {} }))
+    }
+
+    fn save_sections_doc(&self, doc: &serde_json::Value) -> std::io::Result<()> {
+        if let Some(dir) = self.sections_path().parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(
+            self.sections_path(),
+            serde_json::to_string_pretty(doc).map_err(|e| std::io::Error::other(e.to_string()))? + "\n",
+        )
+    }
+
+    /// 列出分区（含各自有序 threadId 列表）。
+    pub fn list_sections(&self) -> Vec<serde_json::Value> {
+        let doc = self.load_sections_doc();
+        let threads = doc.get("threads").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let mut out = Vec::new();
+        let Some(arr) = doc.get("sections").and_then(|a| a.as_array()) else {
+            return out;
+        };
+        for s in arr {
+            let sid = s.get("sectionId").and_then(|v| v.as_str()).unwrap_or("");
+            let mut members: Vec<(u64, String)> = Vec::new();
+            if let Some(map) = threads.as_object() {
+                for (tid, meta) in map {
+                    if meta.get("sectionId").and_then(|v| v.as_str()) == Some(sid) {
+                        let order = meta.get("order").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+                        members.push((order, tid.clone()));
+                    }
+                }
+            }
+            members.sort();
+            let mut s = s.clone();
+            if let Some(obj) = s.as_object_mut() {
+                obj.insert(
+                    "threadIds".into(),
+                    serde_json::Value::Array(
+                        members.into_iter().map(|(_, t)| serde_json::Value::String(t)).collect(),
+                    ),
+                );
+            }
+            out.push(s);
+        }
+        out.sort_by_key(|s| {
+            s.get("order").and_then(|v| v.as_u64()).unwrap_or(u64::MAX)
+        });
+        out
+    }
+
+    /// 新建分区。`sectionId` 由服务端生成（稳定、可 sanitize）。
+    pub fn create_section(
+        &self,
+        name: &str,
+        appearance: Option<serde_json::Value>,
+    ) -> std::io::Result<serde_json::Value> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "分区名不能为空"));
+        }
+        let mut doc = self.load_sections_doc();
+        let sections = doc
+            .get_mut("sections")
+            .and_then(|v| v.as_array_mut())
+            .ok_or_else(|| std::io::Error::other("sections 损坏"))?;
+        let used: std::collections::BTreeSet<String> = sections
+            .iter()
+            .filter_map(|s| s.get("sectionId").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        let mut n = sections.len() + 1;
+        let section_id = loop {
+            let id = format!("sec-{n}");
+            if !used.contains(&id) {
+                break id;
+            }
+            n += 1;
+        };
+        let order = sections.len() as u64;
+        let entry = serde_json::json!({
+            "sectionId": section_id,
+            "name": name.chars().take(64).collect::<String>(),
+            "appearance": appearance.unwrap_or(serde_json::Value::Null),
+            "order": order,
+        });
+        sections.push(entry.clone());
+        self.save_sections_doc(&doc)?;
+        Ok(entry)
+    }
+
+    /// 更新分区名 / appearance。`appearance: None` = 不改；`Some(Null)` = 清除。
+    pub fn update_section(
+        &self,
+        section_id: &str,
+        name: &str,
+        appearance: Option<Option<serde_json::Value>>,
+    ) -> std::io::Result<serde_json::Value> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "分区名不能为空"));
+        }
+        let mut doc = self.load_sections_doc();
+        let sections = doc
+            .get_mut("sections")
+            .and_then(|v| v.as_array_mut())
+            .ok_or_else(|| std::io::Error::other("sections 损坏"))?;
+        let mut found = None;
+        for s in sections.iter_mut() {
+            if s.get("sectionId").and_then(|v| v.as_str()) == Some(section_id) {
+                if let Some(obj) = s.as_object_mut() {
+                    obj.insert("name".into(), serde_json::Value::String(name.chars().take(64).collect()));
+                    if let Some(ap) = appearance {
+                        obj.insert("appearance".into(), ap.unwrap_or(serde_json::Value::Null));
+                    }
+                    found = Some(s.clone());
+                }
+                break;
+            }
+        }
+        let Some(entry) = found else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("分区 {section_id} 不存在"),
+            ));
+        };
+        self.save_sections_doc(&doc)?;
+        Ok(entry)
+    }
+
+    /// 删除分区：分区消失，其下线移到未分组（sectionId=null）。
+    pub fn delete_section(&self, section_id: &str) -> std::io::Result<bool> {
+        let mut doc = self.load_sections_doc();
+        let before = doc
+            .get("sections")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if let Some(arr) = doc.get_mut("sections").and_then(|v| v.as_array_mut()) {
+            arr.retain(|s| s.get("sectionId").and_then(|v| v.as_str()) != Some(section_id));
+        }
+        if doc
+            .get("sections")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+            == before
+        {
+            return Ok(false);
+        }
+        if let Some(map) = doc.get_mut("threads").and_then(|v| v.as_object_mut()) {
+            for (_, meta) in map.iter_mut() {
+                if meta.get("sectionId").and_then(|v| v.as_str()) == Some(section_id) {
+                    if let Some(obj) = meta.as_object_mut() {
+                        obj.insert("sectionId".into(), serde_json::Value::Null);
+                    }
+                }
+            }
+        }
+        self.save_sections_doc(&doc)?;
+        Ok(true)
+    }
+
+    /// 把线移入 / 移出分区。`section_id: None` = 移出。`before_thread_id` 控制组内顺序。
+    pub fn move_thread_to_section(
+        &self,
+        thread_id: &str,
+        section_id: Option<&str>,
+        before_thread_id: Option<&str>,
+    ) -> std::io::Result<serde_json::Value> {
+        if let Some(sid) = section_id {
+            let exists = self
+                .load_sections_doc()
+                .get("sections")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().any(|s| s.get("sectionId").and_then(|v| v.as_str()) == Some(sid)))
+                .unwrap_or(false);
+            if !exists {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("分区 {sid} 不存在"),
+                ));
+            }
+        }
+        let mut doc = self.load_sections_doc();
+        if !doc.get("threads").and_then(|v| v.as_object()).is_some() {
+            doc["threads"] = serde_json::json!({});
+        }
+        // 组内 order：默认追加；给 before_thread_id 则取其 order-1 插入语义（用其 order，稳定排序够用）
+        let mut order = 0u64;
+        if let (Some(map), Some(before)) = (
+            doc.get("threads").and_then(|v| v.as_object()),
+            before_thread_id,
+        ) {
+            if let Some(meta) = map.get(before) {
+                order = meta.get("order").and_then(|v| v.as_u64()).unwrap_or(0);
+            }
+        } else if let Some(map) = doc.get("threads").and_then(|v| v.as_object()) {
+            let max = map
+                .values()
+                .filter(|m| {
+                    section_id.is_none_or(|sid| {
+                        m.get("sectionId").and_then(|v| v.as_str()) == Some(sid)
+                    })
+                })
+                .filter_map(|m| m.get("order").and_then(|v| v.as_u64()))
+                .max()
+                .unwrap_or(0);
+            order = max.saturating_add(1);
+        }
+        let entry = serde_json::json!({
+            "sectionId": section_id.map(|s| serde_json::Value::String(s.to_string())).unwrap_or(serde_json::Value::Null),
+            "order": order,
+        });
+        doc["threads"][thread_id] = entry.clone();
+        self.save_sections_doc(&doc)?;
+        Ok(serde_json::json!({
+            "threadId": thread_id,
+            "sectionId": section_id,
+            "order": order,
+        }))
+    }
+
+    /// Codex `thread/unsubscribe`：本实现无推送订阅 —— 幂等成功并如实说明。
+    pub fn unsubscribe(&self, thread_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "threadId": thread_id,
+            "unsubscribed": true,
+            "subscribed": false,
+            "note": "NEO 无推送订阅；本调用幂等成功",
+        })
+    }
 }
 
 /// 把任意字符串规范成安全的文件名。
@@ -797,6 +1041,47 @@ mod tests {
         std::fs::write(d.join("notes.txt"), "hi").unwrap();
         std::fs::write(d.join("backup.jsonl.bak"), "hi").unwrap();
         assert!(s.list().is_empty(), "只认 .jsonl");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn sections_create_move_delete_roundtrip() {
+        let d = tmpdir("sections");
+        let s = SessionStore::open(&d);
+        write_session(&s, "t-1", "任务一", 1);
+        write_session(&s, "t-2", "任务二", 1);
+
+        assert!(s.list_sections().is_empty());
+        let sec = s
+            .create_section("工作", Some(serde_json::json!({"color": "#3b82f6"})))
+            .unwrap();
+        let sid = sec["sectionId"].as_str().unwrap().to_string();
+        assert!(sid.starts_with("sec-"));
+        assert_eq!(s.list_sections().len(), 1);
+
+        let moved = s.move_thread_to_section("t-1", Some(&sid), None).unwrap();
+        assert_eq!(moved["sectionId"], sid.as_str());
+        let listed = s.list_sections();
+        assert_eq!(listed[0]["threadIds"], serde_json::json!(["t-1"]));
+
+        // 移出
+        s.move_thread_to_section("t-1", None, None).unwrap();
+        assert_eq!(s.list_sections()[0]["threadIds"], serde_json::json!([]));
+
+        // 更新名
+        let up = s.update_section(&sid, "  重要  ", None).unwrap();
+        assert_eq!(up["name"], "重要");
+
+        // 删除后线回到未分组且分区消失
+        s.move_thread_to_section("t-2", Some(&sid), None).unwrap();
+        assert!(s.delete_section(&sid).unwrap());
+        assert!(s.list_sections().is_empty());
+        assert!(!s.delete_section(&sid).unwrap(), "二次删除应 false");
+
+        let unsub = s.unsubscribe("t-1");
+        assert_eq!(unsub["unsubscribed"], true);
+        assert!(unsub["note"].as_str().unwrap().contains("无推送"));
+
         let _ = std::fs::remove_dir_all(&d);
     }
 }

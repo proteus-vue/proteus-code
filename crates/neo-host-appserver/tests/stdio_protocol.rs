@@ -112,7 +112,7 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 79, "initialize + 19 Op + 55 control + aliases");
+    assert_eq!(methods.len(), 102, "initialize + 19 Op + 78 control + aliases");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
     assert!(methods.iter().any(|m| m == "turn/steer"), "Codex steer 必须可达");
@@ -536,6 +536,71 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 ),
                 ThreadCmd::PluginSkillRead { plugin, skill } => ThreadResult::Value(
                     json!({"pluginId": plugin, "skillName": skill, "content": ""}),
+                ),
+                ThreadCmd::SectionList { .. } => ThreadResult::Value(
+                    json!({"sections": [], "nextCursor": null}),
+                ),
+                ThreadCmd::SectionCreate { name, .. } => ThreadResult::Value(
+                    json!({"sectionId": "sec-1", "name": name}),
+                ),
+                ThreadCmd::SectionUpdate { section_id, name, .. } => ThreadResult::Value(
+                    json!({"sectionId": section_id, "name": name}),
+                ),
+                ThreadCmd::SectionDelete { section_id } => ThreadResult::Value(
+                    json!({"sectionId": section_id, "removed": true}),
+                ),
+                ThreadCmd::SectionMoveThread { thread_id, section_id, .. } => ThreadResult::Value(
+                    json!({"threadId": thread_id, "sectionId": section_id}),
+                ),
+                ThreadCmd::ThreadUnsubscribe { id } => ThreadResult::Value(
+                    json!({"threadId": id, "unsubscribed": true}),
+                ),
+                ThreadCmd::ConfigValueWrite { key_path, .. } => ThreadResult::Value(
+                    json!({"keyPath": key_path, "applied": true}),
+                ),
+                ThreadCmd::ConfigBatchWrite { edits, .. } => ThreadResult::Value(
+                    json!({"applied": edits.len()}),
+                ),
+                ThreadCmd::ConfigMcpReload => ThreadResult::Value(
+                    json!({"reloaded": true, "servers": []}),
+                ),
+                ThreadCmd::ConfigRequirementsRead => ThreadResult::Value(
+                    json!({"requirements": []}),
+                ),
+                ThreadCmd::SkillsConfigWrite { enabled, name, path } => ThreadResult::Value(
+                    json!({"enabled": enabled, "name": name, "path": path}),
+                ),
+                ThreadCmd::SkillsExtraRootsSet { extra_roots } => ThreadResult::Value(
+                    json!({"extraRoots": extra_roots}),
+                ),
+                ThreadCmd::ExperimentalList { .. } => ThreadResult::Value(
+                    json!({"features": [], "nextCursor": null}),
+                ),
+                ThreadCmd::ExperimentalSet { enablement } => ThreadResult::Value(
+                    json!({"enablement": enablement}),
+                ),
+                ThreadCmd::AppList { .. } => ThreadResult::Value(json!({"apps": []})),
+                ThreadCmd::AppRead { app_ids, .. } => ThreadResult::Value(
+                    json!({"apps": [], "requested": app_ids}),
+                ),
+                ThreadCmd::AppInstalled { .. } => ThreadResult::Value(json!({"apps": []})),
+                ThreadCmd::FuzzyFileSearch { query, .. } => ThreadResult::Value(
+                    json!({"matches": [], "truncated": false, "query": query}),
+                ),
+                ThreadCmd::WindowsSandboxReadiness => ThreadResult::Value(
+                    json!({"supported": false, "ready": false}),
+                ),
+                ThreadCmd::WindowsSandboxSetupStart { mode, .. } => ThreadResult::Error(
+                    format!("仅 Windows：{mode}"),
+                ),
+                ThreadCmd::GuardianDenied { id, .. } => ThreadResult::Error(
+                    format!("无 Guardian：{id}"),
+                ),
+                ThreadCmd::ReviewStart { thread_id, .. } => ThreadResult::Value(
+                    json!({"started": true, "threadId": thread_id, "drives": false}),
+                ),
+                ThreadCmd::FeedbackUpload { classification, .. } => ThreadResult::Value(
+                    json!({"uploaded": false, "classification": classification}),
                 ),
             }),
         },

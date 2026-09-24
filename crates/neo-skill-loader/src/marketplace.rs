@@ -463,6 +463,8 @@ mod tests {
 
     #[test]
     fn marketplace_add_list_install_uninstall_roundtrip() {
+        // 与 skill_config 测试共享 NEO_HOME：进程内串行，避免并行 env 互踩
+        let _guard = crate::test_env::neo_home_lock();
         let home = tmp_home("rt");
         // 构造本地市场
         let src = home.join("src-market");
@@ -515,6 +517,7 @@ mod tests {
 
     #[test]
     fn marketplace_add_rejects_missing_source() {
+        let _guard = crate::test_env::neo_home_lock();
         let home = tmp_home("badsrc");
         unsafe {
             std::env::set_var("NEO_HOME", &home);

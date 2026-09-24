@@ -1422,7 +1422,659 @@ fn thread_cmd(
                 Err(e) => ThreadResult::Error(e),
             }
         }
+        // ── 线分区（sidecar，不进会话 JSONL）────────────────────────────
+        ThreadCmd::SectionList { cursor: _, limit } => {
+            let mut sections = store.list_sections();
+            if let Some(n) = limit {
+                sections.truncate(n as usize);
+            }
+            ThreadResult::Value(serde_json::json!({
+                "sections": sections,
+                "nextCursor": serde_json::Value::Null,
+            }))
+        }
+        ThreadCmd::SectionCreate { name, appearance } => match store.create_section(&name, appearance) {
+            Ok(v) => ThreadResult::Value(v),
+            Err(e) => ThreadResult::Error(e.to_string()),
+        },
+        ThreadCmd::SectionUpdate { section_id, name, appearance } => {
+            match store.update_section(&section_id, &name, appearance) {
+                Ok(v) => ThreadResult::Value(v),
+                Err(e) => ThreadResult::Error(e.to_string()),
+            }
+        }
+        ThreadCmd::SectionDelete { section_id } => match store.delete_section(&section_id) {
+            Ok(removed) => ThreadResult::Value(serde_json::json!({
+                "sectionId": section_id,
+                "removed": removed,
+            })),
+            Err(e) => ThreadResult::Error(e.to_string()),
+        },
+        ThreadCmd::SectionMoveThread { thread_id, section_id, before_thread_id } => {
+            if thread_id != kernel.session_id() && !store.exists(&thread_id) {
+                return ThreadResult::Error(format!("会话 {thread_id} 不存在"));
+            }
+            match store.move_thread_to_section(&thread_id, section_id.as_deref(), before_thread_id.as_deref())
+            {
+                Ok(v) => ThreadResult::Value(v),
+                Err(e) => ThreadResult::Error(e.to_string()),
+            }
+        }
+        ThreadCmd::ThreadUnsubscribe { id } => ThreadResult::Value(store.unsubscribe(&id)),
+        // ── 配置写：落 $NEO_HOME/config.json（本仓无 config.toml 装载器）──
+        ThreadCmd::ConfigValueWrite {
+            key_path,
+            value,
+            merge_strategy,
+            file_path,
+            expected_version,
+        } => {
+            match config_write_single(&key_path, &value, &merge_strategy, file_path.as_deref(), expected_version.as_deref()) {
+                Ok(v) => ThreadResult::Value(v),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        ThreadCmd::ConfigBatchWrite {
+            edits,
+            file_path,
+            expected_version,
+            reload_user_config,
+        } => match config_write_batch(&edits, file_path.as_deref(), expected_version.as_deref()) {
+            Ok(mut v) => {
+                if reload_user_config.unwrap_or(false) {
+                    let n = neo_mcp::config::load_user_config().map(|s| s.len()).unwrap_or(0);
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("mcpServersReloaded".into(), serde_json::json!(n));
+                    }
+                }
+                ThreadResult::Value(v)
+            }
+            Err(e) => ThreadResult::Error(e),
+        },
+        ThreadCmd::ConfigMcpReload => match neo_mcp::config::load_user_config() {
+            Ok(specs) => {
+                let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+                ThreadResult::Value(serde_json::json!({
+                    "reloaded": true,
+                    "servers": names,
+                    "note": "已重读 $NEO_HOME/mcp.json；已注册工具需重启会话才换血",
+                }))
+            }
+            Err(e) => ThreadResult::Error(format!("重读 mcp.json 失败：{e}")),
+        },
+        ThreadCmd::ConfigRequirementsRead => {
+            // 诚实清单：本进程实际会读的配置/密钥，不编造 Codex 专有项
+            ThreadResult::Value(serde_json::json!({
+                "requirements": [
+                    {
+                        "key": "DEEPSEEK_API_KEY",
+                        "required": false,
+                        "scope": "env",
+                        "reason": "默认模型提供商；未设时若 providers.json 已配可其它服务商",
+                    },
+                    {
+                        "key": "NEO_HOME",
+                        "required": false,
+                        "scope": "env",
+                        "reason": "配置根目录，默认 ~/.neo",
+                    },
+                    {
+                        "key": "$NEO_HOME/mcp.json",
+                        "required": false,
+                        "scope": "file",
+                        "reason": "MCP 服务器清单（仅用户级，仓库级显式拒绝）",
+                    },
+                    {
+                        "key": "$NEO_HOME/providers.json",
+                        "required": false,
+                        "scope": "file",
+                        "reason": "模型服务商注册表",
+                    },
+                ],
+                "configFile": config_json_path_display(),
+            }))
+        }
+        ThreadCmd::SkillsConfigWrite { enabled, name, path } => {
+            match neo_skill_loader::write_skill_config(enabled, name.as_deref(), path.as_deref()) {
+                Ok(v) => ThreadResult::Value(v),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        ThreadCmd::SkillsExtraRootsSet { extra_roots } => {
+            match neo_skill_loader::set_extra_roots(extra_roots) {
+                Ok(roots) => ThreadResult::Value(serde_json::json!({ "extraRoots": roots })),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        ThreadCmd::ExperimentalList { cursor: _, limit, thread_id: _ } => {
+            let flags = experimental_load();
+            let mut items: Vec<serde_json::Value> = flags
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| {
+                            serde_json::json!({
+                                "name": k,
+                                "enabled": v.as_bool().unwrap_or(false),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            items.sort_by_key(|i| i["name"].as_str().unwrap_or("").to_string());
+            if let Some(n) = limit {
+                items.truncate(n as usize);
+            }
+            ThreadResult::Value(serde_json::json!({
+                "features": items,
+                "nextCursor": serde_json::Value::Null,
+            }))
+        }
+        ThreadCmd::ExperimentalSet { enablement } => {
+            let Some(map) = enablement.as_object() else {
+                return ThreadResult::Error("enablement 必须是 object（feature → bool）".into());
+            };
+            let mut flags = experimental_load();
+            if flags.as_object().is_none() {
+                flags = serde_json::json!({});
+            }
+            for (k, v) in map {
+                if let Some(b) = v.as_bool() {
+                    flags[k] = serde_json::Value::Bool(b);
+                }
+            }
+            match experimental_save(&flags) {
+                Ok(()) => ThreadResult::Value(serde_json::json!({ "enablement": flags })),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        // 本仓无 connector/app 运行时 —— 空表诚实返回，不编造条目
+        ThreadCmd::AppList { cursor: _, force_refetch: _, limit: _, thread_id: _ } => {
+            ThreadResult::Value(serde_json::json!({
+                "apps": [],
+                "nextCursor": serde_json::Value::Null,
+                "note": "NEO 尚无 apps/connectors 运行时",
+            }))
+        }
+        ThreadCmd::AppRead { app_ids, include_tools: _, thread_id: _ } => {
+            ThreadResult::Value(serde_json::json!({
+                "apps": [],
+                "requested": app_ids,
+                "note": "NEO 尚无 apps/connectors 运行时",
+            }))
+        }
+        ThreadCmd::AppInstalled { force_refresh: _, thread_id: _ } => {
+            ThreadResult::Value(serde_json::json!({
+                "apps": [],
+                "note": "NEO 尚无 apps/connectors 运行时",
+            }))
+        }
+        ThreadCmd::FuzzyFileSearch { query, roots, cancellation_token: _ } => {
+            let hits = fuzzy_search_roots(&query, &roots);
+            ThreadResult::Value(serde_json::json!({
+                "matches": hits.matches,
+                "truncated": hits.truncated,
+            }))
+        }
+        ThreadCmd::WindowsSandboxReadiness => {
+            let is_windows = cfg!(windows);
+            ThreadResult::Value(serde_json::json!({
+                "supported": is_windows,
+                "ready": false,
+                "platform": std::env::consts::OS,
+                "note": if is_windows {
+                    "Windows 沙箱就绪检测尚未接入"
+                } else {
+                    "非 Windows 平台无 Windows 沙箱"
+                },
+            }))
+        }
+        ThreadCmd::WindowsSandboxSetupStart { mode, cwd: _ } => {
+            if cfg!(windows) {
+                ThreadResult::Error(format!(
+                    "windowsSandbox/setupStart 尚未在 Windows 上接入（mode={mode}）"
+                ))
+            } else {
+                ThreadResult::Error(format!(
+                    "windowsSandbox/setupStart 仅 Windows 适用（当前 {}）",
+                    std::env::consts::OS
+                ))
+            }
+        }
+        ThreadCmd::GuardianDenied { id, event: _ } => {
+            // Codex Guardian 是其专有审批评估流；NEO 无对等物 —— 明确拒绝而非静默成功
+            ThreadResult::Error(format!(
+                "NEO 无 Guardian 审批评估系统，无法处理 thread/approveGuardianDeniedAction（threadId={id}）"
+            ))
+        }
+        ThreadCmd::ReviewStart { target, thread_id, delivery } => {
+            // 对齐形状：在指定线程上启动一轮「代码审查」用户输入（走既有 UserTurn）
+            if thread_id != kernel.session_id() && !store.exists(&thread_id) {
+                return ThreadResult::Error(format!("会话 {thread_id} 不存在"));
+            }
+            let target_kind = target
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let prompt = match target_kind {
+                "uncommittedChanges" => {
+                    "请审查当前工作区未提交的改动（staged/unstaged/untracked），\
+                     按严重程度列出问题，并给出可执行的修复建议。"
+                        .to_string()
+                }
+                "baseBranch" => {
+                    let base = target
+                        .get("branch")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("main");
+                    format!(
+                        "请审查当前分支相对 `{base}` 的 diff，按严重程度列出问题，并给出修复建议。"
+                    )
+                }
+                other => format!("请审查目标 `{other}` 的相关改动，列出问题与修复建议。"),
+            };
+            if delivery.as_deref() == Some("detached") {
+                // Codex 已弃用 detached；我们不另开线，如实说明并仍 inline
+                ThreadResult::Value(serde_json::json!({
+                    "started": true,
+                    "delivery": "inline",
+                    "deprecationNotice": "detached delivery 已弃用；已在目标线程 inline 启动",
+                    "threadId": thread_id,
+                    "prompt": prompt,
+                    "drives": false,
+                    "note": "仅登记审查意图；请用 turn/start 发送 prompt 驱动模型",
+                }))
+            } else {
+                ThreadResult::Value(serde_json::json!({
+                    "started": true,
+                    "delivery": "inline",
+                    "threadId": thread_id,
+                    "prompt": prompt,
+                    "drives": false,
+                    "note": "审查 prompt 已就绪；调用方用 turn/start 提交以驱动模型",
+                }))
+            }
+        }
+        ThreadCmd::FeedbackUpload {
+            classification,
+            reason,
+            tags,
+            include_logs,
+            extra_log_files,
+            thread_id,
+        } => {
+            // 无账号远端 —— 落本地收据，不假装上传成功
+            let receipt_dir = neo_skill_loader::marketplace::neo_home()
+                .map(|h| h.join("feedback"))
+                .ok_or_else(|| "NEO_HOME/HOME 不可用".to_string());
+            match receipt_dir {
+                Err(e) => ThreadResult::Error(e),
+                Ok(dir) => {
+                    if let Err(e) = std::fs::create_dir_all(&dir) {
+                        return ThreadResult::Error(e.to_string());
+                    }
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let path = dir.join(format!("fb-{ts}.json"));
+                    let body = serde_json::json!({
+                        "classification": classification,
+                        "reason": reason,
+                        "tags": tags,
+                        "includeLogs": include_logs.unwrap_or(false),
+                        "extraLogFiles": extra_log_files,
+                        "threadId": thread_id,
+                    });
+                    if let Err(e) = std::fs::write(
+                        &path,
+                        serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".into()) + "\n",
+                    ) {
+                        return ThreadResult::Error(e.to_string());
+                    }
+                    ThreadResult::Value(serde_json::json!({
+                        "uploaded": false,
+                        "localPath": path.display().to_string(),
+                        "note": "无账号远端；反馈已本地保存",
+                    }))
+                }
+            }
+        }
     }
+}
+
+// ── 批5 辅助：配置 JSON / fuzzy 搜索（不依赖 host-tui，避免 L5 横向依赖）──
+
+fn neo_home_display() -> Option<std::path::PathBuf> {
+    let h = std::env::var_os("NEO_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))?;
+    Some(if h.ends_with(".neo") { h } else { h.join(".neo") })
+}
+
+fn config_json_path() -> Option<std::path::PathBuf> {
+    neo_home_display().map(|h| h.join("config.json"))
+}
+
+fn config_json_path_display() -> String {
+    config_json_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "不可用".into())
+}
+
+fn config_load() -> serde_json::Value {
+    let Some(p) = config_json_path() else {
+        return serde_json::json!({});
+    };
+    let Ok(raw) = std::fs::read_to_string(p) else {
+        return serde_json::json!({});
+    };
+    serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn config_save(doc: &serde_json::Value) -> Result<(), String> {
+    let p = config_json_path().ok_or("NEO_HOME/HOME 不可用")?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        &p,
+        serde_json::to_string_pretty(doc).map_err(|e| e.to_string())? + "\n",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 点分 keyPath 写入。`upsert` = 沿路径合并对象；`replace` = 整键替换值。
+fn config_set_key(
+    doc: &mut serde_json::Value,
+    key_path: &str,
+    value: serde_json::Value,
+    merge: &str,
+) -> Result<(), String> {
+    if key_path.trim().is_empty() {
+        return Err("keyPath 不能为空".into());
+    }
+    if doc.as_object().is_none() && !doc.is_null() {
+        return Err("config 根必须是 object".into());
+    }
+    if doc.is_null() {
+        *doc = serde_json::json!({});
+    }
+    let parts: Vec<&str> = key_path
+        .split('.')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return Err("keyPath 不能为空".into());
+    }
+    let mut cur = doc;
+    for (i, part) in parts.iter().enumerate() {
+        if cur.as_object().is_none() {
+            *cur = serde_json::json!({});
+        }
+        let last = i + 1 == parts.len();
+        if last {
+            if merge == "upsert" {
+                if cur.get(*part).map(|v| v.is_object()).unwrap_or(false)
+                    && value.is_object()
+                {
+                    let obj = cur[*part].as_object_mut().expect("object");
+                    for (k, v) in value.as_object().expect("object") {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                } else {
+                    cur[*part] = value.clone();
+                }
+            } else {
+                // replace（及未知策略按 replace：整值覆盖）
+                cur[*part] = value.clone();
+            }
+        } else {
+            let next = cur
+                .as_object_mut()
+                .expect("object")
+                .entry((*part).to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if next.is_null() {
+                *next = serde_json::json!({});
+            }
+            cur = next;
+        }
+    }
+    Ok(())
+}
+
+fn config_write_single(
+    key_path: &str,
+    value: &serde_json::Value,
+    merge_strategy: &str,
+    file_path: Option<&str>,
+    expected_version: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    if let Some(fp) = file_path {
+        if !fp.ends_with(".json") {
+            return Err(format!(
+                "本轮只写 $NEO_HOME/config.json；不支持 filePath={fp}（无 toml 装载器）"
+            ));
+        }
+    }
+    if let Some(want) = expected_version {
+        let cur = config_load()
+            .get("_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0")
+            .to_string();
+        if cur != want {
+            return Err(format!("expectedVersion 不匹配：当前 {cur}，期望 {want}"));
+        }
+    }
+    let mut doc = config_load();
+    if doc.is_null() {
+        doc = serde_json::json!({});
+    }
+    config_set_key(&mut doc, key_path, value.clone(), merge_strategy)?;
+    // 乐观并发：每次写递增 _version
+    let ver = doc
+        .get("_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        + 1;
+    doc["_version"] = serde_json::json!(ver);
+    config_save(&doc)?;
+    Ok(serde_json::json!({
+        "keyPath": key_path,
+        "value": value,
+        "mergeStrategy": merge_strategy,
+        "filePath": config_json_path_display(),
+        "version": ver.to_string(),
+        "applied": true,
+    }))
+}
+
+fn config_write_batch(
+    edits: &[serde_json::Value],
+    file_path: Option<&str>,
+    expected_version: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    if let Some(fp) = file_path {
+        if !fp.ends_with(".json") {
+            return Err(format!(
+                "本轮只写 $NEO_HOME/config.json；不支持 filePath={fp}"
+            ));
+        }
+    }
+    if let Some(want) = expected_version {
+        let cur = config_load()
+            .get("_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0")
+            .to_string();
+        if cur != want {
+            return Err(format!("expectedVersion 不匹配：当前 {cur}，期望 {want}"));
+        }
+    }
+    let mut doc = config_load();
+    if doc.is_null() {
+        doc = serde_json::json!({});
+    }
+    let mut applied = 0usize;
+    for (i, e) in edits.iter().enumerate() {
+        let key = e
+            .get("keyPath")
+            .or_else(|| e.get("key_path"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("edits[{i}].keyPath 缺失"))?;
+        let merge = e
+            .get("mergeStrategy")
+            .or_else(|| e.get("merge_strategy"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("replace");
+        let val = e.get("value").cloned().unwrap_or(serde_json::Value::Null);
+        config_set_key(&mut doc, key, val, merge)?;
+        applied += 1;
+    }
+    let ver = doc
+        .get("_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        + 1;
+    doc["_version"] = serde_json::json!(ver);
+    config_save(&doc)?;
+    Ok(serde_json::json!({
+        "applied": applied,
+        "filePath": config_json_path_display(),
+        "version": ver.to_string(),
+    }))
+}
+
+fn experimental_path() -> Option<std::path::PathBuf> {
+    neo_home_display().map(|h| h.join("experimental.json"))
+}
+
+fn experimental_load() -> serde_json::Value {
+    let Some(p) = experimental_path() else {
+        return serde_json::json!({});
+    };
+    let Ok(raw) = std::fs::read_to_string(p) else {
+        return serde_json::json!({});
+    };
+    serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn experimental_save(flags: &serde_json::Value) -> Result<(), String> {
+    let p = experimental_path().ok_or("NEO_HOME/HOME 不可用")?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        &p,
+        serde_json::to_string_pretty(flags).map_err(|e| e.to_string())? + "\n",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 子序列模糊匹配 + 连续/边界加权（与 TUI `fuzzy_score` 同启发，不依赖 host-tui）。
+fn fuzzy_score(query: &str, candidate: &str) -> Option<u32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let q: Vec<char> = query.to_lowercase().chars().collect();
+    let c: Vec<char> = candidate.to_lowercase().chars().collect();
+    let orig: Vec<char> = candidate.chars().collect();
+    let mut qi = 0usize;
+    let mut score = 0u32;
+    let mut last: Option<usize> = None;
+    for (ci, &ch) in c.iter().enumerate() {
+        if qi >= q.len() {
+            break;
+        }
+        if ch == q[qi] {
+            if let Some(lm) = last {
+                if ci == lm + 1 {
+                    score += 1;
+                } else {
+                    score += 3 + (ci - lm) as u32;
+                }
+            } else {
+                score += ci as u32;
+                let boundary = ci == 0
+                    || matches!(
+                        orig.get(ci.wrapping_sub(1)),
+                        Some('/') | Some('_') | Some('-') | Some('.')
+                    );
+                if boundary {
+                    score = score.saturating_sub(2);
+                }
+            }
+            last = Some(ci);
+            qi += 1;
+        }
+    }
+    if qi == q.len() { Some(score) } else { None }
+}
+
+struct FuzzyHits {
+    matches: Vec<serde_json::Value>,
+    truncated: bool,
+}
+
+fn fuzzy_search_roots(query: &str, roots: &[String]) -> FuzzyHits {
+    const SKIP: &[&str] = &[
+        ".git", "node_modules", "target", "dist", "build", ".venv", "__pycache__", ".next",
+        ".cache", ".neo",
+    ];
+    const MAX_FILES: usize = 20_000;
+    const MAX_DEPTH: usize = 8;
+    const MAX_HITS: usize = 50;
+    let mut scored: Vec<(u32, String)> = Vec::new();
+    let mut truncated = false;
+    let mut scanned = 0usize;
+    for root in roots {
+        let rootp = std::path::Path::new(root);
+        if !rootp.is_dir() {
+            continue;
+        }
+        let mut stack = vec![(rootp.to_path_buf(), 0usize)];
+        while let Some((dir, depth)) = stack.pop() {
+            if depth > MAX_DEPTH || scanned >= MAX_FILES {
+                truncated = true;
+                continue;
+            }
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                if scanned >= MAX_FILES {
+                    truncated = true;
+                    break;
+                }
+                scanned += 1;
+                let path = e.path();
+                let name = e.file_name().to_string_lossy().into_owned();
+                if path.is_dir() {
+                    if SKIP.contains(&name.as_str()) {
+                        continue;
+                    }
+                    stack.push((path, depth + 1));
+                } else if let Some(s) = fuzzy_score(query, &name) {
+                    // 相对 root 的展示路径优先
+                    let display = path
+                        .strip_prefix(rootp)
+                        .map(|r| r.display().to_string())
+                        .unwrap_or_else(|_| path.display().to_string());
+                    scored.push((s, display));
+                }
+            }
+        }
+    }
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    scored.dedup_by(|a, b| a.1 == b.1);
+    let truncated = truncated || scored.len() > MAX_HITS;
+    let matches: Vec<serde_json::Value> = scored
+        .into_iter()
+        .take(MAX_HITS)
+        .map(|(score, path)| serde_json::json!({ "path": path, "score": score }))
+        .collect();
+    FuzzyHits { matches, truncated }
 }
 
 /// 启动桌面窗口（三种实现：GPUI 默认 / --egui / --webview）。

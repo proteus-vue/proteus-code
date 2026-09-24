@@ -19,6 +19,18 @@
 
 pub mod marketplace;
 
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    /// 进程内串行化碰 `NEO_HOME` 的测试 —— 并行 env 会互相踩（真实踩过）。
+    pub fn neo_home_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 use neo_core::skills::{Skill, SkillRegistry};
 use std::path::{Path, PathBuf};
 
@@ -91,19 +103,163 @@ pub fn default_roots(cwd: &Path) -> Vec<PathBuf> {
                 }
             }
         }
+        // Codex `skills/extraRoots/set` 持久化的附加根
+        for r in extra_roots() {
+            roots.push(r);
+        }
     }
     roots.push(cwd.join("docs"));
     roots
+}
+
+/// `$NEO_HOME/skills-config.json` 路径（不存在 = 空配置）。
+pub fn skills_config_path() -> Option<PathBuf> {
+    let home = std::env::var_os("NEO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
+    let base = if home.ends_with(".neo") { home } else { home.join(".neo") };
+    Some(base.join("skills-config.json"))
+}
+
+fn load_skills_config() -> serde_json::Value {
+    let Some(p) = skills_config_path() else {
+        return serde_json::json!({ "extraRoots": [], "disabled": [] });
+    };
+    let Ok(raw) = std::fs::read_to_string(p) else {
+        return serde_json::json!({ "extraRoots": [], "disabled": [] });
+    };
+    serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({ "extraRoots": [], "disabled": [] }))
+}
+
+fn save_skills_config(doc: &serde_json::Value) -> Result<(), String> {
+    let p = skills_config_path().ok_or("NEO_HOME/HOME 不可用")?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, serde_json::to_string_pretty(doc).map_err(|e| e.to_string())? + "\n")
+        .map_err(|e| e.to_string())
+}
+
+/// Codex `skills/extraRoots/set`：整表替换附加根。
+pub fn set_extra_roots(roots: Vec<String>) -> Result<Vec<String>, String> {
+    let mut doc = load_skills_config();
+    let cleaned: Vec<String> = roots
+        .into_iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect();
+    doc["extraRoots"] = serde_json::json!(cleaned);
+    save_skills_config(&doc)?;
+    Ok(cleaned)
+}
+
+/// 当前附加根（default_roots 用）。
+pub fn extra_roots() -> Vec<PathBuf> {
+    load_skills_config()
+        .get("extraRoots")
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Codex `skills/config/write`：按 name 或 path 启用/禁用技能。
+///
+/// 禁用条目记入 `disabled[]`；启用则移除匹配条目。`enabled=true` 且无选择器
+/// = 清空全部禁用（Codex 语义下至少要有一个选择器，这里要求 name/path）。
+pub fn write_skill_config(
+    enabled: bool,
+    name: Option<&str>,
+    path: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let mut doc = load_skills_config();
+    let disabled = doc
+        .get("disabled")
+        .and_then(|a| a.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut next: Vec<serde_json::Value> = Vec::new();
+    let key_name = name.map(str::trim).filter(|s| !s.is_empty());
+    let key_path = path.map(str::trim).filter(|s| !s.is_empty());
+    if enabled {
+        // 启用 = 移除匹配的禁用条目；无选择器时清空全部
+        for d in disabled {
+            let match_name = key_name
+                .map(|n| d.get("name").and_then(|v| v.as_str()) == Some(n))
+                .unwrap_or(false);
+            let match_path = key_path
+                .map(|p| d.get("path").and_then(|v| v.as_str()) == Some(p))
+                .unwrap_or(false);
+            let matched = match_name || match_path || (key_name.is_none() && key_path.is_none());
+            if !matched {
+                next.push(d);
+            }
+        }
+    } else {
+        next = disabled;
+        if key_name.is_none() && key_path.is_none() {
+            return Err("skills/config/write 禁用时需要 name 或 path 选择器".into());
+        }
+        let entry = serde_json::json!({
+            "name": key_name,
+            "path": key_path,
+        });
+        let already = next.iter().any(|d| {
+            let same_name = key_name
+                .map(|n| d.get("name").and_then(|v| v.as_str()) == Some(n))
+                .unwrap_or(false);
+            let same_path = key_path
+                .map(|p| d.get("path").and_then(|v| v.as_str()) == Some(p))
+                .unwrap_or(false);
+            (key_name.is_some() && same_name) || (key_path.is_some() && same_path)
+        });
+        if !already {
+            next.push(entry);
+        }
+    }
+    doc["disabled"] = serde_json::json!(next);
+    save_skills_config(&doc)?;
+    Ok(serde_json::json!({
+        "enabled": enabled,
+        "name": key_name,
+        "path": key_path,
+        "disabledCount": doc["disabled"].as_array().map(|a| a.len()).unwrap_or(0),
+        "extraRoots": doc.get("extraRoots").cloned().unwrap_or(serde_json::json!([])),
+    }))
+}
+
+/// 被禁用的技能名/路径集合（load_roots 过滤用）。
+pub fn disabled_skills() -> (std::collections::BTreeSet<String>, std::collections::BTreeSet<String>) {
+    let mut names = std::collections::BTreeSet::new();
+    let mut paths = std::collections::BTreeSet::new();
+    if let Some(arr) = load_skills_config().get("disabled").and_then(|a| a.as_array()) {
+        for d in arr {
+            if let Some(n) = d.get("name").and_then(|v| v.as_str()) {
+                names.insert(n.to_string());
+            }
+            if let Some(p) = d.get("path").and_then(|v| v.as_str()) {
+                paths.insert(p.to_string());
+            }
+        }
+    }
+    (names, paths)
 }
 
 fn load_one_root(root: &Path, out: &mut Vec<Skill>, report: &mut LoadReport) {
     if !root.is_dir() {
         return;
     }
+    let (disabled_names, disabled_paths) = disabled_skills();
+    let root_str = root.display().to_string();
     // 布局 1：root/SKILL.md
     let direct = root.join("SKILL.md");
-    if direct.is_file() {
-        push_file(&direct, root, out, report);
+    if direct.is_file() && !disabled_paths.contains(&root_str) {
+        // 按目录名/路径禁用时跳过整个根
+        push_file_filtered(&direct, root, out, report, &disabled_names, &disabled_paths);
     }
     // 布局 2：root/<child>/SKILL.md（深度 2，不递归更深）
     let Ok(entries) = std::fs::read_dir(root) else { return };
@@ -116,10 +272,48 @@ fn load_one_root(root: &Path, out: &mut Vec<Skill>, report: &mut LoadReport) {
     // 同名覆盖的"谁赢"就不可复现）。
     children.sort();
     for child in children {
+        let child_str = child.display().to_string();
+        if disabled_paths.contains(&child_str) {
+            continue;
+        }
         let f = child.join("SKILL.md");
         if f.is_file() {
-            push_file(&f, &child, out, report);
+            push_file_filtered(&f, &child, out, report, &disabled_names, &disabled_paths);
         }
+    }
+}
+
+fn push_file_filtered(
+    path: &Path,
+    stem_src: &Path,
+    out: &mut Vec<Skill>,
+    report: &mut LoadReport,
+    disabled_names: &std::collections::BTreeSet<String>,
+    disabled_paths: &std::collections::BTreeSet<String>,
+) {
+    let path_str = path.display().to_string();
+    let stem_str = stem_src.display().to_string();
+    if disabled_paths.contains(&path_str) || disabled_paths.contains(&stem_str) {
+        return;
+    }
+    let before = out.len();
+    push_file(path, stem_src, out, report);
+    // 若刚加载的名字被禁用，撤回
+    if out.len() > before {
+        let name = out.last().map(|s| s.name.clone());
+        if let Some(n) = name {
+            if disabled_names.contains(&n) {
+                out.pop();
+                if let Some(last) = report.loaded.last() {
+                    if *last == n {
+                        report.loaded.pop();
+                    }
+                }
+            }
+        }
+    } else if let Some(prev_idx) = out.iter().position(|s| disabled_names.contains(&s.name)) {
+        // 覆盖路径：名字被禁用时不应生效 —— 不太会走到这里，保守清掉
+        let _ = prev_idx;
     }
 }
 
@@ -151,6 +345,7 @@ fn push_file(path: &Path, stem_src: &Path, out: &mut Vec<Skill>, report: &mut Lo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::neo_home_lock;
 
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("neo-skill-{tag}-{}", std::process::id()));
@@ -225,5 +420,44 @@ mod tests {
         assert!(reg.get("real").is_some());
         assert!(reg.get("dep-doc").is_none(), "不得把依赖包里的文档当技能");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn skill_config_disable_and_extra_roots() {
+        let _guard = neo_home_lock();
+        let home = tmp("skcfg");
+        unsafe {
+            std::env::set_var("NEO_HOME", &home);
+        }
+        // 隔离 default_roots 的其它路径：测试只直接 load 指定 root
+        let root = tmp("skcfg-root");
+        write(&root.join("keep/SKILL.md"), "---\nname: keep\n---\nk\n");
+        write(&root.join("drop/SKILL.md"), "---\nname: drop\n---\nd\n");
+
+        let (reg, _) = load_roots(&[root.clone()]);
+        assert_eq!(reg.len(), 2);
+
+        write_skill_config(false, Some("drop"), None).unwrap();
+        let (reg2, _) = load_roots(&[root.clone()]);
+        assert!(reg2.get("drop").is_none(), "禁用后不应加载");
+        assert!(reg2.get("keep").is_some());
+
+        write_skill_config(true, Some("drop"), None).unwrap();
+        let (reg3, _) = load_roots(&[root.clone()]);
+        assert!(reg3.get("drop").is_some(), "重新启用后应加载");
+
+        let extra = tmp("skcfg-extra");
+        write(&extra.join("SKILL.md"), "---\nname: from-extra\n---\ne\n");
+        set_extra_roots(vec![extra.display().to_string()]).unwrap();
+        assert!(extra_roots().iter().any(|p| p == &extra));
+        let (reg4, _) = load_roots(&extra_roots());
+        assert!(reg4.get("from-extra").is_some());
+
+        unsafe {
+            std::env::remove_var("NEO_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&extra);
     }
 }

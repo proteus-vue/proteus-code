@@ -213,6 +213,106 @@ pub enum ThreadCmd {
     PluginReconcile,
     /// `plugin/skill/read`
     PluginSkillRead { plugin: String, skill: String },
+    /// `threadSection/list`
+    SectionList { cursor: Option<String>, limit: Option<u32> },
+    /// `threadSection/create`
+    SectionCreate { name: String, appearance: Option<Value> },
+    /// `threadSection/update`（appearance: None=不改, Some(Null)=清除）
+    SectionUpdate {
+        section_id: String,
+        name: String,
+        appearance: Option<Option<Value>>,
+    },
+    /// `threadSection/delete`
+    SectionDelete { section_id: String },
+    /// `thread/section/move`
+    SectionMoveThread {
+        thread_id: String,
+        section_id: Option<String>,
+        before_thread_id: Option<String>,
+    },
+    /// `thread/unsubscribe`
+    ThreadUnsubscribe { id: String },
+    /// `config/value/write`
+    ConfigValueWrite {
+        key_path: String,
+        value: Value,
+        merge_strategy: String,
+        file_path: Option<String>,
+        expected_version: Option<String>,
+    },
+    /// `config/batchWrite`
+    ConfigBatchWrite {
+        edits: Vec<Value>,
+        file_path: Option<String>,
+        expected_version: Option<String>,
+        reload_user_config: Option<bool>,
+    },
+    /// `config/mcpServer/reload`
+    ConfigMcpReload,
+    /// `configRequirements/read`
+    ConfigRequirementsRead,
+    /// `skills/config/write`
+    SkillsConfigWrite {
+        enabled: bool,
+        name: Option<String>,
+        path: Option<String>,
+    },
+    /// `skills/extraRoots/set`
+    SkillsExtraRootsSet { extra_roots: Vec<String> },
+    /// `experimentalFeature/list`
+    ExperimentalList {
+        cursor: Option<String>,
+        limit: Option<u32>,
+        thread_id: Option<String>,
+    },
+    /// `experimentalFeature/enablement/set`
+    ExperimentalSet { enablement: Value },
+    /// `app/list`
+    AppList {
+        cursor: Option<String>,
+        force_refetch: Option<bool>,
+        limit: Option<u32>,
+        thread_id: Option<String>,
+    },
+    /// `app/read`
+    AppRead {
+        app_ids: Vec<String>,
+        include_tools: Option<bool>,
+        thread_id: Option<String>,
+    },
+    /// `app/installed`
+    AppInstalled {
+        force_refresh: Option<bool>,
+        thread_id: Option<String>,
+    },
+    /// `fuzzyFileSearch`
+    FuzzyFileSearch {
+        query: String,
+        roots: Vec<String>,
+        cancellation_token: Option<String>,
+    },
+    /// `windowsSandbox/readiness`
+    WindowsSandboxReadiness,
+    /// `windowsSandbox/setupStart`
+    WindowsSandboxSetupStart { mode: String, cwd: Option<String> },
+    /// `thread/approveGuardianDeniedAction`
+    GuardianDenied { id: String, event: Value },
+    /// `review/start`
+    ReviewStart {
+        target: Value,
+        thread_id: String,
+        delivery: Option<String>,
+    },
+    /// `feedback/upload`
+    FeedbackUpload {
+        classification: String,
+        reason: Option<String>,
+        tags: Option<Value>,
+        include_logs: Option<bool>,
+        extra_log_files: Option<Vec<String>>,
+        thread_id: Option<String>,
+    },
 }
 
 /// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，18 个）。
@@ -312,6 +412,29 @@ pub const THREAD_METHODS: &[&str] = &[
     "plugin/installed",
     "plugin/reconcile",
     "plugin/skill/read",
+    "threadSection/list",
+    "threadSection/create",
+    "threadSection/update",
+    "threadSection/delete",
+    "thread/section/move",
+    "thread/unsubscribe",
+    "config/value/write",
+    "config/batchWrite",
+    "config/mcpServer/reload",
+    "configRequirements/read",
+    "skills/config/write",
+    "skills/extraRoots/set",
+    "experimentalFeature/list",
+    "experimentalFeature/enablement/set",
+    "app/list",
+    "app/read",
+    "app/installed",
+    "fuzzyFileSearch",
+    "windowsSandbox/readiness",
+    "windowsSandbox/setupStart",
+    "thread/approveGuardianDeniedAction",
+    "review/start",
+    "feedback/upload",
 ];
 
 /// 全部方法名（握手用）。
@@ -423,6 +546,28 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         ],
         "plugin/uninstall" => &["pluginId", "id"],
         "plugin/skill/read" => &["pluginName", "plugin", "skillName", "skill", "remotePluginId", "remoteMarketplaceName"],
+        "threadSection/list" => &["cursor", "limit"],
+        "threadSection/create" => &["name", "appearance"],
+        "threadSection/update" => &["sectionId", "section_id", "name", "appearance"],
+        "threadSection/delete" => &["sectionId", "section_id"],
+        "thread/section/move" => &["threadId", "thread_id", "sectionId", "section_id", "beforeThreadId", "before_thread_id"],
+        "thread/unsubscribe" => &["threadId", "thread_id", "id"],
+        "config/value/write" => &["keyPath", "key_path", "value", "mergeStrategy", "merge_strategy", "filePath", "file_path", "expectedVersion", "expected_version"],
+        "config/batchWrite" => &["edits", "filePath", "file_path", "expectedVersion", "expected_version", "reloadUserConfig", "reload_user_config"],
+        "config/mcpServer/reload" | "configRequirements/read" => &[],
+        "skills/config/write" => &["enabled", "name", "path"],
+        "skills/extraRoots/set" => &["extraRoots", "extra_roots"],
+        "experimentalFeature/list" => &["cursor", "limit", "threadId", "thread_id"],
+        "experimentalFeature/enablement/set" => &["enablement"],
+        "app/list" => &["cursor", "forceRefetch", "force_refetch", "limit", "threadId", "thread_id"],
+        "app/read" => &["appIds", "app_ids", "includeTools", "include_tools", "threadId", "thread_id"],
+        "app/installed" => &["forceRefresh", "force_refresh", "threadId", "thread_id"],
+        "fuzzyFileSearch" => &["query", "roots", "cancellationToken", "cancellation_token"],
+        "windowsSandbox/readiness" => &[],
+        "windowsSandbox/setupStart" => &["mode", "cwd"],
+        "thread/approveGuardianDeniedAction" => &["event", "threadId", "thread_id", "id"],
+        "review/start" => &["target", "threadId", "thread_id", "delivery"],
+        "feedback/upload" => &["classification", "reason", "tags", "includeLogs", "include_logs", "extraLogFiles", "extra_log_files", "threadId", "thread_id"],
         "command/exec/write" => &["session_id", "data"],
         "command/exec/resize" => &["session_id", "cols", "rows"],
         "command/exec/terminate" => &["session_id"],
@@ -729,6 +874,155 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
         "plugin/skill/read" => {
             let p: PluginSkillReadParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::PluginSkillRead { plugin: p.plugin, skill: p.skill })
+        }
+        "threadSection/list" => {
+            let p: SectionListParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::SectionList { cursor: p.cursor, limit: p.limit })
+        }
+        "threadSection/create" => {
+            let p: SectionCreateParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::SectionCreate { name: p.name, appearance: p.appearance })
+        }
+        "threadSection/update" => {
+            let p: SectionUpdateParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::SectionUpdate {
+                section_id: p.section_id,
+                name: p.name,
+                // 缺键=None（不改）；null/对象=Some，交存储层写入
+                appearance: p.appearance.map(Some),
+            })
+        }
+        "threadSection/delete" => {
+            let p: SectionDeleteParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::SectionDelete { section_id: p.section_id })
+        }
+        "thread/section/move" => {
+            let p: SectionMoveParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::SectionMoveThread {
+                thread_id: p.thread_id,
+                section_id: p.section_id,
+                before_thread_id: p.before_thread_id,
+            })
+        }
+        "thread/unsubscribe" => {
+            let p: ThreadUnsubscribeParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ThreadUnsubscribe { id: p.id })
+        }
+        "config/value/write" => {
+            let p: ConfigValueWriteParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ConfigValueWrite {
+                key_path: p.key_path,
+                value: p.value,
+                merge_strategy: p.merge_strategy,
+                file_path: p.file_path,
+                expected_version: p.expected_version,
+            })
+        }
+        "config/batchWrite" => {
+            let p: ConfigBatchWriteParams = from_params(method, params)?;
+            let edits: Vec<Value> = p
+                .edits
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "keyPath": e.key_path,
+                        "mergeStrategy": e.merge_strategy,
+                        "value": e.value,
+                    })
+                })
+                .collect();
+            Action::Thread(ThreadCmd::ConfigBatchWrite {
+                edits,
+                file_path: p.file_path,
+                expected_version: p.expected_version,
+                reload_user_config: p.reload_user_config,
+            })
+        }
+        "config/mcpServer/reload" => Action::Thread(ThreadCmd::ConfigMcpReload),
+        "configRequirements/read" => Action::Thread(ThreadCmd::ConfigRequirementsRead),
+        "skills/config/write" => {
+            let p: SkillsConfigWriteParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::SkillsConfigWrite {
+                enabled: p.enabled,
+                name: p.name,
+                path: p.path,
+            })
+        }
+        "skills/extraRoots/set" => {
+            let p: SkillsExtraRootsParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::SkillsExtraRootsSet { extra_roots: p.extra_roots })
+        }
+        "experimentalFeature/list" => {
+            let p: ExperimentalListParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ExperimentalList {
+                cursor: p.cursor,
+                limit: p.limit,
+                thread_id: p.thread_id,
+            })
+        }
+        "experimentalFeature/enablement/set" => {
+            let p: ExperimentalSetParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ExperimentalSet { enablement: p.enablement })
+        }
+        "app/list" => {
+            let p: AppListParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::AppList {
+                cursor: p.cursor,
+                force_refetch: p.force_refetch,
+                limit: p.limit,
+                thread_id: p.thread_id,
+            })
+        }
+        "app/read" => {
+            let p: AppReadParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::AppRead {
+                app_ids: p.app_ids,
+                include_tools: p.include_tools,
+                thread_id: p.thread_id,
+            })
+        }
+        "app/installed" => {
+            let p: AppInstalledParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::AppInstalled {
+                force_refresh: p.force_refresh,
+                thread_id: p.thread_id,
+            })
+        }
+        "fuzzyFileSearch" => {
+            let p: FuzzyFileSearchParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FuzzyFileSearch {
+                query: p.query,
+                roots: p.roots,
+                cancellation_token: p.cancellation_token,
+            })
+        }
+        "windowsSandbox/readiness" => Action::Thread(ThreadCmd::WindowsSandboxReadiness),
+        "windowsSandbox/setupStart" => {
+            let p: WindowsSandboxParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::WindowsSandboxSetupStart { mode: p.mode, cwd: p.cwd })
+        }
+        "thread/approveGuardianDeniedAction" => {
+            let p: GuardianDeniedParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::GuardianDenied { id: p.id, event: p.event })
+        }
+        "review/start" => {
+            let p: ReviewStartParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ReviewStart {
+                target: p.target,
+                thread_id: p.thread_id,
+                delivery: p.delivery,
+            })
+        }
+        "feedback/upload" => {
+            let p: FeedbackUploadParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FeedbackUpload {
+                classification: p.classification,
+                reason: p.reason,
+                tags: p.tags,
+                include_logs: p.include_logs,
+                extra_log_files: p.extra_log_files,
+                thread_id: p.thread_id,
+            })
         }
         "command/exec/write" => {
             let p: ExecWriteParams = from_params(method, params)?;
@@ -1086,6 +1380,216 @@ struct PluginSkillReadParams {
     skill: String,
 }
 
+/// `threadSection/list`。
+#[derive(Debug, Deserialize)]
+struct SectionListParams {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// `threadSection/create`。
+#[derive(Debug, Deserialize)]
+struct SectionCreateParams {
+    name: String,
+    #[serde(default)]
+    appearance: Option<Value>,
+}
+
+/// `threadSection/update`：`sectionId` 必填；appearance 缺键=保留、null=清除。
+///
+/// 用 `Option<Option<Value>>` 区分「没传」与「传了 null」需要 `deserialize_with`；
+/// 这里简化：serde 对 `Option<Value>` 把 null 也变成 `Some(Null)`，缺键变 `None` ——
+/// 正好对齐 Codex 的 omit / null 语义。
+#[derive(Debug, Deserialize)]
+struct SectionUpdateParams {
+    #[serde(alias = "sectionId", alias = "section_id")]
+    section_id: String,
+    name: String,
+    #[serde(default)]
+    appearance: Option<Value>,
+}
+
+/// `threadSection/delete`。
+#[derive(Debug, Deserialize)]
+struct SectionDeleteParams {
+    #[serde(alias = "sectionId", alias = "section_id")]
+    section_id: String,
+}
+
+/// `thread/section/move`。
+#[derive(Debug, Deserialize)]
+struct SectionMoveParams {
+    #[serde(alias = "threadId", alias = "thread_id")]
+    thread_id: String,
+    #[serde(default, alias = "sectionId", alias = "section_id")]
+    section_id: Option<String>,
+    #[serde(default, alias = "beforeThreadId", alias = "before_thread_id")]
+    before_thread_id: Option<String>,
+}
+
+/// `thread/unsubscribe`。
+#[derive(Debug, Deserialize)]
+struct ThreadUnsubscribeParams {
+    #[serde(alias = "threadId", alias = "thread_id")]
+    id: String,
+}
+
+/// `config/value/write`。
+#[derive(Debug, Deserialize)]
+struct ConfigValueWriteParams {
+    #[serde(alias = "keyPath", alias = "key_path")]
+    key_path: String,
+    value: Value,
+    #[serde(alias = "mergeStrategy", alias = "merge_strategy")]
+    merge_strategy: String,
+    #[serde(default, alias = "filePath", alias = "file_path")]
+    file_path: Option<String>,
+    #[serde(default, alias = "expectedVersion", alias = "expected_version")]
+    expected_version: Option<String>,
+}
+
+/// `config/batchWrite` 的单条编辑（Codex `ConfigEdit`）。
+#[derive(Debug, Deserialize)]
+struct ConfigEditWire {
+    #[serde(alias = "keyPath", alias = "key_path")]
+    key_path: String,
+    #[serde(alias = "mergeStrategy", alias = "merge_strategy")]
+    merge_strategy: String,
+    value: Value,
+}
+
+/// `config/batchWrite`。
+#[derive(Debug, Deserialize)]
+struct ConfigBatchWriteParams {
+    edits: Vec<ConfigEditWire>,
+    #[serde(default, alias = "filePath", alias = "file_path")]
+    file_path: Option<String>,
+    #[serde(default, alias = "expectedVersion", alias = "expected_version")]
+    expected_version: Option<String>,
+    #[serde(default, alias = "reloadUserConfig", alias = "reload_user_config")]
+    reload_user_config: Option<bool>,
+}
+
+/// `skills/config/write`。
+#[derive(Debug, Deserialize)]
+struct SkillsConfigWriteParams {
+    enabled: bool,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+/// `skills/extraRoots/set`。
+#[derive(Debug, Deserialize)]
+struct SkillsExtraRootsParams {
+    #[serde(alias = "extraRoots", alias = "extra_roots")]
+    extra_roots: Vec<String>,
+}
+
+/// `experimentalFeature/list`。
+#[derive(Debug, Deserialize)]
+struct ExperimentalListParams {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default, alias = "threadId", alias = "thread_id")]
+    thread_id: Option<String>,
+}
+
+/// `experimentalFeature/enablement/set`。
+#[derive(Debug, Deserialize)]
+struct ExperimentalSetParams {
+    enablement: Value,
+}
+
+/// `app/list`。
+#[derive(Debug, Deserialize)]
+struct AppListParams {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default, alias = "forceRefetch", alias = "force_refetch")]
+    force_refetch: Option<bool>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default, alias = "threadId", alias = "thread_id")]
+    thread_id: Option<String>,
+}
+
+/// `app/read`。
+#[derive(Debug, Deserialize)]
+struct AppReadParams {
+    #[serde(alias = "appIds", alias = "app_ids")]
+    app_ids: Vec<String>,
+    #[serde(default, alias = "includeTools", alias = "include_tools")]
+    include_tools: Option<bool>,
+    #[serde(default, alias = "threadId", alias = "thread_id")]
+    thread_id: Option<String>,
+}
+
+/// `app/installed`。
+#[derive(Debug, Deserialize)]
+struct AppInstalledParams {
+    #[serde(default, alias = "forceRefresh", alias = "force_refresh")]
+    force_refresh: Option<bool>,
+    #[serde(default, alias = "threadId", alias = "thread_id")]
+    thread_id: Option<String>,
+}
+
+/// `fuzzyFileSearch`。
+#[derive(Debug, Deserialize)]
+struct FuzzyFileSearchParams {
+    query: String,
+    roots: Vec<String>,
+    #[serde(default, alias = "cancellationToken", alias = "cancellation_token")]
+    cancellation_token: Option<String>,
+}
+
+/// `windowsSandbox/setupStart`。
+#[derive(Debug, Deserialize)]
+struct WindowsSandboxParams {
+    mode: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// `thread/approveGuardianDeniedAction`。
+#[derive(Debug, Deserialize)]
+struct GuardianDeniedParams {
+    event: Value,
+    #[serde(alias = "threadId", alias = "thread_id")]
+    id: String,
+}
+
+/// `review/start`。
+#[derive(Debug, Deserialize)]
+struct ReviewStartParams {
+    target: Value,
+    #[serde(alias = "threadId", alias = "thread_id")]
+    thread_id: String,
+    #[serde(default)]
+    delivery: Option<String>,
+}
+
+/// `feedback/upload`。
+#[derive(Debug, Deserialize)]
+struct FeedbackUploadParams {
+    classification: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    tags: Option<Value>,
+    #[serde(default, alias = "includeLogs", alias = "include_logs")]
+    include_logs: Option<bool>,
+    #[serde(default, alias = "extraLogFiles", alias = "extra_log_files")]
+    extra_log_files: Option<Vec<String>>,
+    #[serde(default, alias = "threadId", alias = "thread_id")]
+    thread_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct McpResourceReadParams {
     server: String,
@@ -1339,6 +1843,60 @@ mod tests {
     }
 
     #[test]
+    fn batch5_dispatch_covers_section_config_skills_app_fuzzy() {
+        assert!(matches!(
+            dispatch("threadSection/create", &json!({"name": "工作"})).unwrap(),
+            Action::Thread(ThreadCmd::SectionCreate { name, .. }) if name == "工作"
+        ));
+        assert!(matches!(
+            dispatch(
+                "thread/section/move",
+                &json!({"threadId": "t1", "sectionId": null})
+            )
+            .unwrap(),
+            Action::Thread(ThreadCmd::SectionMoveThread { thread_id, section_id: None, .. })
+                if thread_id == "t1"
+        ));
+        assert!(matches!(
+            dispatch(
+                "config/value/write",
+                &json!({"keyPath": "model", "value": "m", "mergeStrategy": "replace"})
+            )
+            .unwrap(),
+            Action::Thread(ThreadCmd::ConfigValueWrite { .. })
+        ));
+        assert!(matches!(
+            dispatch(
+                "skills/extraRoots/set",
+                &json!({"extraRoots": ["/tmp/s"]})
+            )
+            .unwrap(),
+            Action::Thread(ThreadCmd::SkillsExtraRootsSet { .. })
+        ));
+        assert!(matches!(
+            dispatch("app/list", &json!({})).unwrap(),
+            Action::Thread(ThreadCmd::AppList { .. })
+        ));
+        assert!(matches!(
+            dispatch(
+                "fuzzyFileSearch",
+                &json!({"query": "main", "roots": ["/tmp"]})
+            )
+            .unwrap(),
+            Action::Thread(ThreadCmd::FuzzyFileSearch { .. })
+        ));
+        assert!(matches!(
+            dispatch("windowsSandbox/readiness", &json!({})).unwrap(),
+            Action::Thread(ThreadCmd::WindowsSandboxReadiness)
+        ));
+        // 未知键仍拒绝
+        assert_eq!(
+            dispatch("threadSection/list", &json!({"nope": 1})).unwrap_err().code,
+            INVALID_PARAMS
+        );
+    }
+
+    #[test]
     fn initialize_negotiates_protocol_version() {
         let ok = initialize_result(&InitializeParams {
             protocol_version: Some(PROTOCOL_VERSION),
@@ -1348,8 +1906,8 @@ mod tests {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(79),
-            "initialize + 19 Op + 55 control + aliases"
+            Some(102),
+            "initialize + 19 Op + 78 control + aliases"
         );
 
         // 版本不匹配必须拒绝，且把双方版本放进 data（机器可读）
