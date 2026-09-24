@@ -5257,6 +5257,7 @@ dependencies = [
  "neo-host-tui",
  "neo-host-web",
  "neo-llm-deepseek",
+ "neo-mcp",
  "neo-mock",
  "neo-protocol",
  "neo-providers",
