@@ -277,6 +277,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-54 | @ 文件引用：图标 + 路径着色（无芯片） | P1 | ✅ 镜像层红文件图标 + accent 路径色 · textarea 透明字 + 光标 · 至路径字符止 · 菜单选中后空格分隔 |
 | IA-56 | 图标库统一单色实心（对齐文件图标） | P1 | ✅ 全集 fill=currentColor + evenodd 挖孔 · 去 fillOpacity/白描边/多色点 · @ 引用同步 |
 | IA-57 | 图标两套：导航空心 + 语义实心 | P1 | ✅ HOLLOW stroke（menu/plus/search/…）· SOLID fill（files/package/tab 类）· 同名 API 不变 |
+| IA-58 | 修：标签条热区偏下（titlebar 回退不一致） | P1 | ✅ browser-tabs padding 回退 28px 对齐 drag · z-index 85 高于拖拽条 |
 
 
 ---
