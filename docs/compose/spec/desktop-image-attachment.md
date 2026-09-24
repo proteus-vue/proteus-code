@@ -1,14 +1,23 @@
 ---
 feature: desktop-image-attachment
-status: in-progress
+status: delivered
 updated: 2026-09-24
 branch: main
-commits: 
+commits: 179c2670..798ca46d
 ---
 
 # Desktop Image Attachment
 
 ## Report
+
+**What was built** — 桌面支持粘贴 / 拖放 / 选文件把图片送进会话：经 Tauri `save_attachment` 写入 `{workspace}/.neo/attachments`（无 workspace 则 `$HOME/.neo/attachments`），1MiB 上限（前端预检 + 服务端），chip 可删；发送时拼非 `@` 的 `view_image` 指令并清空。内核 `resolve_refs` 对图片扩展名不再 `cat`，摘要改为提示 `view_image`（含回归单测）。
+
+**Verification** — `kernel_loop image_ref` PASS · `kernel_loop ref` 9 PASS · `view_image` 2 PASS · `src-tauri cargo check` PASS · `tsc`+`vite build` PASS · 效率审计 0 · 审查 1 critical（b64 padding）+ 路径/文件名问题已修并复审 4/4 PASS。
+
+**Journey log**
+- `@path` 走 cat 注入文本 → 二进制图必须改走 `view_image`，不能当文件引用。
+- 手写 b64 时 `pad=3-i` 会被后续 `=` 覆盖；正确是计 `pads`、`emit=3-pads`。
+- 无 workspace 时落 `current_dir` 会污染进程 cwd；应用 `$HOME/.neo/attachments`。
 
 ## [S1] Problem
 桌面输入区没有图片入口（粘贴 / 拖放 / 文件选择）。内核已有 `view_image(path)`：读本地图 → `ImageAttachment` → `UserImage` → provider `image_url`（IA-42）。用户无法把图片送进会话；PRODUCT-IA IA-10 / P2 图片附件仍为 ⬜。
