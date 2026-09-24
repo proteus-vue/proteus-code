@@ -177,6 +177,22 @@ pub enum ThreadCmd {
     PermissionProfileList,
     /// `modelProvider/capabilities/read`
     ModelProviderCapabilities,
+    /// `thread/inject_items`：向当前会话历史追加用户可见文本（不驱动模型）
+    InjectItems { text: String },
+    /// `thread/revert`：按 beforeTurnId 回退（= rewind 若干用户轮）
+    Revert { before_turn_id: String },
+    /// `thread/metadata/update`：更新会话 git 元数据（append-only op）
+    MetadataUpdate { id: String, branch: Option<String>, sha: Option<String>, origin_url: Option<String> },
+    /// `thread/attachment/add`
+    AttachmentAdd { id: String, attachment_type: String, identity_key: String, payload: Value },
+    /// `thread/attachment/list`
+    AttachmentList { id: String },
+    /// `thread/attachment/remove`
+    AttachmentRemove { id: String, attachment_type: String, identity_key: String },
+    /// `mcpServer/tool/call`：经既有 Tool seam 调 mcp__server__tool
+    McpToolCall { server: String, tool: String, arguments: Value },
+    /// `mcpServer/resource/read`：经 mcp__server__read_resource
+    McpResourceRead { server: String, uri: String },
 }
 
 /// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，18 个）。
@@ -238,6 +254,14 @@ pub const THREAD_METHODS: &[&str] = &[
     "thread/archive",
     "thread/unarchive",
     "thread/loaded/list",
+    "thread/inject_items",
+    "thread/revert",
+    "thread/metadata/update",
+    "thread/attachment/add",
+    "thread/attachment/list",
+    "thread/attachment/remove",
+    "mcpServer/tool/call",
+    "mcpServer/resource/read",
     "tools/list",
     "models/list",
     "model/list",
@@ -337,6 +361,14 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "thread/history" | "thread/items/list" | "thread/turns/list" | "thread/read" => &["id", "threadId", "thread_id", "limit"],
         "thread/export" => &["id", "format"],
         "thread/archive" | "thread/unarchive" => &["id", "threadId", "thread_id"],
+        "thread/inject_items" => &["threadId", "thread_id", "text", "items"],
+        "thread/revert" => &["threadId", "thread_id", "beforeTurnId", "before_turn_id"],
+        "thread/metadata/update" => &["threadId", "thread_id", "gitInfo", "branch", "sha", "originUrl", "origin_url"],
+        "thread/attachment/add" => &["threadId", "thread_id", "attachmentType", "attachment_type", "identityKey", "identity_key", "payload"],
+        "thread/attachment/list" => &["threadId", "thread_id"],
+        "thread/attachment/remove" => &["threadId", "thread_id", "attachmentType", "attachment_type", "identityKey", "identity_key"],
+        "mcpServer/tool/call" => &["server", "tool", "threadId", "thread_id", "arguments", "_meta"],
+        "mcpServer/resource/read" => &["server", "uri", "threadId", "thread_id", "target", "_meta"],
         "thread/list" | "thread/create" | "thread/start" | "thread/loaded/list"
         | "tools/list" | "models/list" | "model/list"
         | "hooks/list" | "mcpServerStatus/list" | "permissionProfile/list"
@@ -520,6 +552,59 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             Action::Thread(ThreadCmd::Archive { id: p.id, archived: false })
         }
         "thread/loaded/list" => Action::Thread(ThreadCmd::List),
+        "thread/inject_items" => {
+            let p: InjectItemsParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::InjectItems { text: inject_text(&p)? })
+        }
+        "thread/revert" => {
+            let p: RevertParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::Revert { before_turn_id: p.before_turn_id })
+        }
+        "thread/metadata/update" => {
+            let p: MetadataUpdateParams = from_params(method, params)?;
+            let gi = p.git_info;
+            let branch = p.branch.or_else(|| gi.as_ref().and_then(|g| g.get("branch").and_then(Value::as_str)).map(str::to_string));
+            let sha = p.sha.or_else(|| gi.as_ref().and_then(|g| g.get("sha").and_then(Value::as_str)).map(str::to_string));
+            let origin_url = p.origin_url.or_else(|| gi.as_ref().and_then(|g| g.get("origin_url").and_then(Value::as_str)).map(str::to_string));
+            Action::Thread(ThreadCmd::MetadataUpdate { id: p.id, branch, sha, origin_url })
+        }
+        "thread/attachment/add" => {
+            let p: AttachmentAddParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::AttachmentAdd {
+                id: p.id,
+                attachment_type: p.attachment_type,
+                identity_key: p.identity_key,
+                payload: p.payload,
+            })
+        }
+        "thread/attachment/list" => {
+            let p: AttachmentListParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::AttachmentList { id: p.id })
+        }
+        "thread/attachment/remove" => {
+            let p: AttachmentRemoveParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::AttachmentRemove {
+                id: p.id,
+                attachment_type: p.attachment_type,
+                identity_key: p.identity_key,
+            })
+        }
+        "mcpServer/tool/call" => {
+            let p: McpToolCallParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::McpToolCall {
+                server: p.server,
+                tool: p.tool,
+                arguments: p.arguments.unwrap_or_else(|| json!({})),
+            })
+        }
+        "mcpServer/resource/read" => {
+            let p: McpResourceReadParams = from_params(method, params)?;
+            let uri = resource_uri(&p)?;
+            Action::Thread(ThreadCmd::McpResourceRead {
+                server: p.server,
+                uri,
+            })
+        }
         "skills/list" => Action::Thread(ThreadCmd::SkillsList),
         "config/read" => Action::Thread(ThreadCmd::ConfigRead),
         "hooks/list" => Action::Thread(ThreadCmd::HooksList),
@@ -683,6 +768,42 @@ struct SteerParams {
     thread_id: Option<String>,
 }
 
+fn inject_text(p: &InjectItemsParams) -> Result<String, RpcError> {
+    if let Some(t) = p.text.as_deref() {
+        if !t.trim().is_empty() {
+            return Ok(t.to_string());
+        }
+    }
+    if let Some(arr) = p.items.as_ref().and_then(Value::as_array) {
+        let mut parts = Vec::new();
+        for item in arr {
+            if let Some(t) = item.get("text").and_then(Value::as_str) {
+                parts.push(t);
+            } else if let Some(t) = item.as_str() {
+                parts.push(t);
+            }
+        }
+        if !parts.is_empty() {
+            return Ok(parts.join("\n"));
+        }
+    }
+    Err(invalid_params("thread/inject_items 需要 text 或 items[].text"))
+}
+
+fn resource_uri(p: &McpResourceReadParams) -> Result<String, RpcError> {
+    if let Some(u) = p.uri.as_deref() {
+        if !u.trim().is_empty() {
+            return Ok(u.to_string());
+        }
+    }
+    if let Some(t) = p.target.as_ref() {
+        if let Some(u) = t.get("uri").and_then(Value::as_str) {
+            return Ok(u.to_string());
+        }
+    }
+    Err(invalid_params("mcpServer/resource/read 需要 uri 或 target.uri"))
+}
+
 fn steer_text(p: &SteerParams) -> Result<String, RpcError> {
     if let Some(t) = p.text.as_deref() {
         if !t.trim().is_empty() {
@@ -755,6 +876,93 @@ struct ThreadIdParams {
 struct ThreadReadParams {
     #[serde(alias = "threadId", alias = "thread_id")]
     id: String,
+}
+
+
+/// `thread/inject_items`：兼容 items[]（取首个 text）与简单 text 字段。
+#[derive(Debug, Deserialize)]
+struct InjectItemsParams {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    items: Option<Value>,
+    #[serde(default, alias = "threadId", alias = "thread_id")]
+    _thread: Option<String>,
+}
+
+/// `thread/revert`。
+#[derive(Debug, Deserialize)]
+struct RevertParams {
+    #[serde(alias = "beforeTurnId", alias = "before_turn_id")]
+    before_turn_id: String,
+    #[serde(default, alias = "threadId", alias = "thread_id")]
+    _thread: Option<String>,
+}
+
+/// `thread/metadata/update`。
+#[derive(Debug, Deserialize)]
+struct MetadataUpdateParams {
+    #[serde(alias = "threadId", alias = "thread_id")]
+    id: String,
+    #[serde(default, alias = "gitInfo")]
+    git_info: Option<Value>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    sha: Option<String>,
+    #[serde(default, alias = "originUrl")]
+    origin_url: Option<String>,
+}
+
+/// `thread/attachment/add`。
+#[derive(Debug, Deserialize)]
+struct AttachmentAddParams {
+    #[serde(alias = "threadId", alias = "thread_id")]
+    id: String,
+    #[serde(alias = "attachmentType", alias = "attachment_type")]
+    attachment_type: String,
+    #[serde(alias = "identityKey", alias = "identity_key")]
+    identity_key: String,
+    payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttachmentListParams {
+    #[serde(alias = "threadId", alias = "thread_id")]
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttachmentRemoveParams {
+    #[serde(alias = "threadId", alias = "thread_id")]
+    id: String,
+    #[serde(alias = "attachmentType", alias = "attachment_type")]
+    attachment_type: String,
+    #[serde(alias = "identityKey", alias = "identity_key")]
+    identity_key: String,
+}
+
+/// `mcpServer/tool/call`。
+#[derive(Debug, Deserialize)]
+struct McpToolCallParams {
+    server: String,
+    tool: String,
+    #[serde(default)]
+    arguments: Option<Value>,
+    #[serde(default, alias = "threadId")]
+    _thread: Option<String>,
+}
+
+/// `mcpServer/resource/read`：Codex 用 target.uri 或顶层 uri。
+#[derive(Debug, Deserialize)]
+struct McpResourceReadParams {
+    server: String,
+    #[serde(default)]
+    uri: Option<String>,
+    #[serde(default)]
+    target: Option<Value>,
+    #[serde(default, alias = "threadId")]
+    _thread: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -957,8 +1165,8 @@ mod tests {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(61),
-            "initialize + 19 Op + 37 control + aliases"
+            Some(69),
+            "initialize + 19 Op + 45 control + aliases"
         );
 
         // 版本不匹配必须拒绝，且把双方版本放进 data（机器可读）

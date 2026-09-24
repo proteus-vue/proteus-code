@@ -112,7 +112,7 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 61, "initialize + 19 Op + 37 control + aliases");
+    assert_eq!(methods.len(), 69, "initialize + 19 Op + 45 control + aliases");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
     assert!(methods.iter().any(|m| m == "turn/steer"), "Codex steer 必须可达");
@@ -455,6 +455,22 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 ThreadCmd::Models => ThreadResult::Value(json!({"models": [{"name":"mock"}], "current": "mock"})),
                 ThreadCmd::GitInfo { .. } => ThreadResult::Value(json!({"in_repo": false})),
                 ThreadCmd::GoalGet => ThreadResult::Value(json!({"goal": null})),
+                ThreadCmd::InjectItems { text } => ThreadResult::Value(json!({"injected": text.chars().count()})),
+                ThreadCmd::Revert { before_turn_id } => ThreadResult::Value(json!({"before": before_turn_id, "turns": 0})),
+                ThreadCmd::MetadataUpdate { id, .. } => ThreadResult::Value(json!({"id": id, "updated": true})),
+                ThreadCmd::AttachmentAdd { id, attachment_type, identity_key, .. } => ThreadResult::Value(json!({
+                    "id": id, "attachmentType": attachment_type, "identityKey": identity_key
+                })),
+                ThreadCmd::AttachmentList { id } => ThreadResult::Value(json!({"id": id, "attachments": []})),
+                ThreadCmd::AttachmentRemove { id, attachment_type, identity_key } => ThreadResult::Value(json!({
+                    "id": id, "attachmentType": attachment_type, "identityKey": identity_key, "removed": true
+                })),
+                ThreadCmd::McpToolCall { server, tool, .. } => ThreadResult::Value(json!({
+                    "server": server, "tool": tool, "output": ""
+                })),
+                ThreadCmd::McpResourceRead { server, uri } => ThreadResult::Value(json!({
+                    "server": server, "uri": uri, "text": ""
+                })),
                 ThreadCmd::Archive { id, archived } => ThreadResult::Value(json!({"id": id, "archived": archived})),
                 ThreadCmd::HooksList => ThreadResult::Value(json!({"hooks": []})),
                 ThreadCmd::McpServerStatusList => ThreadResult::Value(json!({"servers": []})),

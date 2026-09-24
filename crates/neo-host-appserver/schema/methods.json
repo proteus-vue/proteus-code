@@ -276,6 +276,96 @@
     "handshake_only": false
   },
   {
+    "name": "thread/inject_items",
+    "params": [
+      "threadId",
+      "thread_id",
+      "text",
+      "items"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/revert",
+    "params": [
+      "threadId",
+      "thread_id",
+      "beforeTurnId",
+      "before_turn_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/metadata/update",
+    "params": [
+      "threadId",
+      "thread_id",
+      "gitInfo",
+      "branch",
+      "sha",
+      "originUrl",
+      "origin_url"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/attachment/add",
+    "params": [
+      "threadId",
+      "thread_id",
+      "attachmentType",
+      "attachment_type",
+      "identityKey",
+      "identity_key",
+      "payload"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/attachment/list",
+    "params": [
+      "threadId",
+      "thread_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/attachment/remove",
+    "params": [
+      "threadId",
+      "thread_id",
+      "attachmentType",
+      "attachment_type",
+      "identityKey",
+      "identity_key"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "mcpServer/tool/call",
+    "params": [
+      "server",
+      "tool",
+      "threadId",
+      "thread_id",
+      "arguments",
+      "_meta"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "mcpServer/resource/read",
+    "params": [
+      "server",
+      "uri",
+      "threadId",
+      "thread_id",
+      "target",
+      "_meta"
+    ],
+    "handshake_only": false
+  },
+  {
     "name": "tools/list",
     "params": [],
     "handshake_only": false

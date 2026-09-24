@@ -167,7 +167,8 @@ impl SessionStore {
     ///
     /// `set_title` 与 `set_archived` 共用追加逻辑 —— 两种元数据都不另开
     /// 旁路文件，避免第二真相源。
-    fn append_op(&self, id: &str, payload: serde_json::Value) -> std::io::Result<bool> {
+    /// 追加一条 `kind=op` 记录（set_title / set_archived / git 元数据共用）。
+    pub fn append_op(&self, id: &str, payload: serde_json::Value) -> std::io::Result<bool> {
         use std::io::Write;
         let path = self.path_for(id);
         if !path.exists() {
@@ -215,6 +216,78 @@ impl SessionStore {
             return Ok(false);
         }
         self.append_op(id, serde_json::json!({ "set_archived": { "archived": archived } }))
+    }
+
+    /// 附件侧车目录：`root/.attachments/<id>.json`（**不进 list 扫描**，
+    /// 因为 list 只认 `.jsonl`）。与会话日志分开：附件是宿主附属数据，
+    /// 不是 append-only 会话真相的一部分。
+    fn attachment_path(&self, id: &str) -> PathBuf {
+        self.root.join(".attachments").join(format!("{}.json", sanitize_id(id)))
+    }
+
+    /// 读一个会话的附件列表（不存在 = 空表，不是错误）。
+    pub fn list_attachments(&self, id: &str) -> Vec<serde_json::Value> {
+        let Ok(raw) = std::fs::read_to_string(self.attachment_path(id)) else {
+            return Vec::new();
+        };
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+    }
+
+    /// 按 `(attachmentType, identityKey)` upsert 一条附件（Codex 同键语义）。
+    pub fn upsert_attachment(
+        &self,
+        id: &str,
+        attachment_type: &str,
+        identity_key: &str,
+        payload: serde_json::Value,
+    ) -> std::io::Result<serde_json::Value> {
+        let mut items = self.list_attachments(id);
+        let entry = serde_json::json!({
+            "attachmentType": attachment_type,
+            "identityKey": identity_key,
+            "payload": payload,
+        });
+        let mut replaced = false;
+        for it in items.iter_mut() {
+            if it.get("attachmentType").and_then(|v| v.as_str()) == Some(attachment_type)
+                && it.get("identityKey").and_then(|v| v.as_str()) == Some(identity_key)
+            {
+                *it = entry.clone();
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            items.push(entry.clone());
+        }
+        let path = self.attachment_path(id);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into()))?;
+        Ok(entry)
+    }
+
+    /// 按 `(attachmentType, identityKey)` 删除附件。返回是否真的删了一条。
+    pub fn remove_attachment(&self, id: &str, attachment_type: &str, identity_key: &str) -> bool {
+        let mut items = self.list_attachments(id);
+        let before = items.len();
+        items.retain(|it| {
+            !(it.get("attachmentType").and_then(|v| v.as_str()) == Some(attachment_type)
+                && it.get("identityKey").and_then(|v| v.as_str()) == Some(identity_key))
+        });
+        if items.len() == before {
+            return false;
+        }
+        let path = self.attachment_path(id);
+        let _ = std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into()),
+        );
+        true
     }
 
     /// 会话是否存在。
@@ -692,8 +765,33 @@ mod tests {
         assert_eq!(sanitize_id(&long).len(), MAX_ID_LEN, "超长 id 应被截断");
     }
 
+
+    #[test]
+    fn attachment_upsert_list_remove() {
+        let d = tmpdir("attach");
+        let s = SessionStore::open(&d);
+        write_events(&s, "s-1", "hi", vec![]);
+        let e = s
+            .upsert_attachment("s-1", "image", "shot-1", serde_json::json!({"path":"/tmp/a.png"}))
+            .unwrap();
+        assert_eq!(e["identityKey"], "shot-1");
+        assert_eq!(s.list_attachments("s-1").len(), 1);
+        // upsert 同键覆盖
+        s.upsert_attachment("s-1", "image", "shot-1", serde_json::json!({"path":"/tmp/b.png"}))
+            .unwrap();
+        assert_eq!(s.list_attachments("s-1").len(), 1);
+        assert_eq!(s.list_attachments("s-1")[0]["payload"]["path"], "/tmp/b.png");
+        assert!(s.remove_attachment("s-1", "image", "shot-1"));
+        assert!(s.list_attachments("s-1").is_empty());
+        assert!(!s.remove_attachment("s-1", "image", "shot-1"));
+        // 附件文件不出现在会话 list
+        assert_eq!(s.list().len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn ignores_non_jsonl_files() {
+
         let d = tmpdir("ext");
         let s = SessionStore::open(&d);
         std::fs::write(d.join("notes.txt"), "hi").unwrap();

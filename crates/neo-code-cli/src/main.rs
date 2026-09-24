@@ -1010,6 +1010,141 @@ fn thread_cmd(
                 Err(e) => ThreadResult::Error(format!("删除失败：{}（{e}）", full.display())),
             }
         }
+        ThreadCmd::InjectItems { text } => {
+            match kernel.inject_user_text(&text) {
+                Ok(()) => ThreadResult::Value(serde_json::json!({
+                    "id": kernel.session_id(),
+                    "injected": true,
+                    "chars": text.chars().count(),
+                })),
+                Err(e) => ThreadResult::Error(e.to_string()),
+            }
+        }
+        ThreadCmd::Revert { before_turn_id } => {
+            // beforeTurnId 形如 turn-N（1 基）。rewind 步数 = 总轮数 - (N-1)
+            let n: usize = before_turn_id
+                .strip_prefix("turn-")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            if n == 0 {
+                return ThreadResult::Error(format!(
+                    "无法解析 beforeTurnId「{before_turn_id}」（期望 turn-N）"
+                ));
+            }
+            let total = kernel.user_turn_count();
+            let turns = total.saturating_sub(n.saturating_sub(1));
+            if turns == 0 {
+                return ThreadResult::Value(serde_json::json!({
+                    "before": before_turn_id,
+                    "turns": 0,
+                    "message": "该轮之前没有可回退内容",
+                }));
+            }
+            match kernel.submit(neo_protocol::Op::Rewind { turns }) {
+                Ok(events) => ThreadResult::Resumed {
+                    result: serde_json::json!({
+                        "before": before_turn_id,
+                        "turns": turns,
+                        "events": events.len(),
+                    }),
+                    history: events,
+                },
+                Err(e) => ThreadResult::Error(e.to_string()),
+            }
+        }
+        ThreadCmd::MetadataUpdate { id, branch, sha, origin_url } => {
+            if id != kernel.session_id() && !store.exists(&id) {
+                return ThreadResult::Error(format!("会话 {id} 不存在"));
+            }
+            let mut payload = serde_json::json!({ "git_info": {} });
+            if let Some(obj) = payload.get_mut("git_info").and_then(|v| v.as_object_mut()) {
+                if let Some(b) = branch {
+                    obj.insert("branch".into(), serde_json::Value::String(b));
+                }
+                if let Some(s) = sha {
+                    obj.insert("sha".into(), serde_json::Value::String(s));
+                }
+                if let Some(o) = origin_url {
+                    obj.insert("origin_url".into(), serde_json::Value::String(o));
+                }
+            }
+            match store.append_op(&id, payload) {
+                Ok(_) => ThreadResult::Value(serde_json::json!({ "id": id, "updated": true })),
+                Err(e) => ThreadResult::Error(e.to_string()),
+            }
+        }
+        ThreadCmd::AttachmentAdd { id, attachment_type, identity_key, payload } => {
+            if id != kernel.session_id() && !store.exists(&id) {
+                return ThreadResult::Error(format!("会话 {id} 不存在"));
+            }
+            match store.upsert_attachment(&id, &attachment_type, &identity_key, payload) {
+                Ok(entry) => ThreadResult::Value(entry),
+                Err(e) => ThreadResult::Error(e.to_string()),
+            }
+        }
+        ThreadCmd::AttachmentList { id } => {
+            let id = if id == kernel.session_id() || store.exists(&id) {
+                id
+            } else {
+                return ThreadResult::Error(format!("会话 {id} 不存在"));
+            };
+            ThreadResult::Value(serde_json::json!({
+                "id": id,
+                "attachments": store.list_attachments(&id),
+            }))
+        }
+        ThreadCmd::AttachmentRemove { id, attachment_type, identity_key } => {
+            let removed = store.remove_attachment(&id, &attachment_type, &identity_key);
+            if !removed {
+                return ThreadResult::Error(format!(
+                    "附件不存在：{attachment_type}/{identity_key}"
+                ));
+            }
+            ThreadResult::Value(serde_json::json!({
+                "id": id,
+                "attachmentType": attachment_type,
+                "identityKey": identity_key,
+                "removed": true,
+            }))
+        }
+        ThreadCmd::McpToolCall { server, tool, arguments } => {
+            let name = format!(
+                "mcp__{}__{}",
+                server.replace('-', "_"),
+                tool.replace('-', "_")
+            );
+            let out = kernel.execute_tool_by_name(&name, &arguments);
+            if out.exit_code != 0 {
+                return ThreadResult::Error(if out.stderr.is_empty() {
+                    format!("MCP 工具失败：{name}")
+                } else {
+                    out.stderr
+                });
+            }
+            ThreadResult::Value(serde_json::json!({
+                "server": server,
+                "tool": tool,
+                "output": out.stdout,
+                "truncated": out.truncated,
+            }))
+        }
+        ThreadCmd::McpResourceRead { server, uri } => {
+            let name = format!("mcp__{}__read_resource", server.replace('-', "_"));
+            let out = kernel.execute_tool_by_name(&name, &serde_json::json!({ "uri": uri }));
+            if out.exit_code != 0 {
+                return ThreadResult::Error(if out.stderr.is_empty() {
+                    format!("MCP 资源读取失败：{name}")
+                } else {
+                    out.stderr
+                });
+            }
+            ThreadResult::Value(serde_json::json!({
+                "server": server,
+                "uri": uri,
+                "text": out.stdout,
+                "truncated": out.truncated,
+            }))
+        }
         ThreadCmd::GoalGet => match kernel.goal_snapshot() {
             Some(snap) => ThreadResult::Value(serde_json::json!({ "goal": snap })),
             None => ThreadResult::Value(serde_json::json!({ "goal": null })),

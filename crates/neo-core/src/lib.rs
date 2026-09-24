@@ -2155,6 +2155,64 @@ impl Kernel {
         self.goal.as_ref().and_then(|g| g.snapshot())
     }
 
+    /// 追加一条用户可见文本到当前会话历史（Codex `thread/inject_items` 子集）。
+    ///
+    /// **不驱动模型** —— 只落 UserSubmitted + Message::User，供下一轮请求带上。
+    /// 轮次进行中（turn_active / 审批挂起）拒绝，避免与 Steer 抢历史。
+    pub fn inject_user_text(&mut self, text: &str) -> Result<(), KernelError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(KernelError::GoalUnavailable("inject 文本为空".into()));
+        }
+        if self.turn_active || self.in_flight.is_some() {
+            return Err(KernelError::GoalUnavailable(
+                "有进行中的 turn 时请用 turn/steer，而不是 inject".into(),
+            ));
+        }
+        if !matches!(self.state, KernelState::Idle) {
+            return Err(KernelError::GoalUnavailable(
+                "审批/输入挂起中不能 inject".into(),
+            ));
+        }
+        let ev = EventMsg::UserSubmitted { text: text.to_string() };
+        self.emit_and_log(&ev)?;
+        self.messages.push(Message::User(text.to_string()));
+        Ok(())
+    }
+
+    /// 按名字执行一个已注册工具（Codex `mcpServer/tool/call` 走既有 Tool seam）。
+    ///
+    /// 与模型路径同一 `ToolCtx`（沙箱/上限）；**不写 ToolResult 进历史**——
+    /// 控制面调用是一次性 RPC，结果只回客户端（避免污染对话）。
+    pub fn execute_tool_by_name(&self, name: &str, args: &Value) -> ToolOutput {
+        match self.tools.get(name) {
+            Some(tool) => {
+                let ctx = ToolCtx {
+                    sandbox: self.sandbox.as_ref(),
+                    mode: self.resolution().sandbox,
+                    cwd: &self.cwd,
+                    max_output_bytes: self.max_output_bytes,
+                };
+                tool.execute(args, &ctx)
+            }
+            None => ToolOutput {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: format!("未知工具：{name}"),
+                truncated: false,
+            },
+        }
+    }
+
+    /// 当前用户轮数（`thread/revert` 把 beforeTurnId 换算成 rewind 步数用）。
+    pub fn user_turn_count(&self) -> usize {
+        self
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Message::User(_) | Message::UserImage { .. }))
+            .count()
+    }
+
     /// 进行中的轮次 id（`turn-N`）。无活动轮为 `None`。Codex `turn/steer` 前置条件。
     pub fn active_turn_id(&self) -> Option<String> {
         if self.turn_active {

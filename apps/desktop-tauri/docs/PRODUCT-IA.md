@@ -265,6 +265,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-42 | view_image 多模态（内核侧） | P1 | ✅ 默认注册 · ImageAttachment · UserImage 编码 image_url · 事件仅路径 |
 | IA-43 | Codex 控制面对齐（steer/skills/config/fs/items/turns） | P1 | ✅ 方法表 49 · turn/steer · skills/list · config/read · thread/items\|turns · fs/* 只读+沙箱写 |
 | IA-44 | Codex 扩展批：archive/hooks/mcp 状态/fs copy · 方法表 61 | P1 | ✅ thread/archive\|unarchive · hooks 空表诚实 · mcpServerStatus · permissionProfile · fs/copy\|mkdir\|remove |
+| IA-45 | Codex 批3：inject/revert/metadata/attachment + mcp 运行时 | P1 | ✅ 方法表 69 · inject 不驱动 · revert=rewind 换算 · 附件侧车 · mcpServer/tool\|resource 走既有 Tool seam |
 
 ---
 

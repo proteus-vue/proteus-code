@@ -1895,6 +1895,56 @@ fn goal_advance_runs_a_full_subtask_turn_and_advances_the_engine() {
     assert_eq!(sh.last_failed, Some(false), "本轮无失败，审查判据应为通过");
 }
 
+
+/// Codex thread/inject_items：追加历史、不驱动模型。
+#[test]
+fn inject_user_text_appends_without_driving() {
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::text_only("x")),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    k.inject_user_text("补充上下文：用中文注释").expect("应可注入");
+    assert!(
+        k.messages().iter().any(|m| matches!(m, Message::User(t) if t.contains("中文注释"))),
+        "消息历史应含注入文本"
+    );
+    let logs = k.log_records();
+    assert!(
+        logs.iter().any(|r| r.kind == "event"
+            && r.payload.get("user_submitted").is_some()),
+        "UserSubmitted 必须落日志"
+    );
+    // 轮进行中拒绝
+    k.submit(Op::BeginTurn { text: "go".into(), refs: vec![] }).unwrap();
+    let err = k.inject_user_text("mid-turn").unwrap_err();
+    assert!(matches!(err, neo_core::KernelError::GoalUnavailable(_)), "{err:?}");
+}
+
+/// Codex thread/revert：按 turn-N 换算 rewind。
+#[test]
+fn revert_before_turn_n_rewinds_correct_prefix() {
+    // 两轮用户消息
+    let script = vec![
+        vec![ModelDelta::Text("a1".into())],
+        vec![ModelDelta::Text("a2".into())],
+    ];
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        read_tool(),
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::Default,
+    );
+    k.submit(Op::UserTurn { text: "一".into(), refs: vec![] }).unwrap();
+    k.submit(Op::UserTurn { text: "二".into(), refs: vec![] }).unwrap();
+    assert_eq!(k.user_turn_count(), 2);
+    // before turn-2 → 丢掉第 2 轮，保留第 1 轮 → rewind 1
+    let ev = k.submit(Op::Rewind { turns: 1 }).unwrap();
+    assert!(ev.iter().any(|e| matches!(e, EventMsg::Rewound { turns: 1, .. })));
+    assert_eq!(k.user_turn_count(), 1);
+}
+
 /// Codex turn/steer：轮内注入用户指令，不新开轮。
 #[test]
 fn steer_injects_into_active_turn() {

@@ -632,7 +632,7 @@ mod tests {
     fn method_docs_cover_all_ops() {
         let docs = method_docs();
         // initialize + 17 个 Op + 10 个 control
-        assert_eq!(docs.len(), 61, "方法表 initialize + 19 Op + 37 control + aliases");
+        assert_eq!(docs.len(), 69, "方法表 initialize + 19 Op + 45 control + aliases");
         assert!(docs[0].handshake_only);
         assert_eq!(docs[0].name, "initialize");
         assert!(docs.iter().any(|d| d.name == "thread/resume"));
