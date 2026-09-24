@@ -1,7 +1,7 @@
 /**
- * 自绘图标集（PRODUCT-IA §7.6 · IA-55 重做）。
- * 24 viewBox · 几何更满 · 默认线宽 2 · 关键块面用 fill 加重，
- * 避免「一根细线」的简笔感。不拷贝竞品；禁止 emoji 当图标。
+ * 自绘图标集（PRODUCT-IA §7.6 · IA-55/IA-56）。
+ * 单色实心：fill=currentColor · evenodd 挖孔 · 无第二色、无白描边。
+ * 对齐 @ 文件引用文档图标形态。禁止 emoji；不拷贝竞品。
  */
 import type { CSSProperties, ReactElement } from "react";
 
@@ -36,296 +36,189 @@ export type IconName =
 
 const PATHS: Record<IconName, ReactElement> = {
   menu: (
-    <>
-      <path d="M4 7.25h16v1.5H4zM4 11.25h16v1.5H4zM4 15.25h16v1.5H4z" fill="currentColor" stroke="none" />
-    </>
+    <path
+      fill="currentColor"
+      d="M4 6.5h16v2.25H4V6.5Zm0 4.375h16v2.25H4v-2.25Zm0 4.375h16V17.5H4v-2.25Z"
+    />
   ),
   plus: (
-    <>
-      <path d="M11 4.5h2v6.5H19.5v2H13v6.5h-2V13H4.5v-2H11V4.5z" fill="currentColor" stroke="none" />
-    </>
+    <path
+      fill="currentColor"
+      d="M10.75 3.5h2.5v7.25H20.5v2.5h-7.25V20.5h-2.5v-7.25H3.5v-2.5h7.25V3.5Z"
+    />
   ),
   search: (
-    <>
-      <circle cx="11" cy="11" r="6.25" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="2" />
-      <path d="m15.6 15.6 4.15 4.15" strokeWidth="2.25" />
-      <circle cx="11" cy="11" r="2.25" fill="currentColor" stroke="none" />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M10.75 3.5a7.25 7.25 0 1 0 4.52 12.93l3.65 3.65a1.25 1.25 0 0 0 1.77-1.77l-3.65-3.65A7.25 7.25 0 0 0 10.75 3.5Zm0 2.5a4.75 4.75 0 1 1 0 9.5 4.75 4.75 0 0 1 0-9.5Z"
+    />
   ),
   settings: (
-    <>
-      <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" />
-      <path
-        d="M12 3.2l1.2 2.1 2.4-.4 1 2.2 2.3.8-.4 2.4 1.8 1.7-1.8 1.7.4 2.4-2.3.8-1 2.2-2.4-.4L12 20.8l-1.2-2.1-2.4.4-1-2.2-2.3-.8.4-2.4L3.7 12l1.8-1.7-.4-2.4 2.3-.8 1-2.2 2.4.4L12 3.2z"
-        fill="currentColor"
-        fillOpacity="0.2"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinejoin="round"
-      />
-      <circle cx="12" cy="12" r="1.35" fill="currentColor" stroke="none" />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M12 2.75 13.4 5l2.7-.45 1.15 2.5 2.6.95-.45 2.7L21 12l-1.55 1.3.45 2.7-2.6.95-1.15 2.5-2.7-.45L12 21.25l-1.4-2.25-2.7.45-1.15-2.5-2.6-.95.45-2.7L3 12l1.55-1.3-.45-2.7 2.6-.95L7.85 4.55l2.7.45L12 2.75Zm0 6.5a2.75 2.75 0 1 0 0 5.5 2.75 2.75 0 0 0 0-5.5Z"
+    />
   ),
-  "chevron-left": <path d="M14.75 5.5 8.25 12l6.5 6.5" strokeWidth="2.25" />,
-  "chevron-right": <path d="M9.25 5.5 15.75 12l-6.5 6.5" strokeWidth="2.25" />,
-  "chevron-down": <path d="M5.5 9.25 12 15.75l6.5-6.5" strokeWidth="2.25" />,
+  "chevron-left": (
+    <path
+      fill="currentColor"
+      d="M14.9 5.1 8 12l6.9 6.9 1.8-1.8L11.6 12l5.1-5.1-1.8-1.8Z"
+    />
+  ),
+  "chevron-right": (
+    <path
+      fill="currentColor"
+      d="M9.1 5.1 16 12l-6.9 6.9-1.8-1.8L12.4 12l-5.1-5.1 1.8-1.8Z"
+    />
+  ),
+  "chevron-down": (
+    <path
+      fill="currentColor"
+      d="M5.1 9.1 12 16l6.9-6.9-1.8-1.8L12 12.4l-5.1-5.1-1.8 1.8Z"
+    />
+  ),
   sun: (
-    <>
-      <circle cx="12" cy="12" r="4.25" fill="currentColor" stroke="none" />
-      <path
-        d="M12 2.75v2.5M12 18.75v2.5M2.75 12h2.5M18.75 12h2.5M5.4 5.4l1.75 1.75M16.85 16.85l1.75 1.75M18.6 5.4l-1.75 1.75M7.15 16.85 5.4 18.6"
-        strokeWidth="2"
-      />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M12 7.25a4.75 4.75 0 1 0 0 9.5 4.75 4.75 0 0 0 0-9.5Zm-1.1-7.5h2.2v3.4h-2.2V-.25Zm0 17.6h2.2v3.4h-2.2v-3.4ZM.25 10.9h3.4v2.2H.25v-2.2Zm17.6 0h3.4v2.2h-3.4v-2.2ZM4.05 5.4l1.55-1.55 2.4 2.4-1.55 1.55-2.4-2.4Zm12 12 1.55-1.55 2.4 2.4-1.55 1.55-2.4-2.4ZM19.95 5.4l-1.55-1.55-2.4 2.4 1.55 1.55 2.4-2.4ZM5.6 17.4l-1.55-1.55-2.4 2.4L3.2 19.8l2.4-2.4Z"
+    />
   ),
   moon: (
     <path
-      d="M16.2 14.8A6.8 6.8 0 0 1 9.2 4.2 7.3 7.3 0 1 0 16.2 14.8Z"
       fill="currentColor"
-      fillOpacity="0.22"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinejoin="round"
+      d="M16.4 14.6A7.1 7.1 0 0 1 9.4 3.9a7.6 7.6 0 1 0 7 10.7Z"
     />
   ),
   close: (
-    <>
-      <path d="M6.75 6.75 17.25 17.25M17.25 6.75 6.75 17.25" strokeWidth="2.35" />
-    </>
+    <path
+      fill="currentColor"
+      d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6 6.4 5Z"
+    />
   ),
   edit: (
-    <>
-      <path
-        d="M4.5 16.8 14.2 7.1l3.4 3.4-9.7 9.7H4.5v-3.4z"
-        fill="currentColor"
-        fillOpacity="0.2"
-        stroke="currentColor"
-        strokeWidth="1.85"
-        strokeLinejoin="round"
-      />
-      <path d="m13.2 8.1 3.4 3.4" strokeWidth="2" />
-    </>
+    <path
+      fill="currentColor"
+      d="M4.2 16.55 14.05 6.7l3.55 3.55L7.75 20.1H4.2v-3.55Zm10.05-9.85 1.55-1.55 3.55 3.55-1.55 1.55-3.55-3.55Z"
+    />
   ),
   trash: (
-    <>
-      <path d="M5.5 7.5h13v1.5h-13zM9.5 7.5V5.75h5V7.5" strokeWidth="1.85" />
-      <path
-        d="M7.25 9h9.5l-.7 10.25H7.95L7.25 9z"
-        fill="currentColor"
-        fillOpacity="0.16"
-        stroke="currentColor"
-        strokeWidth="1.85"
-        strokeLinejoin="round"
-      />
-      <path d="M10.4 11.5v5M13.6 11.5v5" strokeWidth="1.75" />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M9.25 4.5h5.5v1.75H17V8H7V6.25h2.25V4.5ZM5.75 8h12.5l-.85 11.5a1.75 1.75 0 0 1-1.75 1.6H8.35a1.75 1.75 0 0 1-1.75-1.6L5.75 8Zm3.5 2.75v6.5h1.5v-6.5H9.25Zm4 0v6.5h1.5v-6.5h-1.5Z"
+    />
   ),
   check: (
     <path
-      d="m5.5 12.5 4.2 4.2L18.5 7.8"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      fill="currentColor"
+      d="M9.4 16.6 4.8 12l1.7-1.7 2.9 2.9 7.1-7.1L18.2 7.8 9.4 16.6Z"
     />
   ),
   send: (
-    <>
-      <path
-        d="M12 4.2 4.8 19.2l7.2-3.4 7.2 3.4L12 4.2z"
-        fill="currentColor"
-        fillOpacity="0.22"
-        stroke="currentColor"
-        strokeWidth="1.85"
-        strokeLinejoin="round"
-      />
-      <path d="M12 4.2v11.6" strokeWidth="1.75" />
-    </>
+    <path
+      fill="currentColor"
+      d="M12 3.2 3.8 20.2l8.2-3.8 8.2 3.8L12 3.2Zm0 3.35 5.35 11.15L12 15.55 6.65 17.7 12 6.55Z"
+    />
   ),
   stop: (
-    <rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none" />
+    <rect x="6.25" y="6.25" width="11.5" height="11.5" rx="2.25" fill="currentColor" />
   ),
   review: (
-    <>
-      <rect
-        x="4.5"
-        y="5.5"
-        width="15"
-        height="13"
-        rx="2"
-        fill="currentColor"
-        fillOpacity="0.16"
-        stroke="currentColor"
-        strokeWidth="1.85"
-      />
-      <path d="M7.75 10h5M7.75 13.25h8.5" strokeWidth="2" />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M6.25 3.5h11.5A1.75 1.75 0 0 1 19.5 5.25v13.5A1.75 1.75 0 0 1 17.75 20.5H6.25A1.75 1.75 0 0 1 4.5 18.75V5.25A1.75 1.75 0 0 1 6.25 3.5Zm1.5 4.25v1.5h8v-1.5h-8Zm0 4.25v1.5h9.5v-1.5H7.75Zm0 4.25v1.5h6v-1.5h-6Z"
+    />
   ),
   terminal: (
-    <>
-      <rect
-        x="3.5"
-        y="5"
-        width="17"
-        height="14"
-        rx="2.25"
-        fill="currentColor"
-        fillOpacity="0.14"
-        stroke="currentColor"
-        strokeWidth="1.85"
-      />
-      <path
-        d="m7.75 10.25 2.9 2.35-2.9 2.35M13.25 15h3.5"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M5.25 4.5h13.5A1.75 1.75 0 0 1 20.5 6.25v11.5A1.75 1.75 0 0 1 18.75 19.5H5.25A1.75 1.75 0 0 1 3.5 17.75V6.25A1.75 1.75 0 0 1 5.25 4.5Zm2.75 4.1 3.1 2.55-3.1 2.55v-2h5.1v-1.6H8V8.6Zm6.4 4.9h3.35v1.6H14.4v-1.6Z"
+    />
   ),
   browser: (
-    <>
-      <rect
-        x="3.5"
-        y="5"
-        width="17"
-        height="14"
-        rx="2.25"
-        fill="currentColor"
-        fillOpacity="0.12"
-        stroke="currentColor"
-        strokeWidth="1.85"
-      />
-      <path d="M3.5 9h17" strokeWidth="1.85" />
-      <circle cx="7.25" cy="7" r="1" fill="#ef4444" stroke="none" />
-      <circle cx="10" cy="7" r="1" fill="#f59e0b" stroke="none" />
-      <circle cx="12.75" cy="7" r="1" fill="#22c55e" stroke="none" />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M5.25 4.5h13.5A1.75 1.75 0 0 1 20.5 6.25v11.5A1.75 1.75 0 0 1 18.75 19.5H5.25A1.75 1.75 0 0 1 3.5 17.75V6.25A1.75 1.75 0 0 1 5.25 4.5Zm0 4.5v1.6h13.5V9H5.25Zm1.6 3.35a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2Zm3.1 0a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2Zm3.1 0a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2Z"
+    />
   ),
   files: (
-    <>
-      <path
-        d="M6.5 3.75h7.25L18 8v12.25H6.5V3.75z"
-        fill="currentColor"
-        fillOpacity="0.2"
-        stroke="currentColor"
-        strokeWidth="1.85"
-        strokeLinejoin="round"
-      />
-      <path d="M13.5 3.75V8H18" strokeWidth="1.85" strokeLinejoin="round" />
-      <path d="M9 12.25h6M9 15.5h4.5" strokeWidth="1.85" />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M6.25 3.25A1.75 1.75 0 0 1 8 1.5h5.35c.46 0 .9.18 1.23.51l5.15 5.15c.33.33.51.77.51 1.23V20.75A1.75 1.75 0 0 1 18.5 22.5h-10.5a1.75 1.75 0 0 1-1.75-1.75V3.25Zm7.35 2.1v3.4c0 .47.38.85.85.85h3.4l-4.25-4.25ZM8.75 12.4h6.5v1.5h-6.5v-1.5Zm0 3.25h4.5v1.5h-4.5v-1.5Z"
+    />
   ),
   chat: (
-    <>
-      <path
-        d="M4.5 6.75h11.5v7.5H9.25L6.5 16.75V14.25H4.5v-7.5z"
-        fill="currentColor"
-        fillOpacity="0.18"
-        stroke="currentColor"
-        strokeWidth="1.85"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M9.25 10.5h9.25v6.25h-2.75l-2.25 2v-2H9.25v-6.25z"
-        fill="currentColor"
-        fillOpacity="0.08"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinejoin="round"
-      />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M5.25 4.75h11.5A1.75 1.75 0 0 1 18.5 6.5v7A1.75 1.75 0 0 1 16.75 15.25H10l-3.25 3v-3H5.25A1.75 1.75 0 0 1 3.5 13.5v-7A1.75 1.75 0 0 1 5.25 4.75Zm1.5 3v1.5h8.5v-1.5H6.75Zm0 3.25v1.5h6.5v-1.5h-6.5ZM10 15.25h7.25A.25.25 0 0 0 17.5 15v-1.4l1.75 1.55a.75.75 0 0 1-.5 1.3H10v-1.45Z"
+    />
   ),
   sim: (
-    <>
-      <rect
-        x="7.75"
-        y="3.75"
-        width="8.5"
-        height="16.5"
-        rx="2.25"
-        fill="currentColor"
-        fillOpacity="0.16"
-        stroke="currentColor"
-        strokeWidth="1.85"
-      />
-      <path d="M10.75 17.25h2.5" strokeWidth="2" />
-      <circle cx="12" cy="7" r="1.1" fill="currentColor" stroke="none" />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M8.75 2.5h6.5A2.25 2.25 0 0 1 17.5 4.75v14.5A2.25 2.25 0 0 1 15.25 21.5h-6.5A2.25 2.25 0 0 1 6.5 19.25V4.75A2.25 2.25 0 0 1 8.75 2.5Zm1.5 2.5v1.5h3.5V5h-3.5Zm.75 9.75h2v1.5h-2v-1.5Z"
+    />
   ),
   goal: (
-    <>
-      <circle cx="12" cy="12" r="7.75" fill="currentColor" fillOpacity="0.14" stroke="currentColor" strokeWidth="1.85" />
-      <circle cx="12" cy="12" r="4" fill="currentColor" fillOpacity="0.35" stroke="currentColor" strokeWidth="1.75" />
-      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
-      <path d="M12 2.75v2.25M12 19v2.25M2.75 12H5M19 12h2.25" strokeWidth="1.85" />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M12 3.25a8.75 8.75 0 1 0 0 17.5 8.75 8.75 0 0 0 0-17.5Zm0 3a5.75 5.75 0 1 0 0 11.5 5.75 5.75 0 0 0 0-11.5Zm0 3.25a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"
+    />
   ),
   subagents: (
-    <>
-      <rect x="3.5" y="5.5" width="7.5" height="6.5" rx="1.75" fill="currentColor" fillOpacity="0.22" stroke="currentColor" strokeWidth="1.75" />
-      <rect x="13" y="5.5" width="7.5" height="6.5" rx="1.75" fill="currentColor" fillOpacity="0.22" stroke="currentColor" strokeWidth="1.75" />
-      <rect x="8.25" y="13" width="7.5" height="6.5" rx="1.75" fill="currentColor" fillOpacity="0.22" stroke="currentColor" strokeWidth="1.75" />
-    </>
+    <path
+      fill="currentColor"
+      d="M3.75 5h7.5A1.5 1.5 0 0 1 12.75 6.5v4A1.5 1.5 0 0 1 11.25 12h-7.5A1.5 1.5 0 0 1 2.25 10.5v-4A1.5 1.5 0 0 1 3.75 5Zm10 0h7.5A1.5 1.5 0 0 1 22.75 6.5v4A1.5 1.5 0 0 1 21.25 12h-7.5A1.5 1.5 0 0 1 12.25 10.5v-4A1.5 1.5 0 0 1 13.75 5ZM8.75 13h7.5A1.5 1.5 0 0 1 17.75 14.5v4A1.5 1.5 0 0 1 16.25 20h-7.5A1.5 1.5 0 0 1 7.25 18.5v-4A1.5 1.5 0 0 1 8.75 13Z"
+    />
   ),
   automations: (
-    <>
-      <circle cx="12" cy="13" r="6.5" fill="currentColor" fillOpacity="0.14" stroke="currentColor" strokeWidth="1.85" />
-      <path d="M12 9.75v3.75l2.75 1.65" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M9.75 3.5h4.5M12 3.5V7" strokeWidth="1.85" />
-      <circle cx="12" cy="13" r="1.35" fill="currentColor" stroke="none" />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M12 5.75a7.25 7.25 0 1 0 0 14.5 7.25 7.25 0 0 0 0-14.5Zm.9 3.4v3.95l2.6 1.55-.75 1.3-3.35-2V9.15h1.5ZM9.75 1.5h4.5v2.25h-4.5V1.5ZM12 3.75V7"
+    />
   ),
   palette: (
-    <>
-      <path
-        d="M12 4.25a7.75 7.75 0 1 0 0 15.5h1.35a1.9 1.9 0 0 0 1.35-3.25l-.45-.45a1.55 1.55 0 0 1 1.1-2.6H17.2A3.55 3.55 0 0 0 20.75 11 7.75 7.75 0 0 0 12 4.25z"
-        fill="currentColor"
-        fillOpacity="0.16"
-        stroke="currentColor"
-        strokeWidth="1.85"
-        strokeLinejoin="round"
-      />
-      <circle cx="9" cy="10.25" r="1.35" fill="#ef4444" stroke="none" />
-      <circle cx="12.25" cy="8.25" r="1.35" fill="#3b82f6" stroke="none" />
-      <circle cx="15.5" cy="10.5" r="1.35" fill="#22c55e" stroke="none" />
-      <circle cx="10.5" cy="14" r="1.2" fill="#f59e0b" stroke="none" />
-    </>
+    <path
+      fill="currentColor"
+      d="M12 3.25a8.75 8.75 0 0 0 0 17.5h1.55c1.1 0 2-.9 2-2 0-.55-.22-1.05-.58-1.42-.35-.36-.57-.85-.57-1.4 0-1.1.9-2 2-2h1.9A4.35 4.35 0 0 0 22.75 11 8.75 8.75 0 0 0 12 3.25Zm-3.2 7.4a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9Zm3.3-2.3a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9Zm3.4 1.15a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9Zm-2.7 4.55a1.3 1.3 0 1 1 0 2.6 1.3 1.3 0 0 1 0-2.6Z"
+    />
   ),
   archive: (
-    <>
-      <path
-        d="M4.5 5.75h15v3.5h-15v-3.5z"
-        fill="currentColor"
-        fillOpacity="0.28"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M5.75 9.75h12.5v8.5H5.75v-8.5z"
-        fill="currentColor"
-        fillOpacity="0.12"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinejoin="round"
-      />
-      <path d="M10 13.25h4" strokeWidth="2" />
-    </>
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M4.5 3.75h15A1.5 1.5 0 0 1 21 5.25v3A1.5 1.5 0 0 1 19.5 9.75h-15A1.5 1.5 0 0 1 3 8.25v-3A1.5 1.5 0 0 1 4.5 3.75Zm1.25 6h12.5v9A1.5 1.5 0 0 1 16.75 20.25h-9.5A1.5 1.5 0 0 1 5.75 18.75v-9Zm4.25 3.1h4v1.5h-4v-1.5Z"
+    />
   ),
   package: (
-    <>
-      <path
-        d="M12 3.4 4.2 7.6v8.8L12 20.6l7.8-4.2V7.6L12 3.4z"
-        fill="currentColor"
-        fillOpacity="0.16"
-        stroke="currentColor"
-        strokeWidth="1.85"
-        strokeLinejoin="round"
-      />
-      <path d="M4.2 7.6 12 11.85l7.8-4.25M12 11.85v8.75" strokeWidth="1.85" strokeLinejoin="round" />
-      <path d="M8.1 5.5 15.9 9.7" strokeWidth="1.6" opacity="0.7" />
-    </>
+    <path
+      fill="currentColor"
+      d="M12 2.1 3.2 6.85v10.3L12 21.9l8.8-4.35V6.85L12 2.1Zm0 2.55 6.15 3.25L12 11.1 5.85 7.9 12 4.65ZM5.25 9.55l5.9 3.15v6.55l-5.9-2.95V9.55Zm7.6 9.7V12.7l5.9-3.15v6.3l-5.9 2.95Z"
+    />
   ),
 };
 
