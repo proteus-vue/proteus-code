@@ -275,6 +275,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-52 | 桌面接入批：export/revert/inject/review/feedback + 设置诊断 + fs/watch + respondStep | P1 | ✅ /export /inject /revert /review /feedback · 审查面板开始 · 仅本步审批 · hooks/MCP/权限档/configRequirements · 技能禁用 · 市场刷新/对账 · boot fs/watch |
 | IA-53 | 桌面接入：协议 fs/* 文件树 · PTY 终端 · 附件/MCP 重读 · 外部 Agent 迁移 | P1 | ✅ fs/readDirectory\|readFile\|getMetadata（失败退 Tauri）· pty 启动/write/terminate · thread/attachment/list · config/mcpServer/reload · externalAgent detect\|import |
 | IA-54 | @ 文件引用：图标 + 路径着色（无芯片） | P1 | ✅ 镜像层红文件图标 + accent 路径色 · textarea 透明字 + 光标 · 至路径字符止 · 菜单选中后空格分隔 |
+| IA-56 | 图标库统一单色实心（对齐文件图标） | P1 | ✅ 全集 fill=currentColor + evenodd 挖孔 · 去 fillOpacity/白描边/多色点 · @ 引用同步 |
 
 
 ---
