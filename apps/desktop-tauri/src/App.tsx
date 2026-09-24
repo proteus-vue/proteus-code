@@ -167,11 +167,13 @@ function matchSlash(q: string) {
 
 /**
  * 把输入里的 `@path` / `@"spaced path"` / `@'path'` 切成高亮段。
- * 镜像层用：芯片底画在 mirror，textarea 透明文字叠上去。
+ * 路径字符集刻意收窄：ASCII 单词/`.`/`/`/`-` —— 后面的中文或自定义
+ * 文案**不得**粘进芯片（真机：`@App.uvue哈哈哈` 曾整段高亮）。
  */
 function splitFileRefs(text: string): { text: string; ref: boolean }[] {
   if (!text) return [];
-  const re = /@(?:"[^"\n]+"|'[^'\n]+'|[^\s@]+)/g;
+  // 引号路径 或 无空白且仅 [\w./-] 的路径；遇到非路径字符即停
+  const re = /@(?:"[^"\n]+"|'[^'\n]+'|[\w./-]+)/g;
   const out: { text: string; ref: boolean }[] = [];
   let last = 0;
   for (const m of text.matchAll(re)) {
