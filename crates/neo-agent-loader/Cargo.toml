@@ -11,4 +11,4 @@ description = "L3 PROVIDER：子代理定义发现与加载（Markdown + frontma
 
 # L3 PROVIDER —— 子代理定义的发现与加载(Markdown + frontmatter)
 [dependencies]
-neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }

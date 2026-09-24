@@ -15,6 +15,6 @@ description = "L3 PROVIDER：SessionPersistence 的 JSONL 实现（append-only�
 # 日志格式（v 字段）必须向后兼容且可迁移 —— 那是格式契约；
 # "用哪种介质存" 才是本 SPI 的可替换点。
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
 serde_json = { workspace = true }

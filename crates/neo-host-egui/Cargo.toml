@@ -22,12 +22,12 @@ description = "L5 宿主：桌面原生 GUI（egui/eframe，复用 neo-text 的�
 [dependencies]
 # 宿主中立的文本语义：Tone / 语义调色板 / 显示宽度 / Markdown / 词法高亮。
 # 与 TUI 共享同一份 —— 这正是阶段 C 抽取它的原因（A3 禁止宿主互相依赖）。
-neo-text = { path = "../neo-text", version = "0.1.0" }
-neo-session = { path = "../neo-session", version = "0.1.0" }
+neo-text = { path = "../neo-text", version = "0.2.0" }
+neo-session = { path = "../neo-session", version = "0.2.0" }
 # 共享内核驱动（与 gpui 宿主共用；它守着 driving 边界守卫）
-neo-driver = { path = "../neo-driver", version = "0.1.0" }
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-driver = { path = "../neo-driver", version = "0.2.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
 eframe = "0.36"
 egui = "0.36"
 # 工具参数摘要是 JSON（ToolCallBegin.arguments）
@@ -35,11 +35,11 @@ serde_json = { workspace = true }
 
 # 驱动线程的单测用离线桩（内存持久化 / 脚本化 provider / 写工具）
 [dev-dependencies]
-neo-mock = { path = "../neo-mock", version = "0.1.0" }
+neo-mock = { path = "../neo-mock", version = "0.2.0" }
 # 往返测试要拿**真实生产者**喂**真实消费者**：diff 文本由 neo-capability
 # 产出、本宿主流式着色。分层方向 L5→L3 是向下的，合法。
 # （反向约束是 L3 不得依赖宿主 —— 那正是当初把这类测试放在宿主侧的原因。）
-neo-capability = { path = "../neo-capability", version = "0.1.0" }
+neo-capability = { path = "../neo-capability", version = "0.2.0" }
 # 端到端测试用**生产装配函数**（neo_exec::build_kernel）建内核，而不是自己
 # 拼 Kernel::new —— 自己拼会漏掉 compactor / goal orchestrator 的接线
 # （本文件第一版就漏了编排器，GoalSet 直接报 GoalUnavailable）。
@@ -47,8 +47,8 @@ neo-capability = { path = "../neo-capability", version = "0.1.0" }
 # 这是**测试专用**的依赖，且只借"装配"不借"渲染"：build_kernel 是各宿主
 # 共用的装配入口（neo-code-cli 为所有宿主调它），不存在"两个宿主共享渲染逻辑"
 # 那种会让 T6 等价退化成循环论证的问题。
-neo-exec = { path = "../neo-exec", version = "0.1.0" }
-neo-config = { path = "../neo-config", version = "0.1.0" }
-neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
-neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }
+neo-exec = { path = "../neo-exec", version = "0.2.0" }
+neo-config = { path = "../neo-config", version = "0.2.0" }
+neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.2.0" }
+neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.2.0" }
 

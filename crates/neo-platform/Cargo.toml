@@ -10,7 +10,7 @@ rust-version.workspace = true
 description = "L1 平台：进程加固 / 文件系统通知 / git 辅助"
 
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
 # 工作区文件索引的遍历。为什么用它而不是自己 read_dir 递归：
 # 它正是 ripgrep 的遍历引擎 —— `.gitignore` / `.ignore` / 隐藏文件 / 符号链接
 # 成环 这些语义已经有大量实践检验过；自己写一遍必然在某个边界上错

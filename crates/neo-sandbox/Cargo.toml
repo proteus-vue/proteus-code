@@ -11,5 +11,5 @@ description = "L1 平台：把命令包裹成 OS 级受限形式（Seatbelt / La
 
 # L0 PLATFORM: 只允许向下/同层，禁止依赖 L2 及以上
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
 thiserror = { workspace = true }

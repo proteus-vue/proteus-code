@@ -18,35 +18,35 @@ path = "src/main.rs"
 
 # `neo` multitool 入口。只做参数解析与装配 —— 业务在 L2/L3，渲染在 L5 宿主。
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
-neo-config = { path = "../neo-config", version = "0.1.0" }
-neo-capability = { path = "../neo-capability", version = "0.1.0" }
-neo-exec = { path = "../neo-exec", version = "0.1.0" }
-neo-host-tui = { path = "../neo-host-tui", version = "0.1.0" }
-neo-host-web = { path = "../neo-host-web", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
+neo-config = { path = "../neo-config", version = "0.2.0" }
+neo-capability = { path = "../neo-capability", version = "0.2.0" }
+neo-exec = { path = "../neo-exec", version = "0.2.0" }
+neo-host-tui = { path = "../neo-host-tui", version = "0.2.0" }
+neo-host-web = { path = "../neo-host-web", version = "0.2.0" }
 # stdio JSON-RPC 宿主（`neo app-server`）：给编辑器/IDE 这类已有自己进程的
 # 客户端一条通用线协议。纯标准库，不进任何 feature 门 —— 精简构建也该有它。
-neo-host-appserver = { path = "../neo-host-appserver", version = "0.1.0" }
-neo-host-desktop = { path = "../neo-host-desktop", version = "0.1.0", optional = true }
+neo-host-appserver = { path = "../neo-host-appserver", version = "0.2.0" }
+neo-host-desktop = { path = "../neo-host-desktop", version = "0.2.0", optional = true }
 # 桌面原生 GUI（egui）。与 webview 版并存：ADR-0006 决定不押注单一方案。
-neo-host-egui = { path = "../neo-host-egui", version = "0.1.0", optional = true }
+neo-host-egui = { path = "../neo-host-egui", version = "0.2.0", optional = true }
 # GPUI 宿主（NEO 的下一代桌面 UI；阶段 1 为 opt-in，默认仍是 egui）
-neo-host-gpui = { path = "../neo-host-gpui", version = "0.1.0", optional = true }
+neo-host-gpui = { path = "../neo-host-gpui", version = "0.2.0", optional = true }
 # 共享内核驱动：CLI 需要为 egui/gpui 两种句柄各实现一次 KernelAccess
-neo-driver = { path = "../neo-driver", version = "0.1.0" }
-neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.1.0" }
-neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.1.0" }
-neo-session-local = { path = "../neo-session-local", version = "0.1.0" }
-neo-session = { path = "../neo-session", version = "0.1.0" }
-neo-session-store = { path = "../neo-session-store", version = "0.1.0" }
-neo-providers = { path = "../neo-providers", version = "0.1.0" }
+neo-driver = { path = "../neo-driver", version = "0.2.0" }
+neo-sandbox-local = { path = "../neo-sandbox-local", version = "0.2.0" }
+neo-llm-deepseek = { path = "../neo-llm-deepseek", version = "0.2.0" }
+neo-session-local = { path = "../neo-session-local", version = "0.2.0" }
+neo-session = { path = "../neo-session", version = "0.2.0" }
+neo-session-store = { path = "../neo-session-store", version = "0.2.0" }
+neo-providers = { path = "../neo-providers", version = "0.2.0" }
 # mcpServerStatus/list：读用户级 mcp.json（与 neo-exec 装配同一配置源）
-neo-mcp = { path = "../neo-mcp", version = "0.1.0" }
+neo-mcp = { path = "../neo-mcp", version = "0.2.0" }
 # marketplace/* + plugin/*：本地插件市场（无账号；与 skill 根同一 L3）
-neo-skill-loader = { path = "../neo-skill-loader", version = "0.1.0" }
+neo-skill-loader = { path = "../neo-skill-loader", version = "0.2.0" }
 # fs/watch：路径级文件监听（L1；app-server EventBus 推 fs/changed）
-neo-platform = { path = "../neo-platform", version = "0.1.0" }
+neo-platform = { path = "../neo-platform", version = "0.2.0" }
 serde_json = { workspace = true }
 
 [features]
@@ -84,4 +84,4 @@ gpui = ["dep:neo-host-gpui"]
 
 # 驱动线程的单测用离线桩（内存持久化 / 确定性断言）
 [dev-dependencies]
-neo-mock = { path = "../neo-mock", version = "0.1.0" }
+neo-mock = { path = "../neo-mock", version = "0.2.0" }

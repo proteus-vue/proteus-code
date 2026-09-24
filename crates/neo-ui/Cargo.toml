@@ -28,13 +28,13 @@ description = "L4 UI 设计系统：NEO 品牌主题 + 带样式的组件"
 # 经 `neo-ui-render` 的中立 `Color` 转换。硬编码色值会同时破坏两件事：
 # 换主题、以及"同一 Tone 在各宿主颜色一致"。
 [dependencies]
-neo-ui-kit = { path = "../neo-ui-kit", version = "0.1.0" }
-neo-ui-render = { path = "../neo-ui-render", version = "0.1.0" }
-neo-ui-behavior = { path = "../neo-ui-behavior", version = "0.1.0" }
+neo-ui-kit = { path = "../neo-ui-kit", version = "0.2.0" }
+neo-ui-render = { path = "../neo-ui-render", version = "0.2.0" }
+neo-ui-behavior = { path = "../neo-ui-behavior", version = "0.2.0" }
 # 宿主中立的语义色调与调色板（品牌色的唯一来源）
-neo-text = { path = "../neo-text", version = "0.1.0" }
+neo-text = { path = "../neo-text", version = "0.2.0" }
 
 [dev-dependencies]
 # 测试需要 UI 测试基建（无头窗口）；**只在测试构建里打开**，
 # 不影响生产构建（见 neo-ui-kit 的 test-support 说明）。
-neo-ui-kit = { path = "../neo-ui-kit", version = "0.1.0", features = ["test-support"] }
+neo-ui-kit = { path = "../neo-ui-kit", version = "0.2.0", features = ["test-support"] }

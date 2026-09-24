@@ -11,5 +11,5 @@ description = "L3 PROVIDER：技能目录发现与加载（SKILL.md → SkillReg
 
 # L3 PROVIDER —— 技能目录发现与加载（把磁盘上的 SKILL.md 变成 SkillRegistry）
 [dependencies]
-neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
 serde_json = { workspace = true }

@@ -15,8 +15,8 @@ description = "L5 宿主：stdio 上的 JSON-RPC 2.0（形态对齐 Codex app-se
 # stdio 是标准库能力，不需要 HTTP/异步运行时 —— 这一层多加一个依赖，
 # 就多一个"客户端必须能装它"的前提。
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # 仅 `schema` 特性：生成 JSON Schema / TypeScript 契约产物

@@ -5223,14 +5223,14 @@ dependencies = [
 
 [[package]]
 name = "neo-agent-loader"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-core",
 ]
 
 [[package]]
 name = "neo-capability"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-config",
  "neo-core",
@@ -5243,7 +5243,7 @@ dependencies = [
 
 [[package]]
 name = "neo-code-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-capability",
  "neo-config",
@@ -5272,7 +5272,7 @@ dependencies = [
 
 [[package]]
 name = "neo-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-protocol",
  "serde",
@@ -5280,7 +5280,7 @@ dependencies = [
 
 [[package]]
 name = "neo-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-capability",
  "neo-config",
@@ -5295,7 +5295,7 @@ dependencies = [
 
 [[package]]
 name = "neo-driver"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "neo-config",
@@ -5311,7 +5311,7 @@ dependencies = [
 
 [[package]]
 name = "neo-exec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-agent-loader",
  "neo-capability",
@@ -5328,7 +5328,7 @@ dependencies = [
 
 [[package]]
 name = "neo-host-appserver"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-core",
  "neo-protocol",
@@ -5340,7 +5340,7 @@ dependencies = [
 
 [[package]]
 name = "neo-host-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-core",
  "neo-orchestration",
@@ -5351,7 +5351,7 @@ dependencies = [
 
 [[package]]
 name = "neo-host-egui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui",
@@ -5371,7 +5371,7 @@ dependencies = [
 
 [[package]]
 name = "neo-host-gpui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "neo-capability",
@@ -5395,7 +5395,7 @@ dependencies = [
 
 [[package]]
 name = "neo-host-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-capability",
  "neo-config",
@@ -5410,7 +5410,7 @@ dependencies = [
 
 [[package]]
 name = "neo-host-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-capability",
  "neo-config",
@@ -5422,7 +5422,7 @@ dependencies = [
 
 [[package]]
 name = "neo-instructions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-config",
  "neo-core",
@@ -5430,7 +5430,7 @@ dependencies = [
 
 [[package]]
 name = "neo-llm-deepseek"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-core",
  "neo-protocol",
@@ -5439,7 +5439,7 @@ dependencies = [
 
 [[package]]
 name = "neo-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-core",
  "neo-protocol",
@@ -5449,7 +5449,7 @@ dependencies = [
 
 [[package]]
 name = "neo-mock"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-core",
  "neo-host-appserver",
@@ -5464,7 +5464,7 @@ dependencies = [
 
 [[package]]
 name = "neo-orchestration"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-capability",
  "neo-core",
@@ -5475,7 +5475,7 @@ dependencies = [
 
 [[package]]
 name = "neo-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ignore",
  "neo-protocol",
@@ -5484,7 +5484,7 @@ dependencies = [
 
 [[package]]
 name = "neo-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "schemars",
  "serde",
@@ -5494,7 +5494,7 @@ dependencies = [
 
 [[package]]
 name = "neo-providers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-config",
  "serde",
@@ -5503,7 +5503,7 @@ dependencies = [
 
 [[package]]
 name = "neo-sandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-protocol",
  "thiserror 1.0.69",
@@ -5511,7 +5511,7 @@ dependencies = [
 
 [[package]]
 name = "neo-sandbox-local"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-core",
  "neo-protocol",
@@ -5520,7 +5520,7 @@ dependencies = [
 
 [[package]]
 name = "neo-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-protocol",
  "serde",
@@ -5529,7 +5529,7 @@ dependencies = [
 
 [[package]]
 name = "neo-session-local"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-core",
  "neo-protocol",
@@ -5538,7 +5538,7 @@ dependencies = [
 
 [[package]]
 name = "neo-session-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-protocol",
  "neo-session",
@@ -5547,7 +5547,7 @@ dependencies = [
 
 [[package]]
 name = "neo-skill-loader"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-core",
  "serde_json",
@@ -5555,14 +5555,14 @@ dependencies = [
 
 [[package]]
 name = "neo-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "neo-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-text",
  "neo-ui-behavior",
@@ -5572,21 +5572,21 @@ dependencies = [
 
 [[package]]
 name = "neo-ui-behavior"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-ui-render",
 ]
 
 [[package]]
 name = "neo-ui-kit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gpui-kit",
 ]
 
 [[package]]
 name = "neo-ui-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neo-text",
  "neo-ui-kit",

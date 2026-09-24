@@ -14,17 +14,17 @@ description = "test-support：为每个 SPI 提供 Mock/Headless 后端与反例
 # 存在理由（SPI-First Step 2）：单后端 SPI = 假 SPI（AP-01），可替换性从未被验证。
 # Mock 是**强制项**，不是可选项 —— 它同时是 conformance 的第二个被试对象。
 [dependencies]
-neo-protocol = { path = "../neo-protocol", version = "0.1.0" }
-neo-core = { path = "../neo-core", version = "0.1.0" }
+neo-protocol = { path = "../neo-protocol", version = "0.2.0" }
+neo-core = { path = "../neo-core", version = "0.2.0" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-neo-host-desktop = { path = "../neo-host-desktop", version = "0.1.0" }
+neo-host-desktop = { path = "../neo-host-desktop", version = "0.2.0" }
 # 桌面原生 GUI（egui）：T6 宿主等价也要覆盖它
-neo-host-egui = { path = "../neo-host-egui", version = "0.1.0" }
+neo-host-egui = { path = "../neo-host-egui", version = "0.2.0" }
 # GPUI 桌面宿主（NEO 的下一代 UI）：T6 宿主等价也要覆盖它
-neo-host-gpui = { path = "../neo-host-gpui", version = "0.1.0" }
-neo-host-tui = { path = "../neo-host-tui", version = "0.1.0" }
-neo-host-web = { path = "../neo-host-web", version = "0.1.0" }
+neo-host-gpui = { path = "../neo-host-gpui", version = "0.2.0" }
+neo-host-tui = { path = "../neo-host-tui", version = "0.2.0" }
+neo-host-web = { path = "../neo-host-web", version = "0.2.0" }
 # stdio JSON-RPC 宿主：T6 宿主等价也要覆盖它（线协议同样只从事件流抽事实）
-neo-host-appserver = { path = "../neo-host-appserver", version = "0.1.0" }
+neo-host-appserver = { path = "../neo-host-appserver", version = "0.2.0" }
