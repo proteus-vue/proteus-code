@@ -6088,3 +6088,44 @@ button.ctx-chip:hover {
   min-width: 48px;
   align-self: stretch;
 }
+
+/* ═══ IA-54 @ 文件引用芯片高亮（镜像层） ═══ */
+.composer-input-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.composer-input-mirror {
+  position: absolute;
+  inset: 0;
+  padding: 4px 4px 10px;
+  margin: 0;
+  border: none;
+  font-family: inherit;
+  font-size: var(--text-chat);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  color: transparent;
+  z-index: 0;
+}
+
+.composer-input-mirror .ref-token {
+  color: transparent;
+  background: color-mix(in srgb, var(--accent, #3b82f6) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 35%, transparent);
+  border-radius: 6px;
+  padding: 1px 4px;
+  margin: 0 -1px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.composer-card textarea {
+  position: relative;
+  z-index: 1;
+  color: var(--text-primary);
+  caret-color: var(--text-primary);
+}

@@ -274,6 +274,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-51 | 修：缩放后新建态 chips 飘顶 + 空分支死标签 | P1 | ✅ chips/卡片同轴钉底 · 无分支不显示 chip |
 | IA-52 | 桌面接入批：export/revert/inject/review/feedback + 设置诊断 + fs/watch + respondStep | P1 | ✅ /export /inject /revert /review /feedback · 审查面板开始 · 仅本步审批 · hooks/MCP/权限档/configRequirements · 技能禁用 · 市场刷新/对账 · boot fs/watch |
 | IA-53 | 桌面接入：协议 fs/* 文件树 · PTY 终端 · 附件/MCP 重读 · 外部 Agent 迁移 | P1 | ✅ fs/readDirectory\|readFile\|getMetadata（失败退 Tauri）· pty 启动/write/terminate · thread/attachment/list · config/mcpServer/reload · externalAgent detect\|import |
+| IA-54 | @ 文件引用芯片高亮（composer 镜像层） | P1 | ✅ @path / @\"…\" 渲染 ref-token 底色 · 与 attach-chip 同族视觉 · 纯文本仍可编辑 |
 
 ---
 

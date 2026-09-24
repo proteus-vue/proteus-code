@@ -165,6 +165,24 @@ function matchSlash(q: string) {
   );
 }
 
+/**
+ * 把输入里的 `@path` / `@"spaced path"` / `@'path'` 切成高亮段。
+ * 镜像层用：芯片底画在 mirror，textarea 透明文字叠上去。
+ */
+function splitFileRefs(text: string): { text: string; ref: boolean }[] {
+  if (!text) return [];
+  const re = /@(?:"[^"\n]+"|'[^'\n]+'|[^\s@]+)/g;
+  const out: { text: string; ref: boolean }[] = [];
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    const i = m.index ?? 0;
+    if (i > last) out.push({ text: text.slice(last, i), ref: false });
+    out.push({ text: m[0], ref: true });
+    last = i + m[0].length;
+  }
+  if (last < text.length) out.push({ text: text.slice(last), ref: false });
+  return out;
+}
 
 /** unified diff 行数统计（排除元数据行） */
 function formatWorkDur(ms: number): string {
@@ -2053,6 +2071,19 @@ export default function App() {
             </div>
           )}
           <div className="at-wrap">
+            <div className="composer-input-wrap">
+            <div className="composer-input-mirror" aria-hidden="true">
+              {splitFileRefs(input).map((seg, i) =>
+                seg.ref ? (
+                  <span key={i} className="ref-token">
+                    {seg.text}
+                  </span>
+                ) : (
+                  <span key={i}>{seg.text}</span>
+                ),
+              )}
+              {"\n"}
+            </div>
             <textarea
               ref={inputRef}
               value={input}
@@ -2133,6 +2164,7 @@ export default function App() {
               disabled={blocked || (status !== "ready" && status !== "busy")}
               rows={3}
             />
+            </div>
             {atQuery && atMatches.length > 0 && (
               <ul className="at-menu" role="listbox">
                 {atMatches.map((p, i) => (
