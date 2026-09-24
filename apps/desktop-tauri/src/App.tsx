@@ -166,14 +166,12 @@ function matchSlash(q: string) {
 }
 
 /**
- * 把输入里的 `@path` / `@"spaced path"` / `@'path'` 切成高亮段。
- * 路径字符集刻意收窄：ASCII 单词/`.`/`/`/`-` —— 后面的中文或自定义
- * 文案**不得**粘进芯片（真机：`@App.uvue哈哈哈` 曾整段高亮）。
+ * `@` 起到下一个空白为止 = 一个引用芯片（含后面的自定义中文 —— 简单、直观）。
+ * 引号路径 `@"a b"` / `@'a b'` 整段识别。
  */
 function splitFileRefs(text: string): { text: string; ref: boolean }[] {
   if (!text) return [];
-  // 引号路径 或 无空白且仅 [\w./-] 的路径；遇到非路径字符即停
-  const re = /@(?:"[^"\n]+"|'[^'\n]+'|[\w./-]+)/g;
+  const re = /@(?:"[^"\n]+"|'[^'\n]+'|[^\s@]+)/g;
   const out: { text: string; ref: boolean }[] = [];
   let last = 0;
   for (const m of text.matchAll(re)) {
@@ -1340,9 +1338,9 @@ export default function App() {
       const ref = formatFileRef(path);
       const before = atQuery.prefix;
       const after = input.slice(before.length);
-      // 替换 @… 片段为完整 ref（去掉残缺查询）
-      const replaced = `${before}${ref}${after.replace(/^@[\w./-]*/, "")}`;
-      setInput(replaced);
+      // 换成完整 ref + 空格：芯片与后续自定义文字之间有间距
+      const replaced = `${before}${ref} ${after.replace(/^@[\w./-]*/, "")}`;
+      setInput(replaced.trimStart() === replaced ? replaced : replaced);
       setAtQuery(null);
       setAtIdx(0);
       requestAnimationFrame(() => inputRef.current?.focus());

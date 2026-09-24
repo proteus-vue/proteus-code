@@ -6116,9 +6116,10 @@ button.ctx-chip:hover {
   color: transparent;
   background: color-mix(in srgb, var(--accent, #3b82f6) 16%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 35%, transparent);
-  border-radius: 6px;
-  padding: 1px 4px;
-  margin: 0 -1px;
+  border-radius: 8px;
+  /* 视觉留白：用 box-shadow 撑开，不改布局宽度 → 与 textarea 不错位 */
+  padding: 2px 8px;
+  margin: 1px -8px;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
