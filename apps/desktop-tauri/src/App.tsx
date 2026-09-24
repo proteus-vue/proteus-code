@@ -7,6 +7,7 @@ import type {
   InitializeResult,
   ThreadSummary,
   UiItem,
+  UserInputState,
   WireEvent,
 } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
@@ -35,6 +36,7 @@ import {
   forkThread,
   gitInfo,
   goalClear,
+  goalGet,
   goalPause,
   goalResume,
   goalSet,
@@ -45,6 +47,7 @@ import {
   onExit,
   onStderr,
   respondApproval,
+  respondUserInput,
   resumeThread,
   rewindTurns,
   startServer,
@@ -197,6 +200,9 @@ export default function App() {
   const switchingWs = useRef(false);
   const [items, setItems] = useState<UiItem[]>([]);
   const [approval, setApproval] = useState<ApprovalState | null>(null);
+  /** request_user_input 挂起（user_input_request → user_input/respond） */
+  const [userInput, setUserInput] = useState<UserInputState | null>(null);
+  const [userInputText, setUserInputText] = useState("");
   const [input, setInput] = useState("");
   /** IA-35：选中的网页元素附件（chip），不塞进 textarea */
   const [webPicks, setWebPicks] = useState<WebElementPick[]>([]);
@@ -281,7 +287,7 @@ export default function App() {
   );
 
   const busy = status === "busy";
-  const blocked = busy || !!approval;
+  const blocked = busy || !!approval || !!userInput;
   /** 调度器读最新 status/busy，避免闭包过期 */
   const statusRef = useRef(status);
   statusRef.current = status;
@@ -426,6 +432,26 @@ export default function App() {
             }),
           );
           break;
+        case "user_input_request":
+          setUserInput({
+            id: String(payload.id ?? ""),
+            prompt: String(payload.prompt ?? ""),
+          });
+          setUserInputText("");
+          setItems((prev) =>
+            prev.map((it) => {
+              if (it.type === "tool" && it.status === "running") {
+                return {
+                  ...it,
+                  status: "approval",
+                  detail: String(payload.prompt ?? ""),
+                  approvalKind: "interactive",
+                };
+              }
+              return it;
+            }),
+          );
+          break;
         case "patch_proposed":
           setLastPatch({
             path: String(payload.path ?? ""),
@@ -461,6 +487,8 @@ export default function App() {
           break;
         case "rewound":
           setApproval(null);
+          setUserInput(null);
+          setUserInputText("");
           setLastPatch(null);
           setItems((prev) => {
             let lastUser = -1;
@@ -546,6 +574,16 @@ export default function App() {
   const refreshThreadsRef = useRef(refreshThreads);
   refreshThreadsRef.current = refreshThreads;
 
+  /** Codex thread/goal/get：boot / 切会话后刷 Goal 面板。 */
+  const refreshGoal = useCallback(async () => {
+    try {
+      const r = await goalGet();
+      setGoal(r.goal ?? null);
+    } catch {
+      /* 旧方法表无此法时静默 */
+    }
+  }, []);
+
   const boot = useCallback(
     async (override?: { workspace?: string; mode?: "workspace" | "none" }) => {
       setStatus("boot");
@@ -613,6 +651,7 @@ export default function App() {
             .catch(() => setFileEntries([]));
         }
         await refreshThreads();
+        void refreshGoal();
         setStatus("ready");
         setStatusMsg(
           mode === "none"
@@ -624,12 +663,14 @@ export default function App() {
         setStatusMsg(String(e));
       }
     },
-    [refreshThreads],
+    [refreshGoal, refreshThreads],
   );
 
   const resetSessionUi = useCallback(() => {
     setItems([]);
     setApproval(null);
+    setUserInput(null);
+    setUserInputText("");
     setFiles([]);
     setLastPatch(null);
     setActiveThread(null);
@@ -761,6 +802,22 @@ export default function App() {
     [approval, append],
   );
 
+  const onUserInputSubmit = useCallback(async () => {
+    if (!userInput) return;
+    const id = userInput.id;
+    const response = userInputText;
+    setUserInput(null);
+    setUserInputText("");
+    try {
+      await respondUserInput(id, response);
+    } catch (e) {
+      append({ type: "error", message: String(e) });
+    }
+  }, [append, userInput, userInputText]);
+
+  /** Codex thread/goal/get：boot / 切会话后刷 Goal 面板。 */
+  // refreshGoal 已上移至 boot 之前（避免 TDZ）
+
   const onModeChange = useCallback(
     async (m: ExecMode) => {
       setExecMode(m);
@@ -781,6 +838,8 @@ export default function App() {
       setItems([]);
       setInput("");
       setApproval(null);
+      setUserInput(null);
+      setUserInputText("");
       setLastPatch(null);
       setGoal(null);
       setFiles([]);
@@ -797,15 +856,18 @@ export default function App() {
         setActiveThread(id);
         setItems([]);
         setApproval(null);
+        setUserInput(null);
+        setUserInputText("");
         setLastPatch(null);
         await resumeThread(id);
         await refreshThreads();
+        await refreshGoal();
         setStatusMsg(`已切换 ${id}`);
       } catch (e) {
         append({ type: "error", message: String(e) });
       }
     },
-    [append, refreshThreads],
+    [append, refreshGoal, refreshThreads],
   );
 
   const onSetGoal = useCallback(async () => {
@@ -1636,6 +1698,36 @@ export default function App() {
             </div>
           )}
 
+          {userInput && (
+            <div className="approval user-input" role="alertdialog" aria-label="需要你的输入">
+              <div className="title">需要你的输入</div>
+              <div className="detail">{userInput.prompt}</div>
+              <div className="user-input-row">
+                <input
+                  value={userInputText}
+                  placeholder="输入答复…"
+                  autoFocus
+                  onChange={(e) => setUserInputText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void onUserInputSubmit();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={!userInputText.trim()}
+                  onClick={() => void onUserInputSubmit()}
+                >
+                  发送答复
+                </button>
+              </div>
+              <p className="muted">user_input/respond · 输入区已锁定</p>
+            </div>
+          )}
+
           {stderrLines.length > 0 && (
             <details className="bubble reasoning">
               <summary>stderr（{stderrLines.length}）</summary>
@@ -1746,13 +1838,15 @@ export default function App() {
               placeholder={
                 approval
                   ? "待审批 — 输入已锁定"
-                  : webPicks.length
-                    ? "对选中的网页元素提出后续修改要求…"
-                    : isNewTask
-                      ? "描述要做的任务，用 @ 引用文件、/ 命令，或 ⌘K…"
-                      : busy
-                        ? "继续输入以排队后续修改"
-                        : "继续输入…"
+                  : userInput
+                    ? "待答复 — 输入已锁定"
+                    : webPicks.length
+                      ? "对选中的网页元素提出后续修改要求…"
+                      : isNewTask
+                        ? "描述要做的任务，用 @ 引用文件、/ 命令，或 ⌘K…"
+                        : busy
+                          ? "继续输入以排队后续修改"
+                          : "继续输入…"
               }
               onChange={(e) => onInputChange(e.target.value)}
               onKeyDown={(e) => {
@@ -1810,12 +1904,15 @@ export default function App() {
                   e.preventDefault();
                   void send();
                 }
-                if (e.key === "Escape" && !approval) {
+                if (e.key === "Escape" && !approval && !userInput) {
                   e.preventDefault();
                   if (busy) void stop();
                 }
               }}
-              disabled={Boolean(approval) || (status !== "ready" && status !== "busy")}
+              disabled={
+                Boolean(approval || userInput) ||
+                (status !== "ready" && status !== "busy")
+              }
               rows={3}
             />
             {atQuery && atMatches.length > 0 && (

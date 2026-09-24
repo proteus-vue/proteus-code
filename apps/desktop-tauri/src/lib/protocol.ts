@@ -95,6 +95,12 @@ export type ApprovalState = {
   kind: string;
 };
 
+/** 内核 `UserInputRequest` 挂起（request_user_input 反向通道）。 */
+export type UserInputState = {
+  id: string;
+  prompt: string;
+};
+
 export type UiItem =
   | { type: "user"; text: string }
   | { type: "assistant"; text: string }

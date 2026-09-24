@@ -685,6 +685,29 @@ button.btn-new span {
   flex-wrap: wrap;
 }
 
+/* 反向通道：request_user_input 挂起卡（IA-41） */
+.approval.user-input .title {
+  color: var(--accent);
+}
+.user-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.user-input-row input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface-elevated);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  color: var(--text-primary);
+}
+.user-input-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* 摘要条 */
 .summary-bar {
   align-self: center;

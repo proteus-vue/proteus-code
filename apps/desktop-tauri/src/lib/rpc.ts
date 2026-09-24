@@ -114,6 +114,21 @@ export async function respondApproval(
   });
 }
 
+/** 应答 `user_input_request`（Codex item/tool/requestUserInput 同形）。 */
+export async function respondUserInput(
+  id: string,
+  response: string,
+): Promise<unknown> {
+  return rpc("user_input/respond", { id, response });
+}
+
+/** 当前目标完整快照（Codex `thread/goal/get`）。无目标时 goal 为 null。 */
+export async function goalGet(): Promise<{
+  goal?: import("./protocol").GoalSnapshot | null;
+}> {
+  return rpc("thread/goal/get", {});
+}
+
 export async function listModels(): Promise<ModelsResult> {
   return rpc<ModelsResult>("models/list");
 }
