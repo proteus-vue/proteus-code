@@ -1,0 +1,723 @@
+<!-- AI生成 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0b1020" />
+<title>NEO × Codex · 内核能力对照</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --bg2: #121a31;
+    --card: #161f3a;
+    --card2: #1b2647;
+    --ink: #e8eefc;
+    --muted: #93a0c2;
+    --line: rgba(148,163,196,.18);
+    --ok: #34d399;
+    --part: #fbbf24;
+    --miss: #f87171;
+    --accent: #6ee7ff;
+    --accent2: #a78bfa;
+    --chip: #243056;
+    --shadow: 0 10px 30px rgba(0,0,0,.35);
+    --r: 16px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); }
+  body {
+    min-height: 100vh;
+    background:
+      radial-gradient(1200px 500px at 10% -10%, rgba(110,231,255,.12), transparent 55%),
+      radial-gradient(900px 420px at 90% 0%, rgba(167,139,250,.12), transparent 50%),
+      var(--bg);
+    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+  .wrap { width: min(960px, 100%); margin: 0 auto; padding: 16px 14px 40px; }
+
+  header.app {
+    position: sticky; top: 0; z-index: 20;
+    backdrop-filter: blur(14px);
+    background: linear-gradient(180deg, rgba(11,16,32,.92), rgba(11,16,32,.78));
+    border-bottom: 1px solid var(--line);
+    margin: -16px -14px 0;
+    padding: 14px 14px 12px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display: grid; place-items: center; font-weight: 800; color: #0b1020; font-size: 13px;
+    box-shadow: 0 6px 16px rgba(110,231,255,.25);
+  }
+  .brand h1 { font-size: 16px; margin: 0; font-weight: 700; letter-spacing: .2px; }
+  .brand p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+
+  .stats {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px;
+  }
+  .stat {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px 8px; text-align: center;
+  }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 11px; color: var(--muted); }
+  .stat.ok b { color: var(--ok); }
+  .stat.part b { color: var(--part); }
+  .stat.miss b { color: var(--miss); }
+  .stat.all b { color: var(--accent); }
+
+  .bar {
+    display: flex; gap: 6px; overflow-x: auto; margin-top: 12px;
+    padding-bottom: 2px; scrollbar-width: none;
+  }
+  .bar::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: 0 0 auto; border: 1px solid var(--line); background: var(--chip);
+    color: var(--ink); border-radius: 999px; padding: 7px 12px; font-size: 12px;
+    cursor: pointer; transition: .15s;
+  }
+  .chip.active { background: linear-gradient(135deg, rgba(110,231,255,.22), rgba(167,139,250,.22)); border-color: rgba(110,231,255,.45); color: #dff9ff; }
+  .chip .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+
+  .hero {
+    margin-top: 14px; background: linear-gradient(145deg, rgba(110,231,255,.08), rgba(167,139,250,.08));
+    border: 1px solid var(--line); border-radius: var(--r); padding: 14px; box-shadow: var(--shadow);
+  }
+  .hero h2 { margin: 0 0 6px; font-size: 15px; }
+  .hero p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.55; }
+  .layers { display: grid; gap: 8px; margin-top: 12px; }
+  .layer {
+    display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; align-items: center;
+    background: rgba(11,16,32,.45); border: 1px solid var(--line); border-radius: 12px; padding: 10px;
+  }
+  .layer i {
+    width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center;
+    font-style: normal; font-size: 12px; font-weight: 700; color: #0b1020;
+  }
+  .layer i.a { background: var(--accent); }
+  .layer i.b { background: var(--accent2); color: #fff; }
+  .layer i.c { background: var(--ok); }
+  .layer div strong { display: block; font-size: 13px; }
+  .layer div span { font-size: 11px; color: var(--muted); }
+  .layer em { font-style: normal; font-size: 11px; color: var(--accent); font-family: var(--mono); }
+
+  .section-title {
+    margin: 18px 0 10px; display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  }
+  .section-title h3 { margin: 0; font-size: 14px; font-weight: 700; }
+  .section-title span { font-size: 11px; color: var(--muted); }
+
+  .list { display: grid; gap: 10px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    overflow: hidden; transition: border-color .15s, transform .1s;
+  }
+  .card:active { transform: scale(.995); }
+  .card.open { border-color: rgba(110,231,255,.35); }
+  .card-head {
+    width: 100%; text-align: left; background: transparent; border: 0; color: inherit;
+    padding: 12px 12px; display: grid; grid-template-columns: 1fr auto; gap: 8px; cursor: pointer;
+    font: inherit;
+  }
+  .card-head .top { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .badge {
+    font-size: 10px; padding: 3px 7px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: rgba(255,255,255,.03); font-family: var(--mono);
+  }
+  .badge.ok { color: #062; background: rgba(52,211,153,.15); border-color: rgba(52,211,153,.35); color: var(--ok); }
+  .badge.part { background: rgba(251,191,36,.12); border-color: rgba(251,191,36,.35); color: var(--part); }
+  .badge.miss { background: rgba(248,113,113,.12); border-color: rgba(248,113,113,.35); color: var(--miss); }
+  .badge.p0 { background: rgba(167,139,250,.15); border-color: rgba(167,139,250,.4); color: #c4b5fd; }
+  .badge.std { background: rgba(110,231,255,.12); border-color: rgba(110,231,255,.35); color: var(--accent); }
+  .name { font-family: var(--mono); font-size: 13px; font-weight: 600; word-break: break-all; }
+  .desc { font-size: 12px; color: var(--muted); line-height: 1.45; margin-top: 4px; }
+  .chev { color: var(--muted); font-size: 16px; align-self: center; transition: .15s; }
+  .card.open .chev { transform: rotate(90deg); color: var(--accent); }
+  .card-body { display: none; padding: 0 12px 12px; border-top: 1px dashed var(--line); }
+  .card.open .card-body { display: block; padding-top: 10px; }
+  .kv { display: grid; gap: 8px; }
+  .kv .row { display: grid; grid-template-columns: 88px 1fr; gap: 8px; font-size: 12px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { line-height: 1.5; }
+  .code {
+    margin-top: 10px; background: #0a0f1e; border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px; font-family: var(--mono); font-size: 11px; color: #c9d7ff; overflow-x: auto;
+    white-space: pre-wrap; word-break: break-all; line-height: 1.5;
+  }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .tag { font-size: 10px; padding: 4px 8px; border-radius: 8px; background: var(--card2); border: 1px solid var(--line); color: var(--muted); }
+
+  .road {
+    margin-top: 18px; background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--r); padding: 14px;
+  }
+  .road h3 { margin: 0 0 10px; font-size: 14px; }
+  .step {
+    display: grid; grid-template-columns: 26px 1fr; gap: 10px; padding: 10px 0;
+    border-bottom: 1px dashed var(--line);
+  }
+  .step:last-child { border-bottom: 0; padding-bottom: 0; }
+  .step .n {
+    width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #0b1020;
+    font-size: 12px; font-weight: 800;
+  }
+  .step strong { display: block; font-size: 13px; margin-bottom: 4px; }
+  .step p { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+  footer {
+    margin-top: 18px; font-size: 11px; color: var(--muted); line-height: 1.6; text-align: center;
+  }
+  footer code { font-family: var(--mono); color: var(--accent); }
+
+  .progress {
+    height: 8px; background: #0a0f1e; border-radius: 999px; overflow: hidden;
+    border: 1px solid var(--line); margin-top: 10px; display: flex;
+  }
+  .progress i { display: block; height: 100%; }
+  .progress .pok { background: var(--ok); }
+  .progress .ppart { background: var(--part); }
+  .progress .pmiss { background: var(--miss); }
+
+  .empty { text-align: center; color: var(--muted); font-size: 13px; padding: 28px 12px; }
+
+  @media (min-width: 720px) {
+    .stats { grid-template-columns: repeat(4, 1fr); }
+    .layers { grid-template-columns: 1fr; }
+    header.app { padding-left: 18px; padding-right: 18px; margin-left: -18px; margin-right: -18px; }
+    .wrap { padding-left: 18px; padding-right: 18px; }
+  }
+</style>
+</head>
+<body>
+<p data-aigc-mark="1" style="margin:0 0 8px;font-size:10px;line-height:1.3;color:#6b6560;font-weight:400;">AI生成</p>
+
+<div class="wrap">
+  <header class="app">
+    <div class="brand">
+      <div class="logo">NX</div>
+      <div>
+        <h1>NEO 内核 × Codex app-server</h1>
+        <p>成熟标准对照 · 内核供给 · 桌面宿主可调用</p>
+      </div>
+    </div>
+    <div class="stats" id="stats">
+      <div class="stat all"><b id="sAll">0</b><span>能力项</span></div>
+      <div class="stat ok"><b id="sOk">0</b><span>已对齐</span></div>
+      <div class="stat part"><b id="sPart">0</b><span>部分</span></div>
+      <div class="stat miss"><b id="sMiss">0</b><span>缺口</span></div>
+    </div>
+    <div class="progress" id="prog" aria-hidden="true">
+      <i class="pok" style="width:0%"></i>
+      <i class="ppart" style="width:0%"></i>
+      <i class="pmiss" style="width:0%"></i>
+    </div>
+    <div class="bar" id="filters" role="tablist" aria-label="筛选"></div>
+  </header>
+
+  <section class="hero">
+    <h2>结论：方向对齐，标准直接用 Codex 成熟面</h2>
+    <p>
+      桌面宿主不该自造协议。对照 <code style="font-family:var(--mono);color:var(--accent)">openai/codex · app-server-protocol</code>：
+      控制面是 ClientRequest 方法表，宿主供给是 ServerRequest 反向通道，模型能力是 ToolRegistry。
+      三层都应由<strong>内核供给</strong>，桌面只消费。
+    </p>
+    <div class="layers">
+      <div class="layer">
+        <i class="a">A</i>
+        <div><strong>控制面 · ClientRequest</strong><span>桌面 → 内核 JSON-RPC（Codex 103 方法 / 我们 29）</span></div>
+        <em>app-server</em>
+      </div>
+      <div class="layer">
+        <i class="b">B</i>
+        <div><strong>反向通道 · ServerRequest</strong><span>内核 → 宿主要能力：审批 / 问人 / 终端 / 看图</span></div>
+        <em>item/*</em>
+      </div>
+      <div class="layer">
+        <i class="c">C</i>
+        <div><strong>模型工具 · ToolRegistry</strong><span>exec_command · multi_agent_v1 · view_image · web_search…</span></div>
+        <em>tools/list</em>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-title">
+    <h3>点名能力 · 你列的这批</h3>
+    <span id="namedCount"></span>
+  </div>
+  <div class="list" id="namedList"></div>
+
+  <div class="section-title">
+    <h3>全量对照 · 按层展开</h3>
+    <span id="allCount"></span>
+  </div>
+  <div class="list" id="allList"></div>
+
+  <section class="road">
+    <h3>建议落地顺序（不造轮子）</h3>
+    <div class="step"><div class="n">1</div><div>
+      <strong>P0 · 反向通道补齐（ServerRequest 形状）</strong>
+      <p>把「问人 / 审批 / 打开终端 / 看图」做成内核可发起的宿主请求。Codex 用 <code>item/tool/requestUserInput</code>、<code>item/*Approval</code>；我们已有审批事件，缺的是 write_stdin / view_image 的宿主回调契约。</p>
+    </div></div>
+    <div class="step"><div class="n">2</div><div>
+      <strong>P0 · 终端统一执行族</strong>
+      <p>对齐 <code>command/exec</code> + <code>/write</code> + <code>/resize</code> + <code>/terminate</code>，模型侧对齐 <code>exec_command</code> / <code>write_stdin</code>（unified_exec）。现在只有一次性 <code>command/exec</code>（非 PTY）。</p>
+    </div></div>
+    <div class="step"><div class="n">3</div><div>
+      <strong>P1 · multi_agent_v1 工具命名空间</strong>
+      <p>Codex 是命名空间工具：<code>spawn_agent / send_message / wait_agent / list_agents / interrupt_agent / close_agent…</code>。我们有 <code>agent_&lt;name&gt;</code> 一次性调用，缺生命周期管理面。</p>
+    </div></div>
+    <div class="step"><div class="n">4</div><div>
+      <strong>P1 · goal 方法名对齐</strong>
+      <p>Codex： <code>thread/goal/get|set|clear</code>。我们： <code>goal/set|pause|resume|advance|clear</code>（能力更强，但方法名不同）。补 get，并做别名兼容，桌面可直接按 Codex 名调。</p>
+    </div></div>
+    <div class="step"><div class="n">5</div><div>
+      <strong>P1 · view_image + 多模态入历史</strong>
+      <p>模型工具 <code>view_image</code>；依赖 L0 图片消息。桌面 BrowserPane/附件已有壳，缺内核工具与事件。</p>
+    </div></div>
+    <div class="step"><div class="n">6</div><div>
+      <strong>P2 · web_search / browser_use</strong>
+      <p>Codex web_search 是 hosted tool；browser/computer use 走 ServerRequest + 宿主驱动。内核定义 Tool 契据，执行委托宿主或外部 MCP，不自研浏览器内核。</p>
+    </div></div>
+  </section>
+
+  <footer>
+    标准来源：GitHub <code>openai/codex</code> · <code>codex-rs/app-server-protocol</code>（ClientRequest 103 / ServerRequest 9）与
+    <code>codex-rs/core/src/tools</code>（exec_command / write_stdin / view_image / multi_agent_v1 / web_search）。<br/>
+    本仓现状：<code>neo-host-appserver</code> 29 方法 · 内置 bash/apply_patch/request_user_input*/todowrite · agent_* · mcp__*。
+    *request_user_input 已注册但执行路径标注「宿主交互未接线」。
+  </footer>
+</div>
+
+<script>
+const DATA = [
+  // ── 点名能力 ──────────────────────────────────────────
+  {
+    id: "exec_command",
+    named: true, layer: "C", status: "part", p: "P0",
+    name: "exec_command",
+    codex: "模型工具 · unified_exec；控制面 command/exec",
+    neo: "bash 工具 + command/exec（一次性，非会话）",
+    desc: "执行命令。Codex 统一 exec 会话可续写；我们 bash 走沙箱，但无 session id 续写。",
+    how: "内核 Tool::execute 经 ToolCtx::exec；app-server command/exec → Op::Shell",
+    gap: "缺 unified session：exec 返回 session_id，后续 write_stdin 续写。",
+    std: ["codex:exec_command", "codex:command/exec", "neo:Op::Shell", "neo:BashTool"],
+    sample: "Codex:  name=\"exec_command\"\nNEO:    name=\"bash\" / method=\"command/exec\""
+  },
+  {
+    id: "write_stdin",
+    named: true, layer: "C", status: "miss", p: "P0",
+    name: "write_stdin",
+    codex: "模型工具 + ClientRequest command/exec/write",
+    neo: "无",
+    desc: "向运行中的 exec 会话写入 stdin 并读回增量输出。桌面「自动打开终端」依赖它。",
+    how: "内核持有 exec session 表；宿主 xterm 与模型工具共用同一 session 契约。",
+    gap: "整条缺失：工具、方法、事件、会话生命周期。",
+    std: ["codex:write_stdin", "codex:command/exec/write", "codex:command/exec/terminate", "codex:command/exec/resize"],
+    sample: "command/exec/write  { session_id, data }\ncommand/exec/resize { session_id, cols, rows }\ncommand/exec/terminate { session_id }"
+  },
+  {
+    id: "request_user_input",
+    named: true, layer: "B", status: "part", p: "P0",
+    name: "request_user_input",
+    codex: "ServerRequest item/tool/requestUserInput + 模型工具",
+    neo: "工具已注册，execute 返回「宿主交互未接线」",
+    desc: "Agent 主动向用户提问。Codex 是内核→宿主的反向请求；桌面必须能应答。",
+    how: "工具 suspend → 内核发 ServerRequest → 宿主 UI → response 回写 tool result。",
+    gap: "缺反向通道与挂起/恢复；桌面 TranscriptParts 已有 UI 分支但收不到真请求。",
+    std: ["codex:item/tool/requestUserInput", "codex:request_user_input", "neo:request_user_input(partial)"],
+    sample: "ServerRequest:\n  method: item/tool/requestUserInput\n  params: { prompt, schema?, selections? }\nResponse:\n  { response: string | object }"
+  },
+  {
+    id: "view_image",
+    named: true, layer: "C", status: "miss", p: "P1",
+    name: "view_image",
+    codex: "模型工具 view_image（detail: high|original）",
+    neo: "无",
+    desc: "让模型查看本地/截图图片。「自动核验元素样式」常配合截图回看。",
+    how: "读图 → 多模态消息入历史（模型可见即落盘）→ 返回图像内容。",
+    gap: "L0 多模态 + Tool + 宿主附件链路均缺。",
+    std: ["codex:view_image", "neo:L0 multimodal(pending)"],
+    sample: "view_image({ path, detail? }) → image content block"
+  },
+  {
+    id: "multi_agent_v1",
+    named: true, layer: "C", status: "part", p: "P1",
+    name: "multi_agent_v1",
+    codex: "命名空间工具组 spawn/send/wait/list/interrupt/close…",
+    neo: "agent_<name> 一次性委派（有子代理、无生命周期 API）",
+    desc: "自动派发子代理。Codex 是可管理的 agent 生命周期；我们是按定义静态注册的调用。",
+    how: "AgentTool + AgentFactory 已在装配点注册；缺 id 级 send/wait/interrupt。",
+    gap: "缺 spawn 动态子代理、消息续传、列表/中断/关闭；命名未对齐 multi_agent_v1。",
+    std: ["codex:multi_agent_v1", "codex:spawn_agent", "neo:agent_*"],
+    sample: "Codex namespace multi_agent_v1:\n  spawn_agent, send_message, followup_task,\n  wait_agent, list_agents, interrupt_agent,\n  resume_agent, close_agent, send_input\nNEO:\n  agent_<name>(task)  // 一次调用返回最终答复"
+  },
+  {
+    id: "get_goal",
+    named: true, layer: "A", status: "part", p: "P1",
+    name: "get_goal / create_goal / update_goal",
+    codex: "thread/goal/get · thread/goal/set · thread/goal/clear",
+    neo: "goal/set|pause|resume|advance|clear；无 get",
+    desc: "Goal 控制面。我们能力更全（四阶段编排），但缺只读 get，且方法名与 Codex 不同。",
+    how: "已有 GoalSnapshot 事件；补只读查询 + Codex 名别名即可桌面直连。",
+    gap: "缺 thread/goal/get；无 Codex 方法名兼容层。",
+    std: ["codex:thread/goal/get", "codex:thread/goal/set", "neo:goal/set", "neo:goal/clear"],
+    sample: "Codex: thread/goal/get → snapshot\nNEO:   goal/set { goal }  // 无 get\n建议: 别名 thread/goal/get|set|clear → 现有 Op"
+  },
+  {
+    id: "web_search",
+    named: true, layer: "C", status: "miss", p: "P2",
+    name: "web_search",
+    codex: "hosted ToolSpec::WebSearch（Live/Cached/Indexed）",
+    neo: "无",
+    desc: "托管联网搜索。不自研爬虫；对齐 hosted tool 或经 MCP。",
+    how: "内核注册 Tool 契据；执行走 provider hosted tools / 外部 MCP。",
+    gap: "整条缺失。",
+    std: ["codex:web_search", "neo:mcp client(partial)"],
+    sample: "ToolSpec::WebSearch { mode, filters, location, ... }"
+  },
+  {
+    id: "browser_use",
+    named: true, layer: "B", status: "part", p: "P2",
+    name: "browser_use / computer_use",
+    codex: "宿主驱动 + 审批/权限 ServerRequest（形态）",
+    neo: "桌面 BrowserPane 有壳；内核无 computer/browser 工具",
+    desc: "自动打开浏览器并操作。UI 壳已有，缺内核工具与宿主执行协议。",
+    how: "内核 BrowserTool → 事件/ServerRequest → 宿主 WebView 驱动 → 结果/截图回内核。",
+    gap: "缺内核工具、驱动 RPC、权限审批绑定、截图回传（依赖 view_image）。",
+    std: ["zcode:browser-use", "codex:ServerRequest item/*", "neo:BrowserPane(shell only)"],
+    sample: "BrowserTool.navigate/click/screenshot\n  → host drives pane\n  → returns a11y tree / image"
+  },
+  {
+    id: "auto_terminal",
+    named: true, layer: "B", status: "part", p: "P0",
+    name: "自动打开终端",
+    codex: "command/exec 族 + 宿主 xterm/PTY",
+    neo: "command/exec 可跑命令；桌面有命令台，真 PTY ⬜",
+    desc: "模型或用户触发时自动开终端并显示会话。",
+    how: "内核发 terminal open 事件/请求 → 宿主开 tab → 绑定 session。",
+    gap: "无 open-terminal 反向请求；无 PTY session。",
+    std: ["codex:command/exec", "neo:command/exec", "neo:D8 partial"],
+    sample: "ServerRequest: terminal/open { session_id, cwd, command? }\nClient: command/exec/write|resize|terminate"
+  },
+  {
+    id: "auto_dispatch_agent",
+    named: true, layer: "C", status: "part", p: "P1",
+    name: "自动派发子代理",
+    codex: "spawn_agent（multi_agent_v1/v2）",
+    neo: "agent_* 静态定义可被模型调用",
+    desc: "模型主动拆任务派子代理。",
+    how: "已有嵌套内核 + 工具白名单；需生命周期与并行派发语义。",
+    gap: "动态 spawn、id 管理、并行会话可见性。",
+    std: ["codex:spawn_agent", "neo:AgentTool"],
+    sample: "spawn_agent { task_name, fork_turns?, ... } → { thread_id, nickname }"
+  },
+  {
+    id: "auto_verify_style",
+    named: true, layer: "C", status: "miss", p: "P2",
+    name: "自动核验元素样式",
+    codex: "无单一方法名；实践= browser 截图/eval + view_image",
+    neo: "无",
+    desc: "改完 UI 自动核对 computed style / 截图对比。",
+    how: "browser 工具 get_style/screenshot → view_image → 模型判定。",
+    gap: "依赖 browser_use + view_image 两条。",
+    std: ["derived:browser+view_image"],
+    sample: "getComputedStyle via host CDP/WebView\nscreenshot → view_image"
+  },
+
+  // ── 控制面 ClientRequest 关键缺口 ─────────────────────
+  {
+    id: "turn_family", layer: "A", status: "part", p: "P0",
+    name: "turn/start · turn/interrupt · turn/steer",
+    codex: "有 steer（中途补话）",
+    neo: "start/begin/pump/interrupt；无 steer",
+    desc: "轮次控制。缺 steer=生成中追加指令。",
+    how: "补 Op::Steer 或等价注入。",
+    gap: "turn/steer 缺失。",
+    std: ["codex:turn/steer", "neo:turn/start"],
+    sample: "turn/steer { text } — 运行中插入用户指令"
+  },
+  {
+    id: "pty_family", layer: "A", status: "part", p: "P0",
+    name: "command/exec · /write · /resize · /terminate",
+    codex: "四件套完整（PTY 会话）",
+    neo: "仅 command/exec 一次性",
+    desc: "终端控制面四方法。",
+    how: "内核 exec session SPI + app-server 四方法。",
+    gap: "write/resize/terminate 缺失。",
+    std: ["codex:command/exec*", "neo:command/exec only"],
+    sample: "exec → { session_id }\nwrite/resize/terminate by session_id"
+  },
+  {
+    id: "goal_methods", layer: "A", status: "part", p: "P1",
+    name: "thread/goal/get|set|clear",
+    codex: "三方法",
+    neo: "goal/set|pause|resume|advance|clear（无 get，命名不同）",
+    desc: "Goal 查询与设置的 Codex 形状。",
+    how: "别名映射 + 只读 get。",
+    gap: "get + 命名兼容。",
+    std: ["codex:thread/goal/*", "neo:goal/*"],
+    sample: "thread/goal/get {} → { goal_id, text, status, ... }"
+  },
+  {
+    id: "thread_family", layer: "A", status: "part", p: "P1",
+    name: "thread/* 扩展（archive/fork/items/turns…）",
+    codex: "thread 族远多于我们（archive, fork, items/list, turns/list, inject_items…）",
+    neo: "list/get/resume/create/delete/rename/history/export",
+    desc: "会话库进阶：归档、分叉、条目/轮次列表、注入。",
+    how: "按桌面需要渐进补；fork 我们在 session/fork。",
+    gap: "archive、items/list、turns/list、inject_items、steer 等。",
+    std: ["codex:thread/*", "neo:thread/* + session/fork"],
+    sample: "thread/items/list · thread/turns/list · thread/archive"
+  },
+  {
+    id: "fs_family", layer: "A", status: "miss", p: "P2",
+    name: "fs/*（read/write/watch…）",
+    codex: "完整文件系统 RPC",
+    neo: "无（桌面可自己读盘，但标准客户端期望内核提供）",
+    desc: "Codex 客户端可经 app-server 访问工作区文件。",
+    how: "只读优先；写走沙箱契约。",
+    gap: "整组缺失（若要「完全兼容 Codex 客户端」则必须有）。",
+    std: ["codex:fs/*"],
+    sample: "fs/readFile · fs/writeFile · fs/watch · fs/getMetadata"
+  },
+  {
+    id: "model_list", layer: "A", status: "ok", p: "P2",
+    name: "model/list",
+    codex: "有",
+    neo: "models/list",
+    desc: "模型目录。",
+    how: "已实现。",
+    gap: "命名 model/list vs models/list — 可加别名。",
+    std: ["codex:model/list", "neo:models/list"],
+    sample: "方法名别名即可"
+  },
+  {
+    id: "config_family", layer: "A", status: "part", p: "P2",
+    name: "config/* · skills · mcpServer/*",
+    codex: "config/read|write、skills/list、mcpServer/tool/call…",
+    neo: "session/configure；MCP client 在装配点，无运行时 RPC",
+    desc: "运行时配置与 MCP 调用面。",
+    how: "按需暴露只读 config + MCP 列表。",
+    gap: "运行时 MCP 调用/状态 RPC 缺失。",
+    std: ["codex:config/*", "codex:mcpServer/*", "neo:session/configure"],
+    sample: "mcpServer/tool/call · mcpServerStatus/list"
+  },
+  {
+    id: "account_plugin", layer: "A", status: "miss", p: "P3",
+    name: "account/* · plugin/* · marketplace/*",
+    codex: "有（账号/插件市场）",
+    neo: "刻意不做（隐私红线 / 非本仓边界）",
+    desc: "账号与插件市场。项目口径：不含账号体系。",
+    how: "保持不做；握手 methods 表不含即可。",
+    gap: "有意缺口 — 非缺陷。",
+    std: ["codex:account/*", "neo:out of scope"],
+    sample: "PROJECT_MEMORY: 对标不含账号"
+  },
+
+  // ── ServerRequest ────────────────────────────────────
+  {
+    id: "sr_approval", layer: "B", status: "ok", p: "P0",
+    name: "item/commandExecution|fileChange|permissions/requestApproval",
+    codex: "三类审批 ServerRequest",
+    neo: "ApprovalRequest 事件 + approval/respond",
+    desc: "内核请求宿主批准。我们已有完整闭环（含 step 审批）。",
+    how: "事件带 id/kind → 宿主 respond 同一 id。",
+    gap: "形状与 Codex method 名不同 — 建议别名映射。",
+    std: ["codex:item/*Approval", "neo:ApprovalRequest"],
+    sample: "NEO 已闭环；可加 Codex method 名适配层"
+  },
+  {
+    id: "sr_tool_call", layer: "B", status: "part", p: "P1",
+    name: "item/tool/call",
+    codex: "内核请求宿主执行宿主侧工具",
+    neo: "无对等 ServerRequest（宿主工具未标准化）",
+    desc: "宿主能力工具（开终端、看图、浏览器）的统一入口。",
+    how: "定义 HostTool 契据 + 反向调用。",
+    gap: "反向工具调用通道缺失。",
+    std: ["codex:item/tool/call"],
+    sample: "ServerRequest item/tool/call { name, input }\n→ Response { output }"
+  },
+  {
+    id: "sr_form_el", layer: "B", status: "miss", p: "P3",
+    name: "openai/form · mcpServer/elicitation",
+    codex: "有",
+    neo: "无",
+    desc: "表单与 MCP elicitation。",
+    how: "需要时再对齐。",
+    gap: "缺（低优先级）。",
+    std: ["codex:openai/form", "codex:mcpServer/elicitation/request"],
+    sample: ""
+  },
+  {
+    id: "sr_auth", layer: "B", status: "miss", p: "P3",
+    name: "account/chatgptAuthTokens · attestation",
+    codex: "有",
+    neo: "刻意不做",
+    desc: "OpenAI 账号/证明。边界外。",
+    how: "保持不做。",
+    gap: "有意不做。",
+    std: ["codex:account/*", "out of scope"],
+    sample: ""
+  },
+
+  // ── 模型工具补齐 ─────────────────────────────────────
+  {
+    id: "tool_base", layer: "C", status: "ok", p: "P0",
+    name: "bash · apply_patch · todowrite",
+    codex: "shell/apply_patch/plan 类等价",
+    neo: "已注册默认集",
+    desc: "Shell-First 最小集已闭环，沙箱结构保证。",
+    how: "register_defaults。",
+    gap: "无（命名与 Codex 不同但语义同类）。",
+    std: ["neo:BashTool", "neo:ApplyPatchTool", "neo:TodoWriteTool"],
+    sample: ""
+  },
+  {
+    id: "tool_mcp", layer: "C", status: "ok", p: "P2",
+    name: "mcp__* 外部工具",
+    codex: "mcpServer/tool/call + 本地 MCP client",
+    neo: "neo-mcp client 装配注册",
+    desc: "用户级 mcp.json → 工具入表。",
+    how: "register_mcp_tools。",
+    gap: "无运行时 RPC 管理面（列表可走 tools/list）。",
+    std: ["neo:neo-mcp", "codex:MCP"],
+    sample: ""
+  },
+  {
+    id: "tool_wait", layer: "C", status: "miss", p: "P2",
+    name: "sleep / wait_for_environment / tool_search",
+    codex: "有（编排辅助）",
+    neo: "无（效率规范禁止裸 sleep 等待就绪）",
+    desc: "Codex 有 sleep 类工具；本仓效率规范禁止固定盲等。",
+    how: "若对齐 Codex，sleep 仅作模型显式工具；就绪探测用条件等待。",
+    gap: "有意不全盘照搬 — 记录差异。",
+    std: ["codex:sleep", "neo:ai-efficiency-rules"],
+    sample: "冲突时：正确性 > 安全性 > 效率；用户点名要再对齐"
+  }
+];
+
+const LAYER_LABEL = { A: "控制面", B: "反向通道", C: "模型工具" };
+const STATUS_LABEL = { ok: "已对齐", part: "部分", miss: "缺口" };
+
+let filter = "all";
+
+function statusBadge(s, p) {
+  return `<span class="badge ${s}">${STATUS_LABEL[s]}</span>` +
+    (p ? `<span class="badge p0">${p}</span>` : "");
+}
+
+function cardHTML(item) {
+  const layer = item.layer ? `<span class="badge std">${LAYER_LABEL[item.layer]}</span>` : "";
+  return `
+  <article class="card" data-id="${item.id}" data-status="${item.status}" data-layer="${item.layer||''}" data-named="${item.named?1:0}">
+    <button class="card-head" type="button" aria-expanded="false">
+      <div>
+        <div class="top">
+          ${statusBadge(item.status, item.p)}
+          ${layer}
+          ${item.named ? '<span class="badge">点名</span>' : ''}
+        </div>
+        <div class="name">${item.name}</div>
+        <div class="desc">${item.desc}</div>
+      </div>
+      <div class="chev" aria-hidden="true">›</div>
+    </button>
+    <div class="card-body">
+      <div class="kv">
+        <div class="row"><div class="k">Codex 标准</div><div class="v">${item.codex}</div></div>
+        <div class="row"><div class="k">NEO 现状</div><div class="v">${item.neo}</div></div>
+        <div class="row"><div class="k">供给方式</div><div class="v">${item.how}</div></div>
+        <div class="row"><div class="k">缺口</div><div class="v">${item.gap}</div></div>
+      </div>
+      ${item.sample ? `<div class="code">${escapeHtml(item.sample)}</div>` : ""}
+      <div class="tags">${(item.std||[]).map(t=>`<span class="tag">${t}</span>`).join("")}</div>
+    </div>
+  </article>`;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function matchFilter(item) {
+  if (filter === "all") return true;
+  if (filter === "named") return !!item.named;
+  if (filter === "ok" || filter === "part" || filter === "miss") return item.status === filter;
+  if (filter === "A" || filter === "B" || filter === "C") return item.layer === filter;
+  if (filter === "P0") return item.p === "P0";
+  if (filter === "P1") return item.p === "P1";
+  return true;
+}
+
+function render() {
+  const named = DATA.filter(d => d.named);
+  const namedVis = named.filter(matchFilter);
+  const allVis = DATA.filter(matchFilter);
+
+  document.getElementById("namedList").innerHTML =
+    namedVis.length ? namedVis.map(cardHTML).join("") : `<div class="empty">无匹配</div>`;
+  document.getElementById("allList").innerHTML =
+    allVis.length ? allVis.map(cardHTML).join("") : `<div class="empty">无匹配</div>`;
+
+  document.getElementById("namedCount").textContent = `${namedVis.length} / ${named.length}`;
+  document.getElementById("allCount").textContent = `${allVis.length} / ${DATA.length}`;
+
+  // stats on full set
+  const ok = DATA.filter(d=>d.status==="ok").length;
+  const part = DATA.filter(d=>d.status==="part").length;
+  const miss = DATA.filter(d=>d.status==="miss").length;
+  const n = DATA.length;
+  sAll.textContent = n; sOk.textContent = ok; sPart.textContent = part; sMiss.textContent = miss;
+  const p = (x) => (100*x/n).toFixed(1) + "%";
+  prog.innerHTML = `<i class="pok" style="width:${p(ok)}"></i><i class="ppart" style="width:${p(part)}"></i><i class="pmiss" style="width:${p(miss)}"></i>`;
+
+  bindCards();
+}
+
+function bindCards() {
+  document.querySelectorAll(".card .card-head").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const card = btn.closest(".card");
+      const open = card.classList.toggle("open");
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+  });
+}
+
+function renderFilters() {
+  const defs = [
+    { id: "all", label: "全部" },
+    { id: "named", label: "点名能力" },
+    { id: "P0", label: "P0" },
+    { id: "P1", label: "P1" },
+    { id: "A", label: "控制面" },
+    { id: "B", label: "反向通道" },
+    { id: "C", label: "模型工具" },
+    { id: "ok", label: "已对齐", color: "var(--ok)" },
+    { id: "part", label: "部分", color: "var(--part)" },
+    { id: "miss", label: "缺口", color: "var(--miss)" },
+  ];
+  filters.innerHTML = defs.map(d =>
+    `<button type="button" class="chip${d.id===filter?" active":""}" data-f="${d.id}">` +
+    (d.color ? `<span class="dot" style="background:${d.color}"></span>` : "") +
+    `${d.label}</button>`
+  ).join("");
+  filters.querySelectorAll(".chip").forEach(ch => {
+    ch.addEventListener("click", () => {
+      filter = ch.dataset.f;
+      renderFilters();
+      render();
+    });
+  });
+}
+
+renderFilters();
+render();
+</script>
+</body>
+</html>
