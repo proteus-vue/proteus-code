@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   ApprovalState,
   Decision,
@@ -1452,26 +1451,14 @@ export default function App() {
     [panelW, sidebarW],
   );
 
-  /** Overlay 标题栏：双击顶部空白 → 窗口缩放（macOS zoom / maximize）。 */
-  const onTitlebarDoubleClick = useCallback((e: React.MouseEvent) => {
-    const t = e.target as HTMLElement | null;
-    // 交互控件上不抢双击（按钮/输入/标签）
-    if (t?.closest("button, input, textarea, select, a, .btab, .icon-btn, .btn-new")) {
-      return;
-    }
-    e.preventDefault();
-    void getCurrentWindow().toggleMaximize().catch(() => undefined);
-  }, []);
-
   return (
     <>
-      {/* 固定标题条：盖住 Overlay 下被内容挡住的原生拖拽/双击缩放区 */}
-      <div
-        className="titlebar-drag"
-        data-tauri-drag-region
-        aria-hidden
-        onDoubleClick={onTitlebarDoubleClick}
-      />
+      {/*
+        Overlay 标题条：只挂 data-tauri-drag-region。
+        不要再绑 onDoubleClick → toggleMaximize —— 会与 Tauri 原生
+        「双击 drag-region 最大化」叠成两次 toggle（放大又缩回，真机踩过）。
+      */}
+      <div className="titlebar-drag" data-tauri-drag-region aria-hidden />
     <div
       className={`app${panelOpen ? " with-panel" : ""}${sidebarOpen ? "" : " no-sidebar"}`}
       style={

@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Icon, type IconName } from "./Icon";
 
 export type WorkbenchId =
@@ -97,16 +96,8 @@ export function WorkbenchShell({
 
   return (
     <aside className="panel workbench">
-      <div
-        className="browser-tabs"
-        role="tablist"
-        data-tauri-drag-region
-        onDoubleClick={(e) => {
-          const t = e.target as HTMLElement;
-          if (t.closest("button, .btab, .btab-add")) return;
-          void getCurrentWindow().toggleMaximize().catch(() => undefined);
-        }}
-      >
+      {/* 只挂 drag-region：勿再 onDoubleClick toggleMaximize（会双触发缩回） */}
+      <div className="browser-tabs" role="tablist" data-tauri-drag-region>
         {openTabs.map((id) => (
           <div
             key={id}
