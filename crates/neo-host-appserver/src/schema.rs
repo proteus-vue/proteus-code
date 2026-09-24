@@ -254,6 +254,61 @@ pub struct ExecTerminateParams {
     pub session_id: String,
 }
 
+/// `marketplace/add` 参数（本地 source；name 可省）。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct MarketplaceAddParams {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, rename = "refName", skip_serializing_if = "Option::is_none")]
+    pub ref_name: Option<String>,
+    #[serde(default, rename = "sparsePaths", skip_serializing_if = "Option::is_none")]
+    pub sparse_paths: Option<Vec<String>>,
+}
+
+/// `marketplace/remove` / `upgrade`。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct MarketplaceNameParams {
+    #[serde(alias = "marketplaceName")]
+    pub name: String,
+}
+
+/// `marketplace/upgrade`（name 可省 = 全部）。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct MarketplaceUpgradeParams {
+    #[serde(default, alias = "marketplaceName", skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// `plugin/read` / `plugin/install`。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct PluginNameParams {
+    #[serde(alias = "pluginName", alias = "plugin_name")]
+    pub name: String,
+    #[serde(default, rename = "marketplacePath", skip_serializing_if = "Option::is_none")]
+    pub marketplace_path: Option<String>,
+    #[serde(default, rename = "remoteMarketplaceName", skip_serializing_if = "Option::is_none")]
+    pub remote_marketplace_name: Option<String>,
+}
+
+/// `plugin/uninstall`。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct PluginIdParams {
+    #[serde(alias = "pluginId")]
+    pub id: String,
+}
+
+/// `plugin/skill/read`（本地用 plugin/skill；Codex 远程键作别名）。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct PluginSkillReadParams {
+    #[serde(alias = "pluginName", alias = "plugin", alias = "remotePluginId")]
+    pub plugin: String,
+    #[serde(alias = "skillName", alias = "skill")]
+    pub skill: String,
+    #[serde(default, rename = "remoteMarketplaceName", skip_serializing_if = "Option::is_none")]
+    pub remote_marketplace_name: Option<String>,
+}
+
 /// 事件通知的线形状：`{"seq", "kind", "payload"}`。
 ///
 /// 载荷嵌在 `payload` 下（与 JSONL 会话日志同构），**不摊平** ——
@@ -339,6 +394,12 @@ pub const ROOT_TYPES: &[&str] = &[
     "ExecWriteParams",
     "ExecResizeParams",
     "ExecTerminateParams",
+    "MarketplaceAddParams",
+    "MarketplaceNameParams",
+    "MarketplaceUpgradeParams",
+    "PluginNameParams",
+    "PluginIdParams",
+    "PluginSkillReadParams",
     "RewindParams",
     "GoalParams",
     "GoalIdParams",
@@ -398,6 +459,12 @@ pub fn json_schema_document() -> Value {
     add!(ExecWriteParams);
     add!(ExecResizeParams);
     add!(ExecTerminateParams);
+    add!(MarketplaceAddParams);
+    add!(MarketplaceNameParams);
+    add!(MarketplaceUpgradeParams);
+    add!(PluginNameParams);
+    add!(PluginIdParams);
+    add!(PluginSkillReadParams);
     add!(RewindParams);
     add!(GoalParams);
     add!(GoalIdParams);
@@ -571,6 +638,12 @@ pub fn typescript_source() -> String {
     emit!(ExecWriteParams);
     emit!(ExecResizeParams);
     emit!(ExecTerminateParams);
+    emit!(MarketplaceAddParams);
+    emit!(MarketplaceNameParams);
+    emit!(MarketplaceUpgradeParams);
+    emit!(PluginNameParams);
+    emit!(PluginIdParams);
+    emit!(PluginSkillReadParams);
     emit!(RewindParams);
     emit!(GoalParams);
     emit!(GoalIdParams);
@@ -631,8 +704,8 @@ mod tests {
     #[test]
     fn method_docs_cover_all_ops() {
         let docs = method_docs();
-        // initialize + 17 个 Op + 10 个 control
-        assert_eq!(docs.len(), 69, "方法表 initialize + 19 Op + 45 control + aliases");
+        // initialize + 19 Op + 55 control + aliases
+        assert_eq!(docs.len(), 79, "方法表 initialize + 19 Op + 55 control + aliases");
         assert!(docs[0].handshake_only);
         assert_eq!(docs[0].name, "initialize");
         assert!(docs.iter().any(|d| d.name == "thread/resume"));
@@ -647,6 +720,9 @@ mod tests {
         assert!(docs.iter().any(|d| d.name == "skills/list"));
         assert!(docs.iter().any(|d| d.name == "fs/readFile"));
         assert!(docs.iter().any(|d| d.name == "thread/items/list"));
+        assert!(docs.iter().any(|d| d.name == "marketplace/add"));
+        assert!(docs.iter().any(|d| d.name == "plugin/install"));
+        assert!(docs.iter().any(|d| d.name == "plugin/skill/read"));
     }
 
     /// 写盘：`cargo test -p neo-host-appserver --features schema export_schema -- --ignored`

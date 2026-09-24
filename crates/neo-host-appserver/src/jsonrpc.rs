@@ -193,6 +193,26 @@ pub enum ThreadCmd {
     McpToolCall { server: String, tool: String, arguments: Value },
     /// `mcpServer/resource/read`：经 mcp__server__read_resource
     McpResourceRead { server: String, uri: String },
+    /// `marketplace/add`
+    MarketplaceAdd { name: String, source: String },
+    /// `marketplace/remove`
+    MarketplaceRemove { name: String },
+    /// `marketplace/upgrade`
+    MarketplaceUpgrade { name: Option<String> },
+    /// `plugin/list`
+    PluginList,
+    /// `plugin/read`
+    PluginRead { name: String },
+    /// `plugin/install`
+    PluginInstall { name: String },
+    /// `plugin/uninstall`
+    PluginUninstall { id: String },
+    /// `plugin/installed`
+    PluginInstalled,
+    /// `plugin/reconcile`
+    PluginReconcile,
+    /// `plugin/skill/read`
+    PluginSkillRead { plugin: String, skill: String },
 }
 
 /// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，18 个）。
@@ -282,6 +302,16 @@ pub const THREAD_METHODS: &[&str] = &[
     "command/exec/write",
     "command/exec/resize",
     "command/exec/terminate",
+    "marketplace/add",
+    "marketplace/remove",
+    "marketplace/upgrade",
+    "plugin/list",
+    "plugin/read",
+    "plugin/install",
+    "plugin/uninstall",
+    "plugin/installed",
+    "plugin/reconcile",
+    "plugin/skill/read",
 ];
 
 /// 全部方法名（握手用）。
@@ -377,6 +407,22 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "fs/readFile" | "fs/getMetadata" | "fs/readDirectory" | "fs/createDirectory" | "fs/remove" => &["path"],
         "fs/writeFile" => &["path", "data", "data_base64", "dataBase64"],
         "fs/copy" => &["from", "to", "source", "destination"],
+        "marketplace/add" => &["name", "source", "refName", "sparsePaths"],
+        "marketplace/remove" => &["marketplaceName", "name"],
+        "marketplace/upgrade" => &["marketplaceName", "name"],
+        "plugin/list" => &["cwds", "forceRefetch", "marketplaceKinds"],
+        "plugin/installed" => &["cwds", "installSuggestionPluginNames"],
+        "plugin/reconcile" => &["reason"],
+        "plugin/read" | "plugin/install" => &[
+            "pluginName",
+            "name",
+            "plugin_name",
+            "marketplacePath",
+            "remoteMarketplaceName",
+            "installAttemptId",
+        ],
+        "plugin/uninstall" => &["pluginId", "id"],
+        "plugin/skill/read" => &["pluginName", "plugin", "skillName", "skill", "remotePluginId", "remoteMarketplaceName"],
         "command/exec/write" => &["session_id", "data"],
         "command/exec/resize" => &["session_id", "cols", "rows"],
         "command/exec/terminate" => &["session_id"],
@@ -644,6 +690,46 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             })
         }
         "model/list" => Action::Thread(ThreadCmd::Models),
+        "marketplace/add" => {
+            let p: MarketplaceAddParams = from_params(method, params)?;
+            let name = p
+                .name
+                .or_else(|| {
+                    std::path::Path::new(&p.source)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                })
+                .or(p.ref_name)
+                .unwrap_or_else(|| "default".into());
+            Action::Thread(ThreadCmd::MarketplaceAdd { name, source: p.source })
+        }
+        "marketplace/remove" => {
+            let p: MarketplaceRemoveParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::MarketplaceRemove { name: p.name })
+        }
+        "marketplace/upgrade" => {
+            let p: MarketplaceUpgradeParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::MarketplaceUpgrade { name: p.name })
+        }
+        "plugin/list" => Action::Thread(ThreadCmd::PluginList),
+        "plugin/installed" => Action::Thread(ThreadCmd::PluginInstalled),
+        "plugin/reconcile" => Action::Thread(ThreadCmd::PluginReconcile),
+        "plugin/read" => {
+            let p: PluginNameParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::PluginRead { name: p.name })
+        }
+        "plugin/install" => {
+            let p: PluginNameParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::PluginInstall { name: p.name })
+        }
+        "plugin/uninstall" => {
+            let p: PluginIdParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::PluginUninstall { id: p.id })
+        }
+        "plugin/skill/read" => {
+            let p: PluginSkillReadParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::PluginSkillRead { plugin: p.plugin, skill: p.skill })
+        }
         "command/exec/write" => {
             let p: ExecWriteParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::ExecWrite { session_id: p.session_id, data: p.data })
@@ -954,6 +1040,52 @@ struct McpToolCallParams {
 }
 
 /// `mcpServer/resource/read`：Codex 用 target.uri 或顶层 uri。
+
+/// `marketplace/add` 参数（Codex source 必填；name 可选时用目录名）。
+#[derive(Debug, Deserialize)]
+struct MarketplaceAddParams {
+    source: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, alias = "refName")]
+    ref_name: Option<String>,
+}
+
+/// `marketplace/remove` / `upgrade`。
+#[derive(Debug, Deserialize)]
+struct MarketplaceRemoveParams {
+    #[serde(alias = "marketplaceName")]
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarketplaceUpgradeParams {
+    #[serde(default, alias = "marketplaceName")]
+    name: Option<String>,
+}
+
+/// `plugin/read` / `plugin/install`：pluginName 或 name。
+#[derive(Debug, Deserialize)]
+struct PluginNameParams {
+    #[serde(alias = "pluginName", alias = "plugin_name")]
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PluginIdParams {
+    #[serde(alias = "pluginId")]
+    id: String,
+}
+
+/// `plugin/skill/read`。
+#[derive(Debug, Deserialize)]
+struct PluginSkillReadParams {
+    #[serde(alias = "pluginName", alias = "plugin", alias = "remotePluginId")]
+    plugin: String,
+    #[serde(alias = "skillName", alias = "skill")]
+    skill: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct McpResourceReadParams {
     server: String,
@@ -1156,6 +1288,57 @@ mod tests {
     }
 
     #[test]
+    fn marketplace_and_plugin_dispatch_without_account_params() {
+        match dispatch("marketplace/add", &json!({"source": "/tmp/mkt"})).unwrap() {
+            Action::Thread(ThreadCmd::MarketplaceAdd { name, source }) => {
+                assert_eq!(source, "/tmp/mkt");
+                assert_eq!(name, "mkt", "缺 name 时用 source 目录名");
+            }
+            other => panic!("{other:?}"),
+        }
+        match dispatch(
+            "marketplace/remove",
+            &json!({"marketplaceName": "local"}),
+        )
+        .unwrap()
+        {
+            Action::Thread(ThreadCmd::MarketplaceRemove { name }) => assert_eq!(name, "local"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            dispatch("plugin/list", &json!({"forceRefetch": true})).unwrap(),
+            Action::Thread(ThreadCmd::PluginList)
+        ));
+        match dispatch("plugin/install", &json!({"pluginName": "demo"})).unwrap() {
+            Action::Thread(ThreadCmd::PluginInstall { name }) => assert_eq!(name, "demo"),
+            other => panic!("{other:?}"),
+        }
+        match dispatch("plugin/uninstall", &json!({"pluginId": "demo"})).unwrap() {
+            Action::Thread(ThreadCmd::PluginUninstall { id }) => assert_eq!(id, "demo"),
+            other => panic!("{other:?}"),
+        }
+        match dispatch(
+            "plugin/skill/read",
+            &json!({
+                "remoteMarketplaceName": "local",
+                "remotePluginId": "demo",
+                "skillName": "demo"
+            }),
+        )
+        .unwrap()
+        {
+            Action::Thread(ThreadCmd::PluginSkillRead { plugin, skill }) => {
+                assert_eq!(plugin, "demo");
+                assert_eq!(skill, "demo");
+            }
+            other => panic!("{other:?}"),
+        }
+        // 账号/分享键不在表内：必须点名拒绝，而不是静默吞掉
+        let e = dispatch("plugin/list", &json!({"accessToken": "x"})).unwrap_err();
+        assert_eq!(e.code, INVALID_PARAMS);
+    }
+
+    #[test]
     fn initialize_negotiates_protocol_version() {
         let ok = initialize_result(&InitializeParams {
             protocol_version: Some(PROTOCOL_VERSION),
@@ -1165,8 +1348,8 @@ mod tests {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(69),
-            "initialize + 19 Op + 45 control + aliases"
+            Some(79),
+            "initialize + 19 Op + 55 control + aliases"
         );
 
         // 版本不匹配必须拒绝，且把双方版本放进 data（机器可读）

@@ -1880,6 +1880,69 @@
       "title": "ItemsListParams",
       "type": "object"
     },
+    "MarketplaceAddParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`marketplace/add` 参数（本地 source；name 可省）。",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "refName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "sparsePaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "MarketplaceAddParams",
+      "type": "object"
+    },
+    "MarketplaceNameParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`marketplace/remove` / `upgrade`。",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "MarketplaceNameParams",
+      "type": "object"
+    },
+    "MarketplaceUpgradeParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`marketplace/upgrade`（name 可省 = 全部）。",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "MarketplaceUpgradeParams",
+      "type": "object"
+    },
     "MethodDoc": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "一份方法表条目（握手响应里的 `methods` 的元素形状说明用）。",
@@ -2379,6 +2442,70 @@
         }
       ],
       "title": "Op"
+    },
+    "PluginIdParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`plugin/uninstall`。",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "PluginIdParams",
+      "type": "object"
+    },
+    "PluginNameParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`plugin/read` / `plugin/install`。",
+      "properties": {
+        "marketplacePath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "remoteMarketplaceName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "PluginNameParams",
+      "type": "object"
+    },
+    "PluginSkillReadParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`plugin/skill/read`（本地用 plugin/skill；Codex 远程键作别名）。",
+      "properties": {
+        "plugin": {
+          "type": "string"
+        },
+        "remoteMarketplaceName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "plugin",
+        "skill"
+      ],
+      "title": "PluginSkillReadParams",
+      "type": "object"
     },
     "RefKind": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2943,6 +3070,16 @@
     "command/exec/write",
     "command/exec/resize",
     "command/exec/terminate",
+    "marketplace/add",
+    "marketplace/remove",
+    "marketplace/upgrade",
+    "plugin/list",
+    "plugin/read",
+    "plugin/install",
+    "plugin/uninstall",
+    "plugin/installed",
+    "plugin/reconcile",
+    "plugin/skill/read",
     "thread/goal/set",
     "thread/goal/clear",
     "thread/fork",
@@ -2995,6 +3132,12 @@
     "ExecWriteParams",
     "ExecResizeParams",
     "ExecTerminateParams",
+    "MarketplaceAddParams",
+    "MarketplaceNameParams",
+    "MarketplaceUpgradeParams",
+    "PluginNameParams",
+    "PluginIdParams",
+    "PluginSkillReadParams",
     "RewindParams",
     "GoalParams",
     "GoalIdParams",

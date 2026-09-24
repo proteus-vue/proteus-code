@@ -75,6 +75,16 @@ export const METHODS = [
   "command/exec/write",
   "command/exec/resize",
   "command/exec/terminate",
+  "marketplace/add",
+  "marketplace/remove",
+  "marketplace/upgrade",
+  "plugin/list",
+  "plugin/read",
+  "plugin/install",
+  "plugin/uninstall",
+  "plugin/installed",
+  "plugin/reconcile",
+  "plugin/skill/read",
   "thread/goal/set",
   "thread/goal/clear",
   "thread/fork",
@@ -161,6 +171,16 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "command/exec/write": ["session_id", "data"],
   "command/exec/resize": ["session_id", "cols", "rows"],
   "command/exec/terminate": ["session_id"],
+  "marketplace/add": ["name", "source", "refName", "sparsePaths"],
+  "marketplace/remove": ["marketplaceName", "name"],
+  "marketplace/upgrade": ["marketplaceName", "name"],
+  "plugin/list": ["cwds", "forceRefetch", "marketplaceKinds"],
+  "plugin/read": ["pluginName", "name", "plugin_name", "marketplacePath", "remoteMarketplaceName", "installAttemptId"],
+  "plugin/install": ["pluginName", "name", "plugin_name", "marketplacePath", "remoteMarketplaceName", "installAttemptId"],
+  "plugin/uninstall": ["pluginId", "id"],
+  "plugin/installed": ["cwds", "installSuggestionPluginNames"],
+  "plugin/reconcile": ["reason"],
+  "plugin/skill/read": ["pluginName", "plugin", "skillName", "skill", "remotePluginId", "remoteMarketplaceName"],
   "thread/goal/set": ["goal"],
   "thread/goal/clear": [],
   "thread/fork": [],
@@ -264,6 +284,9 @@ budget_used: number, };
 export type GoalSubtask = { id: number, title: string, phase: GoalPhase, retries: number, };
 export type InitializeParamsWire = { protocol_version: number | null, client: ClientInfoWire | null, };
 export type ItemsListParams = { id: string | null, limit: number | null, };
+export type MarketplaceAddParams = { source: string, name: string | null, ref_name: string | null, sparse_paths: Array<string> | null, };
+export type MarketplaceNameParams = { name: string, };
+export type MarketplaceUpgradeParams = { name: string | null, };
 export type MethodDoc = { name: string, 
 /**
  * 无参方法为空数组。
@@ -275,6 +298,9 @@ params: Array<string>,
 handshake_only: boolean, };
 export type NameSetParams = { id: string, title: string, };
 export type Op = { "user_turn": { text: string, refs: Array<ContextRef>, } } | { "begin_turn": { text: string, refs: Array<ContextRef>, } } | "pump" | { "shell": { command: string, } } | "interrupt" | { "approve": { id: string, decision: Decision, reason: string | null, } } | { "approve_step": { id: string, decision: Decision, reason: string | null, } } | { "respond_user_input": { id: string, response: string, } } | { "configure_session": { patch: SessionPatch, } } | "compact" | "fork" | { "rewind": { turns: number, } } | { "goal_set": { goal: string, } } | { "goal_pause": { goal_id: string, } } | { "goal_resume": { goal_id: string, } } | "goal_advance" | "goal_clear" | { "steer": { text: string, } } | "shutdown";
+export type PluginIdParams = { id: string, };
+export type PluginNameParams = { name: string, marketplace_path: string | null, remote_marketplace_name: string | null, };
+export type PluginSkillReadParams = { plugin: string, skill: string, remote_marketplace_name: string | null, };
 export type RefKind = "file" | "session" | "command" | "skill";
 export type RewindParams = { turns: number, };
 export type RpcErrorObject = { code: number, message: string, data: unknown, };

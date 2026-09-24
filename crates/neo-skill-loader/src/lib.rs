@@ -17,6 +17,8 @@
 //! 名字冲突时**后加载的覆盖先加载的**，并如实记进 [`LoadReport::replacements`] ——
 //! 静默覆盖会让用户以为加载了两个技能，实际只有一个生效。
 
+pub mod marketplace;
+
 use neo_core::skills::{Skill, SkillRegistry};
 use std::path::{Path, PathBuf};
 
@@ -78,6 +80,17 @@ pub fn default_roots(cwd: &Path) -> Vec<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
     if let Some(h) = home {
         roots.push(h.join(".neo").join("skills"));
+        // 已安装插件的技能目录（插件市场安装后立即可 `$name` 引用）
+        let plugins = h.join(".neo").join("plugins");
+        if let Ok(entries) = std::fs::read_dir(&plugins) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    roots.push(p.join("skills"));
+                    roots.push(p);
+                }
+            }
+        }
     }
     roots.push(cwd.join("docs"));
     roots

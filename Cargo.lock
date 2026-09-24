@@ -5265,6 +5265,7 @@ dependencies = [
  "neo-session",
  "neo-session-local",
  "neo-session-store",
+ "neo-skill-loader",
  "serde_json",
 ]
 
@@ -5548,6 +5549,7 @@ name = "neo-skill-loader"
 version = "0.1.0"
 dependencies = [
  "neo-core",
+ "serde_json",
 ]
 
 [[package]]

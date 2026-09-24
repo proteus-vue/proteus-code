@@ -1369,6 +1369,59 @@ fn thread_cmd(
             })),
             Err(e) => ThreadResult::Error(e),
         },
+        // 本地插件市场：只碰 $NEO_HOME 磁盘配置与资源复制，无账号、不执行插件内容。
+        ThreadCmd::MarketplaceAdd { name, source } => {
+            match neo_skill_loader::marketplace::marketplace_add(&name, &source) {
+                Ok(v) => ThreadResult::Value(v),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        ThreadCmd::MarketplaceRemove { name } => {
+            match neo_skill_loader::marketplace::marketplace_remove(&name) {
+                Ok(removed) => ThreadResult::Value(serde_json::json!({ "name": name, "removed": removed })),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        ThreadCmd::MarketplaceUpgrade { name } => {
+            match neo_skill_loader::marketplace::marketplace_upgrade(name.as_deref()) {
+                Ok(v) => ThreadResult::Value(v),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        ThreadCmd::PluginList => match neo_skill_loader::marketplace::plugin_list() {
+            Ok(v) => ThreadResult::Value(v),
+            Err(e) => ThreadResult::Error(e),
+        },
+        ThreadCmd::PluginInstalled => match neo_skill_loader::marketplace::plugin_installed() {
+            Ok(v) => ThreadResult::Value(v),
+            Err(e) => ThreadResult::Error(e),
+        },
+        ThreadCmd::PluginReconcile => match neo_skill_loader::marketplace::plugin_reconcile() {
+            Ok(v) => ThreadResult::Value(v),
+            Err(e) => ThreadResult::Error(e),
+        },
+        ThreadCmd::PluginRead { name } => match neo_skill_loader::marketplace::plugin_read(&name) {
+            Ok(v) => ThreadResult::Value(v),
+            Err(e) => ThreadResult::Error(e),
+        },
+        ThreadCmd::PluginInstall { name } => {
+            match neo_skill_loader::marketplace::plugin_install(&name) {
+                Ok(v) => ThreadResult::Value(v),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        ThreadCmd::PluginUninstall { id } => {
+            match neo_skill_loader::marketplace::plugin_uninstall(&id) {
+                Ok(removed) => ThreadResult::Value(serde_json::json!({ "pluginId": id, "removed": removed })),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
+        ThreadCmd::PluginSkillRead { plugin, skill } => {
+            match neo_skill_loader::marketplace::plugin_skill_read(&plugin, &skill) {
+                Ok(v) => ThreadResult::Value(v),
+                Err(e) => ThreadResult::Error(e),
+            }
+        }
     }
 }
 

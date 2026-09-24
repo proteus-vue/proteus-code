@@ -497,6 +497,100 @@
     "handshake_only": false
   },
   {
+    "name": "marketplace/add",
+    "params": [
+      "name",
+      "source",
+      "refName",
+      "sparsePaths"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "marketplace/remove",
+    "params": [
+      "marketplaceName",
+      "name"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "marketplace/upgrade",
+    "params": [
+      "marketplaceName",
+      "name"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "plugin/list",
+    "params": [
+      "cwds",
+      "forceRefetch",
+      "marketplaceKinds"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "plugin/read",
+    "params": [
+      "pluginName",
+      "name",
+      "plugin_name",
+      "marketplacePath",
+      "remoteMarketplaceName",
+      "installAttemptId"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "plugin/install",
+    "params": [
+      "pluginName",
+      "name",
+      "plugin_name",
+      "marketplacePath",
+      "remoteMarketplaceName",
+      "installAttemptId"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "plugin/uninstall",
+    "params": [
+      "pluginId",
+      "id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "plugin/installed",
+    "params": [
+      "cwds",
+      "installSuggestionPluginNames"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "plugin/reconcile",
+    "params": [
+      "reason"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "plugin/skill/read",
+    "params": [
+      "pluginName",
+      "plugin",
+      "skillName",
+      "skill",
+      "remotePluginId",
+      "remoteMarketplaceName"
+    ],
+    "handshake_only": false
+  },
+  {
     "name": "thread/goal/set",
     "params": [
       "goal"

@@ -112,7 +112,7 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 69, "initialize + 19 Op + 45 control + aliases");
+    assert_eq!(methods.len(), 79, "initialize + 19 Op + 55 control + aliases");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
     assert!(methods.iter().any(|m| m == "turn/steer"), "Codex steer 必须可达");
@@ -514,6 +514,28 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 ),
                 ThreadCmd::ExecTerminate { session_id } => ThreadResult::Value(
                     json!({"session_id": session_id, "terminated": true, "running": false}),
+                ),
+                ThreadCmd::MarketplaceAdd { name, source } => ThreadResult::Value(
+                    json!({"name": name, "source": source}),
+                ),
+                ThreadCmd::MarketplaceRemove { name } => ThreadResult::Value(
+                    json!({"name": name, "removed": true}),
+                ),
+                ThreadCmd::MarketplaceUpgrade { name } => ThreadResult::Value(
+                    json!({"marketplaces": [], "name": name}),
+                ),
+                ThreadCmd::PluginList => ThreadResult::Value(json!({"plugins": [], "marketplaces": []})),
+                ThreadCmd::PluginInstalled => ThreadResult::Value(json!({"plugins": []})),
+                ThreadCmd::PluginReconcile => ThreadResult::Value(json!({"alive": 0, "removed": []})),
+                ThreadCmd::PluginRead { name } => ThreadResult::Value(json!({"id": name})),
+                ThreadCmd::PluginInstall { name } => ThreadResult::Value(
+                    json!({"pluginId": name, "installed": true}),
+                ),
+                ThreadCmd::PluginUninstall { id } => ThreadResult::Value(
+                    json!({"pluginId": id, "removed": true}),
+                ),
+                ThreadCmd::PluginSkillRead { plugin, skill } => ThreadResult::Value(
+                    json!({"pluginId": plugin, "skillName": skill, "content": ""}),
                 ),
             }),
         },
