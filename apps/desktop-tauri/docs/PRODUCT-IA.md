@@ -188,7 +188,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 3. **仅一处高饱和**强调色（`#ff6a2b`）
 4. 代码区 VS Code Dark+ 思路，不自创一套
 5. 圆角一个 scale 变量
-6. **图标**：自绘线性 SVG（`src/components/Icon.tsx`），24 viewBox / 1.75 stroke / round cap；**禁止** emoji 字符、系统符号（☰⚙▦…）当图标；**不拷贝**三家图标文件
+6. **图标**：自绘 SVG（`src/components/Icon.tsx`），24 viewBox / 默认 stroke 2 · 关键块面 fill 加重（IA-55）；**禁止** emoji 字符、系统符号（☰⚙▦…）当图标；**不拷贝**三家图标文件
 7. **控件**：选择器/下拉用自绘 `Select`（或 button+menu），**禁止**裸原生 `<select>` 出现在产品 UI；输入/按钮走同一 border/radius/height 令牌
 
 默认**浅色**（你截图的竞品主态）；`data-theme=dark` 可切。

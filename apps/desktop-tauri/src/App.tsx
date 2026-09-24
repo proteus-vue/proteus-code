@@ -2078,13 +2078,15 @@ export default function App() {
                   <span key={i} className="ref-token">
                     <svg className="ref-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden>
                       <path
-                        d="M7 4.5h7l3 3V19.5H7z"
-                        fill="none"
+                        d="M6.5 3.75h7.25L18 8v12.25H6.5V3.75z"
+                        fill="currentColor"
+                        fillOpacity="0.2"
                         stroke="currentColor"
-                        strokeWidth="1.75"
+                        strokeWidth="1.85"
                         strokeLinejoin="round"
                       />
-                      <path d="M14 4.5v3h3" fill="none" stroke="currentColor" strokeWidth="1.75" />
+                      <path d="M13.5 3.75V8H18" strokeWidth="1.85" fill="none" />
+                      <path d="M9 12.25h6M9 15.5h4.5" strokeWidth="1.85" fill="none" />
                     </svg>
                     {seg.text}
                   </span>

@@ -1,7 +1,7 @@
 /**
- * 自绘线性图标集（PRODUCT-IA §7.6）。
- * 24 viewBox · stroke=currentColor · 1.75 · round cap。
- * 不拷贝竞品资源；emoji/系统符号不得当图标用。
+ * 自绘图标集（PRODUCT-IA §7.6 · IA-55 重做）。
+ * 24 viewBox · 几何更满 · 默认线宽 2 · 关键块面用 fill 加重，
+ * 避免「一根细线」的简笔感。不拷贝竞品；禁止 emoji 当图标。
  */
 import type { CSSProperties, ReactElement } from "react";
 
@@ -35,121 +35,296 @@ export type IconName =
   | "package";
 
 const PATHS: Record<IconName, ReactElement> = {
-  menu: <path d="M4 7h16M4 12h16M4 17h16" />,
-  plus: <path d="M12 5v14M5 12h14" />,
+  menu: (
+    <>
+      <path d="M4 7.25h16v1.5H4zM4 11.25h16v1.5H4zM4 15.25h16v1.5H4z" fill="currentColor" stroke="none" />
+    </>
+  ),
+  plus: (
+    <>
+      <path d="M11 4.5h2v6.5H19.5v2H13v6.5h-2V13H4.5v-2H11V4.5z" fill="currentColor" stroke="none" />
+    </>
+  ),
   search: (
     <>
-      <circle cx="11" cy="11" r="6.5" />
-      <path d="m16 16 3.5 3.5" />
+      <circle cx="11" cy="11" r="6.25" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="2" />
+      <path d="m15.6 15.6 4.15 4.15" strokeWidth="2.25" />
+      <circle cx="11" cy="11" r="2.25" fill="currentColor" stroke="none" />
     </>
   ),
   settings: (
     <>
-      <path d="M4 8h10M18 8h2M4 16h2M10 16h10" />
-      <circle cx="16" cy="8" r="2" />
-      <circle cx="8" cy="16" r="2" />
+      <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" />
+      <path
+        d="M12 3.2l1.2 2.1 2.4-.4 1 2.2 2.3.8-.4 2.4 1.8 1.7-1.8 1.7.4 2.4-2.3.8-1 2.2-2.4-.4L12 20.8l-1.2-2.1-2.4.4-1-2.2-2.3-.8.4-2.4L3.7 12l1.8-1.7-.4-2.4 2.3-.8 1-2.2 2.4.4L12 3.2z"
+        fill="currentColor"
+        fillOpacity="0.2"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="1.35" fill="currentColor" stroke="none" />
     </>
   ),
-  "chevron-left": <path d="M14.5 6.5 9 12l5.5 5.5" />,
-  "chevron-right": <path d="M9.5 6.5 15 12l-5.5 5.5" />,
-  "chevron-down": <path d="M6.5 9.5 12 15l5.5-5.5" />,
+  "chevron-left": <path d="M14.75 5.5 8.25 12l6.5 6.5" strokeWidth="2.25" />,
+  "chevron-right": <path d="M9.25 5.5 15.75 12l-6.5 6.5" strokeWidth="2.25" />,
+  "chevron-down": <path d="M5.5 9.25 12 15.75l6.5-6.5" strokeWidth="2.25" />,
   sun: (
     <>
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6 19 19M19 5l-1.4 1.4M6.4 17.6 5 19" />
+      <circle cx="12" cy="12" r="4.25" fill="currentColor" stroke="none" />
+      <path
+        d="M12 2.75v2.5M12 18.75v2.5M2.75 12h2.5M18.75 12h2.5M5.4 5.4l1.75 1.75M16.85 16.85l1.75 1.75M18.6 5.4l-1.75 1.75M7.15 16.85 5.4 18.6"
+        strokeWidth="2"
+      />
     </>
   ),
-  moon: <path d="M15.5 14.5A6.5 6.5 0 0 1 9.5 4 7 7 0 1 0 15.5 14.5Z" />,
-  close: <path d="M7 7l10 10M17 7 7 17" />,
+  moon: (
+    <path
+      d="M16.2 14.8A6.8 6.8 0 0 1 9.2 4.2 7.3 7.3 0 1 0 16.2 14.8Z"
+      fill="currentColor"
+      fillOpacity="0.22"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinejoin="round"
+    />
+  ),
+  close: (
+    <>
+      <path d="M6.75 6.75 17.25 17.25M17.25 6.75 6.75 17.25" strokeWidth="2.35" />
+    </>
+  ),
   edit: (
     <>
-      <path d="M4 16.5 14.5 6l3.5 3.5L7.5 20H4v-3.5Z" />
-      <path d="m13 7.5 3.5 3.5" />
+      <path
+        d="M4.5 16.8 14.2 7.1l3.4 3.4-9.7 9.7H4.5v-3.4z"
+        fill="currentColor"
+        fillOpacity="0.2"
+        stroke="currentColor"
+        strokeWidth="1.85"
+        strokeLinejoin="round"
+      />
+      <path d="m13.2 8.1 3.4 3.4" strokeWidth="2" />
     </>
   ),
   trash: (
     <>
-      <path d="M5 7h14M10 7V5h4v2M8 7l.5 12h7L16 7" />
+      <path d="M5.5 7.5h13v1.5h-13zM9.5 7.5V5.75h5V7.5" strokeWidth="1.85" />
+      <path
+        d="M7.25 9h9.5l-.7 10.25H7.95L7.25 9z"
+        fill="currentColor"
+        fillOpacity="0.16"
+        stroke="currentColor"
+        strokeWidth="1.85"
+        strokeLinejoin="round"
+      />
+      <path d="M10.4 11.5v5M13.6 11.5v5" strokeWidth="1.75" />
     </>
   ),
-  check: <path d="m6 12.5 4 4L18 8" />,
-  send: <path d="M12 19V5M6 11l6-6 6 6" />,
-  stop: <rect x="7" y="7" width="10" height="10" rx="1.5" />,
+  check: (
+    <path
+      d="m5.5 12.5 4.2 4.2L18.5 7.8"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  ),
+  send: (
+    <>
+      <path
+        d="M12 4.2 4.8 19.2l7.2-3.4 7.2 3.4L12 4.2z"
+        fill="currentColor"
+        fillOpacity="0.22"
+        stroke="currentColor"
+        strokeWidth="1.85"
+        strokeLinejoin="round"
+      />
+      <path d="M12 4.2v11.6" strokeWidth="1.75" />
+    </>
+  ),
+  stop: (
+    <rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none" />
+  ),
   review: (
     <>
-      <path d="M5 6.5h14v11H5z" />
-      <path d="M8 10h5M8 13h8" />
+      <rect
+        x="4.5"
+        y="5.5"
+        width="15"
+        height="13"
+        rx="2"
+        fill="currentColor"
+        fillOpacity="0.16"
+        stroke="currentColor"
+        strokeWidth="1.85"
+      />
+      <path d="M7.75 10h5M7.75 13.25h8.5" strokeWidth="2" />
     </>
   ),
   terminal: (
     <>
-      <rect x="4" y="5" width="16" height="14" rx="2" />
-      <path d="m8 10 2.5 2L8 14M12.5 14H16" />
+      <rect
+        x="3.5"
+        y="5"
+        width="17"
+        height="14"
+        rx="2.25"
+        fill="currentColor"
+        fillOpacity="0.14"
+        stroke="currentColor"
+        strokeWidth="1.85"
+      />
+      <path
+        d="m7.75 10.25 2.9 2.35-2.9 2.35M13.25 15h3.5"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </>
   ),
   browser: (
     <>
-      <rect x="4" y="5" width="16" height="14" rx="2" />
-      <path d="M4 9h16" />
-      <circle cx="7.5" cy="7" r="0.6" fill="currentColor" stroke="none" />
-      <circle cx="9.5" cy="7" r="0.6" fill="currentColor" stroke="none" />
+      <rect
+        x="3.5"
+        y="5"
+        width="17"
+        height="14"
+        rx="2.25"
+        fill="currentColor"
+        fillOpacity="0.12"
+        stroke="currentColor"
+        strokeWidth="1.85"
+      />
+      <path d="M3.5 9h17" strokeWidth="1.85" />
+      <circle cx="7.25" cy="7" r="1" fill="#ef4444" stroke="none" />
+      <circle cx="10" cy="7" r="1" fill="#f59e0b" stroke="none" />
+      <circle cx="12.75" cy="7" r="1" fill="#22c55e" stroke="none" />
     </>
   ),
   files: (
     <>
-      <path d="M7 4.5h7l3 3V19.5H7z" />
-      <path d="M14 4.5v3h3" />
+      <path
+        d="M6.5 3.75h7.25L18 8v12.25H6.5V3.75z"
+        fill="currentColor"
+        fillOpacity="0.2"
+        stroke="currentColor"
+        strokeWidth="1.85"
+        strokeLinejoin="round"
+      />
+      <path d="M13.5 3.75V8H18" strokeWidth="1.85" strokeLinejoin="round" />
+      <path d="M9 12.25h6M9 15.5h4.5" strokeWidth="1.85" />
     </>
   ),
   chat: (
     <>
-      <path d="M5 7.5h10.5v7H9l-2.5 2.5V14.5H5z" />
-      <path d="M9 10.5h8.5v6H16l2 2v-2" />
+      <path
+        d="M4.5 6.75h11.5v7.5H9.25L6.5 16.75V14.25H4.5v-7.5z"
+        fill="currentColor"
+        fillOpacity="0.18"
+        stroke="currentColor"
+        strokeWidth="1.85"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9.25 10.5h9.25v6.25h-2.75l-2.25 2v-2H9.25v-6.25z"
+        fill="currentColor"
+        fillOpacity="0.08"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+      />
     </>
   ),
   sim: (
     <>
-      <rect x="8" y="4.5" width="8" height="15" rx="2" />
-      <path d="M11 17h2" />
+      <rect
+        x="7.75"
+        y="3.75"
+        width="8.5"
+        height="16.5"
+        rx="2.25"
+        fill="currentColor"
+        fillOpacity="0.16"
+        stroke="currentColor"
+        strokeWidth="1.85"
+      />
+      <path d="M10.75 17.25h2.5" strokeWidth="2" />
+      <circle cx="12" cy="7" r="1.1" fill="currentColor" stroke="none" />
     </>
   ),
   goal: (
     <>
-      <circle cx="12" cy="12" r="7.5" />
-      <circle cx="12" cy="12" r="3.5" />
-      <path d="M12 4.5v3M12 16.5v3" />
+      <circle cx="12" cy="12" r="7.75" fill="currentColor" fillOpacity="0.14" stroke="currentColor" strokeWidth="1.85" />
+      <circle cx="12" cy="12" r="4" fill="currentColor" fillOpacity="0.35" stroke="currentColor" strokeWidth="1.75" />
+      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      <path d="M12 2.75v2.25M12 19v2.25M2.75 12H5M19 12h2.25" strokeWidth="1.85" />
     </>
   ),
   subagents: (
     <>
-      <rect x="4" y="6" width="7" height="6" rx="1.5" />
-      <rect x="13" y="6" width="7" height="6" rx="1.5" />
-      <rect x="8.5" y="14" width="7" height="6" rx="1.5" />
+      <rect x="3.5" y="5.5" width="7.5" height="6.5" rx="1.75" fill="currentColor" fillOpacity="0.22" stroke="currentColor" strokeWidth="1.75" />
+      <rect x="13" y="5.5" width="7.5" height="6.5" rx="1.75" fill="currentColor" fillOpacity="0.22" stroke="currentColor" strokeWidth="1.75" />
+      <rect x="8.25" y="13" width="7.5" height="6.5" rx="1.75" fill="currentColor" fillOpacity="0.22" stroke="currentColor" strokeWidth="1.75" />
     </>
   ),
   automations: (
     <>
-      <circle cx="12" cy="13" r="6.5" />
-      <path d="M12 10v3.5l2.5 1.5M10 3.5h4M12 3.5V6" />
+      <circle cx="12" cy="13" r="6.5" fill="currentColor" fillOpacity="0.14" stroke="currentColor" strokeWidth="1.85" />
+      <path d="M12 9.75v3.75l2.75 1.65" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9.75 3.5h4.5M12 3.5V7" strokeWidth="1.85" />
+      <circle cx="12" cy="13" r="1.35" fill="currentColor" stroke="none" />
     </>
   ),
   palette: (
     <>
-      <path d="M12 4.5a7.5 7.5 0 1 0 0 15h1.2a1.8 1.8 0 0 0 1.3-3.1l-.4-.4a1.5 1.5 0 0 1 1.1-2.5H17A3.5 3.5 0 0 0 20.5 10 7.5 7.5 0 0 0 12 4.5Z" />
-      <circle cx="9" cy="10" r="1" fill="currentColor" stroke="none" />
-      <circle cx="12" cy="8" r="1" fill="currentColor" stroke="none" />
-      <circle cx="15" cy="10" r="1" fill="currentColor" stroke="none" />
+      <path
+        d="M12 4.25a7.75 7.75 0 1 0 0 15.5h1.35a1.9 1.9 0 0 0 1.35-3.25l-.45-.45a1.55 1.55 0 0 1 1.1-2.6H17.2A3.55 3.55 0 0 0 20.75 11 7.75 7.75 0 0 0 12 4.25z"
+        fill="currentColor"
+        fillOpacity="0.16"
+        stroke="currentColor"
+        strokeWidth="1.85"
+        strokeLinejoin="round"
+      />
+      <circle cx="9" cy="10.25" r="1.35" fill="#ef4444" stroke="none" />
+      <circle cx="12.25" cy="8.25" r="1.35" fill="#3b82f6" stroke="none" />
+      <circle cx="15.5" cy="10.5" r="1.35" fill="#22c55e" stroke="none" />
+      <circle cx="10.5" cy="14" r="1.2" fill="#f59e0b" stroke="none" />
     </>
   ),
   archive: (
     <>
-      <path d="M4 7h16v3H4zM5.5 10v9h13v-9M10 14h4" />
+      <path
+        d="M4.5 5.75h15v3.5h-15v-3.5z"
+        fill="currentColor"
+        fillOpacity="0.28"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M5.75 9.75h12.5v8.5H5.75v-8.5z"
+        fill="currentColor"
+        fillOpacity="0.12"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+      />
+      <path d="M10 13.25h4" strokeWidth="2" />
     </>
   ),
   package: (
     <>
-      <path d="M12 3.5 4.5 7.5v9L12 20.5l7.5-4v-9L12 3.5Z" />
-      <path d="M4.5 7.5 12 11.5l7.5-4M12 11.5v9" />
+      <path
+        d="M12 3.4 4.2 7.6v8.8L12 20.6l7.8-4.2V7.6L12 3.4z"
+        fill="currentColor"
+        fillOpacity="0.16"
+        stroke="currentColor"
+        strokeWidth="1.85"
+        strokeLinejoin="round"
+      />
+      <path d="M4.2 7.6 12 11.85l7.8-4.25M12 11.85v8.75" strokeWidth="1.85" strokeLinejoin="round" />
+      <path d="M8.1 5.5 15.9 9.7" strokeWidth="1.6" opacity="0.7" />
     </>
   ),
 };
@@ -159,7 +334,7 @@ export function Icon({
   size = 16,
   className,
   style,
-  strokeWidth = 1.75,
+  strokeWidth = 2,
 }: {
   name: IconName;
   size?: number;
