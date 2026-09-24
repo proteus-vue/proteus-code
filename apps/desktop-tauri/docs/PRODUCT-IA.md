@@ -270,6 +270,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-47 | Codex 批5：threadSection/config 写/skills 根/experimental/app 空表/fuzzy | P1 | ✅ 方法表 102 · 分区 sidecar · config.json 乐观版本 · skills 禁用+extraRoots · app 空表诚实 · 无 Guardian/Windows 沙箱点名拒绝 |
 | IA-48 | Codex 批6：fs/watch 真事件 + externalAgent 迁移 + mcp oauth 边界 | P1 | ✅ 方法表 109 · EventBus 推 fs/changed · PathWatcher 有界合并 · 本地 agent 资产探测/导入 · 无浏览器 OAuth 点名拒绝 |
 | IA-49 | 桌面接入：steer / 归档 / 分区 / 技能 / 插件市场 / 文件树监听 | P1 | ✅ busy Enter 转向 · thread/archive 筛选 · threadSection 分组 · 设置 skills+插件安装 · files_changed\|fs_changed 刷树 |
+| IA-50 | 修：顶栏双击缩放（Overlay 标题栏被内容盖住） | P1 | ✅ 固定 titlebar-drag + drag-region · browser-tabs 让出 title 高 · toggleMaximize 权限 |
 
 ---
 

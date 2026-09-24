@@ -6048,3 +6048,43 @@ button.ctx-chip:hover {
   background: rgba(46, 160, 67, 0.18);
   color: #2ea043;
 }
+
+/* ═══ IA-50 Overlay 标题栏：双击缩放 / 可拖拽 ═══ */
+.titlebar-drag {
+  position: fixed;
+  top: 0;
+  /* 左侧让出 macOS 红绿灯 */
+  left: 78px;
+  right: 0;
+  height: env(titlebar-area-height, 28px);
+  z-index: 80;
+  /* 不挡下层点击的视觉；事件仍可收到（drag-region / dblclick） */
+  background: transparent;
+  pointer-events: auto;
+}
+/* 无 Overlay 支持的平台高度可能为 0 —— 仍留 0 区域即可 */
+@supports not (padding: env(titlebar-area-height)) {
+  .titlebar-drag {
+    height: 28px;
+  }
+}
+/* 右栏标签条让出标题栏高度，避免压在原生 title 区 */
+.panel.workbench .browser-tabs {
+  padding-top: calc(env(titlebar-area-height, 0px) + 6px);
+  height: auto;
+  min-height: calc(40px + env(titlebar-area-height, 0px));
+}
+/* 中栏空白顶也可双击（stream 自身 padding 区） */
+.center .stream {
+  /* 已有 titlebar padding —— 附加 drag-region 到空 padding 由固定条负责 */
+}
+/* 侧栏顶栏空白可拖 / 双击 */
+.sidebar .rail-head {
+  /* 已有 titlebar padding；空隙交给固定 titlebar-drag */
+}
+/* 标签条空白处（非按钮）也可缩放 */
+.panel.workbench .browser-tabs .btab-spacer {
+  flex: 1;
+  min-width: 48px;
+  align-self: stretch;
+}
