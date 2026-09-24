@@ -402,16 +402,21 @@ pub fn build_kernel(
                 workspace,
                 opts.max_steps,
             ));
+            let mut specs = Vec::new();
             for loaded in &report.agents {
                 if loaded.spec.model.is_some() {
                     // 指定模型:当前版本子代理继承主内核模型(诚实边界),
                     // per-agent 模型切换等注册表支持多实例后开放。
                     eprintln!("[agents] 子代理 {} 声明了 model,当前版本忽略(继承主模型)", loaded.spec.name);
                 }
+                specs.push(loaded.spec.clone());
                 tools.register(std::sync::Arc::new(
                     neo_core::agents::AgentTool::new(factory.clone(), loaded.spec.clone()),
                 ));
             }
+            // multi_agent_v1：list_agents + spawn_agent（Codex 同名工具面）
+            let kit = std::sync::Arc::new(neo_core::agents::MultiAgentKit::new(factory, specs));
+            kit.register(&mut tools);
         }
     }
     // 技能目录在**装配点**加载一次（而不是每次 `$skill` 引用都扫盘）：

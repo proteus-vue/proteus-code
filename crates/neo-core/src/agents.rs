@@ -242,3 +242,167 @@ impl Tool for AgentTool {
         out
     }
 }
+
+/// Codex `multi_agent_v1` 命名空间下的工具套装（list / spawn）。
+///
+/// # 诚实边界：同步嵌套轮，不是异步 agent 生命周期
+///
+/// Codex 的 `wait_agent` / `interrupt_agent` / `close_agent` 假设子代理
+/// 在后台以 id 运行。本内核是**单会话串行**：`AgentFactory::run` 是
+/// 同步嵌套 turn，spawn 返回时任务已结束。因此这里只提供：
+/// - `list_agents`：枚举已装配的子代理定义
+/// - `spawn_agent`：按 `agent_type` 同步执行并返回最终答复
+///
+/// 异步 wait/interrupt/close **刻意不注册** —— 注册了却永远「已完成」
+/// 比不注册更误导模型。
+pub struct MultiAgentKit {
+    factory: Arc<AgentFactory>,
+    specs: Vec<AgentSpec>,
+}
+
+impl MultiAgentKit {
+    pub fn new(factory: Arc<AgentFactory>, specs: Vec<AgentSpec>) -> Self {
+        Self { factory, specs }
+    }
+
+    /// 把 `list_agents` + `spawn_agent` 注册进工具表（有定义才注册）。
+    pub fn register(self: &Arc<Self>, reg: &mut ToolRegistry) {
+        if self.specs.is_empty() {
+            return;
+        }
+        reg.register(Arc::new(ListAgentsTool { kit: self.clone() }));
+        reg.register(Arc::new(SpawnAgentTool { kit: self.clone() }));
+    }
+
+    fn find(&self, agent_type: &str) -> Option<&AgentSpec> {
+        let want = agent_type.trim();
+        self.specs.iter().find(|s| s.name == want || s.name.replace('-', "_") == want)
+    }
+}
+
+/// `list_agents`：枚举可 spawn 的 agent_type（对齐 Codex multi_agent_v1）。
+pub struct ListAgentsTool {
+    kit: Arc<MultiAgentKit>,
+}
+
+impl Tool for ListAgentsTool {
+    fn name(&self) -> &str {
+        "list_agents"
+    }
+
+    fn describe(&self) -> String {
+        "list_agents(): multi_agent_v1 — 列出可用子代理（agent_type）。返回 JSON 数组。".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    }
+
+    fn call_kind(&self, _args: &serde_json::Value) -> crate::CallKind {
+        crate::CallKind::Read
+    }
+
+    fn execute(&self, _args: &serde_json::Value, _ctx: &crate::ToolCtx) -> ToolOutput {
+        let agents: Vec<serde_json::Value> = self
+            .kit
+            .specs
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "agent_type": s.name,
+                    "tool": format!("agent_{}", s.name.replace('-', "_")),
+                    "tools": s.tools,
+                    "summary": s.body.chars().take(80).collect::<String>(),
+                })
+            })
+            .collect();
+        ToolOutput {
+            exit_code: 0,
+            stdout: serde_json::to_string(&serde_json::json!({
+                "namespace": "multi_agent_v1",
+                "agents": agents,
+            }))
+            .unwrap_or_else(|_| "[]".into()),
+            stderr: String::new(),
+            truncated: false,
+        }
+    }
+}
+
+/// `spawn_agent`：按 agent_type 同步跑一轮子代理（Codex multi_agent_v1）。
+pub struct SpawnAgentTool {
+    kit: Arc<MultiAgentKit>,
+}
+
+impl Tool for SpawnAgentTool {
+    fn name(&self) -> &str {
+        "spawn_agent"
+    }
+
+    fn describe(&self) -> String {
+        "spawn_agent(agent_type, task): multi_agent_v1 — 同步委派子代理并返回最终答复。\
+         先 list_agents 看可用类型。本实现非异步：返回时任务已结束。"
+            .into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent_type": {
+                    "type": "string",
+                    "description": "子代理类型（list_agents 里的 agent_type）"
+                },
+                "task": {
+                    "type": "string",
+                    "description": "交给子代理的任务描述"
+                }
+            },
+            "required": ["agent_type", "task"]
+        })
+    }
+
+    fn call_kind(&self, _args: &serde_json::Value) -> crate::CallKind {
+        crate::CallKind::Write
+    }
+
+    fn execute(&self, args: &serde_json::Value, ctx: &crate::ToolCtx) -> ToolOutput {
+        let agent_type = args
+            .get("agent_type")
+            .or_else(|| args.get("type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
+        if agent_type.trim().is_empty() || task.trim().is_empty() {
+            return ToolOutput {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: "spawn_agent 需要 agent_type 与 task".into(),
+                truncated: false,
+            };
+        }
+        let Some(spec) = self.kit.find(agent_type) else {
+            let available: Vec<&str> = self.kit.specs.iter().map(|s| s.name.as_str()).collect();
+            return ToolOutput {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: format!("未知 agent_type「{agent_type}」。可用：{available:?}"),
+                truncated: false,
+            };
+        };
+        let mut out = self.kit.factory.run(spec, task);
+        if out.stdout.len() > ctx.max_output_bytes {
+            let mut end = ctx.max_output_bytes;
+            while end > 0 && !out.stdout.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.stdout.truncate(end);
+            out.truncated = true;
+        }
+        out
+    }
+}

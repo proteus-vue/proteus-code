@@ -6,7 +6,7 @@
 //! "compiled multiple times")。集成测试只链接一份,没有这个问题。
 
 use neo_core::{
-    agents::{AgentFactory, AgentSpec, AgentTool},
+    agents::{AgentFactory, AgentSpec, AgentTool, MultiAgentKit},
     CallKind, ModelDelta, ModelProvider, SandboxBackend, SandboxOutcome, Tool, ToolCtx,
     ToolRegistry,
 };
@@ -102,4 +102,45 @@ fn agent_tool_is_conservatively_write_classified() {
     let f = factory_with(vec![], ToolRegistry::new());
     let t = AgentTool::new(Arc::new(f), spec("s", &[]));
     assert_eq!(t.call_kind(&serde_json::Value::Null), CallKind::Write);
+}
+
+#[test]
+fn multi_agent_v1_list_and_spawn() {
+    let script = vec![vec![ModelDelta::Text("审完了".into())]];
+    let f = Arc::new(factory_with(script, ToolRegistry::new()));
+    let kit = Arc::new(MultiAgentKit::new(f, vec![spec("reviewer", &[])]));
+    let mut reg = ToolRegistry::new();
+    kit.register(&mut reg);
+
+    let list = reg.get("list_agents").expect("应注册 list_agents");
+    let out = list.execute(&serde_json::Value::Null, &test_ctx());
+    assert_eq!(out.exit_code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("multi_agent_v1"));
+    assert!(out.stdout.contains("reviewer"));
+
+    let spawn = reg.get("spawn_agent").expect("应注册 spawn_agent");
+    let ok = spawn.execute(
+        &serde_json::json!({"agent_type": "reviewer", "task": "看一眼"}),
+        &test_ctx(),
+    );
+    assert_eq!(ok.exit_code, 0, "{}", ok.stderr);
+    assert_eq!(ok.stdout, "审完了");
+
+    let bad = spawn.execute(
+        &serde_json::json!({"agent_type": "nope", "task": "x"}),
+        &test_ctx(),
+    );
+    assert_eq!(bad.exit_code, -1);
+    assert!(bad.stderr.contains("nope"), "{}", bad.stderr);
+    assert!(bad.stderr.contains("reviewer"), "应列出可用类型：{}", bad.stderr);
+}
+
+#[test]
+fn multi_agent_kit_with_no_specs_registers_nothing() {
+    let f = Arc::new(factory_with(vec![], ToolRegistry::new()));
+    let kit = Arc::new(MultiAgentKit::new(f, vec![]));
+    let mut reg = ToolRegistry::new();
+    kit.register(&mut reg);
+    assert!(reg.get("list_agents").is_none());
+    assert!(reg.get("spawn_agent").is_none());
 }
