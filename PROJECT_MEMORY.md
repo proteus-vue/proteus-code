@@ -6635,3 +6635,88 @@ Web 宿主 `kind` 撞键修复、`--listen unix://`、或回到产品层（签�
 2. **改完要对照截图验收**再报完成；禁止只 build 绿就勾 IA。  
 3. 产品形态真源 = 本仓 `PRODUCT-IA.md`，不是 session 目录。
 
+
+---
+
+## 会话接续点（最近：2026-09-24 · Codex 方法表收口 + 桌面大批接入 + compose-next）
+
+**范围**：app-server 方法对齐（批4–6）→ 桌面宿主 IA-49…60 → compose-next（xterm + 图片附件）。  
+真源仍是 **`apps/desktop-tauri/docs/PRODUCT-IA.md`**。  
+写完本条后 **origin/main 应干净且与本地同步**（实现与文档均已在本日推送）。
+
+### A. Codex ClientRequest 对齐（方法表）
+
+| 批 | 内容 | 方法表 |
+| --- | --- | --- |
+| 批4 | `marketplace/*` + `plugin/*` 本地市场（无账号） | 79 |
+| 批5 | `threadSection/*` · `config/value\|batchWrite` · skills 禁用/extraRoots · experimental · app 空表 · fuzzy · windowsSandbox 边界 | 102 |
+| 批6 | `fs/watch\|unwatch` EventBus · `externalAgentConfig/*` 本地迁移 · `mcpServer/oauth/login` 诚实拒绝 | **109** |
+
+**有意不做（差集 18）**：`account/*`×12 · `plugin/share/*`×5 · `thread/shellCommand`×1（违沙箱）。  
+其余 Codex 方法已覆盖；NEO 另有 23 个自有别名/扩展（`session/*`、`tools/list` 等）。
+
+**关键设计**
+- 插件市场 = **本地磁盘** `$NEO_HOME/marketplaces.json` + `plugins/installed.json`，只复制资源不执行；与账号无关。  
+- `fs/watch` → `EventBus` 推 `EventMsg::FsChanged`（容量 1 合并、`.git` 过滤）；桌面 `refreshKey` 刷文件树。  
+- `write` 拉模型：`SessionManager::write` 为 `mem::take` 增量 + ~80ms 等待窗；并发 UI 写必须**串行/排队**。  
+- 图片不能走 `@path`→`cat`：`resolve_refs` 对 png/jpg/webp/gif **跳过 cat**，summary 指向 `view_image`。
+
+### B. 桌面接入（PRODUCT-IA IA-49…53 · 49–53 核心）
+
+| IA | 项 |
+| --- | --- |
+| 49 | steer · 归档筛选 · threadSection 分组 · 设置 skills/插件 · fs_changed 刷树 |
+| 50 | 顶栏双击缩放（drag-region **唯一**处理，禁止 JS 再 toggle） |
+| 51 | 缩放后 chips 钉底 · 空分支不显示 |
+| 52 | /export /inject /revert /review /feedback · respondStep · 设置诊断 · mcp reload · externalAgent |
+| 53 | 协议 `fs/*` 文件树 · PTY `pty bash` 文本会话 · 附件列表/迁移 |
+
+### C. compose-next（已交付）
+
+| feature | Spec | head |
+| --- | --- | --- |
+| `desktop-xterm-pty` | `docs/compose/spec/desktop-xterm-pty.md` delivered | 实现 `5fef1848` · 文档 `179c2670` |
+| `desktop-image-attachment` | `docs/compose/spec/desktop-image-attachment.md` delivered | 实现 `798ca46d` · 文档 `97191c52` |
+
+**xterm**：`TerminalPane` 拉模型（onData → execWrite · 空闲 `write("")` 排水 · fit resize · terminate）；**排队防丢键**；写失败先 terminate。  
+**图片**：粘贴/拖放/选图 → `save_attachment`（1MiB）→ chips → 发送 **非 `@`** 的 `view_image` 指令；无 workspace 落 `$HOME/.neo/attachments`。
+
+### D. UI 迭代（用户逐条钉死的形态）
+
+1. **@ 引用**：最终 = **镜像层**「文件图标 + 路径着色」，**无芯片底**；图标 **absolute** 不占正文宽；路径字符集 `[\w./-]`；菜单选中后补空格。  
+2. **图标库两套**（IA-57）：导航空心 stroke（menu/plus/search/…）· 语义实心 fill（files/package/tab 类）。  
+3. **标签热区**（IA-58）：`titlebar-drag` 回退 28px 必须与 `browser-tabs` padding 一致，否则热区偏下。  
+4. **@ 行首图标贴边**：mirror/textarea **padding-left 同步 24px**。
+
+### E. 关键坑（本轮新增，复用）
+
+1. **`data-tauri-drag-region` 双击已最大化 → 再调 `toggleMaximize` = 缩回**。禁止叠床。  
+2. **`env(titlebar-area-height)` 回退不一致**（drag=28 vs tabs=0）→ 标签被盖、热区偏下。  
+3. **`b64_decode` 手写**：`pad=3-i` 会被后续 `=` 覆盖；正确是计 `pads`、`emit=3-pads`。  
+4. **@path→cat 不能吃二进制图**；图片必须 `view_image`。  
+5. **xterm 排水窗口 ~80ms**：`onData` 直接 return 会丢键 → `pendingInputRef` 队列；错误路径先 capture id 再 terminate。  
+6. **桌面连旧 `target/debug/neo`** → 方法表不含新方法（「不认识的方法」）；改协议后必须 `cargo build -p neo-code-cli`。  
+7. **compose-next**：工作区沿用 main（用户多次选「当前 main 直接改」）；多任务写 Spec；审查 critical 必须修并复审。
+
+### F. 真源与门禁（不变 + 补充）
+
+- UI 真源：`apps/desktop-tauri/docs/PRODUCT-IA.md` §9（含 IA-41…60）。  
+- 协议：`bash scripts/gen_protocol_schema.sh` + `check_protocol_schema.py`。  
+- 桌面：`cd apps/desktop-tauri && npm run build`；**新 Tauri 命令要重启 tauri dev**。  
+- 内核：`cargo test -p neo-core --test kernel_loop` · `-p neo-capability --test view_image`。  
+- compose Specs：`docs/compose/spec/*.md`。
+
+### G. 仍开（下轮优先）
+
+1. **⌘F 会话内搜索**（原优先级 3）  
+2. Worktree · `⌘⇧K` · 面板体验加深（审查/Diff/文件）  
+3. 插件技能消费详情 · `turn/begin|pump` 逐帧 · 附件侧车 UI  
+4. 桌面 method 引用仍 82/109（余多为别名/空表/诚实拒绝）
+
+### H. 协作约定（沿用 + 强化）
+
+1. 改 UI **先对准截图红框**再动手（用户多次纠正「不是这个」）。  
+2. **两套图标**不要合成一套；@ 引用不要芯片底。  
+3. 图标/热区/缩放类：修完让用户热重载验收，不单靠 build 绿。  
+4. compose-next 交付物 = Spec `delivered` + 实现 commit + 文档 commit。
+
