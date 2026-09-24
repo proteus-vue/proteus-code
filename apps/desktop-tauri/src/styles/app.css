@@ -6089,7 +6089,7 @@ button.ctx-chip:hover {
   align-self: stretch;
 }
 
-/* ═══ IA-54 @ 文件引用芯片高亮（镜像层） ═══ */
+/* ═══ IA-54 @ 文件引用：图标 + 路径着色（无芯片底） ═══ */
 .composer-input-wrap {
   position: relative;
   min-width: 0;
@@ -6108,25 +6108,39 @@ button.ctx-chip:hover {
   word-break: break-word;
   overflow-wrap: anywhere;
   pointer-events: none;
-  color: transparent;
+  color: var(--text-primary);
   z-index: 0;
 }
 
+/* 路径：红文件图标 + 蓝文字；无底、无框、无 chip padding */
 .composer-input-mirror .ref-token {
-  color: transparent;
-  background: color-mix(in srgb, var(--accent, #3b82f6) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 35%, transparent);
-  border-radius: 8px;
-  /* 视觉留白：用 box-shadow 撑开，不改布局宽度 → 与 textarea 不错位 */
-  padding: 2px 8px;
-  margin: 1px -8px;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
+  color: var(--accent, #2563eb);
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
 }
 
+.composer-input-mirror .ref-icon {
+  display: inline-block;
+  vertical-align: -0.15em;
+  margin-right: 3px;
+  color: #e11d48;
+  flex-shrink: 0;
+}
+
+/* 正文由镜像绘制；textarea 只负责光标/输入 */
 .composer-card textarea {
   position: relative;
   z-index: 1;
-  color: var(--text-primary);
+  color: transparent;
   caret-color: var(--text-primary);
+  background: transparent;
 }
+
+.composer-card textarea::placeholder {
+  color: var(--text-tertiary);
+  opacity: 1;
+}
+

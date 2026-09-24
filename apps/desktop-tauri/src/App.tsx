@@ -166,12 +166,12 @@ function matchSlash(q: string) {
 }
 
 /**
- * `@` 起到下一个空白为止 = 一个引用芯片（含后面的自定义中文 —— 简单、直观）。
- * 引号路径 `@"a b"` / `@'a b'` 整段识别。
+ * `@路径`：只认路径字符（含引号路径），后面的中文/自定义字不算引用。
+ * 镜像层画「文件图标 + 路径色」；**无芯片底**。
  */
 function splitFileRefs(text: string): { text: string; ref: boolean }[] {
   if (!text) return [];
-  const re = /@(?:"[^"\n]+"|'[^'\n]+'|[^\s@]+)/g;
+  const re = /@(?:"[^"\n]+"|'[^'\n]+'|[\w./-]+)/g;
   const out: { text: string; ref: boolean }[] = [];
   let last = 0;
   for (const m of text.matchAll(re)) {
@@ -1338,9 +1338,9 @@ export default function App() {
       const ref = formatFileRef(path);
       const before = atQuery.prefix;
       const after = input.slice(before.length);
-      // 换成完整 ref + 空格：芯片与后续自定义文字之间有间距
+      // ref 后补空格，与后续自定义文字分开
       const replaced = `${before}${ref} ${after.replace(/^@[\w./-]*/, "")}`;
-      setInput(replaced.trimStart() === replaced ? replaced : replaced);
+      setInput(replaced);
       setAtQuery(null);
       setAtIdx(0);
       requestAnimationFrame(() => inputRef.current?.focus());
@@ -2076,6 +2076,16 @@ export default function App() {
               {splitFileRefs(input).map((seg, i) =>
                 seg.ref ? (
                   <span key={i} className="ref-token">
+                    <svg className="ref-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                      <path
+                        d="M7 4.5h7l3 3V19.5H7z"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.75"
+                        strokeLinejoin="round"
+                      />
+                      <path d="M14 4.5v3h3" fill="none" stroke="currentColor" strokeWidth="1.75" />
+                    </svg>
                     {seg.text}
                   </span>
                 ) : (
