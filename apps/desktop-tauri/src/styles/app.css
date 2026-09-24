@@ -6099,7 +6099,8 @@ button.ctx-chip:hover {
   position: absolute;
   inset: 0;
   overflow: visible;
-  padding: 4px 4px 10px;
+  /* 左侧 24px 给行首 absolute 图标留空，避免贴卡片边 */
+  padding: 4px 4px 10px 24px;
   margin: 0;
   border: none;
   font-family: inherit;
@@ -6137,24 +6138,21 @@ button.ctx-chip:hover {
   overflow: visible;
 }
 
-/* 行首：图标仍 absolute 贴左，给输入框 padding 让出位 */
+/* 行首：图标 absolute 贴在正文左侧；正文左 padding 24 → 图标约距边 4px */
 .composer-input-mirror .ref-token:first-child .ref-icon,
 .composer-input-mirror > span:first-child.ref-token .ref-icon {
   right: auto;
   left: -20px;
 }
 
-.composer-input-wrap {
-  padding-left: 2px;
-}
-
-/* 正文由镜像绘制；textarea 只负责光标/输入 */
+/* 正文由镜像绘制；textarea 只负责光标/输入 —— padding 必须与 mirror 一致 */
 .composer-card textarea {
   position: relative;
   z-index: 1;
   color: transparent;
   caret-color: var(--text-primary);
   background: transparent;
+  padding: 4px 4px 10px 24px;
 }
 
 .composer-card textarea::placeholder {
