@@ -210,7 +210,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | P0 | 三区骨架、对接 app-server、事件流、审批、会话 | ✅ |
 | P1 | 浏览器标签坞、文件树、Wiki、@、编辑重发、密度 | ✅ 主体 |
 | P1 余量 | 会话内容搜索/改名/删除、⌘, 设置 | ✅ 主体；图片附件 ⬜ |
-| P2 | 真 PTY、图片附件 | ⬜ · 斜杠/拖拽/命令台/子代理/Automations 已做 |
+| P2 | 真 PTY、图片附件 | ✅ 桌面 xterm+PTY · 图片 ⬜ · 斜杠/拖拽/命令台/子代理/Automations 已做 |
 | P3+ | 插件市场、Worktree、分享（默认关） | ✅ 插件市场接设置页（本地 marketplace/* · plugin/*）；Worktree ⬜ · 分享默认关 |
 
 **回归**：`npm run build` + 本文 §9 表勾选 + 内核护栏测试仍绿。
@@ -229,7 +229,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-6 | 侧栏图标折叠 | P1 | ✅ |
 | IA-7 | 工具/思考默认折叠 | P0 | ✅ |
 | IA-8 | Composer @/模式/模型 | P0 | ✅ |
-| IA-9 | 真 PTY / xterm | P2 | ✅ 内核 SessionManager（portable-pty + 沙箱包装）· `command/exec?session` + write/resize/terminate；桌面 xterm 接线 ⬜ |
+| IA-9 | 真 PTY / xterm | P2 | ✅ 内核 SessionManager · `command/exec?session`；桌面 **TerminalPane xterm** 接线（onData write · 空闲排水 · fit resize · terminate） |
 | IA-10 | 图片附件、斜杠命令 | P2 | ✅ 斜杠壳侧（11 条）；图片 ⬜ 待 L0 多模态 |
 | IA-11 | 分栏拖拽 persist | P2 | ✅ 侧栏/右栏 pointer 拖拽 + localStorage |
 | IA-12 | 会话内容搜索、重命名/删除 | P1 | ✅ history 内容搜 · rename · delete（当前会话自动切走再删） |
@@ -278,6 +278,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-56 | 图标库统一单色实心（对齐文件图标） | P1 | ✅ 全集 fill=currentColor + evenodd 挖孔 · 去 fillOpacity/白描边/多色点 · @ 引用同步 |
 | IA-57 | 图标两套：导航空心 + 语义实心 | P1 | ✅ HOLLOW stroke（menu/plus/search/…）· SOLID fill（files/package/tab 类）· 同名 API 不变 |
 | IA-58 | 修：标签条热区偏下（titlebar 回退不一致） | P1 | ✅ browser-tabs padding 回退 28px 对齐 drag · z-index 85 高于拖拽条 |
+| IA-59 | 桌面 xterm + PTY（compose desktop-xterm-pty） | P2 | ✅ TerminalPane · 拉模型排水 · fit resize · 替换旧 term-log 主路径 |
 
 
 ---

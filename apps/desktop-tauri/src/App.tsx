@@ -30,9 +30,6 @@ import {
 import {
   archiveThread,
   commandExec,
-  commandExecSession,
-  execTerminate,
-  execWrite,
   compactSession,
   configureSession,
   createSection,
@@ -73,6 +70,7 @@ import {
 import type { ThreadSection } from "./lib/protocol";
 import { listWorkspace } from "./components/FileTree";
 import { Sidebar } from "./components/Sidebar";
+import { TerminalPane } from "./components/TerminalPane";
 import { SettingsModal } from "./components/SettingsModal";
 import { ProjectPicker } from "./components/ProjectPicker";
 import { WorkbenchShell, type WorkbenchId } from "./components/WorkbenchShell";
@@ -279,20 +277,6 @@ export default function App() {
       (localStorage.getItem("neo-theme") as "light" | "dark" | null) ??
       "light",
   );
-  const [termLog, setTermLog] = useState<
-    {
-      id?: string;
-      cmd: string;
-      /** null = 进行中（等 tool_call_end） */
-      ok: boolean | null;
-      stdout?: string;
-      stderr?: string;
-      truncated?: boolean;
-    }[]
-  >([]);
-  const [termInput, setTermInput] = useState("");
-  /** PTY 持活会话（command/exec?session） */
-  const [termSession, setTermSession] = useState<string | null>(null);
   /** IA-14：tools/list 里的 agent_* 子代理 */
   const [agentTools, setAgentTools] = useState<ToolInfo[]>([]);
   /** IA-14 Automations：壳侧排程（localStorage） */
@@ -406,14 +390,6 @@ export default function App() {
         case "tool_call_begin": {
           const evId = String(payload.id ?? "");
           const evName = String(payload.name ?? "tool");
-          const args = payload.arguments as { cmd?: unknown } | undefined;
-          // 用户命令台：Op::Shell → id shell-* / name bash
-          if (evId.startsWith("shell-")) {
-            setTermLog((log) => [
-              ...log.slice(-200),
-              { id: evId, cmd: String(args?.cmd ?? ""), ok: null },
-            ]);
-          }
           append({
             type: "tool",
             id: evId,
@@ -424,23 +400,7 @@ export default function App() {
           break;
         }
         case "tool_call_end": {
-          const evId = String(payload.id ?? "");
           const code = Number(payload.exit_code ?? -1);
-          if (evId.startsWith("shell-")) {
-            setTermLog((log) =>
-              log.map((row) =>
-                row.id === evId
-                  ? {
-                      ...row,
-                      ok: code === 0,
-                      stdout: String(payload.stdout ?? ""),
-                      stderr: String(payload.stderr ?? ""),
-                      truncated: Boolean(payload.truncated),
-                    }
-                  : row,
-              ),
-            );
-          }
           setItems((prev) =>
             prev.map((it) => {
               if (it.type === "tool" && it.id === payload.id) {
@@ -1193,50 +1153,6 @@ export default function App() {
     saveAutomations(list);
   }, []);
 
-  const runTerminal = useCallback(
-    async (cmd: string) => {
-      const c = cmd.trim();
-      if (!c) return;
-      try {
-        // `pty <cmd>` 或已有会话时的续写 → unified_exec；否则一次性 Shell
-        if (c.startsWith("pty ")) {
-          const r = await commandExecSession(c.slice(4).trim() || "bash", 120, 32);
-          if (r.session_id) setTermSession(r.session_id);
-          append({
-            type: "status",
-            message: `PTY 已启动 ${r.session_id ?? "?"}（后续输入直接回车写 stdin）`,
-          });
-        } else if (termSession && !c.startsWith("!")) {
-          const r = await execWrite(termSession, c.endsWith("\n") ? c : `${c}\n`);
-          append({ type: "status", message: `→ pty ${termSession}` });
-          setTermLog((log) => [
-            ...log.slice(-200),
-            {
-              id: `pty-${Date.now()}`,
-              cmd: c,
-              ok: true,
-              stdout: typeof r === "object" && r && "output" in r ? String((r as { output?: string }).output ?? "") : "",
-            },
-          ]);
-        } else if (c === "!terminate" && termSession) {
-          await execTerminate(termSession);
-          setTermSession(null);
-          append({ type: "status", message: "PTY 已结束" });
-        } else {
-          await commandExec(c.startsWith("!") ? c.slice(1) : c);
-          append({ type: "status", message: `$ ${c}` });
-        }
-        setTermInput("");
-      } catch (e) {
-        setTermLog((log) => [
-          ...log.slice(-200),
-          { cmd: c, ok: false, stderr: String(e) },
-        ]);
-        append({ type: "error", message: String(e) });
-      }
-    },
-    [append, termSession],
-  );
 
   const openWorkbench = useCallback((tab: WB) => {
     setOpenTabs((tabs) => (tabs.includes(tab) ? tabs : [...tabs, tab]));
@@ -2382,50 +2298,7 @@ export default function App() {
             )}
 
             {panelTab === "terminal" && (
-              <div className="wb-section terminal">
-                <div className="term-note">
-                  命令台 · 默认一次性 Shell · `pty bash` 启持活会话 · `!terminate` 结束 · 不经模型
-                </div>
-                <div className="term-log">
-                  {termLog.length === 0 && (
-                    <div className="muted">输入命令回车执行，stdout/stderr 显示在下方。</div>
-                  )}
-                  {termLog.map((row, i) => (
-                    <div
-                      key={row.id ?? i}
-                      className={`term-line ${row.ok === false ? "fail" : row.ok ? "ok" : "running"}`}
-                    >
-                      <div>
-                        <span className="prompt">$</span> {row.cmd}
-                        {row.ok === null && <span className="dim"> ·…</span>}
-                        {row.ok === false && <span className="err"> ✗</span>}
-                        {row.ok === true && <span className="ok-mark"> ✓</span>}
-                      </div>
-                      {row.stdout && <pre className="term-out">{row.stdout}</pre>}
-                      {row.stderr && <pre className="term-err">{row.stderr}</pre>}
-                      {row.truncated && (
-                        <div className="muted term-trunc">输出已截断（有界）</div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                <form
-                  className="term-input"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    void runTerminal(termInput);
-                  }}
-                >
-                  <span className="prompt">$</span>
-                  <input
-                    value={termInput}
-                    onChange={(e) => setTermInput(e.target.value)}
-                    placeholder="ls -la  ·  pty bash  ·  !terminate"
-                    spellCheck={false}
-                    autoComplete="off"
-                  />
-                </form>
-              </div>
+              <TerminalPane />
             )}
 
             {panelTab === "subagents" && (
