@@ -252,6 +252,10 @@ impl neo_core::Compactor for PolicyCompactor {
             .map(|m| match m {
                 neo_core::Message::System(t) => Summarizable { role: "system", text: t.clone() },
                 neo_core::Message::User(t) => Summarizable { role: "user", text: t.clone() },
+                neo_core::Message::UserImage { text, image } => Summarizable {
+                    role: "user",
+                    text: format!("{text}（{} {}B）", image.mime, image.bytes),
+                },
                 neo_core::Message::Assistant { text, tool_calls } => Summarizable {
                     role: "assistant",
                     text: if tool_calls.is_empty() {

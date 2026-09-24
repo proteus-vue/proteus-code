@@ -634,6 +634,41 @@
         },
         {
           "additionalProperties": false,
+          "description": "一次图片附件已进入模型上下文（宿主可按 path 预览；**不含 base64**）。\n\n与 `ToolCallEnd` 分开：End 是工具收尾事实，本事件专供「有一张图\n要展示/回放」——载荷保持小，JSONL 不被像素撑爆。",
+          "properties": {
+            "image_attached": {
+              "properties": {
+                "bytes": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "mime": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "path",
+                "mime",
+                "bytes"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "image_attached"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "properties": {
             "patch_proposed": {
               "properties": {

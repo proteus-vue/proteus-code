@@ -265,6 +265,9 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
             EventMsg::UserInputRequest { prompt, .. } => {
                 Some(format!("[提问] {prompt}（等待宿主 user_input/respond）"))
             }
+            EventMsg::ImageAttached { path, mime, bytes, .. } => {
+                Some(format!("[图片] {path}（{mime}，{bytes}B）"))
+            }
             EventMsg::Error { message } => Some(format!("[错误] {message}")),
             EventMsg::TurnComplete { input_tokens, output_tokens } => Some(format!(
                 "[turn] 完成（in {input_tokens} / out {output_tokens} tokens）"

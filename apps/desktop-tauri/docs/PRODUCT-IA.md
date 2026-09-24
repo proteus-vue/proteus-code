@@ -262,6 +262,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-39 | 再收：单行 tooltip · 标签左 · 缩小宽度 | P1 | ✅ tag 左对齐 · 11px 单行主信息 · 贴光标 |
 | IA-40 | 新增标签菜单：标题贴图标靠左 + 更紧凑 | P1 | ✅ menu-label 左对齐 · 收 item 字号/间距 |
 | IA-41 | 问人反向通道：user_input_request → respond | P1 | ✅ 挂起卡 · Enter 发送 · 锁 composer · boot/resume 刷 thread/goal/get |
+| IA-42 | view_image 多模态（内核侧） | P1 | ✅ 默认注册 · ImageAttachment · UserImage 编码 image_url · 事件仅路径 |
 
 ---
 

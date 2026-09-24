@@ -100,6 +100,21 @@ impl DeepSeekProvider {
             match m {
                 Message::System(s) => out.push(serde_json::json!({ "role": "system", "content": s })),
                 Message::User(s) => out.push(serde_json::json!({ "role": "user", "content": s })),
+                Message::UserImage { text, image } => {
+                    // OpenAI 兼容多模态：content 数组 + data URL。
+                    // 非视觉模型收到后会忽略 image 块或只读 text —— 不丢文字说明。
+                    let url = format!(
+                        "data:{};base64,{}",
+                        image.mime, image.data_base64
+                    );
+                    out.push(serde_json::json!({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": text},
+                            {"type": "image_url", "image_url": {"url": url}},
+                        ],
+                    }));
+                }
                 Message::Assistant { text, tool_calls } => {
                     let calls: Vec<_> = tool_calls
                         .iter()

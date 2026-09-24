@@ -471,6 +471,16 @@ pub enum EventMsg {
     /// 宿主用 `Op::RespondUserInput` 以**同一 id** 回写答复。
     /// 与 `ApprovalRequest` 分开：审批是 Allow/Deny，提问要的是自由文本。
     UserInputRequest { id: ApprovalId, prompt: String },
+    /// 一次图片附件已进入模型上下文（宿主可按 path 预览；**不含 base64**）。
+    ///
+    /// 与 `ToolCallEnd` 分开：End 是工具收尾事实，本事件专供「有一张图
+    /// 要展示/回放」——载荷保持小，JSONL 不被像素撑爆。
+    ImageAttached {
+        id: ToolCallId,
+        path: String,
+        mime: String,
+        bytes: u64,
+    },
     PatchProposed { path: String, diff: String },
     CheckpointSaved { checkpoint_id: String },
     /// 单个文件发生改动（**由工具上报**，内核据此累计）。
@@ -518,6 +528,27 @@ pub struct ToolOutput {
     pub stdout: String,
     pub stderr: String,
     pub truncated: bool,
+}
+
+/// 一张已读入内存的图片（`view_image` → 模型上下文）。
+///
+/// `data_base64` **不进事件流/会话日志**（会把 JSONL 撑爆）：日志只记
+/// [`EventMsg::ImageAttached`] 的路径元数据；像素在内存 `Message` 里，
+/// provider 编码时再发给模型。跨进程回放时若文件仍在则重读，否则降级为文字说明。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+pub struct ImageAttachment {
+    /// `image/png` 等
+    pub mime: String,
+    /// 标准 base64（无 data: 前缀）
+    pub data_base64: String,
+    /// 工作区内绝对路径（回放重读用）
+    pub path: String,
+    /// Codex 同名：`high` / `original` / 缺省
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// 源文件字节数（未编码前；有界性审计用）
+    pub bytes: u64,
 }
 
 // ---------- 用户可见事实：宿主无关的语义抽取 ----------
@@ -672,6 +703,11 @@ pub fn facts_of(events: &[EventMsg]) -> Vec<Fact> {
             // 波及全部宿主 match（detail 前缀区分，history 投影仍可读）。
             EventMsg::UserInputRequest { prompt, .. } => {
                 out.push(Fact::ApprovalNeeded { detail: format!("需要用户输入：{prompt}") })
+            }
+            EventMsg::ImageAttached { path, mime, .. } => {
+                out.push(Fact::ApprovalNeeded {
+                    detail: format!("已附加图片 {path}（{mime}）"),
+                })
             }
             EventMsg::UserSubmitted { text } => out.push(Fact::UserSaid(text.clone())),
             EventMsg::RefsResolved { summary, .. } => {

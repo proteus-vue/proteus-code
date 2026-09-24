@@ -16,7 +16,7 @@ pub mod diff;
 pub mod diff_view;
 
 use neo_core::{CallKind, SandboxOutcome, Tool, ToolCtx, ToolRegistry};
-use neo_protocol::{EventMsg, TodoEntry, TodoStatus, ToolOutput};
+use neo_protocol::{EventMsg, ImageAttachment, TodoEntry, TodoStatus, ToolOutput};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -393,6 +393,148 @@ pub fn register_defaults(reg: &mut ToolRegistry) {
     reg.register(Arc::new(ApplyPatchTool));
     reg.register(Arc::new(RequestUserInputTool));
     reg.register(Arc::new(TodoWriteTool));
+    reg.register(Arc::new(ViewImageTool));
+}
+
+/// 图片附件源文件上限（1 MiB）：更大则拒绝 —— base64 后约 1.33×，
+/// 与内核单次输出上限同一量级，避免一张大图吃光上下文。
+const MAX_IMAGE_BYTES: u64 = 1024 * 1024;
+
+/// `view_image`（对齐 Codex）：读本地图片 → 元数据给模型 + 像素进上下文。
+///
+/// 执行本身只回元数据（stdout 小、可进 ToolCallEnd）；像素经
+/// [`Tool::image_result`] 注入 `Message::UserImage`，再由 provider 编成
+/// `image_url`。事件流只记 [`EventMsg::ImageAttached`] 路径（有界）。
+pub struct ViewImageTool;
+
+impl Tool for ViewImageTool {
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "图片路径（相对工作区或绝对）"},
+                "detail": {
+                    "type": "string",
+                    "enum": ["high", "original"],
+                    "description": "清晰度提示；当前实现忽略（保留契约位）"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    fn name(&self) -> &str {
+        "view_image"
+    }
+
+    fn describe(&self) -> String {
+        "view_image(path): 查看本地图片（png/jpg/webp/gif）。返回尺寸元数据并把像素交给模型。".into()
+    }
+
+    fn call_kind(&self, _args: &Value) -> CallKind {
+        CallKind::Read
+    }
+
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput {
+        let Some(path_str) = arg_str(args, "path") else {
+            return fail("缺少参数 path");
+        };
+        let full = ctx.resolve(path_str);
+        let raw = match std::fs::read(&full) {
+            Ok(r) => r,
+            Err(e) => return fail(&format!("读取失败：{}（{e}）", full.display())),
+        };
+        if raw.is_empty() {
+            return fail("空文件");
+        }
+        if raw.len() as u64 > MAX_IMAGE_BYTES {
+            return fail(&format!(
+                "图片过大：{}B > 上限 {MAX_IMAGE_BYTES}B",
+                raw.len()
+            ));
+        }
+        let mime = image_mime(path_str, &raw);
+        if mime.is_none() {
+            return fail(&format!(
+                "不是可识别的图片扩展名（png/jpg/jpeg/webp/gif）：{path_str}"
+            ));
+        }
+        let mime = mime.unwrap_or_else(|| "application/octet-stream".into());
+        ToolOutput {
+            exit_code: 0,
+            stdout: format!(
+                "path={}\nmime={mime}\nbytes={}\n[已附加图片到上下文]",
+                full.display(),
+                raw.len()
+            ),
+            stderr: String::new(),
+            truncated: false,
+        }
+    }
+
+    fn image_result(&self, args: &Value, output: &ToolOutput) -> Option<ImageAttachment> {
+        if output.exit_code != 0 {
+            return None;
+        }
+        let path_str = arg_str(args, "path")?;
+        let ctx_path = {
+            // execute 已 resolve 过；这里无 ctx —— 用 args 路径再 resolve 一次
+            // 与 execute 同一规则：绝对原样，相对按进程 cwd 会偏。
+            // 故 image_result 必须在 execute 成功且路径仍可读时调用（内核保证）。
+            std::path::PathBuf::from(path_str)
+        };
+        // 相对路径：execute 用 ctx.cwd；这里拿不到 ctx —— 从 stdout 第一行解析绝对路径。
+        let abs = output
+            .stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("path="))
+            .map(std::path::PathBuf::from)?;
+        let _ = ctx_path;
+        let raw = std::fs::read(&abs).ok()?;
+        if raw.is_empty() || raw.len() as u64 > MAX_IMAGE_BYTES {
+            return None;
+        }
+        let mime = image_mime(abs.to_str().unwrap_or(path_str), &raw)?;
+        // 自实现 base64（与 core 同款；capability 不依赖 core 私有函数）
+        Some(ImageAttachment {
+            mime,
+            data_base64: b64(&raw),
+            path: abs.display().to_string(),
+            detail: args.get("detail").and_then(Value::as_str).map(str::to_string),
+            bytes: raw.len() as u64,
+        })
+    }
+}
+
+fn image_mime(path: &str, raw: &[u8]) -> Option<String> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".png") || raw.starts_with(b"\x89PNG") {
+        return Some("image/png".into());
+    }
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || raw.starts_with(&[0xFF, 0xD8]) {
+        return Some("image/jpeg".into());
+    }
+    if lower.ends_with(".webp") || (raw.len() > 12 && &raw[8..12] == b"WEBP") {
+        return Some("image/webp".into());
+    }
+    if lower.ends_with(".gif") || raw.starts_with(b"GIF8") {
+        return Some("image/gif".into());
+    }
+    None
+}
+
+fn b64(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+    }
+    out
 }
 
 /// Subagent（对齐 ZCode：Markdown 定义 + 工具白名单）

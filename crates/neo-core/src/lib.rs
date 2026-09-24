@@ -100,6 +100,15 @@ pub enum Message {
     User(String),
     Assistant { text: String, tool_calls: Vec<ToolInvocation> },
     ToolResult { id: ToolCallId, name: String, output: ToolOutput },
+    /// 带图的用户轮（`view_image` 注入）。provider 编成 OpenAI
+    /// `image_url` content parts；非视觉模型会忽略图或只看 text。
+    ///
+    /// 与 `User(String)` 分开而不是塞进 ToolResult：OpenAI 兼容接口的
+    /// `role:"tool"` 通常只收字符串，图片必须挂在 user/assistant content 数组上。
+    UserImage {
+        text: String,
+        image: neo_protocol::ImageAttachment,
+    },
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -437,6 +446,17 @@ pub trait Tool: Send + Sync {
     /// 默认空：绝大多数工具不产生协议事件。
     fn report(&self, _args: &Value) -> Vec<EventMsg> {
         Vec::new()
+    }
+    /// 执行成功后要交给模型的图片（`view_image`）。
+    ///
+    /// 默认 `None`。与 `execute` 分开：base64 不进 `ToolOutput`（避免改
+    /// 全仓字面量），也不进事件流（避免撑爆 JSONL）——只在内存 `Message` 里。
+    fn image_result(
+        &self,
+        _args: &Value,
+        _output: &ToolOutput,
+    ) -> Option<neo_protocol::ImageAttachment> {
+        None
     }
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutput;
 
@@ -1089,7 +1109,7 @@ impl Kernel {
                 let mut seen = 0usize;
                 let mut cut = None;
                 for (i, m) in self.messages.iter().enumerate().rev() {
-                    if matches!(m, Message::User(_)) {
+                    if matches!(m, Message::User(_) | Message::UserImage { .. }) {
                         seen += 1;
                         if seen == turns {
                             cut = Some(i);
@@ -1882,6 +1902,24 @@ impl Kernel {
             truncated: output.truncated,
         };
         self.emit_and_log(&ev)?;
+        // 图片附件：先落元数据事件（小、可回放），再把像素放进内存消息。
+        if output.exit_code == 0 {
+            if let Some(tool) = self.tools.get(&call.name) {
+                if let Some(img) = tool.image_result(&call.arguments, &output) {
+                    let meta = EventMsg::ImageAttached {
+                        id: call.id.clone(),
+                        path: img.path.clone(),
+                        mime: img.mime.clone(),
+                        bytes: img.bytes,
+                    };
+                    self.emit_and_log(&meta)?;
+                    self.messages.push(Message::UserImage {
+                        text: format!("[已附加图片 {}]", img.path),
+                        image: img,
+                    });
+                }
+            }
+        }
         self.messages.push(Message::ToolResult {
             id: call.id.clone(),
             name: call.name.clone(),
@@ -2218,6 +2256,28 @@ impl Kernel {
                     output: ToolOutput { exit_code, stdout, stderr, truncated },
                 });
             }
+            // 图片：日志只存路径元数据。仍在盘上则重读进内存；文件已变/已删
+            // 则降级为纯文字（诚实边界：不假装还能看到当时的像素）。
+            EventMsg::ImageAttached { path, mime, bytes, .. } => {
+                let image = std::fs::read(&path).ok().filter(|raw| !raw.is_empty()).map(|raw| {
+                    neo_protocol::ImageAttachment {
+                        mime: mime.clone(),
+                        data_base64: base64_encode(&raw),
+                        path: path.clone(),
+                        detail: None,
+                        bytes: raw.len() as u64,
+                    }
+                });
+                match image {
+                    Some(image) => rebuilt.push(Message::UserImage {
+                        text: format!("[已附加图片 {path}]"),
+                        image,
+                    }),
+                    None => rebuilt.push(Message::User(format!(
+                        "[图片不可用：{path}（{mime}，{bytes}B）]"
+                    ))),
+                }
+            }
             _ => {}
         }
     }
@@ -2519,6 +2579,21 @@ enum StepOutcome { More, Suspended, Done }
 
 fn denied_output(reason: &str) -> ToolOutput {
     ToolOutput { exit_code: -1, stdout: String::new(), stderr: reason.into(), truncated: false }
+}
+
+/// 标准 base64 编码（无换行）。L2 不引 crate：自实现 ~25 行，调试链浅。
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+    }
+    out
 }
 
 /// 未执行的 tool_call 占位结果（护栏 #4）。
