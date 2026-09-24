@@ -704,8 +704,8 @@ mod tests {
     #[test]
     fn method_docs_cover_all_ops() {
         let docs = method_docs();
-        // initialize + 19 Op + 78 control + aliases
-        assert_eq!(docs.len(), 102, "方法表 initialize + 19 Op + 78 control + aliases");
+        // initialize + 19 Op + 85 control + aliases
+        assert_eq!(docs.len(), 109, "方法表 initialize + 19 Op + 85 control + aliases");
         assert!(docs[0].handshake_only);
         assert_eq!(docs[0].name, "initialize");
         assert!(docs.iter().any(|d| d.name == "thread/resume"));

@@ -292,6 +292,8 @@ fn render(events: &[EventMsg], opts: &ExecOptions, log: &mut Vec<String>) {
                 Some(format!("[checkpoint] {checkpoint_id}"))
             }
             EventMsg::GoalProgress { done, total, .. } => Some(format!("[goal] {done}/{total}")),
+            // 文件监听提示：无头转录默认不打（客户端靠 event 通知消费）
+            EventMsg::FsChanged { .. } => None,
         };
         if let Some(l) = line {
             if !opts.json {

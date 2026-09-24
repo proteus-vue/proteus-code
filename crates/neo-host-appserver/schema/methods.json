@@ -810,6 +810,81 @@
     "handshake_only": false
   },
   {
+    "name": "fs/watch",
+    "params": [
+      "path",
+      "watchId",
+      "watch_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "fs/unwatch",
+    "params": [
+      "watchId",
+      "watch_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "externalAgentConfig/detect",
+    "params": [
+      "cwds",
+      "includeHome",
+      "include_home",
+      "maxSessionAgeDays",
+      "max_session_age_days",
+      "maxSessions",
+      "max_sessions",
+      "migrationSource",
+      "migration_source",
+      "source"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "externalAgentConfig/import",
+    "params": [
+      "migrationItems",
+      "migration_items",
+      "migrationSource",
+      "migration_source",
+      "providerId",
+      "provider_id",
+      "source"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "externalAgentConfig/import/readHistories",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "externalAgentConfig/import/recordHistory",
+    "params": [
+      "itemTypeResults",
+      "item_type_results",
+      "providerId",
+      "provider_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "mcpServer/oauth/login",
+    "params": [
+      "name",
+      "clientRegistration",
+      "client_registration",
+      "scopes",
+      "threadId",
+      "thread_id",
+      "timeoutSecs",
+      "timeout_secs"
+    ],
+    "handshake_only": false
+  },
+  {
     "name": "thread/goal/set",
     "params": [
       "goal"

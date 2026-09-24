@@ -268,6 +268,7 @@ NEO 已是同构形态，差的主要是**壳的完成度与观感**，不是再
 | IA-45 | Codex 批3：inject/revert/metadata/attachment + mcp 运行时 | P1 | ✅ 方法表 69 · inject 不驱动 · revert=rewind 换算 · 附件侧车 · mcpServer/tool\|resource 走既有 Tool seam |
 | IA-46 | Codex 批4：plugin/* + marketplace/*（本地市场，无账号） | P1 | ✅ 方法表 79 · $NEO_HOME 市场/安装清单 · 只复制资源不执行 · plugin/share/* 绑身份仍不做 |
 | IA-47 | Codex 批5：threadSection/config 写/skills 根/experimental/app 空表/fuzzy | P1 | ✅ 方法表 102 · 分区 sidecar · config.json 乐观版本 · skills 禁用+extraRoots · app 空表诚实 · 无 Guardian/Windows 沙箱点名拒绝 |
+| IA-48 | Codex 批6：fs/watch 真事件 + externalAgent 迁移 + mcp oauth 边界 | P1 | ✅ 方法表 109 · EventBus 推 fs/changed · PathWatcher 有界合并 · 本地 agent 资产探测/导入 · 无浏览器 OAuth 点名拒绝 |
 
 ---
 

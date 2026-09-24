@@ -524,6 +524,19 @@ pub enum EventMsg {
     GoalCleared { goal_id: GoalId },
     Error { message: String },
     TurnComplete { input_tokens: u64, output_tokens: u64 },
+    /// `fs/watch` 订阅的路径发生变化（Codex `fs/changed` 通知）。
+    ///
+    /// 由宿主侧监听器产生，**不经内核状态机** —— 与 `ApprovalRequest` 不同，
+    /// 它不改变会话真值，只是"磁盘上动了"的提示；`facts_of` 刻意忽略它
+    ///（过程提示，不是必须记住的事实）。
+    FsChanged {
+        watch_id: String,
+        /// 变化涉及的路径（截断至前 32 条，防止风暴撑爆事件行）。
+        paths: Vec<String>,
+        /// 合并后的一次提示（true）或逐条（false）—— 由监听器有界通道决定。
+        #[serde(default)]
+        coalesced: bool,
+    },
     ShutdownComplete,
 }
 

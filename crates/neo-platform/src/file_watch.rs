@@ -215,6 +215,67 @@ pub fn index_meaningfully_changed(old: &crate::file_index::FileIndex, new: &crat
     old != new
 }
 
+/// 路径级监听（app-server `fs/watch`）：与 [`WorkspaceWatcher`] 不同，
+/// 它把**具体路径**交给回调（Codex `fs/changed` 要 paths），而不是只给信号。
+///
+/// 合并策略：容量 1 的路径批通道 —— 风暴塌成一批（`coalesced`）。
+/// 回调在**后台线程**收到一批后调用一次；监听器构造本身仍可能在 macOS 上
+/// 阻塞数秒（见 [`WorkspaceWatcher::watch`] 的说明），调用方勿在 UI 线程调用。
+pub struct PathWatcher {
+    _watcher: notify::RecommendedWatcher,
+}
+
+impl PathWatcher {
+    /// 开始递归监听 `root`；每批变化调用一次 `on_batch(paths, coalesced)`。
+    pub fn watch(
+        root: &Path,
+        on_batch: Box<dyn Fn(Vec<PathBuf>, bool) + Send + Sync + 'static>,
+    ) -> Result<Self, WatchError> {
+        if !root.is_dir() {
+            return Err(WatchError::RootUnavailable(format!(
+                "{} 不存在或不是目录",
+                root.display()
+            )));
+        }
+        let (tx, rx) = mpsc::sync_channel::<Vec<PathBuf>>(1);
+        std::thread::spawn(move || {
+            while let Ok(first) = rx.recv() {
+                let mut batch = first;
+                let mut coalesced = false;
+                while let Ok(more) = rx.try_recv() {
+                    batch.extend(more);
+                    coalesced = true;
+                }
+                let truncated = batch.len() > 64;
+                batch.truncate(64);
+                on_batch(batch, coalesced || truncated);
+            }
+        });
+
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let Ok(event) = res else { return };
+            if event
+                .paths
+                .iter()
+                .any(|p| p.components().any(|c| c.as_os_str() == ".git"))
+            {
+                return;
+            }
+            if event.paths.is_empty() {
+                return;
+            }
+            let _ = tx.try_send(event.paths.clone());
+        })
+        .map_err(|e| WatchError::BackendUnavailable(e.to_string()))?;
+
+        watcher
+            .watch(root, notify::RecursiveMode::Recursive)
+            .map_err(|e| WatchError::BackendUnavailable(e.to_string()))?;
+
+        Ok(Self { _watcher: watcher })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

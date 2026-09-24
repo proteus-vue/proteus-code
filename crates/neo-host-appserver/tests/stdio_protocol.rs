@@ -112,7 +112,7 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 102, "initialize + 19 Op + 78 control + aliases");
+    assert_eq!(methods.len(), 109, "initialize + 19 Op + 85 control + aliases");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
     assert!(methods.iter().any(|m| m == "turn/steer"), "Codex steer 必须可达");
@@ -601,6 +601,27 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 ),
                 ThreadCmd::FeedbackUpload { classification, .. } => ThreadResult::Value(
                     json!({"uploaded": false, "classification": classification}),
+                ),
+                ThreadCmd::FsWatch { path, watch_id } => ThreadResult::Value(
+                    json!({"watchId": watch_id, "path": path, "watching": true}),
+                ),
+                ThreadCmd::FsUnwatch { watch_id } => ThreadResult::Value(
+                    json!({"watchId": watch_id, "stopped": true}),
+                ),
+                ThreadCmd::ExtAgentDetect { .. } => ThreadResult::Value(
+                    json!({"migrationItems": [], "migrationSource": "local-fs"}),
+                ),
+                ThreadCmd::ExtAgentImport { migration_items, .. } => ThreadResult::Value(
+                    json!({"imported": 0, "skipped": migration_items.len(), "failed": 0}),
+                ),
+                ThreadCmd::ExtAgentImportReadHistories => ThreadResult::Value(
+                    json!({"histories": []}),
+                ),
+                ThreadCmd::ExtAgentImportRecordHistory { provider_id, .. } => ThreadResult::Value(
+                    json!({"recorded": true, "providerId": provider_id}),
+                ),
+                ThreadCmd::McpOauthLogin { name, .. } => ThreadResult::Error(
+                    format!("无 OAuth：{name}"),
                 ),
             }),
         },

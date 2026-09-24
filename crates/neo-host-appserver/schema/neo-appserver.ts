@@ -108,6 +108,13 @@ export const METHODS = [
   "thread/approveGuardianDeniedAction",
   "review/start",
   "feedback/upload",
+  "fs/watch",
+  "fs/unwatch",
+  "externalAgentConfig/detect",
+  "externalAgentConfig/import",
+  "externalAgentConfig/import/readHistories",
+  "externalAgentConfig/import/recordHistory",
+  "mcpServer/oauth/login",
   "thread/goal/set",
   "thread/goal/clear",
   "thread/fork",
@@ -227,6 +234,13 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "thread/approveGuardianDeniedAction": ["event", "threadId", "thread_id", "id"],
   "review/start": ["target", "threadId", "thread_id", "delivery"],
   "feedback/upload": ["classification", "reason", "tags", "includeLogs", "include_logs", "extraLogFiles", "extra_log_files", "threadId", "thread_id"],
+  "fs/watch": ["path", "watchId", "watch_id"],
+  "fs/unwatch": ["watchId", "watch_id"],
+  "externalAgentConfig/detect": ["cwds", "includeHome", "include_home", "maxSessionAgeDays", "max_session_age_days", "maxSessions", "max_sessions", "migrationSource", "migration_source", "source"],
+  "externalAgentConfig/import": ["migrationItems", "migration_items", "migrationSource", "migration_source", "providerId", "provider_id", "source"],
+  "externalAgentConfig/import/readHistories": [],
+  "externalAgentConfig/import/recordHistory": ["itemTypeResults", "item_type_results", "providerId", "provider_id"],
+  "mcpServer/oauth/login": ["name", "clientRegistration", "client_registration", "scopes", "threadId", "thread_id", "timeoutSecs", "timeout_secs"],
   "thread/goal/set": ["goal"],
   "thread/goal/clear": [],
   "thread/fork": [],
@@ -272,7 +286,15 @@ arguments: unknown, } } | { "tool_call_end": { id: string, exit_code: number,
  * 而看不到命令打印了什么，等于无法判断这步到底做了什么。
  * 内核已按上限截断，`truncated` 如实标注。
  */
-stdout: string, stderr: string, truncated: boolean, } } | { "approval_request": { id: string, detail: string, kind: string, } } | { "user_input_request": { id: string, prompt: string, } } | { "image_attached": { id: string, path: string, mime: string, bytes: number, } } | { "patch_proposed": { path: string, diff: string, } } | { "checkpoint_saved": { checkpoint_id: string, } } | { "file_changed": { path: string, additions: number, deletions: number, } } | { "files_changed": { files: Array<FileChange>, } } | { "context_compacted": { removed_messages: number, summary: string, } } | { "rewound": { turns: number, removed_messages: number, files_kept: number, } } | { "todo_updated": { items: Array<TodoEntry>, } } | { "goal_progress": { goal_id: string, done: number, total: number, } } | { "goal_updated": { snapshot: GoalSnapshot, } } | { "goal_cleared": { goal_id: string, } } | { "error": { message: string, } } | { "turn_complete": { input_tokens: number, output_tokens: number, } } | "shutdown_complete";
+stdout: string, stderr: string, truncated: boolean, } } | { "approval_request": { id: string, detail: string, kind: string, } } | { "user_input_request": { id: string, prompt: string, } } | { "image_attached": { id: string, path: string, mime: string, bytes: number, } } | { "patch_proposed": { path: string, diff: string, } } | { "checkpoint_saved": { checkpoint_id: string, } } | { "file_changed": { path: string, additions: number, deletions: number, } } | { "files_changed": { files: Array<FileChange>, } } | { "context_compacted": { removed_messages: number, summary: string, } } | { "rewound": { turns: number, removed_messages: number, files_kept: number, } } | { "todo_updated": { items: Array<TodoEntry>, } } | { "goal_progress": { goal_id: string, done: number, total: number, } } | { "goal_updated": { snapshot: GoalSnapshot, } } | { "goal_cleared": { goal_id: string, } } | { "error": { message: string, } } | { "turn_complete": { input_tokens: number, output_tokens: number, } } | { "fs_changed": { watch_id: string, 
+/**
+ * 变化涉及的路径（截断至前 32 条，防止风暴撑爆事件行）。
+ */
+paths: Array<string>, 
+/**
+ * 合并后的一次提示（true）或逐条（false）—— 由监听器有界通道决定。
+ */
+coalesced: boolean, } } | "shutdown_complete";
 export type EventNotification = { seq: number, kind: string, payload: unknown, };
 export type ExecMode = "plan" | "confirm_before" | "default" | "auto_edit" | "full_access";
 export type ExecResizeParams = { session_id: string, cols: number, rows: number, };

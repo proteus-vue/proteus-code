@@ -45,6 +45,8 @@ neo-providers = { path = "../neo-providers", version = "0.1.0" }
 neo-mcp = { path = "../neo-mcp", version = "0.1.0" }
 # marketplace/* + plugin/*：本地插件市场（无账号；与 skill 根同一 L3）
 neo-skill-loader = { path = "../neo-skill-loader", version = "0.1.0" }
+# fs/watch：路径级文件监听（L1；app-server EventBus 推 fs/changed）
+neo-platform = { path = "../neo-platform", version = "0.1.0" }
 serde_json = { workspace = true }
 
 [features]

@@ -5259,6 +5259,7 @@ dependencies = [
  "neo-llm-deepseek",
  "neo-mcp",
  "neo-mock",
+ "neo-platform",
  "neo-protocol",
  "neo-providers",
  "neo-sandbox-local",

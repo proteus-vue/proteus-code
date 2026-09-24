@@ -313,6 +313,39 @@ pub enum ThreadCmd {
         extra_log_files: Option<Vec<String>>,
         thread_id: Option<String>,
     },
+    /// `fs/watch`
+    FsWatch { path: String, watch_id: String },
+    /// `fs/unwatch`
+    FsUnwatch { watch_id: String },
+    /// `externalAgentConfig/detect`
+    ExtAgentDetect {
+        cwds: Option<Vec<String>>,
+        include_home: Option<bool>,
+        max_session_age_days: Option<u32>,
+        max_sessions: Option<u32>,
+        migration_source: Option<String>,
+    },
+    /// `externalAgentConfig/import`
+    ExtAgentImport {
+        migration_items: Vec<Value>,
+        migration_source: Option<String>,
+        provider_id: Option<String>,
+    },
+    /// `externalAgentConfig/import/readHistories`
+    ExtAgentImportReadHistories,
+    /// `externalAgentConfig/import/recordHistory`
+    ExtAgentImportRecordHistory {
+        item_type_results: Vec<Value>,
+        provider_id: String,
+    },
+    /// `mcpServer/oauth/login`
+    McpOauthLogin {
+        name: String,
+        client_registration: Option<String>,
+        scopes: Option<Vec<String>>,
+        thread_id: Option<String>,
+        timeout_secs: Option<i64>,
+    },
 }
 
 /// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，18 个）。
@@ -435,6 +468,13 @@ pub const THREAD_METHODS: &[&str] = &[
     "thread/approveGuardianDeniedAction",
     "review/start",
     "feedback/upload",
+    "fs/watch",
+    "fs/unwatch",
+    "externalAgentConfig/detect",
+    "externalAgentConfig/import",
+    "externalAgentConfig/import/readHistories",
+    "externalAgentConfig/import/recordHistory",
+    "mcpServer/oauth/login",
 ];
 
 /// 全部方法名（握手用）。
@@ -568,6 +608,13 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "thread/approveGuardianDeniedAction" => &["event", "threadId", "thread_id", "id"],
         "review/start" => &["target", "threadId", "thread_id", "delivery"],
         "feedback/upload" => &["classification", "reason", "tags", "includeLogs", "include_logs", "extraLogFiles", "extra_log_files", "threadId", "thread_id"],
+        "fs/watch" => &["path", "watchId", "watch_id"],
+        "fs/unwatch" => &["watchId", "watch_id"],
+        "externalAgentConfig/detect" => &["cwds", "includeHome", "include_home", "maxSessionAgeDays", "max_session_age_days", "maxSessions", "max_sessions", "migrationSource", "migration_source", "source"],
+        "externalAgentConfig/import" => &["migrationItems", "migration_items", "migrationSource", "migration_source", "providerId", "provider_id", "source"],
+        "externalAgentConfig/import/readHistories" => &[],
+        "externalAgentConfig/import/recordHistory" => &["itemTypeResults", "item_type_results", "providerId", "provider_id"],
+        "mcpServer/oauth/login" => &["name", "clientRegistration", "client_registration", "scopes", "threadId", "thread_id", "timeoutSecs", "timeout_secs"],
         "command/exec/write" => &["session_id", "data"],
         "command/exec/resize" => &["session_id", "cols", "rows"],
         "command/exec/terminate" => &["session_id"],
@@ -620,8 +667,15 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
         ));
     }
     // 本协议只接受**按名传参**：连无参方法也必须传对象（缺省 = `{}`）。
-    // JSON-RPC 允许位置参数数组，但那条路会让"参数个数"变成第二个契约，
-    // 且客户端少传一个参数时错位得无声无息 —— 直接拒绝。
+    // Codex 侧无参方法的 params 可为 JSON `null` —— 视作 `{}`，不把兼容路径
+    // 开成位置数组（那条会让参数个数变成第二个契约）。
+    let null_params;
+    let params = if params.is_null() {
+        null_params = Value::Object(serde_json::Map::new());
+        &null_params
+    } else {
+        params
+    };
     if !params.is_object() {
         return Err(invalid_params(format!(
             "{method} 的参数必须是对象（本协议按名传参，不支持位置参数数组）"
@@ -1022,6 +1076,52 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
                 include_logs: p.include_logs,
                 extra_log_files: p.extra_log_files,
                 thread_id: p.thread_id,
+            })
+        }
+        "fs/watch" => {
+            let p: FsWatchParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FsWatch { path: p.path, watch_id: p.watch_id })
+        }
+        "fs/unwatch" => {
+            let p: FsUnwatchParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FsUnwatch { watch_id: p.watch_id })
+        }
+        "externalAgentConfig/detect" => {
+            let p: ExtAgentDetectParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ExtAgentDetect {
+                cwds: p.cwds,
+                include_home: p.include_home,
+                max_session_age_days: p.max_session_age_days,
+                max_sessions: p.max_sessions,
+                migration_source: p.migration_source,
+            })
+        }
+        "externalAgentConfig/import" => {
+            let p: ExtAgentImportParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ExtAgentImport {
+                migration_items: p.migration_items,
+                migration_source: p.migration_source,
+                provider_id: p.provider_id,
+            })
+        }
+        "externalAgentConfig/import/readHistories" => {
+            Action::Thread(ThreadCmd::ExtAgentImportReadHistories)
+        }
+        "externalAgentConfig/import/recordHistory" => {
+            let p: ExtAgentRecordHistoryParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ExtAgentImportRecordHistory {
+                item_type_results: p.item_type_results,
+                provider_id: p.provider_id,
+            })
+        }
+        "mcpServer/oauth/login" => {
+            let p: McpOauthLoginParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::McpOauthLogin {
+                name: p.name,
+                client_registration: p.client_registration,
+                scopes: p.scopes,
+                thread_id: p.thread_id,
+                timeout_secs: p.timeout_secs,
             })
         }
         "command/exec/write" => {
@@ -1590,6 +1690,70 @@ struct FeedbackUploadParams {
     thread_id: Option<String>,
 }
 
+/// `fs/watch`。
+#[derive(Debug, Deserialize)]
+struct FsWatchParams {
+    path: String,
+    #[serde(alias = "watchId", alias = "watch_id")]
+    watch_id: String,
+}
+
+/// `fs/unwatch`。
+#[derive(Debug, Deserialize)]
+struct FsUnwatchParams {
+    #[serde(alias = "watchId", alias = "watch_id")]
+    watch_id: String,
+}
+
+/// `externalAgentConfig/detect`。
+#[derive(Debug, Deserialize)]
+struct ExtAgentDetectParams {
+    #[serde(default)]
+    cwds: Option<Vec<String>>,
+    #[serde(default, alias = "includeHome", alias = "include_home")]
+    include_home: Option<bool>,
+    #[serde(default, alias = "maxSessionAgeDays", alias = "max_session_age_days")]
+    max_session_age_days: Option<u32>,
+    #[serde(default, alias = "maxSessions", alias = "max_sessions")]
+    max_sessions: Option<u32>,
+    #[serde(default, alias = "migrationSource", alias = "migration_source")]
+    migration_source: Option<String>,
+}
+
+/// `externalAgentConfig/import`。
+#[derive(Debug, Deserialize)]
+struct ExtAgentImportParams {
+    #[serde(alias = "migrationItems", alias = "migration_items")]
+    migration_items: Vec<Value>,
+    #[serde(default, alias = "migrationSource", alias = "migration_source")]
+    migration_source: Option<String>,
+    #[serde(default, alias = "providerId", alias = "provider_id")]
+    provider_id: Option<String>,
+}
+
+/// `externalAgentConfig/import/recordHistory`。
+#[derive(Debug, Deserialize)]
+struct ExtAgentRecordHistoryParams {
+    #[serde(alias = "itemTypeResults", alias = "item_type_results")]
+    item_type_results: Vec<Value>,
+    #[serde(alias = "providerId", alias = "provider_id")]
+    provider_id: String,
+}
+
+/// `mcpServer/oauth/login`。
+#[derive(Debug, Deserialize)]
+struct McpOauthLoginParams {
+    name: String,
+    #[serde(default, alias = "clientRegistration", alias = "client_registration")]
+    client_registration: Option<String>,
+    #[serde(default)]
+    scopes: Option<Vec<String>>,
+    #[serde(default, alias = "threadId", alias = "thread_id")]
+    thread_id: Option<String>,
+    #[serde(default, alias = "timeoutSecs", alias = "timeout_secs")]
+    timeout_secs: Option<i64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct McpResourceReadParams {
     server: String,
@@ -1897,6 +2061,60 @@ mod tests {
     }
 
     #[test]
+    fn batch6_dispatch_fs_watch_ext_agent_oauth() {
+        match dispatch(
+            "fs/watch",
+            &json!({"path": "/tmp", "watchId": "w1"}),
+        )
+        .unwrap()
+        {
+            Action::Thread(ThreadCmd::FsWatch { path, watch_id }) => {
+                assert_eq!(path, "/tmp");
+                assert_eq!(watch_id, "w1");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            dispatch("fs/unwatch", &json!({"watchId": "w1"})).unwrap(),
+            Action::Thread(ThreadCmd::FsUnwatch { .. })
+        ));
+        assert!(matches!(
+            dispatch(
+                "externalAgentConfig/detect",
+                &json!({"cwds": ["/tmp"], "includeHome": false})
+            )
+            .unwrap(),
+            Action::Thread(ThreadCmd::ExtAgentDetect { .. })
+        ));
+        assert!(matches!(
+            dispatch(
+                "externalAgentConfig/import",
+                &json!({"migrationItems": []})
+            )
+            .unwrap(),
+            Action::Thread(ThreadCmd::ExtAgentImport { .. })
+        ));
+        assert!(matches!(
+            dispatch("externalAgentConfig/import/readHistories", &json!(null)).unwrap(),
+            Action::Thread(ThreadCmd::ExtAgentImportReadHistories)
+        ));
+        match dispatch(
+            "mcpServer/oauth/login",
+            &json!({"name": "slack"}),
+        )
+        .unwrap()
+        {
+            Action::Thread(ThreadCmd::McpOauthLogin { name, .. }) => assert_eq!(name, "slack"),
+            other => panic!("{other:?}"),
+        }
+        // 账号方法仍不在表内
+        assert_eq!(
+            dispatch("account/read", &json!({})).unwrap_err().code,
+            METHOD_NOT_FOUND
+        );
+    }
+
+    #[test]
     fn initialize_negotiates_protocol_version() {
         let ok = initialize_result(&InitializeParams {
             protocol_version: Some(PROTOCOL_VERSION),
@@ -1906,8 +2124,8 @@ mod tests {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(102),
-            "initialize + 19 Op + 78 control + aliases"
+            Some(109),
+            "initialize + 19 Op + 85 control + aliases"
         );
 
         // 版本不匹配必须拒绝，且把双方版本放进 data（机器可读）

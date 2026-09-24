@@ -382,21 +382,34 @@ fn cmd_appserver(args: &[String]) -> i32 {
     // stdio 与 unix 两条传输共用这一个处理器 —— 差别只在"谁在连"，业务装配零重复。
     // PTY 会话表与内核同线程持有（Codex command/exec session 模式）。
     let mut sessions = neo_sandbox_local::SessionManager::default();
-    let handle = move |job| match job {
-        neo_host_appserver::Job::Op(op) => {
-            let events = kernel
-                .submit(op)
-                .unwrap_or_else(|e| vec![EventMsg::Error { message: e.to_string() }]);
-            neo_host_appserver::JobOut::Events(events)
-        }
-        neo_host_appserver::Job::Thread { cmd, .. } => {
-            let res = thread_cmd(&mut kernel, &store, &mut sessions, cmd);
-            neo_host_appserver::JobOut::Thread(res)
+    let mut watch_state = WatchState::default();
+    // on_bus 在 serve 启动时注入 EventBus（fs/watch 推 fs/changed 通知）
+    let bus_slot: Arc<std::sync::Mutex<Option<neo_host_appserver::EventBus>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let bus_for_state = bus_slot.clone();
+    let handle = {
+        let bus_for_handle = bus_slot.clone();
+        move |job| match job {
+            neo_host_appserver::Job::Op(op) => {
+                let events = kernel
+                    .submit(op)
+                    .unwrap_or_else(|e| vec![EventMsg::Error { message: e.to_string() }]);
+                neo_host_appserver::JobOut::Events(events)
+            }
+            neo_host_appserver::Job::Thread { cmd, .. } => {
+                watch_state.bus = bus_for_handle.clone();
+                let res = thread_cmd(&mut kernel, &store, &mut sessions, cmd, &mut watch_state);
+                neo_host_appserver::JobOut::Thread(res)
+            }
         }
     };
     let result = match &listen {
-        Some(socket) => neo_host_appserver::serve_unix(socket, handle),
-        None => neo_host_appserver::serve_stdio(handle),
+        Some(socket) => neo_host_appserver::serve_unix_with_bus(socket, handle, move |bus| {
+            *bus_for_state.lock().expect("bus 锁") = Some(bus);
+        }),
+        None => neo_host_appserver::serve_stdio_with_bus(handle, move |bus| {
+            *bus_for_state.lock().expect("bus 锁") = Some(bus);
+        }),
     };
     match result {
         Ok(()) => 0,
@@ -689,6 +702,7 @@ fn thread_cmd(
     store: &neo_session_store::SessionStore,
     sessions: &mut neo_sandbox_local::SessionManager,
     cmd: neo_host_appserver::ThreadCmd,
+    watch_state: &mut WatchState,
 ) -> neo_host_appserver::ThreadResult {
     use neo_host_appserver::{ThreadCmd, ThreadResult};
 
@@ -1740,7 +1754,529 @@ fn thread_cmd(
                 }
             }
         }
+        // ── 批6：fs/watch · externalAgentConfig · mcp oauth ─────────────
+        ThreadCmd::FsWatch { path, watch_id } => {
+            let p = std::path::PathBuf::from(&path);
+            let abs = if p.is_absolute() {
+                p
+            } else {
+                kernel.cwd().join(&p)
+            };
+            let abs = match abs.canonicalize() {
+                Ok(c) => c,
+                Err(e) => {
+                    return ThreadResult::Error(format!(
+                        "fs/watch 路径不可用：{}（{e}）",
+                        abs.display()
+                    ))
+                }
+            };
+            if !abs.is_dir() && !abs.is_file() {
+                return ThreadResult::Error(format!("fs/watch 路径不存在：{}", abs.display()));
+            }
+            // 文件则监听其父目录（notify 对单文件 watch 行为因平台而异）
+            let watch_root = if abs.is_file() {
+                abs.parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| abs.clone())
+            } else {
+                abs.clone()
+            };
+            let id = watch_id.clone();
+            let bus = watch_state.bus.clone();
+            let sink = bus.clone();
+            // 覆盖同 id：先丢旧监听
+            watch_state.active.remove(&watch_id);
+            match neo_platform::file_watch::PathWatcher::watch(
+                &watch_root,
+                Box::new(move |paths, coalesced| {
+                    let strs: Vec<String> = paths
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect();
+                    if let Some(b) = sink
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.clone())
+                    {
+                        b.push(vec![EventMsg::FsChanged {
+                            watch_id: id.clone(),
+                            paths: strs,
+                            coalesced,
+                        }]);
+                    }
+                }),
+            ) {
+                Ok(w) => {
+                    watch_state.active.insert(watch_id.clone(), w);
+                    ThreadResult::Value(serde_json::json!({
+                        "watchId": watch_id,
+                        "path": watch_root.display().to_string(),
+                        "watching": true,
+                    }))
+                }
+                Err(e) => ThreadResult::Error(format!("fs/watch 启动失败：{e}")),
+            }
+        }
+        ThreadCmd::FsUnwatch { watch_id } => {
+            let removed = watch_state.active.remove(&watch_id).is_some();
+            ThreadResult::Value(serde_json::json!({
+                "watchId": watch_id,
+                "stopped": removed,
+            }))
+        }
+        ThreadCmd::ExtAgentDetect {
+            cwds,
+            include_home,
+            max_session_age_days: _,
+            max_sessions,
+            migration_source: _,
+        } => {
+            let mut roots: Vec<std::path::PathBuf> = Vec::new();
+            match cwds {
+                Some(list) if !list.is_empty() => {
+                    roots.extend(list.into_iter().map(std::path::PathBuf::from));
+                }
+                _ => roots.push(kernel.cwd().to_path_buf()),
+            }
+            if include_home.unwrap_or(false) {
+                if let Some(h) = std::env::var_os("HOME") {
+                    roots.push(std::path::PathBuf::from(h));
+                }
+            }
+            let limit = max_sessions.unwrap_or(50) as usize;
+            let items = ext_agent_detect(&roots, limit);
+            ThreadResult::Value(serde_json::json!({
+                "migrationItems": items,
+                "migrationSource": "local-fs",
+                "note": "仅扫描本地常见 agent 配置文件；无远端账号",
+            }))
+        }
+        ThreadCmd::ExtAgentImport {
+            migration_items,
+            migration_source: _,
+            provider_id,
+        } => {
+            let results = ext_agent_import(&migration_items, kernel.cwd());
+            ThreadResult::Value(serde_json::json!({
+                "imported": results["imported"],
+                "skipped": results["skipped"],
+                "failed": results["failed"],
+                "providerId": provider_id,
+                "details": results["details"],
+            }))
+        }
+        ThreadCmd::ExtAgentImportReadHistories => {
+            let path = neo_home_display().map(|h| h.join("migration-history.json"));
+            let histories = path
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|v| v.get("histories").cloned())
+                .unwrap_or_else(|| serde_json::json!([]));
+            ThreadResult::Value(serde_json::json!({ "histories": histories }))
+        }
+        ThreadCmd::ExtAgentImportRecordHistory {
+            item_type_results,
+            provider_id,
+        } => {
+            let Some(dir) = neo_home_display() else {
+                return ThreadResult::Error("NEO_HOME/HOME 不可用".into());
+            };
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return ThreadResult::Error(e.to_string());
+            }
+            let path = dir.join("migration-history.json");
+            let mut doc = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .unwrap_or_else(|| serde_json::json!({ "histories": [] }));
+            if doc.get("histories").and_then(|h| h.as_array()).is_none() {
+                doc["histories"] = serde_json::json!([]);
+            }
+            let entry = serde_json::json!({
+                "providerId": provider_id,
+                "itemTypeResults": item_type_results,
+                "recordedAtMs": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            });
+            doc["histories"]
+                .as_array_mut()
+                .expect("histories array")
+                .push(entry);
+            // 有界：只留最近 50 条
+            if let Some(arr) = doc["histories"].as_array_mut() {
+                let n = arr.len();
+                if n > 50 {
+                    arr.drain(0..n - 50);
+                }
+            }
+            let Ok(pretty) = serde_json::to_string_pretty(&doc) else {
+                return ThreadResult::Error("migration-history 序列化失败".into());
+            };
+            if let Err(e) = std::fs::write(&path, pretty + "\n") {
+                return ThreadResult::Error(e.to_string());
+            }
+            ThreadResult::Value(serde_json::json!({
+                "recorded": true,
+                "path": path.display().to_string(),
+            }))
+        }
+        ThreadCmd::McpOauthLogin {
+            name,
+            client_registration: _,
+            scopes: _,
+            thread_id: _,
+            timeout_secs: _,
+        } => {
+            // 诚实边界：NEO 无交互式浏览器 OAuth / 账号体系。
+            // 静态 token 走 $NEO_HOME/mcp.json 的 headers/env。
+            ThreadResult::Error(format!(
+                "mcpServer/oauth/login 未接入：NEO 无浏览器 OAuth/账号体系。\
+                 请在 $NEO_HOME/mcp.json 为服务器「{name}」配置静态 headers/env 后重启会话"
+            ))
+        }
     }
+}
+
+/// `fs/watch` 状态：watchId → 监听器（drop 即停）。
+#[derive(Default)]
+struct WatchState {
+    active: std::collections::HashMap<String, neo_platform::file_watch::PathWatcher>,
+    /// EventBus 由 serve 在启动时注入（跨线程 clone Sender）。
+    bus: Arc<std::sync::Mutex<Option<neo_host_appserver::EventBus>>>,
+}
+
+// ── 批6：外部 agent 配置探测 / 导入（纯本地文件，无账号）──────────────
+
+/// 探测常见外部 agent 资产 → Codex `ExternalAgentConfigMigrationItem[]`。
+fn ext_agent_detect(roots: &[std::path::PathBuf], limit: usize) -> Vec<serde_json::Value> {
+    let mut items = Vec::new();
+    let mut push = |item: serde_json::Value| {
+        if items.len() < limit {
+            items.push(item);
+        }
+    };
+
+    for root in roots {
+        // AGENTS_MD
+        for name in ["CLAUDE.md", ".cursorrules", "GEMINI.md", "AGENTS.md"] {
+            let p = root.join(name);
+            if p.is_file() {
+                push(serde_json::json!({
+                    "itemType": "AGENTS_MD",
+                    "description": format!("{name} → 可导入为项目指令"),
+                    "cwd": root.display().to_string(),
+                    "details": null,
+                }));
+            }
+        }
+        // SUBAGENTS
+        let agents = root.join(".claude").join("agents");
+        if agents.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(&agents) {
+                for e in rd.flatten().take(20) {
+                    if e.path().extension().and_then(|x| x.to_str()) == Some("md") {
+                        push(serde_json::json!({
+                            "itemType": "SUBAGENTS",
+                            "description": format!(
+                                "子代理 {}",
+                                e.file_name().to_string_lossy()
+                            ),
+                            "cwd": root.display().to_string(),
+                            "details": null,
+                        }));
+                    }
+                }
+            }
+        }
+        // COMMANDS
+        let cmds = root.join(".claude").join("commands");
+        if cmds.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(&cmds) {
+                for e in rd.flatten().take(20) {
+                    if e.path().extension().and_then(|x| x.to_str()) == Some("md") {
+                        push(serde_json::json!({
+                            "itemType": "COMMANDS",
+                            "description": format!(
+                                "斜杠命令 {}",
+                                e.file_name().to_string_lossy()
+                            ),
+                            "cwd": root.display().to_string(),
+                            "details": null,
+                        }));
+                    }
+                }
+            }
+        }
+        // MCP_SERVER_CONFIG
+        for rel in [
+            ".cursor/mcp.json",
+            ".cursor/mcp.jsonc",
+            ".claude/mcp.json",
+            ".config/claude/mcp.json",
+        ] {
+            let p = root.join(rel);
+            if p.is_file() {
+                push(serde_json::json!({
+                    "itemType": "MCP_SERVER_CONFIG",
+                    "description": format!("{rel} → 可合并进 $NEO_HOME/mcp.json"),
+                    "cwd": root.display().to_string(),
+                    "details": null,
+                }));
+            }
+        }
+        // SKILLS（目录存在即报，细节在 import 时扫）
+        for rel in [".claude/skills", ".cursor/skills", ".agents/skills"] {
+            let p = root.join(rel);
+            if p.is_dir() {
+                push(serde_json::json!({
+                    "itemType": "SKILLS",
+                    "description": format!("{rel} → 可导入技能根"),
+                    "cwd": root.display().to_string(),
+                    "details": null,
+                }));
+            }
+        }
+    }
+    items
+}
+
+/// 导入选中的迁移项（本地复制/合并）。部分类型如实 `skipped`。
+fn ext_agent_import(
+    items: &[serde_json::Value],
+    cwd: &std::path::Path,
+) -> serde_json::Value {
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let mut details = Vec::new();
+
+    for item in items {
+        let kind = item
+            .get("itemType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let item_cwd = item
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| cwd.to_path_buf());
+        let mut note = String::new();
+        let mut ok = false;
+
+        match kind {
+            "AGENTS_MD" => {
+                // 扫常见指令文件，拷到工作区 AGENTS.md（不存在才写，不覆盖）
+                let dest = item_cwd.join("AGENTS.md");
+                if dest.exists() {
+                    note = "AGENTS.md 已存在，跳过覆盖".into();
+                    skipped += 1;
+                } else {
+                    let mut wrote = false;
+                    for name in ["CLAUDE.md", ".cursorrules", "GEMINI.md"] {
+                        let src = item_cwd.join(name);
+                        if src.is_file() {
+                            match std::fs::copy(&src, &dest) {
+                                Ok(_) => {
+                                    note = format!("{name} → AGENTS.md");
+                                    imported += 1;
+                                    ok = true;
+                                    wrote = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    note = format!("复制 {name} 失败：{e}");
+                                    failed += 1;
+                                    wrote = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if !wrote {
+                        // 也可能是源 AGENTS.md 本身
+                        note = "未找到可复制的指令源".into();
+                        skipped += 1;
+                    }
+                }
+            }
+            "SKILLS" => {
+                // 把 skills 根下一级 SKILL.md 目录拷进 $NEO_HOME/skills/
+                let Some(home) = neo_skill_loader::marketplace::neo_home() else {
+                    note = "NEO_HOME 不可用".into();
+                    failed += 1;
+                    details.push(serde_json::json!({"itemType": kind, "ok": false, "note": note}));
+                    continue;
+                };
+                let dest_root = home.join("skills");
+                if let Err(e) = std::fs::create_dir_all(&dest_root) {
+                    note = e.to_string();
+                    failed += 1;
+                } else {
+                    // 尝试多个候选源
+                    let mut copied = 0usize;
+                    for rel in [".claude/skills", ".cursor/skills", ".agents/skills"] {
+                        let src_root = item_cwd.join(rel);
+                        if !src_root.is_dir() {
+                            continue;
+                        }
+                        if let Ok(rd) = std::fs::read_dir(&src_root) {
+                            for e in rd.flatten() {
+                                if !e.path().is_dir() {
+                                    continue;
+                                }
+                                let name = e.file_name();
+                                let dest = dest_root.join(&name);
+                                if dest.exists() {
+                                    continue;
+                                }
+                                if copy_dir_simple(&e.path(), &dest).is_ok() {
+                                    copied += 1;
+                                }
+                            }
+                        }
+                    }
+                    if copied > 0 {
+                        note = format!("导入 {copied} 个技能目录");
+                        imported += 1;
+                        ok = true;
+                    } else {
+                        note = "无新技能可导入".into();
+                        skipped += 1;
+                    }
+                }
+            }
+            "MCP_SERVER_CONFIG" => {
+                // 合并 servers 到 $NEO_HOME/mcp.json（同名跳过）
+                let Some(home) = neo_skill_loader::marketplace::neo_home() else {
+                    note = "NEO_HOME 不可用".into();
+                    failed += 1;
+                    details.push(serde_json::json!({"itemType": kind, "ok": false, "note": note}));
+                    continue;
+                };
+                let dest = home.join("mcp.json");
+                // 源文件：优先 details 无路径时用 cwd 下常见路径
+                let mut src_path = None;
+                for rel in [".cursor/mcp.json", ".cursor/mcp.jsonc", ".claude/mcp.json"] {
+                    let p = item_cwd.join(rel);
+                    if p.is_file() {
+                        src_path = Some(p);
+                        break;
+                    }
+                }
+                // 也接受 description 里的相对路径提示：从 item 自身 cwd 扫
+                let Some(src) = src_path else {
+                    note = "找不到 MCP 配置源文件".into();
+                    skipped += 1;
+                    details.push(serde_json::json!({"itemType": kind, "ok": false, "note": note}));
+                    continue;
+                };
+                let Ok(src_raw) = std::fs::read_to_string(&src) else {
+                    note = "读源失败".into();
+                    failed += 1;
+                    details.push(serde_json::json!({"itemType": kind, "ok": false, "note": note}));
+                    continue;
+                };
+                // jsonc 容错：去 // 行注释（粗处理）
+                let stripped: String = src_raw
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("//"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let Ok(src_val) = serde_json::from_str::<serde_json::Value>(&stripped) else {
+                    note = "源不是合法 JSON".into();
+                    failed += 1;
+                    details.push(serde_json::json!({"itemType": kind, "ok": false, "note": note}));
+                    continue;
+                };
+                let mut dest_val = std::fs::read_to_string(&dest)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                    .unwrap_or_else(|| serde_json::json!({ "servers": [] }));
+                if dest_val.get("servers").and_then(|s| s.as_array()).is_none() {
+                    dest_val["servers"] = serde_json::json!([]);
+                }
+                let src_servers = src_val
+                    .get("servers")
+                    .and_then(|s| s.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut added = 0usize;
+                for s in src_servers {
+                    let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let exists = dest_val["servers"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .any(|x| x.get("name").and_then(|n| n.as_str()) == Some(name))
+                        })
+                        .unwrap_or(false);
+                    if !exists {
+                        dest_val["servers"].as_array_mut().expect("servers").push(s);
+                        added += 1;
+                    }
+                }
+                if added > 0 {
+                    if let Some(d) = dest.parent() {
+                        let _ = std::fs::create_dir_all(d);
+                    }
+                    match std::fs::write(
+                        &dest,
+                        serde_json::to_string_pretty(&dest_val).unwrap_or_default() + "\n",
+                    ) {
+                        Ok(()) => {
+                            note = format!("合并 {added} 个 MCP 服务器");
+                            imported += 1;
+                            ok = true;
+                        }
+                        Err(e) => {
+                            note = e.to_string();
+                            failed += 1;
+                        }
+                    }
+                } else {
+                    note = "无新 MCP 服务器".into();
+                    skipped += 1;
+                }
+            }
+            other => {
+                note = format!("类型 {other} 本轮不支持导入（如实跳过）");
+                skipped += 1;
+            }
+        }
+        details.push(serde_json::json!({
+            "itemType": kind,
+            "ok": ok,
+            "note": note,
+        }));
+    }
+
+    serde_json::json!({
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
+        "details": details,
+    })
+}
+
+fn copy_dir_simple(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let src = e.path();
+        let dst = to.join(e.file_name());
+        if src.is_dir() {
+            copy_dir_simple(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
 }
 
 // ── 批5 辅助：配置 JSON / fuzzy 搜索（不依赖 host-tui，避免 L5 横向依赖）──

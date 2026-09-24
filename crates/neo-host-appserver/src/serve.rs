@@ -111,8 +111,26 @@ fn send_all(outputs: &Outputs, line: String) {
 enum Control {
     /// 一个工作项（带发起它的连接 id，响应回那儿）
     Job { conn: ConnId, job: Job },
+    /// 后台源注入的事件（`fs/watch` 等）：广播给全部连接
+    Events(Vec<EventMsg>),
     /// 所有客户端断开：停内核线程（不再注入任何 Op —— EOF 不是协议动作）
     Quit,
+}
+
+/// 后台事件总线：`fs/watch` 等监听器把 [`EventMsg`] 推进来即广播。
+///
+/// 与 Job 通道分离：监听器在任意线程，内核线程只 `recv` 控制命令；
+/// 转发线程把事件信封成 [`Control::Events`]，避免读线程与监听器抢同一 sender。
+#[derive(Clone)]
+pub struct EventBus(Sender<Vec<EventMsg>>);
+
+impl EventBus {
+    /// 推送一批事件（监听器调用；serve 结束后发送失败可忽略）。
+    pub fn push(&self, events: Vec<EventMsg>) {
+        if !events.is_empty() {
+            let _ = self.0.send(events);
+        }
+    }
 }
 
 /// 处理一个工作项：返回（响应行，待广播的事件行）。
@@ -205,6 +223,18 @@ where
     serve(stdin.lock(), std::io::stdout(), handle)
 }
 
+/// stdio 入口 + 后台事件总线（`fs/watch` 用）。
+///
+/// `on_bus` 在读循环启动前调用一次，拿到可跨线程 [`EventBus`]。
+pub fn serve_stdio_with_bus<F, I>(handle: F, on_bus: I) -> std::io::Result<()>
+where
+    F: FnMut(Job) -> JobOut + Send + 'static,
+    I: FnOnce(EventBus),
+{
+    let stdin = std::io::stdin();
+    serve_with_bus(stdin.lock(), std::io::stdout(), handle, on_bus)
+}
+
 /// [`serve_ops`] 的 stdio 版。
 pub fn serve_stdio_ops<F>(handle_op: F) -> std::io::Result<()>
 where
@@ -235,16 +265,40 @@ where
     })
 }
 
-pub fn serve<R, W, F>(input: R, output: W, mut handle: F) -> std::io::Result<()>
+pub fn serve<R, W, F>(input: R, output: W, handle: F) -> std::io::Result<()>
 where
     R: BufRead,
     W: Write + Send + 'static,
     F: FnMut(Job) -> JobOut + Send + 'static,
 {
+    serve_with_bus(input, output, handle, |_| {})
+}
+
+/// 同 [`serve`]，但把 [`EventBus`] 交给调用方（`fs/watch` 推送 `fs/changed`）。
+pub fn serve_with_bus<R, W, F, I>(input: R, output: W, mut handle: F, on_bus: I) -> std::io::Result<()>
+where
+    R: BufRead,
+    W: Write + Send + 'static,
+    F: FnMut(Job) -> JobOut + Send + 'static,
+    I: FnOnce(EventBus),
+{
     // 唯一连接：多客户端模型的退化情形（conn = SOLE_CONN，广播 = 单发）
     let (out_tx, out_rx) = channel::<String>();
     let outputs: Outputs = Arc::new(Mutex::new(HashMap::from([(SOLE_CONN, out_tx)])));
     let (job_tx, job_rx) = channel::<Control>();
+    // 监听线程 → Control::Events：与 Job 分开，避免监听器与读线程抢同一 sender
+    let (evt_tx, evt_rx) = channel::<Vec<EventMsg>>();
+    {
+        let job_tx = job_tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(evs) = evt_rx.recv() {
+                if job_tx.send(Control::Events(evs)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    on_bus(EventBus(evt_tx));
 
     let writer = std::thread::spawn(move || write_lines(output, out_rx));
 
@@ -260,6 +314,12 @@ where
                     }
                     for line in broadcast {
                         send_all(&kernel_outputs, line);
+                    }
+                }
+                Control::Events(evs) => {
+                    for e in evs {
+                        seq += 1;
+                        send_all(&kernel_outputs, notification(seq, &e).to_string());
                     }
                 }
                 Control::Quit => return,
@@ -332,6 +392,15 @@ pub fn serve_unix<F>(socket_path: &Path, handle: F) -> std::io::Result<()>
 where
     F: FnMut(Job) -> JobOut + Send + 'static,
 {
+    serve_unix_with_bus(socket_path, handle, |_| {})
+}
+
+/// unix 多客户端 + 事件总线（与 [`serve_unix`] 同，另交出 [`EventBus`]）。
+pub fn serve_unix_with_bus<F, I>(socket_path: &Path, handle: F, on_bus: I) -> std::io::Result<()>
+where
+    F: FnMut(Job) -> JobOut + Send + 'static,
+    I: FnOnce(EventBus),
+{
     // 上次崩溃留下的旧 socket 文件会让 bind 失败；只有确认不是活的才清掉
     if socket_path.exists() {
         match UnixStream::connect(socket_path) {
@@ -353,6 +422,18 @@ where
     SHUTDOWN.store(false, Ordering::SeqCst);
     let outputs: Outputs = Arc::new(Mutex::new(HashMap::new()));
     let (job_tx, job_rx) = channel::<Control>();
+    let (evt_tx, evt_rx) = channel::<Vec<EventMsg>>();
+    {
+        let job_tx = job_tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(evs) = evt_rx.recv() {
+                if job_tx.send(Control::Events(evs)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    on_bus(EventBus(evt_tx));
 
     let kernel_outputs = outputs.clone();
     let kernel = std::thread::spawn(move || {
@@ -367,6 +448,12 @@ where
                     }
                     for line in broadcast {
                         send_all(&kernel_outputs, line);
+                    }
+                }
+                Control::Events(evs) => {
+                    for e in evs {
+                        seq += 1;
+                        send_all(&kernel_outputs, notification(seq, &e).to_string());
                     }
                 }
                 // 停机本身不是内核动作：`shutdown` 方法已在它自己的 Job 里

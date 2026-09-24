@@ -1000,6 +1000,40 @@
             "turn_complete"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`fs/watch` 订阅的路径发生变化（Codex `fs/changed` 通知）。\n\n由宿主侧监听器产生，**不经内核状态机** —— 与 `ApprovalRequest` 不同，\n它不改变会话真值，只是\"磁盘上动了\"的提示；`facts_of` 刻意忽略它\n（过程提示，不是必须记住的事实）。",
+          "properties": {
+            "fs_changed": {
+              "properties": {
+                "coalesced": {
+                  "default": false,
+                  "description": "合并后的一次提示（true）或逐条（false）—— 由监听器有界通道决定。",
+                  "type": "boolean"
+                },
+                "paths": {
+                  "description": "变化涉及的路径（截断至前 32 条，防止风暴撑爆事件行）。",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "watch_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "watch_id",
+                "paths"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "fs_changed"
+          ],
+          "type": "object"
         }
       ],
       "title": "EventMsg"
@@ -3103,6 +3137,13 @@
     "thread/approveGuardianDeniedAction",
     "review/start",
     "feedback/upload",
+    "fs/watch",
+    "fs/unwatch",
+    "externalAgentConfig/detect",
+    "externalAgentConfig/import",
+    "externalAgentConfig/import/readHistories",
+    "externalAgentConfig/import/recordHistory",
+    "mcpServer/oauth/login",
     "thread/goal/set",
     "thread/goal/clear",
     "thread/fork",

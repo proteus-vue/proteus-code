@@ -54,7 +54,10 @@ pub mod serve;
 pub mod schema;
 
 pub use jsonrpc::{Action, ClientInfo, InitializeParams, RpcError, ThreadCmd, PROTOCOL_VERSION};
-pub use serve::{serve, serve_ops, serve_stdio, serve_stdio_ops, serve_unix, Job, JobOut, ThreadResult};
+pub use serve::{
+    serve, serve_ops, serve_stdio, serve_stdio_ops, serve_stdio_with_bus, serve_unix,
+    serve_unix_with_bus, serve_with_bus, EventBus, Job, JobOut, ThreadResult,
+};
 
 use neo_core::{DiffSupport, HostBackend, HostCapabilities, ImageSupport};
 use neo_protocol::{EventMsg, Fact};
