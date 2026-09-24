@@ -570,6 +570,98 @@ async fn fetch_url(url: String) -> Result<String, String> {
     .map_err(|e| format!("任务失败：{e}"))?
 }
 
+/// 标准 base64 解码（无换行）。失败返回 None。
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = s.trim().to_string();
+    while s.len() % 4 != 0 {
+        s.push('=');
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 4 {
+            return None;
+        }
+        let mut n = 0u32;
+        let mut pads = 0u32;
+        for &b in chunk.iter() {
+            if b == b'=' {
+                pads += 1;
+                n <<= 6;
+                continue;
+            }
+            if pads > 0 {
+                return None;
+            }
+            let v = T.iter().position(|&t| t == b)? as u32;
+            n = (n << 6) | v;
+        }
+        if pads > 2 {
+            return None;
+        }
+        // pads=0 → 3 bytes; 1 → 2; 2 → 1（n 左对齐）
+        let emit = 3 - pads;
+        if emit >= 1 {
+            out.push((n >> 16) as u8);
+        }
+        if emit >= 2 {
+            out.push((n >> 8) as u8);
+        }
+        if emit >= 3 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
+/// 保存图片附件到 `{root}/.neo/attachments/`（desktop-image-attachment）。
+/// 上限 1MiB，与 ViewImageTool 一致；返回绝对路径。
+#[tauri::command]
+fn save_attachment(root: Option<String>, data_b64: String) -> Result<String, String> {
+    const MAX: usize = 1024 * 1024;
+    let raw = b64_decode(&data_b64).ok_or("附件 base64 解码失败")?;
+    if raw.is_empty() {
+        return Err("附件为空".into());
+    }
+    if raw.len() > MAX {
+        return Err(format!("图片过大：{}B > {MAX}B", raw.len()));
+    }
+    let ext = if raw.starts_with(b"\x89PNG") {
+        "png"
+    } else if raw.starts_with(b"\xff\xd8") {
+        "jpg"
+    } else if raw.len() > 12 && &raw[8..12] == b"WEBP" {
+        "webp"
+    } else if raw.starts_with(b"GIF8") {
+        "gif"
+    } else {
+        return Err("不是可识别的图片（png/jpg/webp/gif）".into());
+    };
+    let dir = if let Some(ws) = root.filter(|s| !s.trim().is_empty()) {
+        std::path::PathBuf::from(ws).join(".neo").join("attachments")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        // 无 workspace → $NEO_HOME/attachments（NEO_HOME 视为已是 .neo 根）
+        let h = std::path::PathBuf::from(home);
+        if h.ends_with(".neo") {
+            h.join("attachments")
+        } else {
+            h.join(".neo").join("attachments")
+        }
+    } else {
+        return Err("无 workspace 且无 HOME，无法保存附件".into());
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建附件目录失败：{e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs(), d.subsec_nanos()))
+        .unwrap_or((0, 0));
+    // 秒级时间戳 + 纳秒，避免同秒多文件互踩
+    let path = dir.join(format!("img-{}-{}.{ext}", ts.0, ts.1));
+    std::fs::write(&path, &raw).map_err(|e| format!("写入附件失败：{e}"))?;
+    Ok(path.display().to_string())
+}
+
 /// 用系统默认浏览器打开 URL（仅 http/https/file）。
 #[tauri::command]
 async fn open_url(url: String) -> Result<(), String> {
@@ -612,7 +704,8 @@ pub fn run() {
             no_project_dir,
             pick_folder,
             open_url,
-            fetch_url
+            fetch_url,
+            save_attachment
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

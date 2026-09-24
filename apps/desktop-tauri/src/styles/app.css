@@ -6190,3 +6190,53 @@ button.ctx-chip:hover {
 .xterm-host .xterm {
   height: 100%;
 }
+
+/* ═══ IA-10 图片附件 ═══ */
+.attach-chip.img-chip .attach-label {
+  max-width: 160px;
+}
+
+.composer-drop {
+  position: relative;
+}
+
+.pick-image {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  gap: 4px;
+}
+
+.pick-image:hover {
+  background: var(--surface-hover);
+}
+
+/* image_attached 转录提示 */
+.msg.image-attached .bubble {
+  font-size: var(--text-ui-sm);
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+}
+
+/* ═══ IA-10 图片附件 chips / 拖放 ═══ */
+.attach-chip.img-chip {
+  gap: 6px;
+}
+
+.composer-drop {
+  position: relative;
+}
+
+.composer-drop.is-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
+}
+
+.pick-image {
+  cursor: pointer;
+}
+
+.pick-image:hover {
+  background: var(--surface-hover);
+}

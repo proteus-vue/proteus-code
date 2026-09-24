@@ -351,6 +351,21 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// 路径是否像图片（resolve_refs 跳过 cat 用）。
+fn is_image_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    // 忽略行范围后缀 `#12-34`
+    let lower = match lower.rfind('#') {
+        Some(i) => &lower[..i],
+        None => lower.as_str(),
+    };
+    lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".webp")
+        || lower.ends_with(".gif")
+}
+
 /// 按行范围截取（1 基，闭区间），并报告是否因**上限**截断。
 ///
 /// `lines = None` 表示整个文件。与 `truncate_utf8` 的分工：
@@ -2539,6 +2554,15 @@ impl Kernel {
         for r in refs {
             match r.kind {
                 RefKind::File => {
+                    // 图片不当文本 cat（IA-60 / desktop-image-attachment）：
+                    // 二进制进 block 会污染上下文；交给模型 view_image(path)。
+                    if is_image_path(&r.target) {
+                        summary.push(format!(
+                            "🖼 {} 是图片路径，请调用 view_image(path) 查看（勿 cat）",
+                            r.target
+                        ));
+                        continue;
+                    }
                     match self.sandbox.execute(
                         self.resolution().sandbox,
                         &format!("cat -- {}", shell_quote(&r.target)),

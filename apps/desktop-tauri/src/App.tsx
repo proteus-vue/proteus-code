@@ -59,6 +59,7 @@ import {
   rewindTurns,
   reviewStart,
   startServer,
+  saveAttachment,
   startTurn,
   steerTurn,
   stopServer,
@@ -247,6 +248,8 @@ export default function App() {
   const [input, setInput] = useState("");
   /** IA-35：选中的网页元素附件（chip），不塞进 textarea */
   const [webPicks, setWebPicks] = useState<WebElementPick[]>([]);
+  /** IA-10 图片附件：已落盘 path 列表（view_image 消费） */
+  const [imagePicks, setImagePicks] = useState<{ path: string; name: string }[]>([]);
   const [stderrLines, setStderrLines] = useState<string[]>([]);
   const [execMode, setExecMode] = useState<ExecMode>("default");
   const [panelOpen, setPanelOpen] = useState(true);
@@ -457,6 +460,12 @@ export default function App() {
               return it;
             }),
           );
+          break;
+        case "image_attached":
+          append({
+            type: "status",
+            message: `已附加图片 ${String(payload.path ?? "")}（view_image）`,
+          });
           break;
         case "patch_proposed":
           setLastPatch({
@@ -780,24 +789,62 @@ export default function App() {
     return parts.join("\n");
   };
 
+
+/** File → base64（无换行）；>1MiB 由 save_attachment 拒绝 */
+async function fileToBase64(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+/** 落盘图片到 {workspace}/.neo/attachments 并返回 path */
+async function saveImageFile(
+  file: File,
+  workspace: string,
+): Promise<{ path: string; name: string }> {
+  if (!/^image\/(png|jpeg|webp|gif)$/i.test(file.type) &&
+      !/\.(png|jpe?g|webp|gif)$/i.test(file.name)) {
+    throw new Error(`不是可识别的图片：${file.name || file.type}`);
+  }
+  if (file.size > 1024 * 1024) {
+    throw new Error(`图片过大：${file.size}B > 1048576B`);
+  }
+  const data_b64 = await fileToBase64(file);
+  const path = await saveAttachment(workspace || null, data_b64);
+  return { path, name: file.name || path.split("/").pop() || "image" };
+}
+
   const send = useCallback(async () => {
     const text = input.trim();
     // 审批 / 问人挂起时锁定；生成中允许 **转向**（turn/steer），不新开轮
     if (approval || userInput) return;
-    if ((!text && webPicks.length === 0)) return;
+    if (!text && webPicks.length === 0 && imagePicks.length === 0) return;
+    // 图片：**非 @** 指令（@path 会被 cat；内核已对图片扩展名跳过，但仍显式说明）
+    const imgLines = imagePicks.map(
+      (p) => `请先 view_image 查看：${p.path}`,
+    );
     // 附件在发送时拼进消息，不占输入框
-    const withAtt =
-      webPicks.length > 0
-        ? [text, ...webPicks.map(formatWebPick)].filter(Boolean).join("\n\n")
-        : text;
+    const parts = [
+      ...imgLines,
+      text,
+      ...webPicks.map(formatWebPick),
+    ].filter(Boolean);
+    const withAtt = parts.join("\n\n");
     if (!withAtt) return;
     if (await slashRunnerRef.current(text || withAtt)) {
       setInput("");
       setWebPicks([]);
+      setImagePicks([]);
       return;
     }
     setInput("");
     setWebPicks([]);
+    setImagePicks([]);
     try {
       if (busy) {
         await steerTurn(withAtt);
@@ -810,7 +857,7 @@ export default function App() {
       append({ type: "error", message: String(e) });
       if (!busy) setStatus("error");
     }
-  }, [append, approval, busy, input, userInput, webPicks]);
+  }, [append, approval, busy, imagePicks, input, userInput, webPicks]);
 
   const stop = useCallback(async () => {
     try {
@@ -1986,7 +2033,57 @@ export default function App() {
               )}
             </div>
           )}
+          {imagePicks.length > 0 && (
+            <div className="attach-chips" role="list" aria-label="图片附件">
+              {imagePicks.map((img) => (
+                <span
+                  key={img.path}
+                  className="attach-chip img-chip"
+                  role="listitem"
+                  title={img.path}
+                >
+                  <Icon name="files" size={13} />
+                  <span className="attach-label">{img.name}</span>
+                  <button
+                    type="button"
+                    className="attach-x"
+                    aria-label={`移除 ${img.name}`}
+                    onClick={() =>
+                      setImagePicks((list) =>
+                        list.filter((x) => x.path !== img.path),
+                      )
+                    }
+                  >
+                    <Icon name="close" size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           <div className="at-wrap">
+            <div
+              className="composer-drop"
+              onDragOver={(e) => {
+                if (e.dataTransfer.types.includes("Files")) {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "copy";
+                }
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                const files = Array.from(e.dataTransfer.files || []);
+                for (const f of files) {
+                  void (async () => {
+                    try {
+                      const saved = await saveImageFile(f, workspaceRoot);
+                      setImagePicks((list) => [...list, saved]);
+                    } catch (err) {
+                      append({ type: "error", message: String(err) });
+                    }
+                  })();
+                }
+              }}
+            >
             <div className="composer-input-wrap">
             <div className="composer-input-mirror" aria-hidden="true">
               {splitFileRefs(input).map((seg, i) =>
@@ -2025,6 +2122,21 @@ export default function App() {
                           : "继续输入…"
               }
               onChange={(e) => onInputChange(e.target.value)}
+              onPaste={(e) => {
+                const items = Array.from(e.clipboardData?.files || []);
+                if (!items.length) return;
+                e.preventDefault();
+                for (const f of items) {
+                  void (async () => {
+                    try {
+                      const saved = await saveImageFile(f, workspaceRoot);
+                      setImagePicks((list) => [...list, saved]);
+                    } catch (err) {
+                      append({ type: "error", message: String(err) });
+                    }
+                  })();
+                }
+              }}
               onKeyDown={(e) => {
                 if (slashOpen && slashMatches.length) {
                   if (e.key === "ArrowDown") {
@@ -2089,6 +2201,7 @@ export default function App() {
               rows={3}
             />
             </div>
+            </div>
             {atQuery && atMatches.length > 0 && (
               <ul className="at-menu" role="listbox">
                 {atMatches.map((p, i) => (
@@ -2127,6 +2240,27 @@ export default function App() {
             )}
           </div>
           <div className="composer-bar">
+            <label className="icon-btn pick-image" title="添加图片" aria-label="添加图片">
+              <Icon name="files" size={15} />
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!f) return;
+                  void (async () => {
+                    try {
+                      const saved = await saveImageFile(f, workspaceRoot);
+                      setImagePicks((list) => [...list, saved]);
+                    } catch (err) {
+                      append({ type: "error", message: String(err) });
+                    }
+                  })();
+                }}
+              />
+            </label>
             <button
               type="button"
               className="mode-chip"
@@ -2170,7 +2304,7 @@ export default function App() {
               disabled={
                 blocked ||
                 (status !== "ready" && status !== "busy") ||
-                (!busy && !input.trim() && webPicks.length === 0)
+                (!busy && !input.trim() && webPicks.length === 0 && imagePicks.length === 0)
               }
               aria-label={busy && !input.trim() ? "中断" : "发送"}
               title={
@@ -2182,7 +2316,7 @@ export default function App() {
               }
             >
               <Icon
-                name={busy && !input.trim() && webPicks.length === 0 ? "stop" : "send"}
+                name={busy && !input.trim() && webPicks.length === 0 && imagePicks.length === 0 ? "stop" : "send"}
                 size={16}
               />
             </button>

@@ -1468,6 +1468,47 @@ fn file_ref_line_range_selects_lines() {
 }
 
 #[test]
+fn image_ref_skips_cat_and_points_to_view_image() {
+    // 图片 @path 不得 cat 二进制进 block（desktop-image-attachment T1）。
+    let dir = std::env::temp_dir().join(format!("neo-imgref-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    // 最小 PNG 头 + 垃圾字节（不必是合法图，只要不被当文本注入）
+    std::fs::write(dir.join("a.png"), b"\x89PNG\r\n\x1a\nBINARY_NOISE").unwrap();
+
+    let mut k = kernel_with_parts(
+        Arc::new(FileSandbox { root: dir.clone() }),
+        Default::default(),
+        Box::new(InMemoryPersistence::new()),
+    );
+    let refs = neo_protocol::parse_refs("@a.png 看图");
+    let events = k
+        .submit(Op::UserTurn {
+            text: "@a.png 看图".into(),
+            refs,
+        })
+        .unwrap();
+
+    let summary = events
+        .iter()
+        .find_map(|e| match e {
+            EventMsg::RefsResolved { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("必须发 RefsResolved");
+    assert!(
+        summary.iter().any(|s| s.contains("a.png") && s.contains("view_image")),
+        "摘要应指向 view_image: {summary:?}"
+    );
+
+    let joined = format!("{:?}", k.messages());
+    assert!(
+        !joined.contains("BINARY_NOISE"),
+        "图片二进制不得进模型可见历史: {joined}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn skill_ref_injects_registered_body_and_missing_skill_lists_available() {
     let mut reg = neo_core::skills::SkillRegistry::new();
     reg.add(neo_core::skills::Skill::new("eff", "效率规范", "# 规则\n不要 sleep\n"));

@@ -600,6 +600,14 @@ export async function fsUnwatch(watchId: string): Promise<unknown> {
   return rpc("fs/unwatch", { watchId });
 }
 
+/** 保存图片到 {root}/.neo/attachments（Tauri save_attachment）→ 绝对路径 */
+export async function saveAttachment(
+  root: string | null,
+  dataB64: string,
+): Promise<string> {
+  return invoke<string>("save_attachment", { root, dataB64 });
+}
+
 export function onEvent(cb: (e: WireEvent) => void): Promise<UnlistenFn> {
   return listen<WireEvent>("neo-event", (ev) => cb(ev.payload));
 }
