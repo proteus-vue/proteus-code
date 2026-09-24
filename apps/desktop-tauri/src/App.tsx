@@ -30,6 +30,9 @@ import {
 import {
   archiveThread,
   commandExec,
+  commandExecSession,
+  execTerminate,
+  execWrite,
   compactSession,
   configureSession,
   createSection,
@@ -270,6 +273,8 @@ export default function App() {
     }[]
   >([]);
   const [termInput, setTermInput] = useState("");
+  /** PTY 持活会话（command/exec?session） */
+  const [termSession, setTermSession] = useState<string | null>(null);
   /** IA-14：tools/list 里的 agent_* 子代理 */
   const [agentTools, setAgentTools] = useState<ToolInfo[]>([]);
   /** IA-14 Automations：壳侧排程（localStorage） */
@@ -1175,10 +1180,35 @@ export default function App() {
       const c = cmd.trim();
       if (!c) return;
       try {
-        // 只清输入；结果行由 shell-* 的 tool_call_begin/end 回填（含 stdout）
-        await commandExec(c);
+        // `pty <cmd>` 或已有会话时的续写 → unified_exec；否则一次性 Shell
+        if (c.startsWith("pty ")) {
+          const r = await commandExecSession(c.slice(4).trim() || "bash", 120, 32);
+          if (r.session_id) setTermSession(r.session_id);
+          append({
+            type: "status",
+            message: `PTY 已启动 ${r.session_id ?? "?"}（后续输入直接回车写 stdin）`,
+          });
+        } else if (termSession && !c.startsWith("!")) {
+          const r = await execWrite(termSession, c.endsWith("\n") ? c : `${c}\n`);
+          append({ type: "status", message: `→ pty ${termSession}` });
+          setTermLog((log) => [
+            ...log.slice(-200),
+            {
+              id: `pty-${Date.now()}`,
+              cmd: c,
+              ok: true,
+              stdout: typeof r === "object" && r && "output" in r ? String((r as { output?: string }).output ?? "") : "",
+            },
+          ]);
+        } else if (c === "!terminate" && termSession) {
+          await execTerminate(termSession);
+          setTermSession(null);
+          append({ type: "status", message: "PTY 已结束" });
+        } else {
+          await commandExec(c.startsWith("!") ? c.slice(1) : c);
+          append({ type: "status", message: `$ ${c}` });
+        }
         setTermInput("");
-        append({ type: "status", message: `$ ${c}` });
       } catch (e) {
         setTermLog((log) => [
           ...log.slice(-200),
@@ -1187,7 +1217,7 @@ export default function App() {
         append({ type: "error", message: String(e) });
       }
     },
-    [append],
+    [append, termSession],
   );
 
   const openWorkbench = useCallback((tab: WB) => {
@@ -2314,7 +2344,7 @@ export default function App() {
             {panelTab === "terminal" && (
               <div className="wb-section terminal">
                 <div className="term-note">
-                  命令台 · 每条一个进程 · 走沙箱 · 不经模型（非交互式 PTY）
+                  命令台 · 默认一次性 Shell · `pty bash` 启持活会话 · `!terminate` 结束 · 不经模型
                 </div>
                 <div className="term-log">
                   {termLog.length === 0 && (
@@ -2350,7 +2380,7 @@ export default function App() {
                   <input
                     value={termInput}
                     onChange={(e) => setTermInput(e.target.value)}
-                    placeholder="ls -la"
+                    placeholder="ls -la  ·  pty bash  ·  !terminate"
                     spellCheck={false}
                     autoComplete="off"
                   />

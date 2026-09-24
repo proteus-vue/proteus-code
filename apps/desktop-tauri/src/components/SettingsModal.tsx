@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ExecMode } from "../lib/rpc";
 import {
+  configMcpServerReload,
   configRead,
   configRequirementsRead,
   configValueWrite,
+  externalAgentDetect,
+  externalAgentImport,
   feedbackUpload,
   hooksList,
   listSkills,
@@ -18,6 +21,8 @@ import {
   pluginUninstall,
   skillsConfigWrite,
   skillsExtraRootsSet,
+  threadAttachmentList,
+  type MigrationItem,
 } from "../lib/rpc";
 import type { PluginInfo, SkillInfo } from "../lib/protocol";
 import { Icon } from "./Icon";
@@ -75,6 +80,9 @@ export function SettingsModal({
   const [reqLine, setReqLine] = useState<string>("—");
   const [diagNote, setDiagNote] = useState<string>("");
   const [extraRoot, setExtraRoot] = useState("");
+  const [migrations, setMigrations] = useState<MigrationItem[]>([]);
+  const [migNote, setMigNote] = useState("");
+  const [attachments, setAttachments] = useState<string>("—");
 
   const reloadPlugins = useCallback(async () => {
     try {
@@ -132,6 +140,18 @@ export function SettingsModal({
         setReqLine(r.configFile ? `${n} 项 · ${r.configFile}` : `${n} 项`);
       })
       .catch((e) => setReqLine(String(e)));
+    void threadAttachmentList()
+      .then((r) =>
+        setAttachments(
+          (r.attachments ?? []).length
+            ? `${(r.attachments ?? []).length} 条附件`
+            : "无附件",
+        ),
+      )
+      .catch((e) => setAttachments(String(e)));
+    void externalAgentDetect({ includeHome: false })
+      .then((r) => setMigrations(r.migrationItems ?? []))
+      .catch(() => setMigrations([]));
   }, [open, reloadPlugins]);
 
   const shortcuts = useMemo(
@@ -253,6 +273,25 @@ export function SettingsModal({
               <code className="settings-path" title={mcpLine}>
                 {mcpLine}
               </code>
+              <button
+                type="button"
+                className="ghost-btn"
+                onClick={() => {
+                  void configMcpServerReload()
+                    .then((r) =>
+                      setDiagNote(
+                        `mcp 重读：${(r.servers ?? []).join(",") || "无"}${r.note ? ` · ${r.note}` : ""}`,
+                      ),
+                    )
+                    .catch((e) => setDiagNote(String(e)));
+                }}
+              >
+                重读
+              </button>
+            </div>
+            <div className="settings-row">
+              <span>附件</span>
+              <code className="settings-path">{attachments}</code>
             </div>
             <div className="settings-row">
               <span>权限档</span>
@@ -458,6 +497,47 @@ export function SettingsModal({
                 <li className="muted">暂无可安装插件 · 先注册市场源</li>
               )}
             </ul>
+          </section>
+
+          <section className="settings-section">
+            <h3>迁移 · 外部 Agent 配置</h3>
+            <p className="muted">
+              仅扫本地 CLAUDE.md / skills / mcp.json · externalAgentConfig/*
+            </p>
+            {migrations.length === 0 ? (
+              <p className="muted">当前工作区未发现可迁移资产</p>
+            ) : (
+              <ul className="settings-list">
+                {migrations.slice(0, 20).map((m, i) => (
+                  <li key={`${m.itemType}-${i}`}>
+                    <code>{m.itemType}</code>
+                    <span className="muted" title={m.description}>
+                      {m.description}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="settings-row">
+              <span>导入</span>
+              <button
+                type="button"
+                className="primary"
+                disabled={migrations.length === 0}
+                onClick={() => {
+                  void externalAgentImport(migrations)
+                    .then((r) =>
+                      setMigNote(
+                        `导入 ${r.imported ?? 0} · 跳过 ${r.skipped ?? 0} · 失败 ${r.failed ?? 0}`,
+                      ),
+                    )
+                    .catch((e) => setMigNote(String(e)));
+                }}
+              >
+                全部导入
+              </button>
+              {migNote && <span className="muted">{migNote}</span>}
+            </div>
           </section>
 
           <section className="settings-section">

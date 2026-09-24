@@ -189,6 +189,170 @@ export async function commandExec(command: string): Promise<unknown> {
   return rpc("command/exec", { command });
 }
 
+/** 启动持活 PTY（Codex unified_exec session 模式）。 */
+export async function commandExecSession(
+  command: string,
+  cols = 80,
+  rows = 24,
+): Promise<{
+  session_id?: string;
+  running?: boolean;
+  output?: string;
+  exit_code?: number | null;
+  mode?: string;
+}> {
+  return rpc("command/exec", { command, session: true, cols, rows });
+}
+
+export async function execWrite(sessionId: string, data: string): Promise<unknown> {
+  return rpc("command/exec/write", { session_id: sessionId, data });
+}
+
+export async function execResize(
+  sessionId: string,
+  cols: number,
+  rows: number,
+): Promise<unknown> {
+  return rpc("command/exec/resize", { session_id: sessionId, cols, rows });
+}
+
+export async function execTerminate(sessionId: string): Promise<unknown> {
+  return rpc("command/exec/terminate", { session_id: sessionId });
+}
+
+/** 协议 fs/*：目录一层 */
+export async function fsReadDirectory(path: string): Promise<{
+  path?: string;
+  entries?: string[];
+}> {
+  return rpc("fs/readDirectory", { path });
+}
+
+export async function fsReadFile(path: string): Promise<{
+  path?: string;
+  content?: string;
+  bytes?: number;
+  truncated?: boolean;
+}> {
+  return rpc("fs/readFile", { path });
+}
+
+export async function fsGetMetadata(path: string): Promise<{
+  path?: string;
+  is_dir?: boolean;
+  is_file?: boolean;
+  bytes?: number;
+}> {
+  return rpc("fs/getMetadata", { path });
+}
+
+export async function fsWriteFile(path: string, data: string): Promise<unknown> {
+  return rpc("fs/writeFile", { path, data });
+}
+
+export async function fsCopy(from: string, to: string): Promise<unknown> {
+  return rpc("fs/copy", { from, to });
+}
+
+export async function fsCreateDirectory(path: string): Promise<unknown> {
+  return rpc("fs/createDirectory", { path });
+}
+
+export async function fsRemove(path: string): Promise<unknown> {
+  return rpc("fs/remove", { path });
+}
+
+/** 会话附件侧车 */
+export async function threadAttachmentList(id?: string): Promise<{
+  id?: string;
+  attachments?: unknown[];
+}> {
+  return rpc("thread/attachment/list", id ? { id } : {});
+}
+
+export async function threadAttachmentAdd(
+  attachmentType: string,
+  identityKey: string,
+  payload: unknown,
+  id?: string,
+): Promise<unknown> {
+  return rpc("thread/attachment/add", {
+    attachmentType,
+    identityKey,
+    payload,
+    ...(id ? { id } : {}),
+  });
+}
+
+export async function threadAttachmentRemove(
+  attachmentType: string,
+  identityKey: string,
+  id?: string,
+): Promise<unknown> {
+  return rpc("thread/attachment/remove", {
+    attachmentType,
+    identityKey,
+    ...(id ? { id } : {}),
+  });
+}
+
+/** 会话 git 元数据（append-only op） */
+export async function threadMetadataUpdate(
+  id: string,
+  meta: { branch?: string; sha?: string; originUrl?: string },
+): Promise<unknown> {
+  return rpc("thread/metadata/update", { id, ...meta });
+}
+
+export async function configMcpServerReload(): Promise<{
+  reloaded?: boolean;
+  servers?: string[];
+  note?: string;
+}> {
+  return rpc("config/mcpServer/reload", {});
+}
+
+export async function modelProviderCapabilities(): Promise<{
+  current?: string;
+  models?: unknown[];
+}> {
+  return rpc("modelProvider/capabilities/read", {});
+}
+
+export async function pluginSkillRead(
+  plugin: string,
+  skill: string,
+): Promise<{ content?: string; path?: string; skillName?: string }> {
+  return rpc("plugin/skill/read", { pluginName: plugin, skillName: skill });
+}
+
+export type MigrationItem = {
+  itemType: string;
+  description: string;
+  cwd?: string;
+};
+
+export async function externalAgentDetect(opts?: {
+  cwds?: string[];
+  includeHome?: boolean;
+}): Promise<{ migrationItems?: MigrationItem[]; migrationSource?: string; note?: string }> {
+  return rpc("externalAgentConfig/detect", {
+    cwds: opts?.cwds,
+    includeHome: opts?.includeHome ?? false,
+  });
+}
+
+export async function externalAgentImport(
+  migrationItems: MigrationItem[],
+): Promise<{
+  imported?: number;
+  skipped?: number;
+  failed?: number;
+  details?: unknown[];
+}> {
+  return rpc("externalAgentConfig/import", { migrationItems });
+}
+
 /** 运行中转向当前轮（Codex `turn/steer`）。 */
 export async function steerTurn(text: string): Promise<unknown> {
   return rpc("turn/steer", { text });

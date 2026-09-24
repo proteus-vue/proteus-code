@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { fsGetMetadata, fsReadDirectory, fsReadFile } from "../lib/rpc";
 import { Icon } from "./Icon";
 
 export type FileTreeResult = {
@@ -19,10 +20,6 @@ export function formatFileRef(path: string): string {
   return `@"${p.replace(/"/g, '\\"')}"`;
 }
 
-export async function listWorkspace(root?: string): Promise<FileTreeResult> {
-  return invoke<FileTreeResult>("list_workspace", { root: root ?? null });
-}
-
 export type FilePreview = {
   path: string;
   binary: boolean;
@@ -31,14 +28,90 @@ export type FilePreview = {
   truncated?: boolean;
 };
 
+const FS_SKIP = new Set([
+  ".git",
+  "node_modules",
+  "target",
+  "dist",
+  "build",
+  ".venv",
+  "__pycache__",
+  ".next",
+  ".cache",
+  ".neo",
+  ".DS_Store",
+]);
+
+/** 协议 fs/readDirectory 递归（深度/条目有界）；失败退回 Tauri walk。 */
+async function walkFs(absRoot: string, dir: string, depth: number, out: string[]): Promise<void> {
+  if (depth > 8 || out.length >= 800) return;
+  const r = await fsReadDirectory(dir);
+  const names = [...(r.entries ?? [])].sort((a, b) => a.localeCompare(b));
+  for (const name of names) {
+    if (FS_SKIP.has(name) || out.length >= 800) continue;
+    const child = dir === "/" ? `/${name}` : `${dir}/${name}`;
+    const rel = child.startsWith(absRoot)
+      ? child.slice(absRoot.length).replace(/^\//, "")
+      : child.replace(/^\//, "");
+    let isDir = false;
+    try {
+      const md = await fsGetMetadata(child);
+      isDir = Boolean(md.is_dir);
+    } catch {
+      isDir = false;
+    }
+    if (isDir) {
+      out.push(rel + "/");
+      await walkFs(absRoot, child, depth + 1, out);
+    } else {
+      out.push(rel);
+    }
+  }
+}
+
+export async function listWorkspace(root?: string): Promise<FileTreeResult> {
+  try {
+    const base = (root ?? "").trim();
+    if (!base) throw new Error("no root");
+    const abs = base.startsWith("/") ? base : "/" + base;
+    const out: string[] = [];
+    await walkFs(abs, abs, 0, out);
+    return { root: abs, entries: out, truncated: out.length >= 800 };
+  } catch {
+    return invoke<FileTreeResult>("list_workspace", { root: root ?? null });
+  }
+}
+
 export async function readWorkspaceFile(
   root: string | undefined,
   path: string,
 ): Promise<FilePreview> {
-  return invoke<FilePreview>("read_workspace_file", {
-    root: root ?? null,
-    path,
-  });
+  try {
+    const abs = path.startsWith("/")
+      ? path
+      : ((root ?? "").replace(/\/$/, "") + "/" + path).replace(/\/{2,}/g, "/");
+    const r = await fsReadFile(abs);
+    const content = r.content ?? "";
+    let binary = false;
+    for (let i = 0; i < Math.min(content.length, 8000); i++) {
+      if (content.charCodeAt(i) === 0) {
+        binary = true;
+        break;
+      }
+    }
+    return {
+      path,
+      binary,
+      content: binary ? null : content,
+      bytes: r.bytes ?? content.length,
+      truncated: r.truncated,
+    };
+  } catch {
+    return invoke<FilePreview>("read_workspace_file", {
+      root: root ?? null,
+      path,
+    });
+  }
 }
 
 type Node = {
