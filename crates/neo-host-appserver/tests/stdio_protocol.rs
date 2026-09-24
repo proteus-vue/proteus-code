@@ -112,13 +112,18 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 36, "initialize + 18 Op + 15 control + 2 alias");
+    assert_eq!(methods.len(), 49, "initialize + 19 Op + 25 control + aliases");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
+    assert!(methods.iter().any(|m| m == "turn/steer"), "Codex steer 必须可达");
     assert!(methods.iter().any(|m| m == "thread/rename"), "改名必须在线上可达");
     assert!(methods.iter().any(|m| m == "thread/goal/get"), "Codex goal 只读查询必须可达");
     assert!(methods.iter().any(|m| m == "user_input/respond"), "问用户反向通道必须可达");
     assert!(methods.iter().any(|m| m == "command/exec/write"), "终端 write 必须可达");
+    assert!(methods.iter().any(|m| m == "skills/list"), "skills/list 必须可达");
+    assert!(methods.iter().any(|m| m == "fs/readFile"), "fs/readFile 必须可达");
+    assert!(methods.iter().any(|m| m == "thread/items/list"), "items/list 必须可达");
+    assert!(methods.iter().any(|m| m == "model/list"), "Codex model/list 别名必须可达");
     // 宿主能力（SPI 的既有数据，不是这条协议新造的）
     assert_eq!(r["result"]["host"]["id"], "app-server");
     assert_eq!(r["result"]["host"]["capabilities"]["interactive_prompt"], true);
@@ -159,6 +164,7 @@ fn every_op_method_reaches_the_kernel_as_its_own_op() {
         ("turn/begin", json!({ "text": "hi" }), Op::BeginTurn { text: "hi".into(), refs: vec![] }),
         ("turn/pump", json!({}), Op::Pump),
         ("turn/interrupt", json!({}), Op::Interrupt),
+        ("turn/steer", json!({ "text": "改用 Rust" }), Op::Steer { text: "改用 Rust".into() }),
         ("command/exec", json!({ "command": "ls -la" }), Op::Shell { command: "ls -la".into() }),
         (
             "approval/respond",
@@ -449,6 +455,15 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 ThreadCmd::Models => ThreadResult::Value(json!({"models": [{"name":"mock"}], "current": "mock"})),
                 ThreadCmd::GitInfo { .. } => ThreadResult::Value(json!({"in_repo": false})),
                 ThreadCmd::GoalGet => ThreadResult::Value(json!({"goal": null})),
+                ThreadCmd::NameSet { id, title } => ThreadResult::Value(json!({"id": id, "title": title})),
+                ThreadCmd::ItemsList { .. } => ThreadResult::Value(json!({"items": []})),
+                ThreadCmd::TurnsList { .. } => ThreadResult::Value(json!({"turns": []})),
+                ThreadCmd::SkillsList => ThreadResult::Value(json!({"skills": []})),
+                ThreadCmd::ConfigRead => ThreadResult::Value(json!({"model": "mock"})),
+                ThreadCmd::FsReadFile { path } => ThreadResult::Value(json!({"path": path, "content": "", "bytes": 0, "truncated": false})),
+                ThreadCmd::FsWriteFile { path, .. } => ThreadResult::Value(json!({"path": path, "bytes": 0})),
+                ThreadCmd::FsGetMetadata { path } => ThreadResult::Value(json!({"path": path, "is_file": true, "is_dir": false, "bytes": 0})),
+                ThreadCmd::FsReadDirectory { path } => ThreadResult::Value(json!({"path": path, "entries": []})),
                 ThreadCmd::ExecStart { command, cols, rows } => ThreadResult::Resumed {
                     result: json!({
                         "session_id": "exec-1",

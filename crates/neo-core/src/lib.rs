@@ -867,6 +867,10 @@ pub struct Kernel {
     session_budget_warned: bool,
     turn_counter: u64,
     step_counter: u64,
+    /// 本轮是否仍在进行（`begin_turn` 置真，`TurnComplete` 置假）。
+    /// `turn/steer` 用它判断能否注入 —— 不靠 `steps_this_turn>0`
+    /// （收轮后该计数不会清零，会误判轮仍在飞）。
+    turn_active: bool,
     /// 用户直输 shell 命令的序号（`Op::Shell`）。
     ///
     /// 单独一个计数器，因为它在**任何轮次之外**：`!ls` 不发 turn、也不驱动模型
@@ -948,6 +952,7 @@ impl Kernel {
             session_budget_warned: false,
             turn_counter: 0,
             step_counter: 0,
+            turn_active: false,
             shell_counter: 0,
             usage_in: 0,
             usage_out: 0,
@@ -1024,6 +1029,11 @@ impl Kernel {
     /// 「双轴与档位不一致」这一经典困惑（见 ADR-0004）。`Config` 上的
     /// `sandbox_mode`/`approval_policy` 字段不参与内核对轴的决定。
     pub fn resolution(&self) -> ModeResolution { resolve(self.cfg.exec_mode) }
+
+    /// 当前执行模式（Codex `config/read` 用）。
+    pub fn exec_mode(&self) -> neo_protocol::ExecMode {
+        self.cfg.exec_mode
+    }
 
     /// 读回已落盘的日志记录（供审计与回放测试）。
     ///
@@ -1161,7 +1171,33 @@ impl Kernel {
                 self.goal_turn_failed = false;
                 self.goal_turn_last_text = None;
                 self.goal_turn_call_kinds.clear();
+                self.turn_active = false;
                 self.emit_and_log(&EventMsg::Error { message: "已中断".into() })?;
+            }
+
+            Op::Steer { text } => {
+                // Codex turn/steer：当前轮注入，不新开轮。
+                if self.in_flight.is_some() {
+                    return Err(KernelError::TurnInFlight);
+                }
+                if !matches!(self.state, KernelState::Idle) {
+                    return Err(KernelError::GoalUnavailable(
+                        "有未决审批/输入时不能 steer，先 respond".into(),
+                    ));
+                }
+                if !self.turn_active {
+                    return Err(KernelError::GoalUnavailable(
+                        "当前没有进行中的 turn（steer 只能在轮内注入）".into(),
+                    ));
+                }
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    return Err(KernelError::GoalUnavailable("steer 文本为空".into()));
+                }
+                let ev = EventMsg::UserSubmitted { text: text.clone() };
+                self.emit_and_log(&ev)?;
+                self.messages.push(Message::User(text));
+                self.drive_steps()?;
             }
 
             Op::ConfigureSession { patch } => {
@@ -1305,6 +1341,7 @@ impl Kernel {
                 self.maybe_warn_session_budget()?;
                 self.turn_counter += 1;
                 self.steps_this_turn = 0;
+                self.turn_active = true;
                 self.calls_this_turn = 0;
                 self.guard_warnings_this_turn = 0;
                 self.last_call_sig = None;
@@ -1509,6 +1546,7 @@ impl Kernel {
                 output_tokens: usage.1,
             };
             self.emit_and_log(&done)?;
+            self.turn_active = false;
             if self.goal_turn_in_flight {
                 self.goal_turn_in_flight = false;
                 let failed = self.goal_turn_failed;
@@ -2084,6 +2122,7 @@ impl Kernel {
         self.state = KernelState::Idle;
         self.pending = None;
         self.outbox.clear();
+        self.turn_active = false;
         // 从现在起的轮次号独立（每个会话自己的轮次序列）
         self.turn_counter = 0;
         self.step_counter = 0;
@@ -2114,6 +2153,41 @@ impl Kernel {
     /// 当前目标完整快照（app-server `thread/goal/get`）。无活动目标为 `None`。
     pub fn goal_snapshot(&self) -> Option<neo_protocol::GoalSnapshot> {
         self.goal.as_ref().and_then(|g| g.snapshot())
+    }
+
+    /// 进行中的轮次 id（`turn-N`）。无活动轮为 `None`。Codex `turn/steer` 前置条件。
+    pub fn active_turn_id(&self) -> Option<String> {
+        if self.turn_active {
+            Some(format!("turn-{}", self.turn_counter))
+        } else {
+            None
+        }
+    }
+
+    /// 技能列表（Codex `skills/list`）：`(name, description)`。
+    pub fn skill_list(&self) -> Vec<(String, String)> {
+        self.skills
+            .names()
+            .into_iter()
+            .map(|n| {
+                let d = self
+                    .skills
+                    .get(&n)
+                    .map(|s| s.description.clone())
+                    .unwrap_or_default();
+                (n.to_string(), d)
+            })
+            .collect()
+    }
+
+    /// 沙箱档位（fs/* 等装配层判定用）。
+    pub fn sandbox_mode(&self) -> neo_protocol::SandboxMode {
+        self.resolution().sandbox
+    }
+
+    /// 沙箱契据（写文件必须经此 —— 不给宿主旁路）。
+    pub fn sandbox(&self) -> &dyn SandboxBackend {
+        self.sandbox.as_ref()
     }
 
     /// 取当前会话已落盘的日志（供重建与会话切换使用）。

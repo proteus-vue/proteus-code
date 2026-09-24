@@ -15,6 +15,7 @@ export const METHODS = [
   "turn/begin",
   "turn/pump",
   "turn/interrupt",
+  "turn/steer",
   "command/exec",
   "approval/respond",
   "approval/respondStep",
@@ -35,17 +36,29 @@ export const METHODS = [
   "thread/create",
   "thread/delete",
   "thread/rename",
+  "thread/name/set",
   "thread/history",
   "thread/export",
   "thread/goal/get",
+  "thread/items/list",
+  "thread/turns/list",
   "tools/list",
   "models/list",
+  "model/list",
   "git/info",
+  "skills/list",
+  "config/read",
+  "fs/readFile",
+  "fs/writeFile",
+  "fs/getMetadata",
+  "fs/readDirectory",
   "command/exec/write",
   "command/exec/resize",
   "command/exec/terminate",
   "thread/goal/set",
   "thread/goal/clear",
+  "thread/fork",
+  "thread/compact/start",
 ] as const;
 export type MethodName = (typeof METHODS)[number];
 
@@ -68,6 +81,7 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "turn/begin": ["text"],
   "turn/pump": [],
   "turn/interrupt": [],
+  "turn/steer": ["text", "expected_turn_id", "expectedTurnId", "thread_id", "threadId", "input"],
   "command/exec": ["command", "session", "cols", "rows"],
   "approval/respond": ["id", "decision", "reason"],
   "approval/respondStep": ["id", "decision", "reason"],
@@ -88,17 +102,29 @@ export const METHOD_PARAMS: Record<string, readonly string[]> = {
   "thread/create": [],
   "thread/delete": ["id"],
   "thread/rename": ["id", "title"],
-  "thread/history": ["id"],
+  "thread/name/set": ["id", "title", "threadId", "thread_id", "name", "title"],
+  "thread/history": ["id", "threadId", "thread_id", "limit"],
   "thread/export": ["id", "format"],
   "thread/goal/get": [],
+  "thread/items/list": ["id", "threadId", "thread_id", "limit"],
+  "thread/turns/list": ["id", "threadId", "thread_id", "limit"],
   "tools/list": [],
   "models/list": [],
+  "model/list": [],
   "git/info": ["cwd"],
+  "skills/list": [],
+  "config/read": [],
+  "fs/readFile": ["path"],
+  "fs/writeFile": ["path", "data", "data_base64", "dataBase64"],
+  "fs/getMetadata": ["path"],
+  "fs/readDirectory": ["path"],
   "command/exec/write": ["session_id", "data"],
   "command/exec/resize": ["session_id", "cols", "rows"],
   "command/exec/terminate": ["session_id"],
   "thread/goal/set": ["goal"],
   "thread/goal/clear": [],
+  "thread/fork": [],
+  "thread/compact/start": [],
 };
 
 export type ApprovalParams = { id: string, decision: Decision, reason: string | null, };
@@ -154,6 +180,8 @@ export type Fact = { "user_said": string } | { "refs_resolved": Array<string> } 
  */
 args: string | null, } } | { "approval_needed": { detail: string, } } | { "todo_list": Array<TodoEntry> } | { "context_compacted": { removed_messages: number, } } | { "rewound": { turns: number, removed_messages: number, files_kept: number, } } | { "files_changed": Array<FileChange> } | { "patch_preview": { path: string, diff: string, } } | { "failed": string } | { "turn_finished": { input_tokens: number, output_tokens: number, } } | { "session_ready": { session_id: string, } } | { "instructions_loaded": { sources: Array<string>, truncated: boolean, } } | { "model_switched": { model: string, context_limit: number, } } | { "goal": string } | { "goal_cleared": string };
 export type FileChange = { path: string, additions: number, deletions: number, };
+export type FsPathParams = { path: string, };
+export type FsWriteParams = { path: string, data: string | null, data_base64: string | null, };
 export type GoalIdParams = { goal_id: string, };
 export type GoalParams = { goal: string, };
 export type GoalPhase = "plan" | "code" | "review" | "learn" | "done";
@@ -194,6 +222,7 @@ turns_remaining: number,
 budget_used: number, };
 export type GoalSubtask = { id: number, title: string, phase: GoalPhase, retries: number, };
 export type InitializeParamsWire = { protocol_version: number | null, client: ClientInfoWire | null, };
+export type ItemsListParams = { id: string | null, limit: number | null, };
 export type MethodDoc = { name: string, 
 /**
  * 无参方法为空数组。
@@ -203,7 +232,8 @@ params: Array<string>,
  * 是否在握手前可用。
  */
 handshake_only: boolean, };
-export type Op = { "user_turn": { text: string, refs: Array<ContextRef>, } } | { "begin_turn": { text: string, refs: Array<ContextRef>, } } | "pump" | { "shell": { command: string, } } | "interrupt" | { "approve": { id: string, decision: Decision, reason: string | null, } } | { "approve_step": { id: string, decision: Decision, reason: string | null, } } | { "respond_user_input": { id: string, response: string, } } | { "configure_session": { patch: SessionPatch, } } | "compact" | "fork" | { "rewind": { turns: number, } } | { "goal_set": { goal: string, } } | { "goal_pause": { goal_id: string, } } | { "goal_resume": { goal_id: string, } } | "goal_advance" | "goal_clear" | "shutdown";
+export type NameSetParams = { id: string, title: string, };
+export type Op = { "user_turn": { text: string, refs: Array<ContextRef>, } } | { "begin_turn": { text: string, refs: Array<ContextRef>, } } | "pump" | { "shell": { command: string, } } | "interrupt" | { "approve": { id: string, decision: Decision, reason: string | null, } } | { "approve_step": { id: string, decision: Decision, reason: string | null, } } | { "respond_user_input": { id: string, response: string, } } | { "configure_session": { patch: SessionPatch, } } | "compact" | "fork" | { "rewind": { turns: number, } } | { "goal_set": { goal: string, } } | { "goal_pause": { goal_id: string, } } | { "goal_resume": { goal_id: string, } } | "goal_advance" | "goal_clear" | { "steer": { text: string, } } | "shutdown";
 export type RefKind = "file" | "session" | "command" | "skill";
 export type RewindParams = { turns: number, };
 export type RpcErrorObject = { code: number, message: string, data: unknown, };
@@ -224,6 +254,11 @@ export type SessionPatch = { exec_mode: ExecMode | null, sandbox_mode: SandboxMo
  * 要"不限"必须显式传 `0`，不能靠缺省——否则桌面端漏传会静默抹掉用户设过的预算。
  */
 token_budget: number | null, };
+export type SteerParams = { text: string | null, 
+/**
+ * Codex `input[]`：导出为 unknown（形状见 Codex UserInput oneOf）。
+ */
+input: unknown, expected_turn_id: string | null, thread_id: string | null, };
 export type TextParams = { text: string, };
 export type ThreadSummary = { id: string, 
 /**
@@ -253,4 +288,5 @@ state: string, };
 export type TodoEntry = { content: string, status: TodoStatus, };
 export type TodoStatus = "pending" | "in_progress" | "completed";
 export type ToolOutput = { exit_code: number, stdout: string, stderr: string, truncated: boolean, };
+export type TurnsListParams = { id: string | null, limit: number | null, };
 export type UserInputParams = { id: string, response: string, };

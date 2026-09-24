@@ -152,6 +152,64 @@ pub struct UserInputParams {
     pub response: String,
 }
 
+/// `turn/steer` 参数（导出骨架：线上可用 text 或 Codex input[]）。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct SteerParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Codex `input[]`：导出为 unknown（形状见 Codex UserInput oneOf）。
+    #[serde(default, rename = "input", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", ts(type = "unknown"))]
+    pub input: Option<Value>,
+    #[serde(default, rename = "expectedTurnId", alias = "expected_turn_id", skip_serializing_if = "Option::is_none")]
+    pub expected_turn_id: Option<String>,
+    #[serde(default, rename = "threadId", alias = "thread_id", skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// `thread/name/set` 参数（Codex threadId+name）。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct NameSetParams {
+    #[serde(alias = "threadId")]
+    pub id: String,
+    #[serde(alias = "name")]
+    pub title: String,
+}
+
+/// `thread/items/list` / `thread/turns/list`。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct ItemsListParams {
+    #[serde(default, alias = "threadId", skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// `thread/turns/list`（与 items 同形，单独类型便于文档）。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct TurnsListParams {
+    #[serde(default, alias = "threadId", skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// `fs/readFile` 等路径参数。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct FsPathParams {
+    pub path: String,
+}
+
+/// `fs/writeFile` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct FsWriteParams {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(default, rename = "dataBase64", alias = "data_base64", skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+}
+
 /// `command/exec/write` 参数。
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
 pub struct ExecWriteParams {
@@ -246,6 +304,12 @@ pub const ROOT_TYPES: &[&str] = &[
     "CommandParams",
     "ApprovalParams",
     "UserInputParams",
+    "SteerParams",
+    "NameSetParams",
+    "ItemsListParams",
+    "TurnsListParams",
+    "FsPathParams",
+    "FsWriteParams",
     "ExecWriteParams",
     "ExecResizeParams",
     "ExecTerminateParams",
@@ -296,6 +360,12 @@ pub fn json_schema_document() -> Value {
     add!(CommandParams);
     add!(ApprovalParams);
     add!(UserInputParams);
+    add!(SteerParams);
+    add!(NameSetParams);
+    add!(ItemsListParams);
+    add!(TurnsListParams);
+    add!(FsPathParams);
+    add!(FsWriteParams);
     add!(ExecWriteParams);
     add!(ExecResizeParams);
     add!(ExecTerminateParams);
@@ -460,6 +530,12 @@ pub fn typescript_source() -> String {
     emit!(CommandParams);
     emit!(ApprovalParams);
     emit!(UserInputParams);
+    emit!(SteerParams);
+    emit!(NameSetParams);
+    emit!(ItemsListParams);
+    emit!(TurnsListParams);
+    emit!(FsPathParams);
+    emit!(FsWriteParams);
     emit!(ExecWriteParams);
     emit!(ExecResizeParams);
     emit!(ExecTerminateParams);
@@ -524,7 +600,7 @@ mod tests {
     fn method_docs_cover_all_ops() {
         let docs = method_docs();
         // initialize + 17 个 Op + 10 个 control
-        assert_eq!(docs.len(), 36, "方法表应为 initialize + 18 Op + 15 control + 2 alias");
+        assert_eq!(docs.len(), 49, "方法表 initialize + 19 Op + 25 control + aliases");
         assert!(docs[0].handshake_only);
         assert_eq!(docs[0].name, "initialize");
         assert!(docs.iter().any(|d| d.name == "thread/resume"));
@@ -535,6 +611,10 @@ mod tests {
         assert!(docs.iter().any(|d| d.name == "thread/goal/get"));
         assert!(docs.iter().any(|d| d.name == "user_input/respond"));
         assert!(docs.iter().any(|d| d.name == "command/exec/write"));
+        assert!(docs.iter().any(|d| d.name == "turn/steer"));
+        assert!(docs.iter().any(|d| d.name == "skills/list"));
+        assert!(docs.iter().any(|d| d.name == "fs/readFile"));
+        assert!(docs.iter().any(|d| d.name == "thread/items/list"));
     }
 
     /// 写盘：`cargo test -p neo-host-appserver --features schema export_schema -- --ignored`

@@ -143,6 +143,24 @@ pub enum ThreadCmd {
     ExecResize { session_id: String, cols: u16, rows: u16 },
     /// `command/exec/terminate`：结束会话
     ExecTerminate { session_id: String },
+    /// `thread/name/set`（Codex：threadId+name）
+    NameSet { id: String, title: String },
+    /// `thread/items/list`：事实投影（与 history 同源，Codex items 形状）
+    ItemsList { id: Option<String>, limit: Option<usize> },
+    /// `thread/turns/list`：用户轮摘要
+    TurnsList { id: Option<String>, limit: Option<usize> },
+    /// `skills/list`
+    SkillsList,
+    /// `config/read`
+    ConfigRead,
+    /// `fs/readFile` — 绝对或相对工作区路径
+    FsReadFile { path: String },
+    /// `fs/writeFile`
+    FsWriteFile { path: String, data: String, data_base64: Option<String> },
+    /// `fs/getMetadata`
+    FsGetMetadata { path: String },
+    /// `fs/readDirectory`
+    FsReadDirectory { path: String },
 }
 
 /// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，18 个）。
@@ -157,6 +175,7 @@ pub const OP_METHODS: &[&str] = &[
     "turn/begin",
     "turn/pump",
     "turn/interrupt",
+    "turn/steer",
     "command/exec",
     "approval/respond",
     "approval/respondStep",
@@ -174,7 +193,13 @@ pub const OP_METHODS: &[&str] = &[
 ];
 
 /// Codex 方法名别名：映射到已有 `Op`，不增加 `Op` 变体数。
-pub const ALIAS_METHODS: &[&str] = &["thread/goal/set", "thread/goal/clear"];
+pub const ALIAS_METHODS: &[&str] = &[
+    "thread/goal/set",
+    "thread/goal/clear",
+    "model/list",
+    "thread/fork",
+    "thread/compact/start",
+];
 
 /// 会话库控制方法（`ThreadCmd`）。**不是 Op 映射**，故不进 [`OP_METHODS`]。
 ///
@@ -186,23 +211,39 @@ pub const THREAD_METHODS: &[&str] = &[
     "thread/create",
     "thread/delete",
     "thread/rename",
+    "thread/name/set",
     "thread/history",
     "thread/export",
     "thread/goal/get",
+    "thread/items/list",
+    "thread/turns/list",
     "tools/list",
     "models/list",
+    "model/list",
     "git/info",
+    "skills/list",
+    "config/read",
+    "fs/readFile",
+    "fs/writeFile",
+    "fs/getMetadata",
+    "fs/readDirectory",
     "command/exec/write",
     "command/exec/resize",
     "command/exec/terminate",
 ];
 
-/// 全部方法名（握手用）：`initialize` + 18 个 Op + 15 个 control + 2 别名 = 36。
+/// 全部方法名（握手用）。
 pub fn method_table() -> Vec<&'static str> {
     let mut v = vec!["initialize"];
+    // model/list 同时在 THREAD 与 ALIAS 会重复 —— 只放一处。
+    // THREAD 含 model/list（控制面），ALIAS 不再列它。
     v.extend_from_slice(OP_METHODS);
     v.extend_from_slice(THREAD_METHODS);
-    v.extend_from_slice(ALIAS_METHODS);
+    for m in ALIAS_METHODS {
+        if !THREAD_METHODS.contains(m) && !OP_METHODS.contains(m) {
+            v.push(m);
+        }
+    }
     v
 }
 
@@ -211,18 +252,26 @@ pub fn method_table() -> Vec<&'static str> {
 /// 单独开这个函数而不是直接暴露 `allowed_keys`：后者对未知方法返回 `None`
 ///（表示"不限制"），而契约导出需要**完整表**（含无参方法的空列表）。
 pub fn method_param_docs() -> Vec<(&'static str, &'static [&'static str])> {
+    let mut seen = std::collections::BTreeSet::new();
     let mut v = vec![("initialize", &["protocol_version", "client"][..])];
+    seen.insert("initialize");
     for m in OP_METHODS {
-        let keys = allowed_keys(m).unwrap_or(&[]);
-        v.push((m, keys));
+        if seen.insert(m) {
+            let keys = allowed_keys(m).unwrap_or(&[]);
+            v.push((m, keys));
+        }
     }
     for m in THREAD_METHODS {
-        let keys = allowed_keys(m).unwrap_or(&[]);
-        v.push((m, keys));
+        if seen.insert(m) {
+            let keys = allowed_keys(m).unwrap_or(&[]);
+            v.push((m, keys));
+        }
     }
     for m in ALIAS_METHODS {
-        let keys = allowed_keys(m).unwrap_or(&[]);
-        v.push((m, keys));
+        if seen.insert(m) {
+            let keys = allowed_keys(m).unwrap_or(&[]);
+            v.push((m, keys));
+        }
     }
     v
 }
@@ -238,7 +287,9 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "initialize" => &["protocol_version", "client"],
         "turn/start" | "turn/begin" => &["text"],
         "turn/pump" | "turn/interrupt" | "session/compact" | "session/fork"
-        | "goal/advance" | "goal/clear" | "thread/goal/clear" | "thread/goal/get" | "shutdown" => &[],
+        | "goal/advance" | "goal/clear" | "thread/goal/clear" | "thread/goal/get"
+        | "thread/fork" | "thread/compact/start" | "skills/list" | "config/read" | "shutdown" => &[],
+        "turn/steer" => &["text", "expected_turn_id", "expectedTurnId", "thread_id", "threadId", "input"],
         "command/exec" => &["command", "session", "cols", "rows"],
         "approval/respond" | "approval/respondStep" => &["id", "decision", "reason"],
         "user_input/respond" => &["id", "response"],
@@ -254,10 +305,13 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "goal/pause" | "goal/resume" => &["goal_id"],
         "thread/get" | "thread/resume" | "thread/delete" => &["id"],
         "thread/rename" => &["id", "title"],
-        "thread/history" => &["id"],
+        "thread/name/set" => &["id", "title", "threadId", "thread_id", "name", "title"],
+        "thread/history" | "thread/items/list" | "thread/turns/list" => &["id", "threadId", "thread_id", "limit"],
         "thread/export" => &["id", "format"],
-        "thread/list" | "thread/create" | "tools/list" | "models/list" => &[],
+        "thread/list" | "thread/create" | "tools/list" | "models/list" | "model/list" => &[],
         "git/info" => &["cwd"],
+        "fs/readFile" | "fs/getMetadata" | "fs/readDirectory" => &["path"],
+        "fs/writeFile" => &["path", "data", "data_base64", "dataBase64"],
         "command/exec/write" => &["session_id", "data"],
         "command/exec/resize" => &["session_id", "cols", "rows"],
         "command/exec/terminate" => &["session_id"],
@@ -332,6 +386,11 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
         }
         "turn/pump" => Action::Submit(Op::Pump),
         "turn/interrupt" => Action::Submit(Op::Interrupt),
+        "turn/steer" => {
+            let p: SteerParams = from_params(method, params)?;
+            let text = steer_text(&p)?;
+            Action::Submit(Op::Steer { text })
+        }
         "command/exec" => {
             let p: CommandParams = from_params(method, params)?;
             if p.session.unwrap_or(false) {
@@ -381,6 +440,8 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
         }
         "goal/advance" => Action::Submit(Op::GoalAdvance),
         "goal/clear" | "thread/goal/clear" => Action::Submit(Op::GoalClear),
+        "thread/fork" => Action::Submit(Op::Fork),
+        "thread/compact/start" => Action::Submit(Op::Compact),
         "thread/list" => Action::Thread(ThreadCmd::List),
         "thread/get" => {
             let p: IdParams = from_params(method, params)?;
@@ -399,7 +460,42 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             let p: RenameParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::Rename { id: p.id, title: p.title })
         }
+        "thread/name/set" => {
+            let p: NameSetParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::NameSet { id: p.id, title: p.title })
+        }
         "thread/goal/get" => Action::Thread(ThreadCmd::GoalGet),
+        "thread/items/list" => {
+            let p: ItemsListParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::ItemsList { id: p.id, limit: p.limit })
+        }
+        "thread/turns/list" => {
+            let p: TurnsListParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::TurnsList { id: p.id, limit: p.limit })
+        }
+        "skills/list" => Action::Thread(ThreadCmd::SkillsList),
+        "config/read" => Action::Thread(ThreadCmd::ConfigRead),
+        "fs/readFile" => {
+            let p: FsPathParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FsReadFile { path: p.path })
+        }
+        "fs/getMetadata" => {
+            let p: FsPathParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FsGetMetadata { path: p.path })
+        }
+        "fs/readDirectory" => {
+            let p: FsPathParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FsReadDirectory { path: p.path })
+        }
+        "fs/writeFile" => {
+            let p: FsWriteParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FsWriteFile {
+                path: p.path,
+                data: p.data.unwrap_or_default(),
+                data_base64: p.data_base64,
+            })
+        }
+        "model/list" => Action::Thread(ThreadCmd::Models),
         "command/exec/write" => {
             let p: ExecWriteParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::ExecWrite { session_id: p.session_id, data: p.data })
@@ -507,6 +603,84 @@ struct HistoryParams {
     id: Option<String>,
 }
 
+/// Codex `turn/steer`：兼容简单 `text` 与 Codex 形状（input[] / expectedTurnId）。
+#[derive(Debug, Deserialize, Default)]
+struct SteerParams {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    input: Option<serde_json::Value>,
+    /// Codex 前置条件字段：dispatch 无内核句柄，仅**收下不报未知键**；
+    /// 真正与 active turn 的比对在内核侧（装配可选校验）。
+    #[allow(dead_code)]
+    #[serde(default, alias = "expectedTurnId")]
+    expected_turn_id: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default, alias = "threadId")]
+    thread_id: Option<String>,
+}
+
+fn steer_text(p: &SteerParams) -> Result<String, RpcError> {
+    if let Some(t) = p.text.as_deref() {
+        if !t.trim().is_empty() {
+            return Ok(t.to_string());
+        }
+    }
+    if let Some(arr) = p.input.as_ref().and_then(Value::as_array) {
+        let mut parts = Vec::new();
+        for item in arr {
+            if let Some(t) = item.get("text").and_then(Value::as_str) {
+                parts.push(t);
+            }
+        }
+        if !parts.is_empty() {
+            return Ok(parts.join("\n"));
+        }
+    }
+    Err(invalid_params("turn/steer 需要 text 或 input[].text"))
+}
+
+/// `thread/name/set`：Codex `threadId`+`name` → 我们的 id+title。
+#[derive(Debug, Deserialize)]
+struct NameSetParams {
+    #[serde(alias = "threadId")]
+    id: String,
+    #[serde(alias = "name")]
+    title: String,
+}
+
+/// `thread/items/list` / `thread/turns/list` 共用可选 id+limit。
+#[derive(Debug, Deserialize)]
+struct ItemsListParams {
+    #[serde(default, alias = "threadId")]
+    id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TurnsListParams {
+    #[serde(default, alias = "threadId")]
+    id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `fs/*` 路径参数。
+#[derive(Debug, Deserialize)]
+struct FsPathParams {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FsWriteParams {
+    path: String,
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default, alias = "dataBase64")]
+    data_base64: Option<String>,
+}
+
 /// `thread/export` 参数。
 #[derive(Debug, Deserialize)]
 struct ExportParams {
@@ -584,12 +758,15 @@ mod tests {
         // 17 个方法对应协议层 17 个 Op 变体。数量写死在这里是**故意的**：
         // 协议层新增 `Op` 变体时，这个断言会红，逼着来补映射 ——
         // 否则新能力只在 TUI/桌面可用，线上永远发不出去（静默缺口）。
-        assert_eq!(OP_METHODS.len(), 18, "Op 变体与方法数必须一一对应");
+        assert_eq!(OP_METHODS.len(), 19, "Op 变体与方法数必须一一对应");
         let mut sorted = OP_METHODS.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), OP_METHODS.len(), "方法名不得重复");
-        assert_eq!(ALIAS_METHODS.len(), 2, "Codex goal 别名应有 2 个");
+        assert!(ALIAS_METHODS.contains(&"model/list"));
+        assert!(ALIAS_METHODS.contains(&"thread/fork"));
+        assert!(ALIAS_METHODS.contains(&"thread/compact/start"));
+        assert_eq!(ALIAS_METHODS.len(), 5, "Codex 别名应有 5 个");
     }
 
     #[test]
@@ -650,8 +827,6 @@ mod tests {
     }
 
     #[test]
-    
-    #[test]
     fn session_true_maps_to_exec_start_and_default_maps_to_shell() {
         match dispatch("command/exec", &json!({"command": "bash", "session": true})).unwrap() {
             Action::Thread(ThreadCmd::ExecStart { command, cols, rows }) => {
@@ -666,7 +841,29 @@ mod tests {
         );
     }
 
-fn initialize_negotiates_protocol_version() {
+    #[test]
+    fn steer_accepts_text_and_codex_input_array() {
+        match dispatch("turn/steer", &json!({ "text": "改用 Rust" })).unwrap() {
+            Action::Submit(Op::Steer { text }) => assert_eq!(text, "改用 Rust"),
+            other => panic!("{other:?}"),
+        }
+        match dispatch(
+            "turn/steer",
+            &json!({
+                "expectedTurnId": "turn-1",
+                "threadId": "s1",
+                "input": [{"type": "text", "text": "先写测试"}]
+            }),
+        )
+        .unwrap()
+        {
+            Action::Submit(Op::Steer { text }) => assert_eq!(text, "先写测试"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn initialize_negotiates_protocol_version() {
         let ok = initialize_result(&InitializeParams {
             protocol_version: Some(PROTOCOL_VERSION),
             client: Some(ClientInfo { name: "vscode-neo".into(), version: Some("0.2".into()) }),
@@ -675,8 +872,8 @@ fn initialize_negotiates_protocol_version() {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(36),
-            "initialize + 18 Op + 15 control + 2 alias"
+            Some(49),
+            "initialize + 19 Op + 25 control + alias (deduped)"
         );
 
         // 版本不匹配必须拒绝，且把双方版本放进 data（机器可读）

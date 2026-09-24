@@ -1562,6 +1562,46 @@
       "title": "FileChange",
       "type": "object"
     },
+    "FsPathParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`fs/readFile` 等路径参数。",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "FsPathParams",
+      "type": "object"
+    },
+    "FsWriteParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`fs/writeFile` 参数。",
+      "properties": {
+        "data": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dataBase64": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "FsWriteParams",
+      "type": "object"
+    },
     "GoalIdParams": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`goal/pause` / `goal/resume` 参数。",
@@ -1800,6 +1840,28 @@
       "title": "InitializeParamsWire",
       "type": "object"
     },
+    "ItemsListParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`thread/items/list` / `thread/turns/list`。",
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "ItemsListParams",
+      "type": "object"
+    },
     "MethodDoc": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "一份方法表条目（握手响应里的 `methods` 的元素形状说明用）。",
@@ -1825,6 +1887,24 @@
         "handshake_only"
       ],
       "title": "MethodDoc",
+      "type": "object"
+    },
+    "NameSetParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`thread/name/set` 参数（Codex threadId+name）。",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "title": "NameSetParams",
       "type": "object"
     },
     "Op": {
@@ -2257,6 +2337,27 @@
           "const": "goal_clear",
           "description": "清除目标（目标与其进度一并丢弃，会话保留）。",
           "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "运行中插入用户指令（Codex `turn/steer`）。\n\n与 `UserTurn` 的区别：**不新开轮**——把文本推入当前轮历史并继续\n`drive_steps`。流式在飞时拒绝（等边界或先 Interrupt）；轮已结束时\n拒绝（应走 `turn/start`）。",
+          "properties": {
+            "steer": {
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "steer"
+          ],
+          "type": "object"
         }
       ],
       "title": "Op"
@@ -2504,6 +2605,35 @@
       "title": "SessionPatch",
       "type": "object"
     },
+    "SteerParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`turn/steer` 参数（导出骨架：线上可用 text 或 Codex input[]）。",
+      "properties": {
+        "expectedTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input": {
+          "description": "Codex `input[]`：导出为 unknown（形状见 Codex UserInput oneOf）。"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "SteerParams",
+      "type": "object"
+    },
     "TextParams": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "文本类参数（`turn/start` / `turn/begin`）。",
@@ -2646,6 +2776,28 @@
       "title": "ToolOutput",
       "type": "object"
     },
+    "TurnsListParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`thread/turns/list`（与 items 同形，单独类型便于文档）。",
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "TurnsListParams",
+      "type": "object"
+    },
     "UserInputParams": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`user_input/respond` 参数。",
@@ -2685,6 +2837,7 @@
     "turn/begin",
     "turn/pump",
     "turn/interrupt",
+    "turn/steer",
     "command/exec",
     "approval/respond",
     "approval/respondStep",
@@ -2705,17 +2858,29 @@
     "thread/create",
     "thread/delete",
     "thread/rename",
+    "thread/name/set",
     "thread/history",
     "thread/export",
     "thread/goal/get",
+    "thread/items/list",
+    "thread/turns/list",
     "tools/list",
     "models/list",
+    "model/list",
     "git/info",
+    "skills/list",
+    "config/read",
+    "fs/readFile",
+    "fs/writeFile",
+    "fs/getMetadata",
+    "fs/readDirectory",
     "command/exec/write",
     "command/exec/resize",
     "command/exec/terminate",
     "thread/goal/set",
-    "thread/goal/clear"
+    "thread/goal/clear",
+    "thread/fork",
+    "thread/compact/start"
   ],
   "x-notification": {
     "event": {
@@ -2752,6 +2917,12 @@
     "CommandParams",
     "ApprovalParams",
     "UserInputParams",
+    "SteerParams",
+    "NameSetParams",
+    "ItemsListParams",
+    "TurnsListParams",
+    "FsPathParams",
+    "FsWriteParams",
     "ExecWriteParams",
     "ExecResizeParams",
     "ExecTerminateParams",

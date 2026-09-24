@@ -413,6 +413,81 @@ fn workspace_for_git(kernel: &neo_core::Kernel) -> std::path::PathBuf {
     kernel.cwd().to_path_buf()
 }
 
+fn events_from_logged(recs: &[neo_core::LoggedRecord]) -> Vec<EventMsg> {
+    recs.iter()
+        .filter(|r| r.kind == "event")
+        .filter_map(|r| serde_json::from_value::<EventMsg>(r.payload.clone()).ok())
+        .collect()
+}
+
+fn events_from_session(recs: &[neo_session::SessionEvent]) -> Vec<EventMsg> {
+    recs.iter()
+        .filter(|r| r.kind == "event")
+        .filter_map(|r| serde_json::from_value::<EventMsg>(r.payload.clone()).ok())
+        .collect()
+}
+
+fn load_events(
+    kernel: &neo_core::Kernel,
+    store: &neo_session_store::SessionStore,
+    id: &str,
+) -> Result<Vec<EventMsg>, String> {
+    if id == kernel.session_id() {
+        return Ok(events_from_logged(&kernel.log_for_test()));
+    }
+    if !store.exists(id) {
+        return Err(format!("会话 {id} 不存在"));
+    }
+    let recs = neo_session::replay(&store.path_for(id))
+        .map_err(|e| format!("读会话日志失败：{e}"))?;
+    Ok(events_from_session(&recs))
+}
+
+/// `fs/*` 路径：绝对原样，相对按工作区解析。
+fn fs_resolve(cwd: &std::path::Path, path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    }
+}
+
+/// 标准 base64 解码（无换行）。失败返回 None。
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = s.trim().to_string();
+    while s.len() % 4 != 0 {
+        s.push('=');
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 4 {
+            return None;
+        }
+        let mut n = 0u32;
+        let mut pad = 0;
+        for (i, &b) in chunk.iter().enumerate() {
+            if b == b'=' {
+                pad = 3 - i;
+                n <<= 6;
+                continue;
+            }
+            let v = T.iter().position(|&t| t == b)? as u32;
+            n = (n << 6) | v;
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
 /// 工作区 git 元数据（**零子进程**：只读 `.git` 文件）。
 ///
 /// 与 `detect_branch` 同一立场：启动/列举时不该为装饰性信息去 fork `git`，
@@ -809,6 +884,167 @@ fn thread_cmd(
             Some(snap) => ThreadResult::Value(serde_json::json!({ "goal": snap })),
             None => ThreadResult::Value(serde_json::json!({ "goal": null })),
         },
+        ThreadCmd::NameSet { id, title } => {
+            let is_current = id == kernel.session_id();
+            if !store.exists(&id) && !is_current {
+                return ThreadResult::Error(format!("会话 {id} 不存在"));
+            }
+            match store.set_title(&id, &title) {
+                Ok(_) => ThreadResult::Value(serde_json::json!({
+                    "id": id,
+                    "title": title,
+                    "has_title": true,
+                })),
+                Err(e) => ThreadResult::Error(e.to_string()),
+            }
+        }
+        ThreadCmd::ItemsList { id, limit } => {
+            let id = id.unwrap_or_else(|| kernel.session_id().to_string());
+            let events = match load_events(kernel, store, &id) {
+                Ok(e) => e,
+                Err(msg) => return ThreadResult::Error(msg),
+            };
+            let mut items: Vec<serde_json::Value> =
+                neo_protocol::facts_of(&events).into_iter().map(|f| serde_json::to_value(f).unwrap_or(serde_json::Value::Null)).collect();
+            if let Some(n) = limit {
+                items.truncate(n);
+            }
+            ThreadResult::Value(serde_json::json!({
+                "id": id,
+                "items": items,
+            }))
+        }
+        ThreadCmd::TurnsList { id, limit } => {
+            let id = id.unwrap_or_else(|| kernel.session_id().to_string());
+            let events = match load_events(kernel, store, &id) {
+                Ok(e) => e,
+                Err(msg) => return ThreadResult::Error(msg),
+            };
+            // 用户轮 = UserSubmitted；轮摘要 = 其后第一条 AgentMessageDone 截断
+            let mut turns: Vec<serde_json::Value> = Vec::new();
+            let mut cur: Option<serde_json::Value> = None;
+            for ev in &events {
+                match &ev {
+                    EventMsg::UserSubmitted { text } => {
+                        if let Some(t) = cur.take() {
+                            turns.push(t);
+                        }
+                        cur = Some(serde_json::json!({
+                            "id": format!("turn-{}", turns.len() + 1),
+                            "user": text.chars().take(200).collect::<String>(),
+                            "assistant": "",
+                        }));
+                    }
+                    EventMsg::AgentMessageDone { text } => {
+                        if let Some(t) = cur.as_mut() {
+                            if let Some(obj) = t.as_object_mut() {
+                                obj.insert("assistant".into(), serde_json::Value::String(
+                                    text.chars().take(400).collect::<String>(),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(t) = cur.take() {
+                turns.push(t);
+            }
+            if let Some(n) = limit {
+                turns.truncate(n);
+            }
+            ThreadResult::Value(serde_json::json!({ "id": id, "turns": turns }))
+        }
+        ThreadCmd::SkillsList => {
+            let skills: Vec<serde_json::Value> = kernel
+                .skill_list()
+                .into_iter()
+                .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
+                .collect();
+            ThreadResult::Value(serde_json::json!({ "skills": skills }))
+        }
+        ThreadCmd::ConfigRead => {
+            let res = kernel.resolution();
+            ThreadResult::Value(serde_json::json!({
+                "exec_mode": serde_json::to_value(kernel.exec_mode()).unwrap_or(serde_json::Value::Null),
+                "sandbox_mode": serde_json::to_value(res.sandbox).unwrap_or(serde_json::Value::Null),
+                "approval_policy": serde_json::to_value(res.approval).unwrap_or(serde_json::Value::Null),
+                "file_edit": match res.file_edit { neo_config::FileEditPolicy::Auto => "auto", neo_config::FileEditPolicy::Ask => "ask" },
+                "model": kernel.current_model(),
+                "workspace": kernel.cwd().display().to_string(),
+                "session_id": kernel.session_id(),
+                "token_budget": kernel.session_token_budget().0,
+                "protocol_version": neo_host_appserver::PROTOCOL_VERSION,
+            }))
+        }
+        ThreadCmd::FsReadFile { path } => {
+            let full = fs_resolve(kernel.cwd(), &path);
+            match std::fs::read(&full) {
+                Ok(raw) => {
+                    // 有界：与工具输出同量级上限
+                    const CAP: usize = 2 * 1024 * 1024;
+                    let truncated = raw.len() > CAP;
+                    let slice = if truncated { &raw[..CAP] } else { &raw[..] };
+                    ThreadResult::Value(serde_json::json!({
+                        "path": full.display().to_string(),
+                        "bytes": raw.len(),
+                        "truncated": truncated,
+                        "content": String::from_utf8_lossy(slice),
+                    }))
+                }
+                Err(e) => ThreadResult::Error(format!("读取失败：{}（{e}）", full.display())),
+            }
+        }
+        ThreadCmd::FsGetMetadata { path } => {
+            let full = fs_resolve(kernel.cwd(), &path);
+            match std::fs::metadata(&full) {
+                Ok(md) => ThreadResult::Value(serde_json::json!({
+                    "path": full.display().to_string(),
+                    "is_dir": md.is_dir(),
+                    "is_file": md.is_file(),
+                    "bytes": md.len(),
+                })),
+                Err(e) => ThreadResult::Error(format!("元数据失败：{}（{e}）", full.display())),
+            }
+        }
+        ThreadCmd::FsReadDirectory { path } => {
+            let full = fs_resolve(kernel.cwd(), &path);
+            match std::fs::read_dir(&full) {
+                Ok(rd) => {
+                    let mut names: Vec<String> = Vec::new();
+                    for e in rd.flatten() {
+                        names.push(e.file_name().to_string_lossy().into_owned());
+                    }
+                    names.sort();
+                    ThreadResult::Value(serde_json::json!({
+                        "path": full.display().to_string(),
+                        "entries": names,
+                    }))
+                }
+                Err(e) => ThreadResult::Error(format!("列目录失败：{}（{e}）", full.display())),
+            }
+        }
+        ThreadCmd::FsWriteFile { path, data, data_base64 } => {
+            let full = fs_resolve(kernel.cwd(), &path);
+            let content = match data_base64 {
+                Some(b64) => {
+                    // 简单 base64 解码（标准 alphabet）
+                    match b64_decode(&b64) {
+                        Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                        None => return ThreadResult::Error("data_base64 解码失败".into()),
+                    }
+                }
+                None => data,
+            };
+            let mode = kernel.sandbox_mode();
+            match kernel.sandbox().write_file(mode, &full, &content) {
+                neo_core::FileOutcome::Written { bytes } => ThreadResult::Value(
+                    serde_json::json!({ "path": full.display().to_string(), "bytes": bytes }),
+                ),
+                neo_core::FileOutcome::Denied { reason } => ThreadResult::Error(reason),
+                neo_core::FileOutcome::Failed { reason } => ThreadResult::Error(reason),
+            }
+        }
         ThreadCmd::ExecStart { command, cols, rows } => {
             let mode = kernel.resolution().sandbox;
             let cwd = kernel.cwd().to_path_buf();

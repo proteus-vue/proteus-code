@@ -194,6 +194,12 @@ pub enum Op {
     GoalAdvance,
     /// 清除目标（目标与其进度一并丢弃，会话保留）。
     GoalClear,
+    /// 运行中插入用户指令（Codex `turn/steer`）。
+    ///
+    /// 与 `UserTurn` 的区别：**不新开轮**——把文本推入当前轮历史并继续
+    /// `drive_steps`。流式在飞时拒绝（等边界或先 Interrupt）；轮已结束时
+    /// 拒绝（应走 `turn/start`）。
+    Steer { text: String },
     Shutdown,
 }
 

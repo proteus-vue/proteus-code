@@ -32,6 +32,18 @@
     "handshake_only": false
   },
   {
+    "name": "turn/steer",
+    "params": [
+      "text",
+      "expected_turn_id",
+      "expectedTurnId",
+      "thread_id",
+      "threadId",
+      "input"
+    ],
+    "handshake_only": false
+  },
+  {
     "name": "command/exec",
     "params": [
       "command",
@@ -171,9 +183,24 @@
     "handshake_only": false
   },
   {
+    "name": "thread/name/set",
+    "params": [
+      "id",
+      "title",
+      "threadId",
+      "thread_id",
+      "name",
+      "title"
+    ],
+    "handshake_only": false
+  },
+  {
     "name": "thread/history",
     "params": [
-      "id"
+      "id",
+      "threadId",
+      "thread_id",
+      "limit"
     ],
     "handshake_only": false
   },
@@ -191,6 +218,26 @@
     "handshake_only": false
   },
   {
+    "name": "thread/items/list",
+    "params": [
+      "id",
+      "threadId",
+      "thread_id",
+      "limit"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/turns/list",
+    "params": [
+      "id",
+      "threadId",
+      "thread_id",
+      "limit"
+    ],
+    "handshake_only": false
+  },
+  {
     "name": "tools/list",
     "params": [],
     "handshake_only": false
@@ -201,9 +248,55 @@
     "handshake_only": false
   },
   {
+    "name": "model/list",
+    "params": [],
+    "handshake_only": false
+  },
+  {
     "name": "git/info",
     "params": [
       "cwd"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "skills/list",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "config/read",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "fs/readFile",
+    "params": [
+      "path"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "fs/writeFile",
+    "params": [
+      "path",
+      "data",
+      "data_base64",
+      "dataBase64"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "fs/getMetadata",
+    "params": [
+      "path"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "fs/readDirectory",
+    "params": [
+      "path"
     ],
     "handshake_only": false
   },
@@ -240,6 +333,16 @@
   },
   {
     "name": "thread/goal/clear",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/fork",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/compact/start",
     "params": [],
     "handshake_only": false
   }

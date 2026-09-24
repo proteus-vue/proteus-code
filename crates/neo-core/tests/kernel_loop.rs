@@ -1895,6 +1895,32 @@ fn goal_advance_runs_a_full_subtask_turn_and_advances_the_engine() {
     assert_eq!(sh.last_failed, Some(false), "本轮无失败，审查判据应为通过");
 }
 
+/// Codex turn/steer：轮内注入用户指令，不新开轮。
+#[test]
+fn steer_injects_into_active_turn() {
+    let script = vec![
+        vec![tool_call("w1", "bash", serde_json::json!({"cmd": "echo hi"}))],
+        vec![ModelDelta::Text("done".into())],
+    ];
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(MockTool::new("bash")));
+    let mut k = kernel_with(
+        Box::new(ScriptedModelProvider::new(script)),
+        r,
+        Box::new(InMemoryPersistence::new()),
+        ExecMode::FullAccess,
+    );
+    // begin + pump 一步到工具边界后 steer；更简单：begin 后 steer 再 drive
+    let _ = k.submit(Op::BeginTurn { text: "开始".into(), refs: vec![] });
+    assert!(k.active_turn_id().is_some(), "begin 后应有活动轮");
+    let ev = k.submit(Op::Steer { text: "改成用中文注释".into() }).unwrap();
+    assert!(ev.iter().any(|e| matches!(e, EventMsg::UserSubmitted { text } if text.contains("中文"))));
+    assert!(ev.iter().any(|e| matches!(e, EventMsg::TurnComplete { .. })));
+    assert!(k.active_turn_id().is_none(), "收轮后 steer 不可再注入");
+    let err = k.submit(Op::Steer { text: "late".into() }).unwrap_err();
+    assert!(matches!(err, neo_core::KernelError::GoalUnavailable(_)), "{err:?}");
+}
+
 /// `thread/goal/get` 的内核侧：设定后能取到完整快照，清除后为 None。
 #[test]
 fn goal_snapshot_is_readable_after_set_and_none_after_clear() {
