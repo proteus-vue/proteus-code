@@ -2,12 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ExecMode } from "../lib/rpc";
 import {
   configRead,
+  configRequirementsRead,
+  configValueWrite,
+  feedbackUpload,
+  hooksList,
   listSkills,
   marketplaceAdd,
   marketplaceRemove,
+  marketplaceUpgrade,
+  mcpServerStatusList,
+  permissionProfileList,
   pluginInstall,
   pluginList,
+  pluginReconcile,
   pluginUninstall,
+  skillsConfigWrite,
 } from "../lib/rpc";
 import type { PluginInfo, SkillInfo } from "../lib/protocol";
 import { Icon } from "./Icon";
@@ -59,6 +68,12 @@ export function SettingsModal({
   const [mktSource, setMktSource] = useState("");
   const [busyPlugin, setBusyPlugin] = useState<string | null>(null);
   const [configSummary, setConfigSummary] = useState<string>("");
+  const [hooks, setHooks] = useState<string>("—");
+  const [mcpLine, setMcpLine] = useState<string>("—");
+  const [permLine, setPermLine] = useState<string>("—");
+  const [reqLine, setReqLine] = useState<string>("—");
+  const [diagNote, setDiagNote] = useState<string>("");
+  const [extraRoot, setExtraRoot] = useState("");
 
   const reloadPlugins = useCallback(async () => {
     try {
@@ -91,6 +106,31 @@ export function SettingsModal({
         setConfigSummary(bits.join(" · ") || "—");
       })
       .catch(() => setConfigSummary("—"));
+    void hooksList()
+      .then((r) => setHooks(`${(r.hooks ?? []).length} 个 hooks`))
+      .catch((e) => setHooks(String(e)));
+    void mcpServerStatusList()
+      .then((r) => {
+        const s = r.servers ?? [];
+        setMcpLine(
+          s.length
+            ? s.map((x) => `${x.name}:${x.status ?? "?"}`).join(" · ")
+            : "无 MCP 服务器",
+        );
+      })
+      .catch((e) => setMcpLine(String(e)));
+    void permissionProfileList()
+      .then((r) => {
+        const cur = (r.profiles ?? []).find((p) => p.current);
+        setPermLine(cur?.label || cur?.id || "—");
+      })
+      .catch((e) => setPermLine(String(e)));
+    void configRequirementsRead()
+      .then((r) => {
+        const n = (r.requirements ?? []).length;
+        setReqLine(r.configFile ? `${n} 项 · ${r.configFile}` : `${n} 项`);
+      })
+      .catch((e) => setReqLine(String(e)));
   }, [open, reloadPlugins]);
 
   const shortcuts = useMemo(
@@ -197,6 +237,45 @@ export function SettingsModal({
                 {configSummary}
               </code>
             </div>
+            <div className="settings-row">
+              <span>configRequirements</span>
+              <code className="settings-path" title={reqLine}>
+                {reqLine}
+              </code>
+            </div>
+            <div className="settings-row">
+              <span>hooks</span>
+              <code className="settings-path">{hooks}</code>
+            </div>
+            <div className="settings-row">
+              <span>MCP</span>
+              <code className="settings-path" title={mcpLine}>
+                {mcpLine}
+              </code>
+            </div>
+            <div className="settings-row">
+              <span>权限档</span>
+              <code className="settings-path">{permLine}</code>
+            </div>
+            <div className="settings-row">
+              <span>写配置</span>
+              <div className="mkt-add">
+                <input
+                  placeholder="keyPath 如 model"
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    const key = (e.target as HTMLInputElement).value.trim();
+                    if (!key) return;
+                    void configValueWrite(key, model, "replace")
+                      .then(() => setDiagNote(`已写 config ${key}=${model}`))
+                      .catch((err) => setDiagNote(String(err)));
+                    (e.target as HTMLInputElement).value = "";
+                  }}
+                />
+                <span className="muted">Enter 写入当前 model</span>
+              </div>
+            </div>
+            {diagNote && <p className="muted">{diagNote}</p>}
           </section>
 
           <section className="settings-section">
@@ -210,9 +289,52 @@ export function SettingsModal({
                 <li key={s.name} title={s.description}>
                   <code>${s.name}</code>
                   <span className="muted">{s.description || ""}</span>
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    onClick={() => {
+                      // 默认禁用；再点启用（无选选择器时启用=清空该名禁用）
+                      void skillsConfigWrite(false, s.name)
+                        .then(() => setDiagNote(`已禁用 $${s.name}（重启会话生效）`))
+                        .catch((e) => setDiagNote(String(e)));
+                    }}
+                  >
+                    禁用
+                  </button>
                 </li>
               ))}
             </ul>
+            <div className="settings-row">
+              <span>额外技能根</span>
+              <div className="mkt-add">
+                <input
+                  value={extraRoot}
+                  placeholder="/abs/path/to/skills"
+                  onChange={(e) => setExtraRoot(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={!extraRoot.trim()}
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        const r = await import("../lib/rpc").then((m) =>
+                          m.skillsExtraRootsSet([extraRoot.trim()]),
+                        );
+                        setDiagNote("extraRoots 已写入（重启 app-server 生效）");
+                        setExtraRoot("");
+                        return r;
+                      } catch (e) {
+                        setDiagNote(String(e));
+                      }
+                    })();
+                  }}
+                >
+                  设置
+                </button>
+              </div>
+            </div>
           </section>
 
           <section className="settings-section">
@@ -248,6 +370,33 @@ export function SettingsModal({
                   }}
                 >
                   注册
+                </button>
+                <button
+                  type="button"
+                  className="ghost-btn"
+                  onClick={() => {
+                    void marketplaceUpgrade()
+                      .then(() => reloadPlugins())
+                      .then(() => setDiagNote("marketplace/upgrade 完成"))
+                      .catch((e) => setPluginErr(String(e)));
+                  }}
+                >
+                  刷新市场
+                </button>
+                <button
+                  type="button"
+                  className="ghost-btn"
+                  onClick={() => {
+                    void pluginReconcile()
+                      .then((r) =>
+                        setDiagNote(
+                          `reconcile：存活 ${r.alive ?? 0} · 剔除 ${(r.removed ?? []).join(",") || "无"}`,
+                        ),
+                      )
+                      .catch((e) => setPluginErr(String(e)));
+                  }}
+                >
+                  对账
                 </button>
               </div>
             </div>
@@ -334,6 +483,22 @@ export function SettingsModal({
               NEO Desktop · 本地 app-server · 协议 v{protocolVersion} ·{" "}
               {methodCount} methods · 不上传代码
             </p>
+            <div className="settings-row">
+              <span>反馈</span>
+              <button
+                type="button"
+                className="ghost-btn"
+                onClick={() => {
+                  void feedbackUpload("user_note", "settings 关于区")
+                    .then((r) =>
+                      setDiagNote(r.localPath ? `本地收据 ${r.localPath}` : "已记录"),
+                    )
+                    .catch((e) => setDiagNote(String(e)));
+                }}
+              >
+                写本地收据（feedback/upload）
+              </button>
+            </div>
           </section>
         </div>
 

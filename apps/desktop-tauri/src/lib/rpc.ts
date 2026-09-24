@@ -264,6 +264,178 @@ export async function fuzzyFileSearch(
   return rpc("fuzzyFileSearch", { query, roots });
 }
 
+/** 导出会话（markdown / json）。 */
+export async function threadExport(
+  format: "markdown" | "json" = "markdown",
+  id?: string,
+): Promise<{ content?: string; format?: string; id?: string; items?: unknown }> {
+  return rpc("thread/export", id ? { id, format } : { format });
+}
+
+/** 按 beforeTurnId 回退（Codex `thread/revert`）。 */
+export async function threadRevert(beforeTurnId: string): Promise<unknown> {
+  return rpc("thread/revert", { beforeTurnId });
+}
+
+/** 向历史注入用户可见文本（不驱动模型）。 */
+export async function threadInjectItems(text: string): Promise<unknown> {
+  return rpc("thread/inject_items", { text });
+}
+
+/** 事实投影分页（与 history 同源）。 */
+export async function threadItemsList(
+  limit?: number,
+  id?: string,
+): Promise<{ items?: unknown[]; id?: string }> {
+  return rpc("thread/items/list", {
+    ...(id ? { id } : {}),
+    ...(limit != null ? { limit } : {}),
+  });
+}
+
+/** 用户轮摘要。 */
+export async function threadTurnsList(
+  limit?: number,
+  id?: string,
+): Promise<{ turns?: unknown[]; id?: string }> {
+  return rpc("thread/turns/list", {
+    ...(id ? { id } : {}),
+    ...(limit != null ? { limit } : {}),
+  });
+}
+
+/** 仅执行本步剩余审批（Codex `approval/respondStep`）。 */
+export async function respondApprovalStep(
+  id: string,
+  decision: Decision,
+  reason?: string | null,
+): Promise<unknown> {
+  return rpc("approval/respondStep", {
+    id,
+    decision,
+    reason: reason ?? null,
+  });
+}
+
+export async function hooksList(): Promise<{ hooks?: unknown[] }> {
+  return rpc("hooks/list", {});
+}
+
+export async function mcpServerStatusList(): Promise<{
+  servers?: { name?: string; status?: string; transport?: string }[];
+}> {
+  return rpc("mcpServerStatus/list", {});
+}
+
+export async function permissionProfileList(): Promise<{
+  profiles?: { id?: string; label?: string; current?: boolean }[];
+}> {
+  return rpc("permissionProfile/list", {});
+}
+
+export async function configRequirementsRead(): Promise<{
+  requirements?: { key?: string; required?: boolean; reason?: string }[];
+  configFile?: string;
+}> {
+  return rpc("configRequirements/read", {});
+}
+
+/** 写用户 config.json（乐观 _version）。 */
+export async function configValueWrite(
+  keyPath: string,
+  value: unknown,
+  mergeStrategy: "replace" | "upsert" = "replace",
+): Promise<unknown> {
+  return rpc("config/value/write", { keyPath, value, mergeStrategy });
+}
+
+/** 启停技能（name 或 path 选择器）。 */
+export async function skillsConfigWrite(
+  enabled: boolean,
+  name?: string,
+  path?: string,
+): Promise<unknown> {
+  return rpc("skills/config/write", {
+    enabled,
+    ...(name ? { name } : {}),
+    ...(path ? { path } : {}),
+  });
+}
+
+export async function skillsExtraRootsSet(extraRoots: string[]): Promise<unknown> {
+  return rpc("skills/extraRoots/set", { extraRoots });
+}
+
+export async function experimentalFeatureList(): Promise<{
+  features?: { name?: string; enabled?: boolean }[];
+}> {
+  return rpc("experimentalFeature/list", {});
+}
+
+export async function experimentalSet(
+  enablement: Record<string, boolean>,
+): Promise<unknown> {
+  return rpc("experimentalFeature/enablement/set", { enablement });
+}
+
+export async function marketplaceUpgrade(name?: string): Promise<unknown> {
+  return rpc("marketplace/upgrade", name ? { marketplaceName: name } : {});
+}
+
+export async function pluginInstalled(): Promise<{ plugins?: PluginInfo[] }> {
+  return rpc("plugin/installed", {});
+}
+
+export async function pluginReconcile(): Promise<{
+  alive?: number;
+  removed?: string[];
+}> {
+  return rpc("plugin/reconcile", {});
+}
+
+export async function pluginRead(name: string): Promise<PluginInfo> {
+  return rpc("plugin/read", { pluginName: name });
+}
+
+/** 启动审查（返回 prompt，调用方再 turn/start）。 */
+export async function reviewStart(
+  threadId: string,
+  target: { type: string; branch?: string },
+  delivery?: "inline" | "detached",
+): Promise<{
+  started?: boolean;
+  prompt?: string;
+  delivery?: string;
+  drives?: boolean;
+  deprecationNotice?: string;
+}> {
+  return rpc("review/start", {
+    threadId,
+    target,
+    ...(delivery ? { delivery } : {}),
+  });
+}
+
+/** 本地反馈收据（无远端上传）。 */
+export async function feedbackUpload(
+  classification: string,
+  reason?: string,
+): Promise<{ uploaded?: boolean; localPath?: string; note?: string }> {
+  return rpc("feedback/upload", {
+    classification,
+    ...(reason ? { reason } : {}),
+  });
+}
+
+/** 订阅工作区变化 → fs/changed 事件。 */
+export async function fsWatch(path: string, watchId: string): Promise<unknown> {
+  return rpc("fs/watch", { path, watchId });
+}
+
+export async function fsUnwatch(watchId: string): Promise<unknown> {
+  return rpc("fs/unwatch", { watchId });
+}
+
 export function onEvent(cb: (e: WireEvent) => void): Promise<UnlistenFn> {
   return listen<WireEvent>("neo-event", (ev) => cb(ev.payload));
 }

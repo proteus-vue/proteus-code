@@ -35,7 +35,10 @@ import {
   createSection,
   createThread,
   type ExecMode,
+  feedbackUpload,
   forkThread,
+  fsUnwatch,
+  fsWatch,
   gitInfo,
   goalClear,
   goalGet,
@@ -50,13 +53,18 @@ import {
   onExit,
   onStderr,
   respondApproval,
+  respondApprovalStep,
   respondUserInput,
   resumeThread,
   rewindTurns,
+  reviewStart,
   startServer,
   startTurn,
   steerTurn,
   stopServer,
+  threadExport,
+  threadInjectItems,
+  threadRevert,
   unpackEvent,
 } from "./lib/rpc";
 import type { ThreadSection } from "./lib/protocol";
@@ -131,6 +139,11 @@ const SLASH_COMMANDS: {
   { id: "new", name: "new", aliases: ["clear"], desc: "新建会话" },
   { id: "fork", name: "fork", desc: "分叉当前会话" },
   { id: "undo", name: "undo", aliases: ["rewind"], desc: "回退一轮" },
+  { id: "export", name: "export", aliases: ["dump"], desc: "导出对话 markdown" },
+  { id: "inject", name: "inject", desc: "注入文本不驱动模型" },
+  { id: "revert", name: "revert", desc: "回退到指定 turn（thread/revert）" },
+  { id: "review", name: "review", desc: "审查未提交改动（review/start）" },
+  { id: "feedback", name: "feedback", desc: "本地反馈收据" },
   { id: "settings", name: "settings", aliases: ["config"], desc: "打开设置 ⌘," },
   { id: "theme", name: "theme", aliases: ["themes"], desc: "切换浅色/深色" },
   { id: "sidebar", name: "sidebar", desc: "切换侧栏 ⌘B" },
@@ -671,6 +684,11 @@ export default function App() {
               setFileEntries(r.entries.filter((e) => !e.endsWith("/"))),
             )
             .catch(() => setFileEntries([]));
+          // fs/watch：工作区变化 → fs_changed → 文件树 refreshKey
+          void fsUnwatch("ws-root").catch(() => undefined);
+          void fsWatch(root, "ws-root").catch(() => undefined);
+        } else {
+          void fsUnwatch("ws-root").catch(() => undefined);
         }
         await refreshThreads();
         void refreshGoal();
@@ -820,12 +838,13 @@ export default function App() {
   }, [append]);
 
   const onApproval = useCallback(
-    async (decision: Decision) => {
+    async (decision: Decision, step = false) => {
       if (!approval) return;
       const id = approval.id;
       setApproval(null);
       try {
-        await respondApproval(id, decision, null);
+        if (step) await respondApprovalStep(id, decision, null);
+        else await respondApproval(id, decision, null);
       } catch (e) {
         append({ type: "error", message: String(e) });
       }
@@ -973,6 +992,85 @@ export default function App() {
             append({ type: "error", message: String(e) });
           }
           break;
+        case "export": {
+          try {
+            const r = await threadExport("markdown");
+            const content = r.content ?? "";
+            append({
+              type: "status",
+              message: `已导出 markdown（${content.length} 字）· thread/export`,
+            });
+            // 内容进状态行上方：用 inject 也不合适；直接塞一条可复制 assistant 摘要
+            if (content) {
+              append({
+                type: "assistant",
+                text: "```\n导出预览（前 500 字）：\n" +
+                  content.slice(0, 500) +
+                  (content.length > 500 ? "\n…" : "") +
+                  "\n```",
+              });
+            }
+          } catch (e) {
+            append({ type: "error", message: String(e) });
+          }
+          break;
+        }
+        case "inject": {
+          const payload = text.slice("/inject".length).trim();
+          if (!payload) {
+            append({ type: "error", message: "用法：/inject 要注入的文本" });
+            break;
+          }
+          try {
+            await threadInjectItems(payload);
+            append({ type: "status", message: "已注入历史（不驱动模型）" });
+          } catch (e) {
+            append({ type: "error", message: String(e) });
+          }
+          break;
+        }
+        case "revert": {
+          const tid = text.slice("/revert".length).trim() || "turn-1";
+          try {
+            await threadRevert(tid);
+            append({ type: "status", message: `已回退到 ${tid}` });
+            await refreshGoal();
+          } catch (e) {
+            append({ type: "error", message: String(e) });
+          }
+          break;
+        }
+        case "review": {
+          try {
+            const threadId = activeThread ?? "";
+            const r = await reviewStart(threadId || "appserver", {
+              type: "uncommittedChanges",
+            });
+            if (r.prompt) {
+              append({ type: "status", message: "审查 prompt 已就绪，发送中…" });
+              await startTurn(r.prompt);
+            } else {
+              append({ type: "status", message: "review/start 未返回 prompt" });
+            }
+          } catch (e) {
+            append({ type: "error", message: String(e) });
+          }
+          break;
+        }
+        case "feedback": {
+          try {
+            const r = await feedbackUpload("user_note", "slash /feedback");
+            append({
+              type: "status",
+              message: r.localPath
+                ? `反馈已本地保存 ${r.localPath}`
+                : "反馈已记录",
+            });
+          } catch (e) {
+            append({ type: "error", message: String(e) });
+          }
+          break;
+        }
         case "settings":
         case "models":
           setSettingsOpen(true);
@@ -997,7 +1095,7 @@ export default function App() {
       }
       return true;
     },
-    [append, cycleMode, onFork, onNewThread],
+    [activeThread, append, cycleMode, onFork, onNewThread, refreshGoal],
   );
 
   useEffect(() => {
@@ -1275,6 +1373,43 @@ export default function App() {
         },
       },
       {
+        id: "export",
+        label: "导出对话 markdown",
+        hint: "thread/export",
+        run: async () => {
+          try {
+            const r = await threadExport("markdown");
+            append({
+              type: "status",
+              message: `已导出（${(r.content ?? "").length} 字）`,
+            });
+            if (r.content) {
+              append({
+                type: "assistant",
+                text: "```\n" + r.content.slice(0, 500) + "\n```",
+              });
+            }
+          } catch (e) {
+            append({ type: "error", message: String(e) });
+          }
+        },
+      },
+      {
+        id: "review",
+        label: "审查未提交改动",
+        hint: "review/start",
+        run: async () => {
+          try {
+            const r = await reviewStart(activeThread || "appserver", {
+              type: "uncommittedChanges",
+            });
+            if (r.prompt) await startTurn(r.prompt);
+          } catch (e) {
+            append({ type: "error", message: String(e) });
+          }
+        },
+      },
+      {
         id: "shell",
         label: "命令台…（输入 shell）",
         hint: "command/exec",
@@ -1312,7 +1447,7 @@ export default function App() {
         run: () => onModelChange(m.name),
       })),
     ],
-    [append, cycleMode, modelsList, onFork, onModeChange, onModelChange, onNewThread, stop],
+    [activeThread, append, cycleMode, modelsList, onFork, onModeChange, onModelChange, onNewThread, stop],
   );
 
   useEffect(() => {
@@ -1731,6 +1866,13 @@ export default function App() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => void onApproval("allow", true)}
+                  title="approval/respondStep — 只执行本步剩余，不驱动后续"
+                >
+                  仅本步
+                </button>
+                <button
+                  type="button"
                   onClick={() => void onApproval("allow_always")}
                 >
                   总是允许
@@ -2107,7 +2249,36 @@ export default function App() {
           >
             {panelTab === "review" && (
               <div className="wb-section">
-                <div className="wb-sub">改动文件</div>
+                <div className="wb-sub">
+                  改动文件
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    style={{ marginLeft: "auto" }}
+                    disabled={busy}
+                    onClick={() => {
+                      void (async () => {
+                        try {
+                          const r = await reviewStart(
+                            activeThread || "appserver",
+                            { type: "uncommittedChanges" },
+                          );
+                          if (r.prompt) {
+                            append({
+                              type: "status",
+                              message: "review/start → 发送审查任务",
+                            });
+                            await startTurn(r.prompt);
+                          }
+                        } catch (e) {
+                          append({ type: "error", message: String(e) });
+                        }
+                      })();
+                    }}
+                  >
+                    开始审查
+                  </button>
+                </div>
                 {files.length === 0 ? (
                   <p className="muted pad">本轮尚无文件变更</p>
                 ) : (
