@@ -29,7 +29,32 @@ export type ThreadSummary = {
   changes?: [number, number] | null;
   additions?: number;
   deletions?: number;
+  /** Codex thread/archive 标记（sidecar op，列表回读） */
+  archived?: boolean;
 };
+
+/** Codex threadSection/* */
+export type ThreadSection = {
+  sectionId: string;
+  name: string;
+  appearance?: { color?: string | null; icon?: string | null } | null;
+  order?: number;
+  threadIds?: string[];
+};
+
+export type SkillInfo = { name: string; description?: string };
+
+export type PluginInfo = {
+  id?: string;
+  name?: string;
+  version?: string;
+  installed?: boolean;
+  marketplace?: string;
+  path?: string;
+  skills?: string[];
+};
+
+export type MarketplaceInfo = { name: string; source: string };
 
 export type FileChange = { path: string; additions: number; deletions: number };
 

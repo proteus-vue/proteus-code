@@ -28,9 +28,11 @@ import {
   groupTools,
 } from "./components/TranscriptParts";
 import {
+  archiveThread,
   commandExec,
   compactSession,
   configureSession,
+  createSection,
   createThread,
   type ExecMode,
   forkThread,
@@ -42,6 +44,7 @@ import {
   goalSet,
   interruptTurn,
   listModels,
+  listSections,
   listThreads,
   onEvent,
   onExit,
@@ -52,9 +55,11 @@ import {
   rewindTurns,
   startServer,
   startTurn,
+  steerTurn,
   stopServer,
   unpackEvent,
 } from "./lib/rpc";
+import type { ThreadSection } from "./lib/protocol";
 import { listWorkspace } from "./components/FileTree";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsModal } from "./components/SettingsModal";
@@ -179,6 +184,10 @@ export default function App() {
   const [init, setInit] = useState<InitializeResult | null>(null);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [activeThread, setActiveThread] = useState<string | null>(null);
+  /** IA-49：threadSection/* 分区 */
+  const [sections, setSections] = useState<ThreadSection[]>([]);
+  /** 文件树自动刷新键（files_changed / fs_changed 递增） */
+  const [fileTreeKey, setFileTreeKey] = useState(0);
   const [model, setModel] = useState<string>("—");
   const [modelsList, setModelsList] = useState<
     { name: string; description?: string; production?: boolean }[]
@@ -287,7 +296,8 @@ export default function App() {
   );
 
   const busy = status === "busy";
-  const blocked = busy || !!approval || !!userInput;
+  /** 审批 / 问人挂起时锁输入；busy 可 steer，不进 blocked */
+  const blocked = !!approval || !!userInput;
   /** 调度器读最新 status/busy，避免闭包过期 */
   const statusRef = useRef(status);
   statusRef.current = status;
@@ -464,12 +474,15 @@ export default function App() {
           });
           break;
         case "files_changed":
-        case "file_changed": {
+        case "file_changed":
+        case "fs_changed": {
           if (kind === "files_changed") {
             const fs = (payload.files as FileChange[] | undefined) ?? [];
             setFiles(fs);
             append({ type: "files", files: fs });
           }
+          // 文件树跟随磁盘（batch6 fs/watch 或内核 files_changed）
+          setFileTreeKey((n) => n + 1);
           break;
         }
         case "goal_updated": {
@@ -574,6 +587,15 @@ export default function App() {
   const refreshThreadsRef = useRef(refreshThreads);
   refreshThreadsRef.current = refreshThreads;
 
+  /** IA-49：线分区列表 */
+  const refreshSections = useCallback(async () => {
+    try {
+      setSections(await listSections());
+    } catch {
+      setSections([]);
+    }
+  }, []);
+
   /** Codex thread/goal/get：boot / 切会话后刷 Goal 面板。 */
   const refreshGoal = useCallback(async () => {
     try {
@@ -652,6 +674,7 @@ export default function App() {
         }
         await refreshThreads();
         void refreshGoal();
+        void refreshSections();
         setStatus("ready");
         setStatusMsg(
           mode === "none"
@@ -663,7 +686,7 @@ export default function App() {
         setStatusMsg(String(e));
       }
     },
-    [refreshGoal, refreshThreads],
+    [refreshGoal, refreshSections, refreshThreads],
   );
 
   const resetSessionUi = useCallback(() => {
@@ -758,7 +781,9 @@ export default function App() {
 
   const send = useCallback(async () => {
     const text = input.trim();
-    if ((!text && webPicks.length === 0) || blocked) return;
+    // 审批 / 问人挂起时锁定；生成中允许 **转向**（turn/steer），不新开轮
+    if (approval || userInput) return;
+    if ((!text && webPicks.length === 0)) return;
     // 附件在发送时拼进消息，不占输入框
     const withAtt =
       webPicks.length > 0
@@ -773,12 +798,18 @@ export default function App() {
     setInput("");
     setWebPicks([]);
     try {
+      if (busy) {
+        await steerTurn(withAtt);
+        append({ type: "user", text: withAtt });
+        append({ type: "status", message: "已转向当前轮（turn/steer）" });
+        return;
+      }
       await startTurn(withAtt);
     } catch (e) {
       append({ type: "error", message: String(e) });
-      setStatus("error");
+      if (!busy) setStatus("error");
     }
-  }, [append, blocked, input, webPicks]);
+  }, [append, approval, busy, input, userInput, webPicks]);
 
   const stop = useCallback(async () => {
     try {
@@ -1470,6 +1501,17 @@ export default function App() {
         onResume={(id) => void onResume(id)}
         onRename={(id, title) => void onRenameSession(id, title)}
         onDelete={(id) => void onDeleteSession(id)}
+        onArchive={(id, archived) => {
+          void archiveThread(id, archived)
+            .then(() => refreshThreads())
+            .catch((e) => append({ type: "error", message: String(e) }));
+        }}
+        sections={sections}
+        onCreateSection={(name) => {
+          void createSection(name)
+            .then(() => refreshSections())
+            .catch((e) => append({ type: "error", message: String(e) }));
+        }}
         projectLabel={projectLabel}
         workspaceRoot={projectMode === "none" ? "" : workspaceRoot}
         projectMode={projectMode}
@@ -1845,7 +1887,7 @@ export default function App() {
                       : isNewTask
                         ? "描述要做的任务，用 @ 引用文件、/ 命令，或 ⌘K…"
                         : busy
-                          ? "继续输入以排队后续修改"
+                          ? "生成中 — Enter 转向当前轮（steer）"
                           : "继续输入…"
               }
               onChange={(e) => onInputChange(e.target.value)}
@@ -1909,10 +1951,7 @@ export default function App() {
                   if (busy) void stop();
                 }
               }}
-              disabled={
-                Boolean(approval || userInput) ||
-                (status !== "ready" && status !== "busy")
-              }
+              disabled={blocked || (status !== "ready" && status !== "busy")}
               rows={3}
             />
             {atQuery && atMatches.length > 0 && (
@@ -1964,7 +2003,13 @@ export default function App() {
               {EXEC_MODES.find((m) => m.id === execMode)?.label ?? execMode}
             </button>
             <span className="hint">
-              {approval ? "等待审批" : busy ? "生成中 · Esc 中断" : "Enter 发送"}
+              {approval
+                ? "等待审批"
+                : userInput
+                  ? "等待答复"
+                  : busy
+                    ? "生成中 · Enter 转向 · Esc 中断"
+                    : "Enter 发送"}
               {lastSummary ? ` · 上轮 +${lastSummary.in}/−${lastSummary.out}` : ""}
             </span>
             <Select
@@ -1982,11 +2027,29 @@ export default function App() {
             <button
               type="button"
               className="send-circle"
-              onClick={() => void send()}
-              disabled={blocked || (!input.trim() && webPicks.length === 0)}
-              aria-label="发送"
+              onClick={() => {
+                // busy 且无输入 = 中断；有输入 = 转向（steer）
+                if (busy && !input.trim() && webPicks.length === 0) void stop();
+                else void send();
+              }}
+              disabled={
+                blocked ||
+                (status !== "ready" && status !== "busy") ||
+                (!busy && !input.trim() && webPicks.length === 0)
+              }
+              aria-label={busy && !input.trim() ? "中断" : "发送"}
+              title={
+                busy
+                  ? input.trim()
+                    ? "转向当前轮 turn/steer"
+                    : "中断 Esc"
+                  : "发送 Enter"
+              }
             >
-              <Icon name={busy ? "stop" : "send"} size={16} />
+              <Icon
+                name={busy && !input.trim() && webPicks.length === 0 ? "stop" : "send"}
+                size={16}
+              />
             </button>
             {busy && (
               <button type="button" className="ghost-btn" onClick={() => void stop()}>
@@ -2308,6 +2371,7 @@ export default function App() {
                 <FileTree
                   root={workspaceRoot || undefined}
                   selected={filePreview?.path ?? null}
+                  refreshKey={fileTreeKey}
                   onSelect={(p) => {
                     setPreviewLoading(true);
                     void readWorkspaceFile(workspaceRoot || undefined, p)

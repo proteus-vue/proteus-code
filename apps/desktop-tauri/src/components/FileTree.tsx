@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Icon } from "./Icon";
 
@@ -96,18 +96,22 @@ export function FileTree({
   onSelect,
   root,
   selected,
+  refreshKey = 0,
 }: {
   root?: string;
   selected?: string | null;
   onSelect: (relPath: string) => void;
+  /** 变化即重新扫描（fs/changed / files_changed 驱动） */
+  refreshKey?: number;
 }) {
   const [raw, setRaw] = useState<string[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(false);
+  const [openSnap, setOpenSnap] = useState<Set<string> | null>(null);
 
-  const refresh = async () => {
+  const refresh = async (keepOpen = false) => {
     setLoading(true);
     setErr(null);
     try {
@@ -115,13 +119,32 @@ export function FileTree({
       setRaw(r.entries);
       setTruncated(r.truncated);
       const tops = r.entries.filter((e) => e.endsWith("/")).map((e) => e.slice(0, -1));
-      setOpen(new Set(tops));
+      if (keepOpen) {
+        // 保留用户已展开的目录，只补新的顶层
+        setOpen((prev) => {
+          const n = new Set(prev);
+          for (const t of tops) if (prev.size === 0 || prev.has(t) || openSnap?.has(t)) n.add(t);
+          // 首次仍全开
+          if (prev.size === 0) return new Set(tops);
+          return n;
+        });
+      } else {
+        setOpen(new Set(tops));
+        setOpenSnap(new Set(tops));
+      }
     } catch (e) {
       setErr(String(e));
     } finally {
       setLoading(false);
     }
   };
+
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  useEffect(() => {
+    if (refreshKey > 0) void refreshRef.current(true);
+  }, [refreshKey]);
 
   const tree = useMemo(() => (raw ? buildTree(raw) : []), [raw]);
 
@@ -175,7 +198,7 @@ export function FileTree({
   return (
     <div className="file-tree">
       <div className="tree-head">
-        <button type="button" className="ghost-btn" onClick={() => void refresh()} disabled={loading}>
+        <button type="button" className="ghost-btn" onClick={() => void refresh(false)} disabled={loading}>
           {loading ? "扫描中…" : "刷新"}
         </button>
         <button
@@ -196,7 +219,7 @@ export function FileTree({
       {!raw && !err && (
         <div className="tree-empty">
           <p className="muted">加载工作区文件</p>
-          <button type="button" className="primary" onClick={() => void refresh()}>
+          <button type="button" className="primary" onClick={() => void refresh(false)}>
             扫描
           </button>
         </div>

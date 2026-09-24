@@ -1,6 +1,6 @@
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { formatRelative } from "../lib/time";
-import type { ThreadSummary } from "../lib/protocol";
+import type { ThreadSection, ThreadSummary } from "../lib/protocol";
 import type { RecentWorkspace } from "../lib/workspaces";
 import { Icon } from "./Icon";
 
@@ -17,6 +17,9 @@ export function Sidebar({
   onResume,
   onRename,
   onDelete,
+  onArchive,
+  sections,
+  onCreateSection,
   projectLabel,
   workspaceRoot,
   projectMode,
@@ -37,6 +40,11 @@ export function Sidebar({
   onResume: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
+  /** 归档 / 取消归档（thread/archive） */
+  onArchive?: (id: string, archived: boolean) => void;
+  /** Codex threadSection/* 分区（空 = 未分组平铺） */
+  sections?: ThreadSection[];
+  onCreateSection?: (name: string) => void;
   projectLabel: string;
   workspaceRoot: string;
   projectMode?: "workspace" | "none";
@@ -53,7 +61,11 @@ export function Sidebar({
   /** IA-20 项目切换菜单 */
   const [projOpen, setProjOpen] = useState(false);
   const [addPath, setAddPath] = useState("");
+  /** 显示已归档（默认隐藏） */
+  const [showArchived, setShowArchived] = useState(false);
+  const [newSectionName, setNewSectionName] = useState("");
   const recents = recentWorkspaces ?? [];
+  const secList = sections ?? [];
 
   useEffect(() => {
     if (!projOpen) return;
@@ -103,12 +115,135 @@ export function Sidebar({
     );
   }
 
-  const filtered = threads;
+  const visible = threads.filter((t) => showArchived || !t.archived);
+  const archivedCount = threads.filter((t) => t.archived).length;
 
   const commitRename = (id: string) => {
     const t = draft.trim();
     setEditingId(null);
     if (t) onRename(id, t);
+  };
+
+  /** 分区 → 线程；未分区的放根组 */
+  const grouped = useMemo(() => {
+    const byId = new Map(visible.map((t) => [t.id, t]));
+    const claimed = new Set<string>();
+    const groups: { key: string; name: string; sectionId?: string; items: ThreadSummary[] }[] =
+      [];
+    for (const s of secList) {
+      const items: ThreadSummary[] = [];
+      for (const id of s.threadIds ?? []) {
+        const t = byId.get(id);
+        if (t && !t.archived) {
+          items.push(t);
+          claimed.add(id);
+        } else if (t && showArchived && t.archived) {
+          items.push(t);
+          claimed.add(id);
+        }
+      }
+      groups.push({ key: s.sectionId, name: s.name, sectionId: s.sectionId, items });
+    }
+    const rest = visible.filter((t) => !claimed.has(t.id));
+    groups.push({ key: "__root", name: "会话", items: rest });
+    return groups;
+  }, [secList, visible, showArchived]);
+
+  const renderRow = (t: ThreadSummary) => {
+    const rel = formatRelative(t.updated_ms);
+    if (editingId === t.id) {
+      return (
+        <li key={t.id}>
+          <div className="row-edit">
+            <input
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitRename(t.id);
+                if (e.key === "Escape") setEditingId(null);
+              }}
+              onBlur={() => commitRename(t.id)}
+              maxLength={48}
+            />
+          </div>
+        </li>
+      );
+    }
+    return (
+      <li key={t.id} className={`row-wrap${t.archived ? " is-archived" : ""}`}>
+        <button
+          type="button"
+          className={activeId === t.id ? "active" : ""}
+          onClick={() => onResume(t.id)}
+          onDoubleClick={() => {
+            setDraft(t.title || t.id);
+            setEditingId(t.id);
+          }}
+          onMouseEnter={onRowEnter}
+          onMouseLeave={onRowLeave}
+          title={[
+            t.title || t.id,
+            rel ? `更新 ${rel}` : "",
+            t.records != null && t.records > 0 ? `${t.records} 条` : "",
+            t.archived ? "已归档" : "",
+            t.state ?? "",
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        >
+          <span className="title">
+            <span className="title-text">{t.title || t.id}</span>
+          </span>
+          {rel && <span className="rel">{rel}</span>}
+        </button>
+        <span className="row-actions">
+          <button
+            type="button"
+            className="row-icon"
+            aria-label={t.archived ? "取消归档" : "归档会话"}
+            title={t.archived ? "取消归档" : "归档"}
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirmDelId(null);
+              onArchive?.(t.id, !t.archived);
+            }}
+          >
+            <Icon name="archive" size={14} />
+          </button>
+          <button
+            type="button"
+            className="row-icon"
+            aria-label="重命名"
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirmDelId(null);
+              setDraft(t.title || t.id);
+              setEditingId(t.id);
+            }}
+          >
+            <Icon name="edit" size={14} />
+          </button>
+          <button
+            type="button"
+            className={`row-icon ${confirmDelId === t.id ? "armed" : ""}`}
+            aria-label={confirmDelId === t.id ? "再次点击删除" : "删除会话"}
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditingId(null);
+              if (confirmDelId !== t.id) {
+                setConfirmDelId(t.id);
+                return;
+              }
+              setConfirmDelId(null);
+              onDelete(t.id);
+            }}
+          >
+            <Icon name="trash" size={14} />
+          </button>
+        </span>
+      </li>
+    );
   };
 
   return (
@@ -220,10 +355,30 @@ export function Sidebar({
         )}
       </div>
 
-      {/* IA-20 会话分区标题 —— 让「会话管理」可见 */}
+      {/* 分区标题 + 归档筛选 + 新建分区 */}
       <div className="sidebar-section list-head">
         <span className="list-label">会话</span>
-        <span className="list-count">{filtered.length}</span>
+        <span className="list-count">{visible.length}</span>
+        {archivedCount > 0 && (
+          <button
+            type="button"
+            className={`list-filter${showArchived ? " on" : ""}`}
+            title={`显示/隐藏已归档（${archivedCount}）`}
+            onClick={() => setShowArchived((v) => !v)}
+          >
+            <Icon name="archive" size={12} />
+            {archivedCount}
+          </button>
+        )}
+        <button
+          type="button"
+          className="list-new"
+          title="新建分区（threadSection/create）"
+          aria-label="新建分区"
+          onClick={() => setNewSectionName((s) => (s === "" ? " " : ""))}
+        >
+          <Icon name="plus" size={13} />
+        </button>
         <button
           type="button"
           className="list-new"
@@ -231,104 +386,52 @@ export function Sidebar({
           aria-label="新建会话"
           onClick={onNew}
         >
-          <Icon name="plus" size={13} />
+          <Icon name="chat" size={13} />
         </button>
       </div>
+      {newSectionName !== "" && (
+        <div className="section-add-row">
+          <input
+            autoFocus
+            value={newSectionName.trim() === "" && newSectionName === " " ? "" : newSectionName}
+            placeholder="分区名 · Enter 创建"
+            onChange={(e) => setNewSectionName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && newSectionName.trim()) {
+                onCreateSection?.(newSectionName.trim());
+                setNewSectionName("");
+              }
+              if (e.key === "Escape") setNewSectionName("");
+            }}
+            maxLength={64}
+          />
+        </div>
+      )}
 
-      <ul className="sidebar-list">
-        {threads.length === 0 && (
-          <li>
-            <button type="button" className="active">
-              <span className="title">当前任务</span>
-            </button>
-          </li>
-        )}
-        {filtered.length === 0 && threads.length > 0 && (
-          <li className="sidebar-empty">无匹配会话</li>
-        )}
-        {filtered.map((t) => {
-          const rel = formatRelative(t.updated_ms);
-          if (editingId === t.id) {
-            return (
-              <li key={t.id}>
-                <div className="row-edit">
-                  <input
-                    autoFocus
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") commitRename(t.id);
-                      if (e.key === "Escape") setEditingId(null);
-                    }}
-                    onBlur={() => commitRename(t.id)}
-                    maxLength={48}
-                  />
-                </div>
+      {grouped.map((g) => (
+        <div key={g.key} className="sidebar-group">
+          {(g.sectionId || g.items.length > 0) && (
+            <div className="sidebar-group-head">
+              <span>{g.name}</span>
+              <span className="list-count">{g.items.length}</span>
+            </div>
+          )}
+          <ul className="sidebar-list">
+            {g.key === "__root" && visible.length === 0 && (
+              <li>
+                <button type="button" className="active">
+                  <span className="title">当前任务</span>
+                </button>
               </li>
-            );
-          }
-          return (
-            <li key={t.id} className="row-wrap">
-              <button
-                type="button"
-                className={activeId === t.id ? "active" : ""}
-                onClick={() => onResume(t.id)}
-                onDoubleClick={() => {
-                  setDraft(t.title || t.id);
-                  setEditingId(t.id);
-                }}
-                onMouseEnter={onRowEnter}
-                onMouseLeave={onRowLeave}
-                title={[
-                  t.title || t.id,
-                  rel ? `更新 ${rel}` : "",
-                  t.records != null && t.records > 0 ? `${t.records} 条` : "",
-                  t.state ?? "",
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              >
-                <span className="title">
-                  <span className="title-text">{t.title || t.id}</span>
-                </span>
-                {rel && <span className="rel">{rel}</span>}
-              </button>
-              <span className="row-actions">
-                <button
-                  type="button"
-                  className="row-icon"
-                  aria-label="重命名"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setConfirmDelId(null);
-                    setDraft(t.title || t.id);
-                    setEditingId(t.id);
-                  }}
-                >
-                  <Icon name="edit" size={14} />
-                </button>
-                <button
-                  type="button"
-                  className={`row-icon ${confirmDelId === t.id ? "armed" : ""}`}
-                  aria-label={confirmDelId === t.id ? "再次点击删除" : "删除会话"}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setEditingId(null);
-                    if (confirmDelId !== t.id) {
-                      setConfirmDelId(t.id);
-                      return;
-                    }
-                    setConfirmDelId(null);
-                    onDelete(t.id);
-                  }}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
-              </span>
-            </li>
-          );
-        })}
-      </ul>
+            )}
+            {g.key === "__root" && showArchived === false && visible.length > 0 && false}
+            {g.items.length === 0 && g.sectionId && (
+              <li className="sidebar-empty">空分区 · 拖拽将接入 move</li>
+            )}
+            {g.items.map(renderRow)}
+          </ul>
+        </div>
+      ))}
       {filesFoot && <div className="sidebar-foot">{filesFoot}</div>}
     </aside>
   );

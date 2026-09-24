@@ -1,5 +1,15 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ExecMode } from "../lib/rpc";
+import {
+  configRead,
+  listSkills,
+  marketplaceAdd,
+  marketplaceRemove,
+  pluginInstall,
+  pluginList,
+  pluginUninstall,
+} from "../lib/rpc";
+import type { PluginInfo, SkillInfo } from "../lib/protocol";
 import { Icon } from "./Icon";
 import { Select } from "./Select";
 
@@ -40,10 +50,48 @@ export function SettingsModal({
   workspaceRoot: string;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [skillsErr, setSkillsErr] = useState<string | null>(null);
+  const [plugins, setPlugins] = useState<PluginInfo[]>([]);
+  const [markets, setMarkets] = useState<{ name: string; source: string }[]>([]);
+  const [pluginErr, setPluginErr] = useState<string | null>(null);
+  const [mktName, setMktName] = useState("");
+  const [mktSource, setMktSource] = useState("");
+  const [busyPlugin, setBusyPlugin] = useState<string | null>(null);
+  const [configSummary, setConfigSummary] = useState<string>("");
+
+  const reloadPlugins = useCallback(async () => {
+    try {
+      const r = await pluginList();
+      setPlugins(r.plugins ?? []);
+      setMarkets(r.marketplaces ?? []);
+      setPluginErr(null);
+    } catch (e) {
+      setPluginErr(String(e));
+    }
+  }, []);
 
   useEffect(() => {
-    if (open) requestAnimationFrame(() => closeRef.current?.focus());
-  }, [open]);
+    if (!open) return;
+    requestAnimationFrame(() => closeRef.current?.focus());
+    void listSkills()
+      .then((r) => {
+        setSkills(r.skills ?? []);
+        setSkillsErr(null);
+      })
+      .catch((e) => setSkillsErr(String(e)));
+    void reloadPlugins();
+    void configRead()
+      .then((c) => {
+        const bits = [
+          c.model ? `model=${c.model}` : null,
+          c.exec_mode ? `mode=${c.exec_mode}` : null,
+          c.sandbox_mode ? `sandbox=${c.sandbox_mode}` : null,
+        ].filter(Boolean);
+        setConfigSummary(bits.join(" · ") || "—");
+      })
+      .catch(() => setConfigSummary("—"));
+  }, [open, reloadPlugins]);
 
   const shortcuts = useMemo(
     () =>
@@ -56,6 +104,7 @@ export function SettingsModal({
         ["⌘,", "设置"],
         ["⇧Tab", "循环执行模式"],
         ["Esc", "中断生成"],
+        ["Enter（生成中）", "转向当前轮 turn/steer"],
       ] as const,
     [],
   );
@@ -142,6 +191,129 @@ export function SettingsModal({
                 {workspaceRoot || "—"}
               </code>
             </div>
+            <div className="settings-row">
+              <span>config/read</span>
+              <code className="settings-path" title={configSummary}>
+                {configSummary}
+              </code>
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <h3>技能</h3>
+            {skillsErr && <p className="muted error-text">{skillsErr}</p>}
+            {!skillsErr && skills.length === 0 && (
+              <p className="muted">未加载到技能（skills/list 空表）</p>
+            )}
+            <ul className="settings-list">
+              {skills.map((s) => (
+                <li key={s.name} title={s.description}>
+                  <code>${s.name}</code>
+                  <span className="muted">{s.description || ""}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <section className="settings-section">
+            <h3>插件市场</h3>
+            <p className="muted">
+              本地磁盘市场 · 无账号 · 只复制资源不执行 · plugin/share 不做
+            </p>
+            <div className="settings-row">
+              <span>市场源</span>
+              <div className="mkt-add">
+                <input
+                  value={mktName}
+                  placeholder="名称 local"
+                  onChange={(e) => setMktName(e.target.value)}
+                />
+                <input
+                  value={mktSource}
+                  placeholder="/abs/path/to/market"
+                  onChange={(e) => setMktSource(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={!mktName.trim() || !mktSource.trim()}
+                  onClick={() => {
+                    void marketplaceAdd(mktName.trim(), mktSource.trim())
+                      .then(() => {
+                        setMktName("");
+                        setMktSource("");
+                        return reloadPlugins();
+                      })
+                      .catch((e) => setPluginErr(String(e)));
+                  }}
+                >
+                  注册
+                </button>
+              </div>
+            </div>
+            {markets.length > 0 && (
+              <ul className="settings-list">
+                {markets.map((m) => (
+                  <li key={m.name}>
+                    <code>{m.name}</code>
+                    <span className="muted" title={m.source}>
+                      {m.source}
+                    </span>
+                    <button
+                      type="button"
+                      className="ghost-btn"
+                      onClick={() => {
+                        void marketplaceRemove(m.name)
+                          .then(() => reloadPlugins())
+                          .catch((e) => setPluginErr(String(e)));
+                      }}
+                    >
+                      移除
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {pluginErr && <p className="muted error-text">{pluginErr}</p>}
+            <ul className="settings-list">
+              {plugins.map((p) => {
+                const id = p.id || p.name || "?";
+                return (
+                  <li key={id}>
+                    <Icon name="package" size={14} />
+                    <code>{p.name || p.id}</code>
+                    <span className="muted">{p.version || ""}</span>
+                    <span className={`mkt-badge ${p.installed ? "on" : ""}`}>
+                      {p.installed ? "已装" : "可装"}
+                    </span>
+                    <button
+                      type="button"
+                      className="ghost-btn"
+                      disabled={busyPlugin === id}
+                      onClick={() => {
+                        setBusyPlugin(id);
+                        const call = p.installed
+                          ? pluginUninstall(String(p.id ?? p.name))
+                          : pluginInstall(String(p.name ?? p.id));
+                        void call
+                          .then(() => reloadPlugins())
+                          .catch((e) => setPluginErr(String(e)))
+                          .finally(() => setBusyPlugin(null));
+                      }}
+                    >
+                      {busyPlugin === id
+                        ? "…"
+                        : p.installed
+                          ? "卸载"
+                          : "安装"}
+                    </button>
+                  </li>
+                );
+              })}
+              {plugins.length === 0 && !pluginErr && (
+                <li className="muted">暂无可安装插件 · 先注册市场源</li>
+              )}
+            </ul>
           </section>
 
           <section className="settings-section">

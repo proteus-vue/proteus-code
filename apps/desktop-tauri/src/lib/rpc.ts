@@ -5,6 +5,9 @@ import type {
   Decision,
   InitializeResult,
   ModelsResult,
+  PluginInfo,
+  SkillInfo,
+  ThreadSection,
   ThreadSummary,
   WireEvent,
 } from "./protocol";
@@ -184,6 +187,81 @@ export async function compactSession(): Promise<unknown> {
 }
 export async function commandExec(command: string): Promise<unknown> {
   return rpc("command/exec", { command });
+}
+
+/** 运行中转向当前轮（Codex `turn/steer`）。 */
+export async function steerTurn(text: string): Promise<unknown> {
+  return rpc("turn/steer", { text });
+}
+
+/** 归档 / 取消归档会话（Codex `thread/archive` / `unarchive`）。 */
+export async function archiveThread(id: string, archived: boolean): Promise<unknown> {
+  return rpc(archived ? "thread/archive" : "thread/unarchive", { id });
+}
+
+/** 线分区列表（Codex `threadSection/list`）。 */
+export async function listSections(): Promise<ThreadSection[]> {
+  const r = await rpc<{ sections?: ThreadSection[] }>("threadSection/list", {});
+  return r.sections ?? [];
+}
+
+export async function createSection(name: string): Promise<ThreadSection> {
+  return rpc<ThreadSection>("threadSection/create", { name });
+}
+
+export async function renameSection(sectionId: string, name: string): Promise<unknown> {
+  return rpc("threadSection/update", { sectionId, name });
+}
+
+export async function deleteSection(sectionId: string): Promise<unknown> {
+  return rpc("threadSection/delete", { sectionId });
+}
+
+/** 把线程移入分区；sectionId=null 移出。 */
+export async function moveThreadToSection(
+  threadId: string,
+  sectionId: string | null,
+): Promise<unknown> {
+  return rpc("thread/section/move", { threadId, sectionId });
+}
+
+export async function listSkills(): Promise<{ skills?: SkillInfo[] }> {
+  return rpc("skills/list", {});
+}
+
+export async function configRead(): Promise<Record<string, unknown>> {
+  return rpc("config/read", {});
+}
+
+export async function pluginList(): Promise<{
+  plugins?: PluginInfo[];
+  marketplaces?: { name: string; source: string }[];
+}> {
+  return rpc("plugin/list", {});
+}
+
+export async function pluginInstall(name: string): Promise<unknown> {
+  return rpc("plugin/install", { pluginName: name });
+}
+
+export async function pluginUninstall(id: string): Promise<unknown> {
+  return rpc("plugin/uninstall", { pluginId: id });
+}
+
+export async function marketplaceAdd(name: string, source: string): Promise<unknown> {
+  return rpc("marketplace/add", { name, source });
+}
+
+export async function marketplaceRemove(name: string): Promise<unknown> {
+  return rpc("marketplace/remove", { marketplaceName: name });
+}
+
+/** 模糊文件搜索（有界）。 */
+export async function fuzzyFileSearch(
+  query: string,
+  roots: string[],
+): Promise<{ matches?: { path: string; score?: number }[]; truncated?: boolean }> {
+  return rpc("fuzzyFileSearch", { query, roots });
 }
 
 export function onEvent(cb: (e: WireEvent) => void): Promise<UnlistenFn> {

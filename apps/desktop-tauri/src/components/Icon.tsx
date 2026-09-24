@@ -30,7 +30,9 @@ export type IconName =
   | "goal"
   | "subagents"
   | "automations"
-  | "palette";
+  | "palette"
+  | "archive"
+  | "package";
 
 const PATHS: Record<IconName, ReactElement> = {
   menu: <path d="M4 7h16M4 12h16M4 17h16" />,
@@ -137,6 +139,17 @@ const PATHS: Record<IconName, ReactElement> = {
       <circle cx="9" cy="10" r="1" fill="currentColor" stroke="none" />
       <circle cx="12" cy="8" r="1" fill="currentColor" stroke="none" />
       <circle cx="15" cy="10" r="1" fill="currentColor" stroke="none" />
+    </>
+  ),
+  archive: (
+    <>
+      <path d="M4 7h16v3H4zM5.5 10v9h13v-9M10 14h4" />
+    </>
+  ),
+  package: (
+    <>
+      <path d="M12 3.5 4.5 7.5v9L12 20.5l7.5-4v-9L12 3.5Z" />
+      <path d="M4.5 7.5 12 11.5l7.5-4M12 11.5v9" />
     </>
   ),
 };
