@@ -17,6 +17,7 @@ import {
   pluginReconcile,
   pluginUninstall,
   skillsConfigWrite,
+  skillsExtraRootsSet,
 } from "../lib/rpc";
 import type { PluginInfo, SkillInfo } from "../lib/protocol";
 import { Icon } from "./Icon";
@@ -317,18 +318,12 @@ export function SettingsModal({
                   className="primary"
                   disabled={!extraRoot.trim()}
                   onClick={() => {
-                    void (async () => {
-                      try {
-                        const r = await import("../lib/rpc").then((m) =>
-                          m.skillsExtraRootsSet([extraRoot.trim()]),
-                        );
+                    void skillsExtraRootsSet([extraRoot.trim()])
+                      .then(() => {
                         setDiagNote("extraRoots 已写入（重启 app-server 生效）");
                         setExtraRoot("");
-                        return r;
-                      } catch (e) {
-                        setDiagNote(String(e));
-                      }
-                    })();
+                      })
+                      .catch((e) => setDiagNote(String(e)));
                   }}
                 >
                   设置
