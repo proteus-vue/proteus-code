@@ -2076,17 +2076,20 @@ export default function App() {
               {splitFileRefs(input).map((seg, i) =>
                 seg.ref ? (
                   <span key={i} className="ref-token">
-                    <svg className="ref-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden>
+                    <svg className="ref-icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden>
                       <path
-                        d="M6.5 3.75h7.25L18 8v12.25H6.5V3.75z"
                         fill="currentColor"
-                        fillOpacity="0.2"
-                        stroke="currentColor"
-                        strokeWidth="1.85"
-                        strokeLinejoin="round"
+                        fillRule="evenodd"
+                        clipRule="evenodd"
+                        d="M6.25 3.25A1.75 1.75 0 0 1 8 1.5h5.35c.46 0 .9.18 1.23.51l5.15 5.15c.33.33.51.77.51 1.23V20.75A1.75 1.75 0 0 1 18.5 22.5h-10.5a1.75 1.75 0 0 1-1.75-1.75V3.25Zm7.35 2.1v3.4c0 .47.38.85.85.85h3.4l-4.25-4.25Z"
                       />
-                      <path d="M13.5 3.75V8H18" strokeWidth="1.85" fill="none" />
-                      <path d="M9 12.25h6M9 15.5h4.5" strokeWidth="1.85" fill="none" />
+                      <path
+                        d="M8.75 13.25h6.5M8.75 16.5h4.25"
+                        stroke="#fff"
+                        strokeOpacity="0.55"
+                        strokeWidth="1.4"
+                        strokeLinecap="round"
+                      />
                     </svg>
                     {seg.text}
                   </span>

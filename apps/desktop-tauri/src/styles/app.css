@@ -6113,10 +6113,10 @@ button.ctx-chip:hover {
   z-index: 0;
 }
 
-/* 路径：红文件图标 + 蓝文字；图标绝对定位，不占正文宽度 → 光标对齐 */
+/* 路径引用：实心文档 + 同色路径字；图标 absolute，不占正文宽 → 光标对齐 */
 .composer-input-mirror .ref-token {
   position: relative;
-  color: var(--accent, #2563eb);
+  color: var(--accent, #ff6a2b);
   background: none;
   border: none;
   border-radius: 0;
@@ -6129,19 +6129,23 @@ button.ctx-chip:hover {
   right: 100%;
   top: 50%;
   transform: translateY(-50%);
-  width: 14px;
-  height: 14px;
-  margin-right: 4px;
-  color: #e11d48;
+  width: 15px;
+  height: 15px;
+  margin-right: 5px;
+  color: inherit;
   pointer-events: none;
   overflow: visible;
 }
 
-/* 行首时图标可能贴边：给 ref 前留出视觉空间仍不改正文流 */
+/* 行首：图标仍 absolute 贴左，给输入框 padding 让出位 */
 .composer-input-mirror .ref-token:first-child .ref-icon,
 .composer-input-mirror > span:first-child.ref-token .ref-icon {
   right: auto;
-  left: -18px;
+  left: -20px;
+}
+
+.composer-input-wrap {
+  padding-left: 2px;
 }
 
 /* 正文由镜像绘制；textarea 只负责光标/输入 */
