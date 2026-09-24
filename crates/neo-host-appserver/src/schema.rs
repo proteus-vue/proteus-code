@@ -200,6 +200,29 @@ pub struct FsPathParams {
     pub path: String,
 }
 
+/// `fs/copy` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct FsCopyParams {
+    #[serde(alias = "source")]
+    pub from: String,
+    #[serde(alias = "destination")]
+    pub to: String,
+}
+
+/// Codex `thread/archive` 的 threadId。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct ThreadIdParams {
+    #[serde(alias = "threadId", alias = "thread_id")]
+    pub id: String,
+}
+
+/// Codex `thread/read`。
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
+pub struct ThreadReadParams {
+    #[serde(alias = "threadId", alias = "thread_id")]
+    pub id: String,
+}
+
 /// `fs/writeFile` 参数。
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
 pub struct FsWriteParams {
@@ -309,6 +332,9 @@ pub const ROOT_TYPES: &[&str] = &[
     "ItemsListParams",
     "TurnsListParams",
     "FsPathParams",
+    "FsCopyParams",
+    "ThreadIdParams",
+    "ThreadReadParams",
     "FsWriteParams",
     "ExecWriteParams",
     "ExecResizeParams",
@@ -365,6 +391,9 @@ pub fn json_schema_document() -> Value {
     add!(ItemsListParams);
     add!(TurnsListParams);
     add!(FsPathParams);
+    add!(FsCopyParams);
+    add!(ThreadIdParams);
+    add!(ThreadReadParams);
     add!(FsWriteParams);
     add!(ExecWriteParams);
     add!(ExecResizeParams);
@@ -535,6 +564,9 @@ pub fn typescript_source() -> String {
     emit!(ItemsListParams);
     emit!(TurnsListParams);
     emit!(FsPathParams);
+    emit!(FsCopyParams);
+    emit!(ThreadIdParams);
+    emit!(ThreadReadParams);
     emit!(FsWriteParams);
     emit!(ExecWriteParams);
     emit!(ExecResizeParams);
@@ -600,7 +632,7 @@ mod tests {
     fn method_docs_cover_all_ops() {
         let docs = method_docs();
         // initialize + 17 个 Op + 10 个 control
-        assert_eq!(docs.len(), 49, "方法表 initialize + 19 Op + 25 control + aliases");
+        assert_eq!(docs.len(), 61, "方法表 initialize + 19 Op + 37 control + aliases");
         assert!(docs[0].handshake_only);
         assert_eq!(docs[0].name, "initialize");
         assert!(docs.iter().any(|d| d.name == "thread/resume"));

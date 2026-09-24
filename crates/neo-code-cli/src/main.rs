@@ -716,6 +716,7 @@ fn thread_cmd(
                 neo_session::SessionState::Interrupted => "interrupted",
                 neo_session::SessionState::Empty => "empty",
             },
+            "archived": m.archived,
         })
     }
 
@@ -879,6 +880,135 @@ fn thread_cmd(
                 "events_replayed": events.len(),
                 "items": items,
             }))
+        }
+        ThreadCmd::Archive { id, archived } => {
+            if !store.exists(&id) {
+                return ThreadResult::Error(format!("会话 {id} 不存在"));
+            }
+            match store.set_archived(&id, archived) {
+                Ok(_) => ThreadResult::Value(serde_json::json!({
+                    "id": id,
+                    "archived": archived,
+                })),
+                Err(e) => ThreadResult::Error(e.to_string()),
+            }
+        }
+        ThreadCmd::HooksList => {
+            // 诚实边界：尚无 hooks 系统 —— 空列表而不是编造条目
+            ThreadResult::Value(serde_json::json!({ "hooks": [] }))
+        }
+        ThreadCmd::McpServerStatusList => {
+            let specs = neo_mcp::config::load_user_config().unwrap_or_else(|_| vec![]);
+            let tools: Vec<String> = kernel
+                .tool_schemas()
+                .into_iter()
+                .filter(|t| t.name.starts_with("mcp__"))
+                .map(|t| t.name.clone())
+                .collect();
+            let servers: Vec<serde_json::Value> = specs
+                .iter()
+                .map(|s| {
+                    let prefix = format!("mcp__{}__", s.name.replace('-', "_"));
+                    let n = tools.iter().filter(|t| t.starts_with(&prefix)).count();
+                    serde_json::json!({
+                        "name": s.name,
+                        "transport": if s.command.is_empty() { "http" } else { "stdio" },
+                        "tools_registered": n,
+                        "status": if n > 0 { "connected" } else { "configured" },
+                    })
+                })
+                .collect();
+            ThreadResult::Value(serde_json::json!({ "servers": servers }))
+        }
+        ThreadCmd::PermissionProfileList => {
+            let current = kernel.exec_mode();
+            let profiles: Vec<serde_json::Value> = [
+                ("plan", "只读计划"),
+                ("confirm_before", "变更前确认"),
+                ("default", "默认"),
+                ("auto_edit", "自动编辑"),
+                ("full_access", "完全访问"),
+            ]
+            .iter()
+            .map(|(id, label)| {
+                serde_json::json!({
+                    "id": id,
+                    "label": label,
+                    "current": serde_json::to_value(current)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s == *id))
+                        .unwrap_or(false),
+                })
+            })
+            .collect();
+            ThreadResult::Value(serde_json::json!({ "profiles": profiles }))
+        }
+        ThreadCmd::ModelProviderCapabilities => {
+            let current = kernel.current_model().to_string();
+            let models: Vec<serde_json::Value> = kernel
+                .available_models()
+                .into_iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "name": m.name,
+                        "description": m.description,
+                        "context_limit": m.context_limit,
+                        "production": m.production,
+                        "current": m.name == current,
+                    })
+                })
+                .collect();
+            ThreadResult::Value(serde_json::json!({
+                "current": current,
+                "models": models,
+            }))
+        }
+        ThreadCmd::FsCopy { from, to } => {
+            let src = fs_resolve(kernel.cwd(), &from);
+            let dst = fs_resolve(kernel.cwd(), &to);
+            match std::fs::copy(&src, &dst) {
+                Ok(bytes) => ThreadResult::Value(serde_json::json!({
+                    "from": src.display().to_string(),
+                    "to": dst.display().to_string(),
+                    "bytes": bytes,
+                })),
+                Err(e) => ThreadResult::Error(format!(
+                    "复制失败：{} → {}（{e}）",
+                    src.display(),
+                    dst.display()
+                )),
+            }
+        }
+        ThreadCmd::FsCreateDirectory { path } => {
+            let full = fs_resolve(kernel.cwd(), &path);
+            match std::fs::create_dir_all(&full) {
+                Ok(()) => ThreadResult::Value(serde_json::json!({
+                    "path": full.display().to_string(),
+                    "created": true,
+                })),
+                Err(e) => ThreadResult::Error(format!("建目录失败：{}（{e}）", full.display())),
+            }
+        }
+        ThreadCmd::FsRemove { path } => {
+            let full = fs_resolve(kernel.cwd(), &path);
+            let meta = match std::fs::metadata(&full) {
+                Ok(m) => m,
+                Err(e) => {
+                    return ThreadResult::Error(format!("删除失败：{}（{e}）", full.display()))
+                }
+            };
+            let res = if meta.is_dir() {
+                std::fs::remove_dir_all(&full)
+            } else {
+                std::fs::remove_file(&full)
+            };
+            match res {
+                Ok(()) => ThreadResult::Value(serde_json::json!({
+                    "path": full.display().to_string(),
+                    "removed": true,
+                })),
+                Err(e) => ThreadResult::Error(format!("删除失败：{}（{e}）", full.display())),
+            }
         }
         ThreadCmd::GoalGet => match kernel.goal_snapshot() {
             Some(snap) => ThreadResult::Value(serde_json::json!({ "goal": snap })),

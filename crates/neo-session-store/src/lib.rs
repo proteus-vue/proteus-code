@@ -48,6 +48,8 @@ pub struct SessionMeta {
     pub changes: Option<(usize, usize)>,
     /// 结束状态（见 [`SessionState`]）。
     pub state: SessionState,
+    /// 是否已归档（`thread/archive`；仍在同一 JSONL 内 append-only 标记）。
+    pub archived: bool,
 }
 
 impl SessionMeta {
@@ -110,6 +112,7 @@ impl SessionStore {
                 path,
                 changes: sum.changes,
                 state: sum.state,
+                archived: sum.archived,
             });
         }
         // 最近修改优先；无法取时间的排在后面（按 id 稳定排序）
@@ -160,6 +163,32 @@ impl SessionStore {
         Ok(true)
     }
 
+    /// 用户改名 / 归档：向会话 JSONL **追加**一条 `kind=op` 记录。
+    ///
+    /// `set_title` 与 `set_archived` 共用追加逻辑 —— 两种元数据都不另开
+    /// 旁路文件，避免第二真相源。
+    fn append_op(&self, id: &str, payload: serde_json::Value) -> std::io::Result<bool> {
+        use std::io::Write;
+        let path = self.path_for(id);
+        if !path.exists() {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+        }
+        let seq = tail_max_seq(&path).unwrap_or(0) + 1;
+        let line = serde_json::json!({
+            "v": 1u32,
+            "ts": "1970-01-01T00:00:00Z",
+            "seq": seq,
+            "kind": "op",
+            "payload": payload,
+        });
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        writeln!(f, "{line}")?;
+        f.flush()?;
+        Ok(true)
+    }
+
     /// 用户改名：向会话 JSONL **追加**一条 `op/set_title`（append-only，
     /// 不改写既有字节）。列举时该标题覆盖首条用户消息派生的自动标题。
     ///
@@ -169,8 +198,6 @@ impl SessionStore {
     ///
     /// 不维护旁路标题文件 —— 否则出现第二个真相源（删文件/改 id 时标题漂移）。
     pub fn set_title(&self, id: &str, title: &str) -> std::io::Result<bool> {
-        use std::io::Write;
-        let path = self.path_for(id);
         let title = title.trim();
         if title.is_empty() {
             return Err(std::io::Error::new(
@@ -178,25 +205,16 @@ impl SessionStore {
                 "标题不能为空",
             ));
         }
-        if !path.exists() {
-            // 惰性 create 的会话：允许建文件（调用方已保证 id 合法）
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-        }
         let title: String = title.chars().take(48).collect();
-        let seq = tail_max_seq(&path).unwrap_or(0) + 1;
-        let line = serde_json::json!({
-            "v": 1u32,
-            "ts": "1970-01-01T00:00:00Z",
-            "seq": seq,
-            "kind": "op",
-            "payload": {"set_title": {"title": title}},
-        });
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
-        writeln!(f, "{line}")?;
-        f.flush()?;
-        Ok(true)
+        self.append_op(id, serde_json::json!({ "set_title": { "title": title } }))
+    }
+
+    /// 归档 / 取消归档（Codex `thread/archive` / `thread/unarchive`）。
+    pub fn set_archived(&self, id: &str, archived: bool) -> std::io::Result<bool> {
+        if !self.path_for(id).exists() && !archived {
+            return Ok(false);
+        }
+        self.append_op(id, serde_json::json!({ "set_archived": { "archived": archived } }))
     }
 
     /// 会话是否存在。
@@ -249,6 +267,7 @@ struct Summary {
     /// 最后一个 `files_changed` 的合计（覆盖语义，见 `SessionMeta::changes`）
     changes: Option<(usize, usize)>,
     state: SessionState,
+    archived: bool,
 }
 
 /// 文件里已出现的最大 seq（追加改名用；与 JsonlWriter 尾读同义）。
@@ -299,6 +318,15 @@ fn read_summary(path: &Path) -> Option<Summary> {
                 if !t.is_empty() {
                     out.custom_title = Some(t.chars().take(48).collect());
                 }
+                continue;
+            }
+            // 归档标记：后写覆盖
+            if let Some(a) = p
+                .get("set_archived")
+                .and_then(|s| s.get("archived"))
+                .and_then(|v| v.as_bool())
+            {
+                out.archived = a;
                 continue;
             }
             // 自动标题：第一条带非空文本的 user_turn
@@ -592,6 +620,22 @@ mod tests {
         let s = SessionStore::open(&d);
         let id = s.new_id();
         assert_eq!(sanitize_id(&id), id, "new_id 产出的应当是安全文件名");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn archive_flag_round_trips_in_list() {
+        let d = tmpdir("archive");
+        let store = SessionStore::open(&d);
+        write_events(&store, "s-1", "任务", vec![
+            serde_json::json!({"turn_started": {"turn_id": "t1"}}),
+            serde_json::json!({"turn_complete": {"input_tokens": 1, "output_tokens": 1}}),
+        ]);
+        assert!(!store.list()[0].archived, "默认未归档");
+        store.set_archived("s-1", true).unwrap();
+        assert!(store.list()[0].archived, "归档后应可见");
+        store.set_archived("s-1", false).unwrap();
+        assert!(!store.list()[0].archived, "取消归档应回到 false");
         let _ = std::fs::remove_dir_all(&d);
     }
 

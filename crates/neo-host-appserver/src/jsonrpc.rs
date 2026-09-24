@@ -161,6 +161,22 @@ pub enum ThreadCmd {
     FsGetMetadata { path: String },
     /// `fs/readDirectory`
     FsReadDirectory { path: String },
+    /// `fs/copy`
+    FsCopy { from: String, to: String },
+    /// `fs/createDirectory`
+    FsCreateDirectory { path: String },
+    /// `fs/remove`
+    FsRemove { path: String },
+    /// `thread/archive` / `thread/unarchive`
+    Archive { id: String, archived: bool },
+    /// `hooks/list`（当前无 hooks 系统：如实空列表）
+    HooksList,
+    /// `mcpServerStatus/list`
+    McpServerStatusList,
+    /// `permissionProfile/list`（ExecMode 即权限档）
+    PermissionProfileList,
+    /// `modelProvider/capabilities/read`
+    ModelProviderCapabilities,
 }
 
 /// 除 `initialize` 外的全部方法名（按 `Op` 变体逐个对应，18 个）。
@@ -209,24 +225,36 @@ pub const THREAD_METHODS: &[&str] = &[
     "thread/get",
     "thread/resume",
     "thread/create",
+    "thread/start",
     "thread/delete",
     "thread/rename",
     "thread/name/set",
     "thread/history",
+    "thread/read",
     "thread/export",
     "thread/goal/get",
     "thread/items/list",
     "thread/turns/list",
+    "thread/archive",
+    "thread/unarchive",
+    "thread/loaded/list",
     "tools/list",
     "models/list",
     "model/list",
     "git/info",
     "skills/list",
     "config/read",
+    "hooks/list",
+    "mcpServerStatus/list",
+    "permissionProfile/list",
+    "modelProvider/capabilities/read",
     "fs/readFile",
     "fs/writeFile",
     "fs/getMetadata",
     "fs/readDirectory",
+    "fs/copy",
+    "fs/createDirectory",
+    "fs/remove",
     "command/exec/write",
     "command/exec/resize",
     "command/exec/terminate",
@@ -306,12 +334,17 @@ fn allowed_keys(method: &str) -> Option<&'static [&'static str]> {
         "thread/get" | "thread/resume" | "thread/delete" => &["id"],
         "thread/rename" => &["id", "title"],
         "thread/name/set" => &["id", "title", "threadId", "thread_id", "name", "title"],
-        "thread/history" | "thread/items/list" | "thread/turns/list" => &["id", "threadId", "thread_id", "limit"],
+        "thread/history" | "thread/items/list" | "thread/turns/list" | "thread/read" => &["id", "threadId", "thread_id", "limit"],
         "thread/export" => &["id", "format"],
-        "thread/list" | "thread/create" | "tools/list" | "models/list" | "model/list" => &[],
+        "thread/archive" | "thread/unarchive" => &["id", "threadId", "thread_id"],
+        "thread/list" | "thread/create" | "thread/start" | "thread/loaded/list"
+        | "tools/list" | "models/list" | "model/list"
+        | "hooks/list" | "mcpServerStatus/list" | "permissionProfile/list"
+        | "modelProvider/capabilities/read" => &[],
         "git/info" => &["cwd"],
-        "fs/readFile" | "fs/getMetadata" | "fs/readDirectory" => &["path"],
+        "fs/readFile" | "fs/getMetadata" | "fs/readDirectory" | "fs/createDirectory" | "fs/remove" => &["path"],
         "fs/writeFile" => &["path", "data", "data_base64", "dataBase64"],
+        "fs/copy" => &["from", "to", "source", "destination"],
         "command/exec/write" => &["session_id", "data"],
         "command/exec/resize" => &["session_id", "cols", "rows"],
         "command/exec/terminate" => &["session_id"],
@@ -464,6 +497,7 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             let p: NameSetParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::NameSet { id: p.id, title: p.title })
         }
+        "thread/start" => Action::Thread(ThreadCmd::Create),
         "thread/goal/get" => Action::Thread(ThreadCmd::GoalGet),
         "thread/items/list" => {
             let p: ItemsListParams = from_params(method, params)?;
@@ -473,8 +507,25 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
             let p: TurnsListParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::TurnsList { id: p.id, limit: p.limit })
         }
+        "thread/read" => {
+            let p: ThreadReadParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::History { id: Some(p.id) })
+        }
+        "thread/archive" => {
+            let p: ThreadIdParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::Archive { id: p.id, archived: true })
+        }
+        "thread/unarchive" => {
+            let p: ThreadIdParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::Archive { id: p.id, archived: false })
+        }
+        "thread/loaded/list" => Action::Thread(ThreadCmd::List),
         "skills/list" => Action::Thread(ThreadCmd::SkillsList),
         "config/read" => Action::Thread(ThreadCmd::ConfigRead),
+        "hooks/list" => Action::Thread(ThreadCmd::HooksList),
+        "mcpServerStatus/list" => Action::Thread(ThreadCmd::McpServerStatusList),
+        "permissionProfile/list" => Action::Thread(ThreadCmd::PermissionProfileList),
+        "modelProvider/capabilities/read" => Action::Thread(ThreadCmd::ModelProviderCapabilities),
         "fs/readFile" => {
             let p: FsPathParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::FsReadFile { path: p.path })
@@ -486,6 +537,18 @@ pub fn dispatch(method: &str, params: &Value) -> Result<Action, RpcError> {
         "fs/readDirectory" => {
             let p: FsPathParams = from_params(method, params)?;
             Action::Thread(ThreadCmd::FsReadDirectory { path: p.path })
+        }
+        "fs/createDirectory" => {
+            let p: FsPathParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FsCreateDirectory { path: p.path })
+        }
+        "fs/remove" => {
+            let p: FsPathParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FsRemove { path: p.path })
+        }
+        "fs/copy" => {
+            let p: FsCopyParams = from_params(method, params)?;
+            Action::Thread(ThreadCmd::FsCopy { from: p.from, to: p.to })
         }
         "fs/writeFile" => {
             let p: FsWriteParams = from_params(method, params)?;
@@ -670,6 +733,28 @@ struct TurnsListParams {
 #[derive(Debug, Deserialize)]
 struct FsPathParams {
     path: String,
+}
+
+/// `fs/copy` 参数（Codex 用绝对路径 from/to；也接受 source/destination 别名）。
+#[derive(Debug, Deserialize)]
+struct FsCopyParams {
+    #[serde(alias = "source")]
+    from: String,
+    #[serde(alias = "destination")]
+    to: String,
+}
+
+/// Codex `thread/archive` / `thread/read` 的 threadId。
+#[derive(Debug, Deserialize)]
+struct ThreadIdParams {
+    #[serde(alias = "threadId", alias = "thread_id")]
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThreadReadParams {
+    #[serde(alias = "threadId", alias = "thread_id")]
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -872,8 +957,8 @@ mod tests {
         assert_eq!(ok["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(
             ok["methods"].as_array().map(Vec::len),
-            Some(49),
-            "initialize + 19 Op + 25 control + alias (deduped)"
+            Some(61),
+            "initialize + 19 Op + 37 control + aliases"
         );
 
         // 版本不匹配必须拒绝，且把双方版本放进 data（机器可读）

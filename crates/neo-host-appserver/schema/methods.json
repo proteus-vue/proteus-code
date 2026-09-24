@@ -168,6 +168,11 @@
     "handshake_only": false
   },
   {
+    "name": "thread/start",
+    "params": [],
+    "handshake_only": false
+  },
+  {
     "name": "thread/delete",
     "params": [
       "id"
@@ -196,6 +201,16 @@
   },
   {
     "name": "thread/history",
+    "params": [
+      "id",
+      "threadId",
+      "thread_id",
+      "limit"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/read",
     "params": [
       "id",
       "threadId",
@@ -238,6 +253,29 @@
     "handshake_only": false
   },
   {
+    "name": "thread/archive",
+    "params": [
+      "id",
+      "threadId",
+      "thread_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/unarchive",
+    "params": [
+      "id",
+      "threadId",
+      "thread_id"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "thread/loaded/list",
+    "params": [],
+    "handshake_only": false
+  },
+  {
     "name": "tools/list",
     "params": [],
     "handshake_only": false
@@ -270,6 +308,26 @@
     "handshake_only": false
   },
   {
+    "name": "hooks/list",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "mcpServerStatus/list",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "permissionProfile/list",
+    "params": [],
+    "handshake_only": false
+  },
+  {
+    "name": "modelProvider/capabilities/read",
+    "params": [],
+    "handshake_only": false
+  },
+  {
     "name": "fs/readFile",
     "params": [
       "path"
@@ -295,6 +353,30 @@
   },
   {
     "name": "fs/readDirectory",
+    "params": [
+      "path"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "fs/copy",
+    "params": [
+      "from",
+      "to",
+      "source",
+      "destination"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "fs/createDirectory",
+    "params": [
+      "path"
+    ],
+    "handshake_only": false
+  },
+  {
+    "name": "fs/remove",
     "params": [
       "path"
     ],

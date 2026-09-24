@@ -1562,6 +1562,24 @@
       "title": "FileChange",
       "type": "object"
     },
+    "FsCopyParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`fs/copy` 参数。",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "title": "FsCopyParams",
+      "type": "object"
+    },
     "FsPathParams": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`fs/readFile` 等路径参数。",
@@ -2648,6 +2666,34 @@
       "title": "TextParams",
       "type": "object"
     },
+    "ThreadIdParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Codex `thread/archive` 的 threadId。",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ThreadIdParams",
+      "type": "object"
+    },
+    "ThreadReadParams": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Codex `thread/read`。",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ThreadReadParams",
+      "type": "object"
+    },
     "ThreadSummary": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "会话库条目（`thread/list` / `thread/get` 的 result 元素）。\n\n字段对齐 `neo_session::SessionInfo`，但状态是**线格式字符串** ——\n客户端不该依赖 Rust 枚举的 Debug 形状。",
@@ -2856,24 +2902,36 @@
     "thread/get",
     "thread/resume",
     "thread/create",
+    "thread/start",
     "thread/delete",
     "thread/rename",
     "thread/name/set",
     "thread/history",
+    "thread/read",
     "thread/export",
     "thread/goal/get",
     "thread/items/list",
     "thread/turns/list",
+    "thread/archive",
+    "thread/unarchive",
+    "thread/loaded/list",
     "tools/list",
     "models/list",
     "model/list",
     "git/info",
     "skills/list",
     "config/read",
+    "hooks/list",
+    "mcpServerStatus/list",
+    "permissionProfile/list",
+    "modelProvider/capabilities/read",
     "fs/readFile",
     "fs/writeFile",
     "fs/getMetadata",
     "fs/readDirectory",
+    "fs/copy",
+    "fs/createDirectory",
+    "fs/remove",
     "command/exec/write",
     "command/exec/resize",
     "command/exec/terminate",
@@ -2922,6 +2980,9 @@
     "ItemsListParams",
     "TurnsListParams",
     "FsPathParams",
+    "FsCopyParams",
+    "ThreadIdParams",
+    "ThreadReadParams",
     "FsWriteParams",
     "ExecWriteParams",
     "ExecResizeParams",

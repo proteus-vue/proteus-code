@@ -112,7 +112,7 @@ fn handshake_reports_version_methods_and_host_capabilities() {
     assert_eq!(r["result"]["server"]["name"], "neo-app-server");
     // 方法表是契约的一部分：客户端据此知道内核能干什么
     let methods = r["result"]["methods"].as_array().expect("methods 必须是数组");
-    assert_eq!(methods.len(), 49, "initialize + 19 Op + 25 control + aliases");
+    assert_eq!(methods.len(), 61, "initialize + 19 Op + 37 control + aliases");
     assert!(methods.iter().any(|m| m == "turn/start"));
     assert!(methods.iter().any(|m| m == "turn/interrupt"), "中断必须在线上可达");
     assert!(methods.iter().any(|m| m == "turn/steer"), "Codex steer 必须可达");
@@ -455,6 +455,14 @@ fn thread_list_get_resume_create_delete_round_trip() {
                 ThreadCmd::Models => ThreadResult::Value(json!({"models": [{"name":"mock"}], "current": "mock"})),
                 ThreadCmd::GitInfo { .. } => ThreadResult::Value(json!({"in_repo": false})),
                 ThreadCmd::GoalGet => ThreadResult::Value(json!({"goal": null})),
+                ThreadCmd::Archive { id, archived } => ThreadResult::Value(json!({"id": id, "archived": archived})),
+                ThreadCmd::HooksList => ThreadResult::Value(json!({"hooks": []})),
+                ThreadCmd::McpServerStatusList => ThreadResult::Value(json!({"servers": []})),
+                ThreadCmd::PermissionProfileList => ThreadResult::Value(json!({"profiles": []})),
+                ThreadCmd::ModelProviderCapabilities => ThreadResult::Value(json!({"models": [], "current": "mock"})),
+                ThreadCmd::FsCopy { from, to } => ThreadResult::Value(json!({"from": from, "to": to, "bytes": 0})),
+                ThreadCmd::FsCreateDirectory { path } => ThreadResult::Value(json!({"path": path, "created": true})),
+                ThreadCmd::FsRemove { path } => ThreadResult::Value(json!({"path": path, "removed": true})),
                 ThreadCmd::NameSet { id, title } => ThreadResult::Value(json!({"id": id, "title": title})),
                 ThreadCmd::ItemsList { .. } => ThreadResult::Value(json!({"items": []})),
                 ThreadCmd::TurnsList { .. } => ThreadResult::Value(json!({"turns": []})),

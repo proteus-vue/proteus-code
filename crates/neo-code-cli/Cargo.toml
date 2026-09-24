@@ -41,6 +41,8 @@ neo-session-local = { path = "../neo-session-local", version = "0.1.0" }
 neo-session = { path = "../neo-session", version = "0.1.0" }
 neo-session-store = { path = "../neo-session-store", version = "0.1.0" }
 neo-providers = { path = "../neo-providers", version = "0.1.0" }
+# mcpServerStatus/list：读用户级 mcp.json（与 neo-exec 装配同一配置源）
+neo-mcp = { path = "../neo-mcp", version = "0.1.0" }
 serde_json = { workspace = true }
 
 [features]
